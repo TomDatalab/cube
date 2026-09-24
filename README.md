@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="rust/cube/docker/logo.svg" alt="cube-rust logo" width="140"/>
+</p>
+
 <h1 align="center">Cube, rebuilt in Rust</h1>
 
 <p align="center">

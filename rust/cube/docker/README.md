@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/TomDatalab/cube/d7a068e6d03c282ef49cc76ea8ceaeb555911477/rust/cube/docker/logo.png" alt="cube-rust logo" width="160"/>
+</p>
+
 # Cube, rebuilt in Rust
 
 **The Cube semantic layer as one small Rust binary, with no Node.js inside.**
