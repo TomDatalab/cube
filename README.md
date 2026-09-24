@@ -113,7 +113,7 @@ traits, so every surface was ported and tested on its own.
 | [`cubeorch`](rust/cube/cubeorch) | `QueryOrchestrator`, `QueryCache`, pre-aggregations | cache decision table, refresh keys, pre-aggregation loader, partitions, external builds |
 | [`cubequeue`](rust/cube/cubequeue) | `QueryQueue` | execute, reconcile, heartbeat, cancellation, the "Continue wait" contract, streaming |
 | [`cubecache`](rust/cube/cubecache) | `QueryCache` keys and cache drivers | `getCacheHash`, byte-compatible with Node (golden-tested against the JS code) |
-| [`cubedriver`](rust/cube/cubedriver) | `base-driver` and 33 driver packages | `Driver` trait and 27 drivers, one Cargo feature each |
+| [`cubedriver`](rust/cube/cubedriver) | `base-driver` and 33 driver packages | `Driver` trait and 27 drivers: 10 always built, 17 behind optional Cargo features |
 | [`cubegraphql`](rust/cube/cubegraphql) | `graphql.ts` | dynamic schema from the meta config, GraphiQL |
 | [`cubesqlbridge`](rust/cube/cubesqlbridge) | the Neon `TransportService` | runs the SQL API (`cubesql`) on the Rust services |
 | [`cubeconfig`](rust/cube/cubeconfig) | `cube.js` configuration | `CUBEJS_*` environment + declarative `cube.yml` (data sources, tenants, API, scheduled refresh) |
@@ -216,8 +216,10 @@ pie showData
 
 ## Databases
 
-Every upstream `CUBEJS_DB_TYPE` except `jdbc` has a native driver. Each driver is a
-Cargo feature, and all of them are on by default.
+Every upstream `CUBEJS_DB_TYPE` except `jdbc` has a native driver. Ten core drivers
+(postgres, redshift, mysql, mssql, clickhouse, bigquery, snowflake, druid, firebolt and cubestore) are always built. The other 17 are optional Cargo
+features, all enabled by default; a build can leave them out (see [Building](#building)).
+A type whose feature was left out fails at start-up with a named error.
 
 | `CUBEJS_DB_TYPE` | Client | Verified against |
 |---|---|---|
@@ -285,8 +287,11 @@ cd rust/cube
 cargo test -p cubeserver -p cubedriver -p cubeplanner -p cubeorch -p cubesqlbridge
 cargo build --release -p cubeserver                                  # all 27 drivers
 cargo build --release -p cubeserver --no-default-features \
-  --features cubedriver/prestodb,cubedriver/trino                   # a slimmer build
+  --features cubedriver/prestodb,cubedriver/trino                   # core drivers + Presto/Trino
 ```
+
+The slim build keeps the ten core drivers, which are not feature-gated, and adds only
+the optional drivers you list.
 
 The bundled DuckDB engine takes most of the build time. The Docker build is
 described in [`rust/cube/docker/README.md`](rust/cube/docker/README.md).

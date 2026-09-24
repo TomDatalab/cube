@@ -83,8 +83,11 @@ md-5 = { version = "0.10", optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"], optional = true }
 
 [features]
-# Every driver is built by default, so `cube-server` serves every
-# CUBEJS_DB_TYPE. A slimmer server is built with
+# The optional drivers, all built by default so `cube-server` serves every
+# CUBEJS_DB_TYPE. The ten core drivers (postgres, redshift, mysql, mssql,
+# clickhouse, bigquery, snowflake, druid, firebolt, cubestore) are not
+# features and are always built. A slimmer server keeps only the listed
+# optional drivers:
 # `cargo build -p cubeserver --no-default-features --features cubedriver/<name>,...`
 # (duckdb alone adds ~10 minutes of C++ compilation).
 default = [
