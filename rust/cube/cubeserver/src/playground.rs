@@ -141,7 +141,11 @@ mod tests {
     async fn a_path_cannot_escape_the_assets_directory() {
         let (_dir, assets) = assets();
 
-        for path in ["/../../etc/passwd", "/..%2f..%2fetc%2fpasswd", "//etc/passwd"] {
+        for path in [
+            "/../../etc/passwd",
+            "/..%2f..%2fetc%2fpasswd",
+            "//etc/passwd",
+        ] {
             let (status, body) = get(&assets, path).await;
 
             assert!(!body.contains("root:"), "{path} leaked the file system");

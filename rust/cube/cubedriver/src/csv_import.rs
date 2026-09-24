@@ -111,8 +111,11 @@ async fn read_file(file: &str) -> Result<String> {
     // writer) are all read.
     let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut decoded = Vec::new();
-        std::io::Read::read_to_end(&mut flate2::read::MultiGzDecoder::new(&bytes[..]), &mut decoded)
-            .map_err(|e| DriverError::Query(format!("Unable to decompress {file}: {e}")))?;
+        std::io::Read::read_to_end(
+            &mut flate2::read::MultiGzDecoder::new(&bytes[..]),
+            &mut decoded,
+        )
+        .map_err(|e| DriverError::Query(format!("Unable to decompress {file}: {e}")))?;
         decoded
     } else {
         bytes
@@ -378,7 +381,10 @@ mod tests {
             csv_no_header: true,
             csv_delimiter: Some("^A".to_string()),
             csv_disable_quoting: true,
-            types: Some(vec![Column::new("id", "int"), Column::new("name", "string")]),
+            types: Some(vec![
+                Column::new("id", "int"),
+                Column::new("name", "string"),
+            ]),
             ..Default::default()
         };
         let memory = csv_to_memory(&data).await.unwrap();

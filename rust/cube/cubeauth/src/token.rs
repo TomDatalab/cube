@@ -146,10 +146,7 @@ mod tests {
         claims.insert("exp".to_string(), Value::from(2_000_000_000_u64));
 
         let token = issue_token(&config(), claims, 60).expect("a signed token");
-        assert_eq!(
-            decode_claims(&token)["exp"],
-            Value::from(2_000_000_000_u64)
-        );
+        assert_eq!(decode_claims(&token)["exp"], Value::from(2_000_000_000_u64));
     }
 
     #[test]

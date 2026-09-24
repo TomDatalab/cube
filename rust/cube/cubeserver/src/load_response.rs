@@ -140,9 +140,7 @@ pub fn prepare_annotation(meta: &Value, query: &Value) -> Value {
         };
 
         let with_granularity = Value::String(format!("{dimension}.{granularity}"));
-        if let Some((key, mut item)) =
-            annotation(meta, MemberType::Dimensions, &with_granularity)
-        {
+        if let Some((key, mut item)) = annotation(meta, MemberType::Dimensions, &with_granularity) {
             let granularity_meta = if PREDEFINED_GRANULARITIES.contains(&granularity) {
                 json!({
                     "name": granularity,
@@ -170,10 +168,7 @@ pub fn prepare_annotation(meta: &Value, query: &Value) -> Value {
 
         // Deprecated in Node.js but kept: the time dimension without its
         // granularity, unless it is also a plain dimension of the query.
-        if dimension_list
-            .iter()
-            .any(|d| d.as_str() == Some(dimension))
-        {
+        if dimension_list.iter().any(|d| d.as_str() == Some(dimension)) {
             continue;
         }
         if let Some((key, mut item)) = annotation(
@@ -319,7 +314,10 @@ mod tests {
             annotation["dimensions"]["orders.status"]["title"],
             json!("Orders Status")
         );
-        assert_eq!(annotation["segments"]["orders.done"]["shortTitle"], json!("Done"));
+        assert_eq!(
+            annotation["segments"]["orders.done"]["shortTitle"],
+            json!("Done")
+        );
         assert_eq!(
             annotation["timeDimensions"]["orders.created_at.month"]["granularity"],
             json!({ "name": "month", "title": "month", "interval": "1 month" })
@@ -344,7 +342,9 @@ mod tests {
             json!("3 months")
         );
         // also a plain dimension: no extra deprecated entry
-        assert!(annotation["timeDimensions"].get("orders.created_at").is_none());
+        assert!(annotation["timeDimensions"]
+            .get("orders.created_at")
+            .is_none());
     }
 
     #[test]

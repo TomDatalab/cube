@@ -5,7 +5,9 @@
 //! first recovers that exact string and every other mapping is keyed by it.
 
 use base64::Engine;
-use oracledb::{DbType, JsonValue, Metadata, OracleNumber, OracleTimestamp, Row, Vector, VectorData};
+use oracledb::{
+    DbType, JsonValue, Metadata, OracleNumber, OracleTimestamp, Row, Vector, VectorData,
+};
 use serde_json::Value;
 
 use crate::error::{DriverError, Result};
@@ -39,7 +41,10 @@ pub fn db_type_name(db_type: &DbType) -> &'static str {
         (oracledb::DB_TYPE_RAW, "RAW"),
         (oracledb::DB_TYPE_ROWID, "ROWID"),
         (oracledb::DB_TYPE_TIMESTAMP, "TIMESTAMP"),
-        (oracledb::DB_TYPE_TIMESTAMP_LTZ, "TIMESTAMP WITH LOCAL TIME ZONE"),
+        (
+            oracledb::DB_TYPE_TIMESTAMP_LTZ,
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+        ),
         (oracledb::DB_TYPE_TIMESTAMP_TZ, "TIMESTAMP WITH TIME ZONE"),
         (oracledb::DB_TYPE_UROWID, "UROWID"),
         (oracledb::DB_TYPE_VARCHAR, "VARCHAR2"),
@@ -85,16 +90,17 @@ pub fn oracle_to_generic(db_type_name: &str) -> GenericType {
 /// the instant normalised to UTC (the offset travels alongside and is only
 /// informative), so the fields are already the UTC instant.
 pub fn format_timestamp(ts: &OracleTimestamp) -> Result<String> {
-    let naive = chrono::NaiveDate::from_ymd_opt(ts.year().into(), ts.month().into(), ts.day().into())
-        .and_then(|d| {
-            d.and_hms_nano_opt(
-                ts.hour().into(),
-                ts.minute().into(),
-                ts.second().into(),
-                ts.nanoseconds(),
-            )
-        })
-        .ok_or_else(|| DriverError::TypeDetection(format!("Invalid Oracle timestamp: {ts}")))?;
+    let naive =
+        chrono::NaiveDate::from_ymd_opt(ts.year().into(), ts.month().into(), ts.day().into())
+            .and_then(|d| {
+                d.and_hms_nano_opt(
+                    ts.hour().into(),
+                    ts.minute().into(),
+                    ts.second().into(),
+                    ts.nanoseconds(),
+                )
+            })
+            .ok_or_else(|| DriverError::TypeDetection(format!("Invalid Oracle timestamp: {ts}")))?;
     Ok(naive.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
@@ -146,13 +152,16 @@ pub fn cell_to_value(row: &Row, index: usize, meta: &Metadata) -> Result<Value> 
             .map(|v| Value::String(float_to_string(v))),
         // `f32::to_string` keeps the shortest representation of the f32
         // (0.1, not 0.10000000149011612).
-        "BINARY_FLOAT" => row.get::<Option<f32>>(index).map_err(fetch_error)?.map(|v| {
-            Value::String(if v.is_finite() {
-                v.to_string()
-            } else {
-                float_to_string(f64::from(v))
-            })
-        }),
+        "BINARY_FLOAT" => row
+            .get::<Option<f32>>(index)
+            .map_err(fetch_error)?
+            .map(|v| {
+                Value::String(if v.is_finite() {
+                    v.to_string()
+                } else {
+                    float_to_string(f64::from(v))
+                })
+            }),
         "DATE" | "TIMESTAMP" | "TIMESTAMP WITH LOCAL TIME ZONE" | "TIMESTAMP WITH TIME ZONE" => row
             .get::<Option<OracleTimestamp>>(index)
             .map_err(fetch_error)?
@@ -205,7 +214,9 @@ fn vector_data_to_value(data: &VectorData) -> Value {
     match data {
         VectorData::Float32(v) => Value::Array(
             v.iter()
-                .map(|x| serde_json::Number::from_f64(f64::from(*x)).map_or(Value::Null, Value::Number))
+                .map(|x| {
+                    serde_json::Number::from_f64(f64::from(*x)).map_or(Value::Null, Value::Number)
+                })
                 .collect(),
         ),
         VectorData::Float64(v) => Value::Array(
@@ -314,21 +325,12 @@ mod tests {
     #[test]
     fn timestamps_serialise_like_js_dates() {
         let ts = OracleTimestamp::new_timestamp(2020, 1, 2, 3, 4, 5, 123_456_789);
-        assert_eq!(
-            format_timestamp(&ts).unwrap(),
-            "2020-01-02T03:04:05.123Z"
-        );
+        assert_eq!(format_timestamp(&ts).unwrap(), "2020-01-02T03:04:05.123Z");
         let date = OracleTimestamp::new_date(2020, 1, 2);
-        assert_eq!(
-            format_timestamp(&date).unwrap(),
-            "2020-01-02T00:00:00.000Z"
-        );
+        assert_eq!(format_timestamp(&date).unwrap(), "2020-01-02T00:00:00.000Z");
         // The fields of a TIMESTAMP WITH TIME ZONE are the UTC instant.
         let tz = OracleTimestamp::new_timestamp_tz(2020, 1, 1, 22, 30, 0, 0, 2, 30);
-        assert_eq!(
-            format_timestamp(&tz).unwrap(),
-            "2020-01-01T22:30:00.000Z"
-        );
+        assert_eq!(format_timestamp(&tz).unwrap(), "2020-01-01T22:30:00.000Z");
     }
 
     #[test]

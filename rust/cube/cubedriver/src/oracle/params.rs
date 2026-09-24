@@ -169,7 +169,10 @@ mod tests {
             "SELECT * FROM t WHERE a = ? AND b = ?",
             &[json!(1), json!("x")],
         );
-        assert_eq!(sql, "SELECT * FROM t WHERE a = :cb_param_0 AND b = :cb_param_1");
+        assert_eq!(
+            sql,
+            "SELECT * FROM t WHERE a = :cb_param_0 AND b = :cb_param_1"
+        );
         assert_eq!(
             names(&binds),
             vec![("cb_param_0", json!(1)), ("cb_param_1", json!("x"))]
@@ -206,7 +209,10 @@ mod tests {
             "? ? ? ? ?",
             &[json!(1), json!("1"), json!(1.0), json!(null), json!(null)],
         );
-        assert_eq!(sql, ":cb_param_0 :cb_param_1 :cb_param_0 :cb_param_2 :cb_param_2");
+        assert_eq!(
+            sql,
+            ":cb_param_0 :cb_param_1 :cb_param_0 :cb_param_2 :cb_param_2"
+        );
         assert_eq!(binds.len(), 3);
 
         // objects never share (JS compares them by reference)
@@ -222,8 +228,14 @@ mod tests {
 
     #[test]
     fn values_are_bound_like_node_oracledb() {
-        assert!(matches!(Bind::from_json(&json!(null)).unwrap(), Bind::Null(None)));
-        assert!(matches!(Bind::from_json(&json!(true)).unwrap(), Bind::Bool(true)));
+        assert!(matches!(
+            Bind::from_json(&json!(null)).unwrap(),
+            Bind::Null(None)
+        ));
+        assert!(matches!(
+            Bind::from_json(&json!(true)).unwrap(),
+            Bind::Bool(true)
+        ));
         match Bind::from_json(&json!(1.25)).unwrap() {
             Bind::Number(n) => assert_eq!(n.to_string(), "1.25"),
             other => panic!("{other:?}"),

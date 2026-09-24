@@ -152,7 +152,13 @@ async fn parameters_are_named_binds() {
         &[json!(3), json!(3)],
     )
     .await;
-    assert_eq!(data.rows, vec![vec![json!("big"), json!("2")], vec![json!("small"), json!("3")]]);
+    assert_eq!(
+        data.rows,
+        vec![
+            vec![json!("big"), json!("2")],
+            vec![json!("small"), json!("3")]
+        ]
+    );
 
     // The session NLS formats make ISO date strings convert implicitly.
     let data = query(
@@ -163,7 +169,10 @@ async fn parameters_are_named_binds() {
     .await;
     assert_eq!(
         data.rows[0],
-        vec![json!("2021-03-04T00:00:00.000Z"), json!("2021-03-05T00:00:00.000Z")]
+        vec![
+            json!("2021-03-04T00:00:00.000Z"),
+            json!("2021-03-05T00:00:00.000Z")
+        ]
     );
     driver.release().await.unwrap();
 }
@@ -173,7 +182,8 @@ async fn limit_wrapping_errors_and_row_cap() {
     let url = require_oracle!();
     let driver = driver(&url);
 
-    let wrapped = driver.wrap_query_with_limit("SELECT LEVEL AS l FROM DUAL CONNECT BY LEVEL <= 10", 3);
+    let wrapped =
+        driver.wrap_query_with_limit("SELECT LEVEL AS l FROM DUAL CONNECT BY LEVEL <= 10", 3);
     let data = query(&driver, &wrapped, &[]).await;
     assert_eq!(data.len(), 3);
 
@@ -192,7 +202,12 @@ async fn limit_wrapping_errors_and_row_cap() {
     let mut config = OracleConfig::from_url(&url).unwrap();
     config.max_rows = 5;
     let capped = OracleDriver::new(config).unwrap();
-    let data = query(&capped, "SELECT LEVEL FROM DUAL CONNECT BY LEVEL <= 10", &[]).await;
+    let data = query(
+        &capped,
+        "SELECT LEVEL FROM DUAL CONNECT BY LEVEL <= 10",
+        &[],
+    )
+    .await;
     assert_eq!(data.len(), 5);
 
     // Region-named zones are refused by the client with a named error, not a crash.
@@ -217,7 +232,10 @@ async fn limit_wrapping_errors_and_row_cap() {
     .await;
     assert_eq!(data.rows[0][0], json!("2019-12-31T23:00:00.000Z"));
     // the pool still works afterwards
-    assert_eq!(query(&driver, "SELECT 1 AS x FROM DUAL", &[]).await.len(), 1);
+    assert_eq!(
+        query(&driver, "SELECT 1 AS x FROM DUAL", &[]).await.len(),
+        1
+    );
     driver.release().await.unwrap();
 }
 
@@ -236,7 +254,13 @@ async fn schema_ddl_and_download() {
     query(
         &driver,
         "INSERT INTO cube_rs_orders VALUES (?, ?, ?, ?, ?)",
-        &[json!(1), json!(10.5), json!("new"), json!("2020-01-01"), json!("A")],
+        &[
+            json!(1),
+            json!(10.5),
+            json!("new"),
+            json!("2020-01-01"),
+            json!("A"),
+        ],
     )
     .await;
     query(
@@ -295,8 +319,18 @@ async fn schema_ddl_and_download() {
     assert_eq!(
         m.rows,
         vec![
-            vec![json!("1"), json!("10.5"), json!("new"), json!("2020-01-01T00:00:00.000Z")],
-            vec![json!("2"), json!("20"), json!("done"), json!("2020-02-01T10:00:00.000Z")],
+            vec![
+                json!("1"),
+                json!("10.5"),
+                json!("new"),
+                json!("2020-01-01T00:00:00.000Z")
+            ],
+            vec![
+                json!("2"),
+                json!("20"),
+                json!("done"),
+                json!("2020-02-01T10:00:00.000Z")
+            ],
         ]
     );
 
@@ -319,7 +353,11 @@ async fn pool_is_shared_and_reused() {
             let driver = driver.clone();
             tokio::spawn(async move {
                 driver
-                    .query("SELECT ? AS v FROM DUAL", &[json!(i)], &QueryOptions::default())
+                    .query(
+                        "SELECT ? AS v FROM DUAL",
+                        &[json!(i)],
+                        &QueryOptions::default(),
+                    )
                     .await
                     .unwrap()
             })

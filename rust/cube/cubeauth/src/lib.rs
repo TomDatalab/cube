@@ -39,7 +39,7 @@ pub use jwk::{
     parse_cache_control_max_age, JwkCache, JwkFetcher, JwkResponse, KeyFamily, ReqwestJwkFetcher,
     VerificationKey,
 };
-pub use token::{issue_token, IssueError, DEFAULT_TOKEN_LIFETIME_SECONDS};
 pub use scopes::{
     assert_api_scope, context_to_api_scopes, default_scopes, ALL_API_SCOPES, DEFAULT_API_SCOPES,
 };
+pub use token::{issue_token, IssueError, DEFAULT_TOKEN_LIFETIME_SECONDS};

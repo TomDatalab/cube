@@ -153,8 +153,11 @@ async fn assets_are_served_from_the_root_too() {
 #[tokio::test]
 async fn the_context_names_this_servers_api_prefix_and_carries_a_token() {
     let (_dir, config) = fixture();
-    let (status, body) =
-        get_json(app(config, Arc::new(TokenIssuingAuth)), "/playground/context").await;
+    let (status, body) = get_json(
+        app(config, Arc::new(TokenIssuingAuth)),
+        "/playground/context",
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["basePath"], "/cube");

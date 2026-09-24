@@ -150,9 +150,9 @@ impl ServerConfig {
                 Ok(path) => Some(path),
                 // A `playground` directory beside the model is the
                 // zero-configuration case.
-                Err(_) => defaults
-                    .playground_path
-                    .or_else(|| default_playground_path().map(|p| p.to_string_lossy().into_owned())),
+                Err(_) => defaults.playground_path.or_else(|| {
+                    default_playground_path().map(|p| p.to_string_lossy().into_owned())
+                }),
             },
         })
     }

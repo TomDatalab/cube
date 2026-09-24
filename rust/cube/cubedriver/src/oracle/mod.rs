@@ -177,11 +177,15 @@ impl OracleConfig {
         }
         // Node would build `undefined:1521/undefined` and fail on connect;
         // the missing variable is named up front instead.
-        let host = self.host.as_ref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            DriverError::Config(
-                "The Oracle driver needs CUBEJS_DB_HOST (or a connection string)".to_string(),
-            )
-        })?;
+        let host = self
+            .host
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                DriverError::Config(
+                    "The Oracle driver needs CUBEJS_DB_HOST (or a connection string)".to_string(),
+                )
+            })?;
         let database = self
             .database
             .as_ref()
@@ -324,10 +328,11 @@ impl Pool {
     async fn acquire(self: &Arc<Self>) -> Result<Lease> {
         let pool_timeout = || DriverError::PoolTimeout("oracle".to_string());
         let started = Instant::now();
-        let permit = tokio::time::timeout(self.acquire_timeout, self.permits.clone().acquire_owned())
-            .await
-            .map_err(|_| pool_timeout())?
-            .map_err(|_| DriverError::Query("Oracle pool is closed".to_string()))?;
+        let permit =
+            tokio::time::timeout(self.acquire_timeout, self.permits.clone().acquire_owned())
+                .await
+                .map_err(|_| pool_timeout())?
+                .map_err(|_| DriverError::Query("Oracle pool is closed".to_string()))?;
 
         let candidate = self.take_idle();
         let config = self.config.clone();
@@ -358,8 +363,13 @@ impl Pool {
     }
 
     fn close(&self) {
-        let connections: Vec<Connection> =
-            self.idle.lock().unwrap().drain(..).map(|(c, _)| c).collect();
+        let connections: Vec<Connection> = self
+            .idle
+            .lock()
+            .unwrap()
+            .drain(..)
+            .map(|(c, _)| c)
+            .collect();
         close_in_background(connections);
     }
 
@@ -798,7 +808,9 @@ mod tests {
             driver.wrap_query_with_limit("SELECT 1 FROM dual", 10),
             "SELECT * FROM (SELECT 1 FROM dual) t WHERE ROWNUM <= 10"
         );
-        assert!(driver.information_schema_query().contains("from all_tab_columns tc"));
+        assert!(driver
+            .information_schema_query()
+            .contains("from all_tab_columns tc"));
 
         let long_name = format!("s.{}", "x".repeat(130));
         let err = driver
@@ -821,15 +833,45 @@ mod tests {
     fn tables_schema_reducer() {
         let text = |s: &str| Value::String(s.to_string());
         let data = QueryResult::new(
-            ["table_schema", "table_name", "column_name", "data_type", "key_type"]
-                .iter()
-                .map(|c| Column::new(*c, GenericType::Text))
-                .collect(),
+            [
+                "table_schema",
+                "table_name",
+                "column_name",
+                "data_type",
+                "key_type",
+            ]
+            .iter()
+            .map(|c| Column::new(*c, GenericType::Text))
+            .collect(),
             vec![
-                vec![text("CUBE"), text("ORDERS"), text("ID"), text("NUMBER"), text("P")],
-                vec![text("CUBE"), text("ORDERS"), text("ID"), text("NUMBER"), Value::Null],
-                vec![text("CUBE"), text("ORDERS"), text("AMOUNT"), text("NUMBER"), Value::Null],
-                vec![text("CUBE"), text("ACCOUNTS"), text("NAME"), text("VARCHAR2"), text("U")],
+                vec![
+                    text("CUBE"),
+                    text("ORDERS"),
+                    text("ID"),
+                    text("NUMBER"),
+                    text("P"),
+                ],
+                vec![
+                    text("CUBE"),
+                    text("ORDERS"),
+                    text("ID"),
+                    text("NUMBER"),
+                    Value::Null,
+                ],
+                vec![
+                    text("CUBE"),
+                    text("ORDERS"),
+                    text("AMOUNT"),
+                    text("NUMBER"),
+                    Value::Null,
+                ],
+                vec![
+                    text("CUBE"),
+                    text("ACCOUNTS"),
+                    text("NAME"),
+                    text("VARCHAR2"),
+                    text("U"),
+                ],
             ],
         );
         let structure = tables_schema_from_rows(&data);
