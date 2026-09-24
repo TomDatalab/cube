@@ -9,6 +9,11 @@ license = "Apache-2.0"
 name = "cube-server"
 path = "src/main.rs"
 
+[features]
+default = ["all-drivers"]
+# Every CUBEJS_DB_TYPE (cubedriver's default feature set).
+all-drivers = ["cubedriver/default"]
+
 [dependencies]
 async-trait = "0.1.36"
 cubeauth = { path = "../cubeauth" }
@@ -16,7 +21,9 @@ cubeconfig = { path = "../cubeconfig" }
 cubegraphql = { path = "../cubegraphql" }
 cubeorch = { path = "../cubeorch" }
 cubesqlbridge = { path = "../cubesqlbridge" }
-cubedriver = { path = "../cubedriver" }
+# Drivers come from `all-drivers`; `--no-default-features --features
+# cubedriver/<name>,...` builds a server with only the listed ones.
+cubedriver = { path = "../cubedriver", default-features = false }
 cubemodel = { path = "../cubemodel" }
 cubeplanner = { path = "../cubeplanner" }
 cubequery = { path = "../cubequery" }
