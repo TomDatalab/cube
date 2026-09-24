@@ -1,115 +1,310 @@
-<p align="center">
-  <a href="https://cube.dev?ref=github-readme"><img src="https://raw.githubusercontent.com/cube-js/cube/master/.github/assets/cube-core-logo.png" alt="Cube Core — Open-Source Semantic Layer" width="300px"></a>
-</p>
-<br/>
-
-[Website](https://cube.dev?ref=github-readme) • [Docs](https://docs.cube.dev?ref=github-readme) • [Examples](https://docs.cube.dev/recipes?ref=github-readme) • [Blog](https://cube.dev/blog?ref=github-readme) • [Slack](https://slack.cube.dev?ref=github-readme) • [X](https://twitter.com/the_cube_dev)
-
-[![npm version](https://badge.fury.io/js/%40cubejs-backend%2Fserver.svg)](https://badge.fury.io/js/%40cubejs-backend%2Fserver)
-[![GitHub Actions](https://github.com/cube-js/cube/workflows/Build/badge.svg)](https://github.com/cube-js/cube/actions?query=workflow%3ABuild+branch%3Amaster)
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fcube-js%2Fcube.js.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fcube-js%2Fcube.js?ref=badge_shield)
-
-__Cube Core is the open-source semantic layer.__ Define metrics, dimensions, joins, and access rules once in code, then expose them through SQL, REST, and GraphQL APIs to anything downstream — BI tools, custom applications, or AI agents. Cube Core is headless: it doesn't ship a UI, so you can build the analytics experience that fits your product.
-
-Cube Core works with all SQL data sources, including cloud data warehouses like Snowflake, Databricks, and BigQuery; query engines like Presto and Amazon Athena; and application databases like Postgres. It has a built-in relational caching engine to provide sub-second latency and high concurrency for API requests.
-
-<img
-  src="https://raw.githubusercontent.com/cube-js/cube/master/.github/assets/cube-core-schema.png"
-  alt="Cube Core — semantic layer connecting data sources to embedded analytics, BI tools, and AI agents"
-  style="border: none"
-  width="100%"
-/>
+<h1 align="center">Cube, rebuilt in Rust</h1>
 
 <p align="center">
-  <i>Learn more about connecting Cube to <a href="https://docs.cube.dev/cube-core/getting-started/create-a-project?ref=github-readme" target="_blank">data sources</a> and <a href="https://docs.cube.dev/admin/connect-to-data/visualization-tools?ref=github-readme" target="_blank">analytics & visualization tools</a>.</i>
+  <b>The Cube semantic layer as a single Rust binary, with no Node.js.</b><br/>
+  REST · GraphQL · WebSocket · SQL (Postgres wire) · Playground in one process.
 </p>
 
-## Why Cube Core?
+<p align="center">
+  <a href="https://hub.docker.com/r/blockmill/cube"><img alt="Docker image" src="https://img.shields.io/badge/docker-blockmill%2Fcube-2496ED?logo=docker&logoColor=white"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.98-orange?logo=rust">
+  <img alt="Platforms" src="https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-lightgrey">
+  <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+</p>
 
-Every BI tool relies on a semantic layer as its core engine — the component that defines metrics, dimensions, and business logic and hides the complexity of the underlying data sources. Most semantic layers are proprietary, tightly coupled to a single BI platform, and can't be reused across other tools.
+> **Community fork.** This repository is a fork of [cube-js/cube](https://github.com/cube-js/cube)
+> and is not affiliated with or endorsed by Cube Dev, Inc. The upstream project is
+> licensed under Apache-2.0 (backend) and MIT (client libraries); this fork keeps
+> those licenses. Report problems with the Rust backend here, not upstream.
 
-Cube Core is an open, standalone semantic layer that any analytics application or AI agent can consume through standard APIs. Define your metrics once and use them everywhere — internal BI, embedded analytics, AI agents — without re-implementing the model in each place.
+---
 
-## Getting Started
+## What this fork is
 
-You can run Cube Core locally or self-host it with [Docker](https://www.docker.com/).
+[Cube Core](https://github.com/cube-js/cube) is an open-source semantic layer. You
+define metrics, dimensions, joins and access rules once, then any BI tool, app or AI
+agent can query them over SQL, REST or GraphQL. Upstream, the backend runs on
+**Node.js**: an Express gateway, a JavaScript schema compiler and a TypeScript
+query orchestrator, with Rust components loaded through a native addon.
 
-Once Docker is installed, in a new folder for your project, run:
+This fork **replaces that whole backend with Rust**. The result is `cube-server`, one
+binary that:
+
+- **keeps the same HTTP contract as upstream**: the same endpoints, request and
+  response bodies, status codes and error messages, so `@cubejs-client/*`, the
+  Playground and BI tools work unchanged;
+- **keeps the same `CUBEJS_*` environment variables and YAML data models**;
+- **runs no Node.js, no JVM and no embedded JavaScript or Python engine**;
+- **ships 27 native database drivers and 24 SQL dialects**;
+- **comes as a ~70 MB multi-arch Docker image** that starts in milliseconds and
+  uses about 55 MB of RAM on a small model.
+
+<p align="center">
+  <img src="rust/cube/docs/diagrams/before-after.svg" alt="Before: a Node.js process with an Express gateway, JavaScript compiler, Neon bridge and npm drivers. After: one Rust binary with axum, cubemodel, cubeplanner, cubeorch, cubeconfig and cubedriver." width="100%"/>
+</p>
+
+## Quick start
 
 ```bash
-docker run -p 4000:4000 \
-  -p 15432:15432 \
-  -v ${PWD}:/cube/conf \
+docker run -p 4000:4000 -p 15432:15432 \
+  -e CUBEJS_DB_TYPE=postgres \
+  -e CUBEJS_DB_HOST=db.example.com \
+  -e CUBEJS_DB_NAME=analytics \
+  -e CUBEJS_DB_USER=cube \
+  -e CUBEJS_DB_PASS=secret \
+  -e CUBEJS_API_SECRET=change-me \
   -e CUBEJS_DEV_MODE=true \
-  cubejs/cube
+  -e CUBEJS_PG_SQL_PORT=15432 \
+  -e CUBEJS_SQL_USER=cube -e CUBEJS_SQL_PASSWORD=cube \
+  -v "$PWD":/cube/conf \
+  blockmill/cube
 ```
 
-Then open http://localhost:4000 in your browser to continue setup.
+Put your YAML data model in `./model` and open **http://localhost:4000**.
 
-> **Development mode is an authentication bypass.** In the official images — whose
-> entrypoint is the `cubejs` CLI — `CUBEJS_DEV_MODE=true` also forces
-> `NODE_ENV=development`, which switches off JWT verification on the REST (JSON) and
-> GraphQL APIs, so they accept requests with no token at all. Playground and its
-> supporting endpoints are served with no authentication either, so anyone who can
-> reach the instance is handed a ready-to-use API token (and can mint others carrying
-> any security context, signed with your API secret), can read your data model, and can
-> overwrite it and your `.env`. With no `CUBEJS_SQL_PASSWORD` set, the SQL API accepts
-> any credentials as well, allowing arbitrary SQL against connected data sources.
->
-> This is intentional — development mode is designed to run on a developer's local
-> machine for ease of use and debugging. Never expose it to the internet or use it in
-> production. Using development mode in the Cube cloud platform is highly discouraged,
-> as it bypasses the platform's security model. Cube is also in development mode
-> whenever `NODE_ENV` is not `production`, but `cubejs server` and the official images
-> already set it to `production`. See
-> [`CUBEJS_DEV_MODE`](https://docs.cube.dev/reference/configuration/environment-variables#cubejs_dev_mode).
+| Endpoint | Address |
+|---|---|
+| Playground (query builder, charts, code generation) | `http://localhost:4000/` |
+| REST API | `http://localhost:4000/cube/v1/load`, `/sql`, `/dry-run`, `/meta` |
+| GraphQL | `http://localhost:4000/cube/graphql` |
+| WebSocket | `ws://localhost:4000/cube/ws` |
+| SQL API | `psql -h localhost -p 15432 -U cube` |
+| Health | `/readyz`, `/livez` |
+| Drivers in this build | `http://localhost:4000/cube/v1/connectors` |
 
-For a step-by-step guide, [see the docs](https://docs.cube.dev/cube-core/getting-started/create-a-project?ref=github-readme).
+From source:
 
-## Cube Core vs. Cube
+```bash
+cd rust/cube
+CUBEJS_DB_TYPE=postgres CUBEJS_DB_HOST=localhost CUBEJS_DB_NAME=analytics \
+CUBEJS_API_SECRET=change-me CUBEJS_SCHEMA_PATH=/path/to/model \
+cargo run --release -p cubeserver
+```
 
-[Cube](https://cube.dev?ref=github-readme) is our commercial product — an agentic analytics platform built on Cube Core. Same semantic layer underneath, plus the rest of what makes it a full BI platform: Analytics Chat, workbooks and dashboards, embedded analytics surfaces, managed deployment, RBAC, multi-tenancy, and integrations with Tableau, Power BI, Excel, and Google Sheets.
+> **Never expose development mode.** As upstream, `CUBEJS_DEV_MODE=true` is meant for
+> a developer's machine. The Playground's helper routes (`/playground/*`) are not
+> behind authentication, because the app fetches its API token from them.
+> `cube-server` refuses to mount the Playground when `NODE_ENV=production`. Set a
+> strong `CUBEJS_API_SECRET` and `CUBEJS_SQL_PASSWORD` for anything reachable from a
+> network.
 
-The data model is fully compatible both ways: a model you build in Cube Core runs unchanged in Cube, and vice versa. Cube Core stays open-source and is what we run inside Cube ourselves.
+---
 
-- **Use Cube Core** when you want to own the stack — a custom BI experience, deeply integrated embedded analytics, or AI agents that need a governed semantic foundation.
-- **Use Cube** when you want a managed, full-featured BI platform out of the box — internal analytics or customer-facing embedded analytics without building the surrounding platform yourself.
+## Architecture
 
-For more on how we think about the split, see [The Future of Cube Core and Cube](https://cube.dev/blog/cube-core-and-cube).
+<p align="center">
+  <img src="rust/cube/docs/diagrams/architecture.svg" alt="Inside cube-server: clients reach the SQL API, the axum router and the Playground; requests pass through cubeauth, the tenant registry, cubequery and cubemodel into cubeplanner, then cubeorch and cubequeue, and finally cubedriver, which talks to the databases and to Cube Store." width="100%"/>
+</p>
 
-For a tour of what's in Cube today, watch the workshop:
+Each box is a crate in [`rust/cube/`](rust/cube). Handlers depend only on service
+traits, so every surface was ported and tested on its own.
 
-<a href="https://www.youtube.com/watch?v=7ZQGGepDjUQ" target="_blank">
-  <img src="https://img.youtube.com/vi/7ZQGGepDjUQ/maxresdefault.jpg" alt="Cube agentic analytics workshop on YouTube" width="600">
-</a>
+| Crate | Replaces (upstream Node.js) | What it does |
+|---|---|---|
+| [`cubeserver`](rust/cube/cubeserver) | `@cubejs-backend/server`, the HTTP layer of `api-gateway` | axum router, auth middleware, CORS, WebSocket transport, Playground assets, `cube-server` binary |
+| [`cubeauth`](rust/cube/cubeauth) | `checkAuth`, JWT/JWK, `contextToApiScopes` | HS/RS/ES JWT, `CUBEJS_API_SECRET(S)`, JWK URL cache with rotation, API scopes |
+| [`cubequery`](rust/cube/cubequery) | `query.js`, `date-parser.js` | query parsing, validation and normalization, relative dates, `compareDateRange`, blending |
+| [`cubemodel`](rust/cube/cubemodel) | schema compiler (loading and validation) | YAML + Jinja models, `extends`, views, hierarchies, folders, `/v1/meta` |
+| [`cubeplanner`](rust/cube/cubeplanner) | `BaseQuery.js` and the dialect adapters | Tesseract without JavaScript callbacks; member-SQL parser (`{CUBE.x}`, `FILTER_PARAMS`, `SECURITY_CONTEXT`); 24 dialects |
+| [`cubeorch`](rust/cube/cubeorch) | `QueryOrchestrator`, `QueryCache`, pre-aggregations | cache decision table, refresh keys, pre-aggregation loader, partitions, external builds |
+| [`cubequeue`](rust/cube/cubequeue) | `QueryQueue` | execute, reconcile, heartbeat, cancellation, the "Continue wait" contract, streaming |
+| [`cubecache`](rust/cube/cubecache) | `QueryCache` keys and cache drivers | `getCacheHash`, byte-compatible with Node (golden-tested against the JS code) |
+| [`cubedriver`](rust/cube/cubedriver) | `base-driver` and 33 driver packages | `Driver` trait and 27 drivers, one Cargo feature each |
+| [`cubegraphql`](rust/cube/cubegraphql) | `graphql.ts` | dynamic schema from the meta config, GraphiQL |
+| [`cubesqlbridge`](rust/cube/cubesqlbridge) | the Neon `TransportService` | runs the SQL API (`cubesql`) on the Rust services |
+| [`cubeconfig`](rust/cube/cubeconfig) | `cube.js` configuration | `CUBEJS_*` environment + declarative `cube.yml` (data sources, tenants, API, scheduled refresh) |
 
-Or [try Cube for free](https://cubecloud.dev/auth/signup?ref=github-readme).
+### Life of a `/v1/load` request
 
-## Resources
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client (@cubejs-client)
+    participant R as axum router
+    participant A as cubeauth
+    participant Q as cubequery
+    participant P as cubeplanner (Tesseract)
+    participant O as cubeorch / cubequeue
+    participant D as cubedriver
+    participant DB as Database
 
-- [Documentation](https://docs.cube.dev?ref=github-readme)
-- [Getting Started](https://docs.cube.dev/cube-core/getting-started?ref=github-readme)
-- [Examples & Tutorials](https://docs.cube.dev/recipes?ref=github-readme)
-- [Architecture](https://docs.cube.dev/docs/introduction)
+    C->>R: GET /cube/v1/load?query=…&queryType=multi
+    R->>A: verify JWT, resolve API scopes and tenant
+    R->>Q: parse, validate, normalize (timezone, limits, compareDateRange)
+    loop every normalized query
+        R->>P: plan SQL in the data source's dialect
+        P-->>R: SQL + params + alias map
+        R->>O: cached result or enqueue
+        alt cache hit
+            O-->>R: rows
+        else miss
+            O->>D: execute
+            D->>DB: SQL
+            DB-->>D: rows
+            D-->>O: typed rows
+            O-->>R: rows (or "Continue wait")
+        end
+        R->>R: rename aliases to members, annotate from /v1/meta
+    end
+    R-->>C: { queryType, results[], pivotQuery, slowQuery }
+```
 
-## Contributing
+---
 
-There are many ways you can contribute to Cube Core! Here are a few possibilities:
+## How the migration was done
 
-* Star this repo and follow us on [X](https://twitter.com/the_cube_dev).
-* Add Cube to your stack on [Stackshare](https://stackshare.io/cube-js).
-* Upvote issues with 👍 reaction so we know what the demand is for particular issues to prioritize them within the roadmap.
-* Create issues every time you feel something is missing or goes wrong.
-* Ask questions on [Stack Overflow with cube.js tag](https://stackoverflow.com/questions/tagged/cube.js) if others might have these questions as well.
-* Provide pull requests for all open issues and especially for those with [help wanted](https://github.com/cube-js/cube/issues?q=is%3Aissue+is%3Aopen+label%3A"help+wanted") and [good first issue](https://github.com/cube-js/cube/issues?q=is%3Aissue+is%3Aopen+label%3A"good+first+issue") labels.
+<p align="center">
+  <img src="rust/cube/docs/diagrams/migration-roadmap.svg" alt="Eight steps: foundations, planner, orchestrator, pre-aggregations, SQL API, drivers and remaining API are done; deleting the Node.js packages is next." width="100%"/>
+</p>
 
-All sorts of contributions are **welcome and extremely helpful** 🙌 Please refer to [the contribution guide](https://github.com/cube-js/cube/blob/master/CONTRIBUTING.md) for more information.
+The backend was replaced with a **strangler-fig** approach: one surface at a time,
+with the Node.js server as the reference until the Rust one matched it.
+
+1. **The Node.js code was the spec.** Each endpoint kept the exact contract of
+   `packages/cubejs-api-gateway/src/gateway.ts`: paths, query parameters, bodies,
+   error bodies `{ "error": "…" }`, status codes and `CUBEJS_*` names. The Node.js
+   tests were ported with the code.
+2. **Written specs came first for the hard parts.**
+   [Orchestrator](rust/cube/docs/orchestrator-spec.md),
+   [Tesseract evaluator](rust/cube/docs/tesseract-evaluator-spec.md) and
+   [configuration](rust/cube/docs/config-migration.md) were each specified from the
+   Node.js source before they were implemented.
+3. **Anything unsupported fails loudly.** A feature that is not ported fails with an
+   error that names it. It never quietly behaves differently. For example, an
+   unknown database type used to be planned as Postgres; it is now refused at
+   start-up.
+4. **Everything was checked against real servers.** Drivers were tested against the
+   databases themselves in Docker. Cache keys were golden-tested against the
+   JavaScript implementation. The Playground was checked through the real
+   `@cubejs-client/core` `ResultSet`.
+
+Progress, decisions and known gaps are tracked in
+[`rust/cube/MIGRATION.md`](rust/cube/MIGRATION.md).
+
+### By the numbers
+
+| | |
+|---|---|
+| Rust written for the backend | ~107k lines in 12 crates |
+| Tests in those crates | 1,334 |
+| Database drivers | 27 (all upstream types except `jdbc`) |
+| SQL dialects | 24 |
+| Docker image | ~70 MB compressed, `linux/amd64` + `linux/arm64`, distroless, non-root |
+
+```mermaid
+pie showData
+    title Lines of Rust per crate
+    "cubedriver (27 drivers)" : 47479
+    "cubeorch" : 11533
+    "cubeplanner" : 9422
+    "cubeserver" : 8844
+    "cubemodel" : 5487
+    "cubequeue" : 5362
+    "cubequery" : 5004
+    "cubegraphql" : 3612
+    "cubesqlbridge" : 3041
+    "cubeauth" : 2693
+    "cubeconfig" : 2472
+    "cubecache" : 1749
+```
+
+---
+
+## Databases
+
+Every upstream `CUBEJS_DB_TYPE` except `jdbc` has a native driver. Each driver is a
+Cargo feature, and all of them are on by default.
+
+| `CUBEJS_DB_TYPE` | Client | Verified against |
+|---|---|---|
+| `postgres`, `redshift` | tokio-postgres | Postgres |
+| `mysql` | mysql_async | MySQL 8 |
+| `mysqlauroraserverless` | AWS RDS Data API | local Data API (MySQL 5.7, 8.4) |
+| `mssql` | tiberius (TDS, rustls) | SQL Server 2022 |
+| `clickhouse` | HTTP | ClickHouse 24.8 |
+| `bigquery`, `snowflake` | REST | — |
+| `databricks-jdbc` | SQL Statement Execution API (no JVM) | mock server |
+| `athena` | AWS SDK | mock + LocalStack S3 |
+| `prestodb`, `trino` | HTTP (`nextUri`) | Presto 0.294, Trino 483 (incl. S3 unload) |
+| `pinot` | HTTP broker | Pinot |
+| `druid`, `firebolt` | HTTP SQL | — |
+| `dremio` | REST | Dremio OSS |
+| `hive` | Thrift HiveServer2 (also Spark Thrift) | Hive 4.0 |
+| `vertica` | own wire client | Vertica 9.2 |
+| `crate`, `materialize`, `questdb` | Postgres wire | CrateDB 6.4, Materialize v26, QuestDB 10 |
+| `mongobi` | MySQL wire | mongosqld 2.14 + MongoDB 6 |
+| `oracle` | `oracledb` thin (pure Rust, **no Instant Client**) | Oracle Free |
+| `ksql` | REST + Kafka | ksqlDB 0.29 + Kafka + Cube Store |
+| `sqlite`, `duckdb` | embedded engines | in-memory and file databases |
+| `cubestore` | WebSocket | Cube Store |
+
+`jdbc` is not available because it loads JDBC jars into a JVM. It fails at start-up
+and names the native replacement to use instead.
+
+---
+
+## Differences from upstream Cube
+
+| Upstream | This fork | Why |
+|---|---|---|
+| JavaScript, Python and YAML models | **YAML models only** (Jinja works) | No embedded JS/Python runtime. A `.js` model is rejected with an error naming the file. |
+| `cube.js` / `cube.py` configuration with JS hooks | **Environment variables + `cube.yml`** | Hooks such as `contextToAppId`, `driverFactory` and `repositoryFactory` become declarative tenants and data sources. |
+| API under `/cubejs-api` | **API under `/cube`** | Set `CUBEJS_BASE_PATH=/cubejs-api` to keep the old paths. |
+| `CUBEJS_DB_TYPE=jdbc` | **Not available** | Needs a JVM. |
+| Readiness probe tests only the default data source | **Tests every data source** | Upstream carries a `todo` for this. |
+| Foreign-key introspection in the Postgres/MySQL drivers | **Fixed** | The Node.js query filters on the wrong side of the constraint and drops joins. |
+
+Known gaps (each fails with a named error) are listed in
+[`MIGRATION.md`](rust/cube/MIGRATION.md#known-gaps-in-priority-order). The main ones:
+lambda rollups, export-bucket unload for BigQuery, Snowflake, Redshift and Databricks,
+and some authentication modes (Redshift IAM, Kerberos, Snowflake password auth).
+
+---
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| [`rust/cube/`](rust/cube) | the Rust backend: `cube-server` and its crates |
+| [`rust/cube/MIGRATION.md`](rust/cube/MIGRATION.md) | migration tracking: status per surface, decisions, known gaps |
+| [`rust/cube/docs/`](rust/cube/docs) | design specs and [diagrams](rust/cube/docs/diagrams) (`.excalidraw` sources + generator) |
+| [`rust/cube/docker/`](rust/cube/docker) | Dockerfile of the `blockmill/cube` image |
+| [`rust/cubesql/`](rust/cubesql) | SQL API (Postgres wire), from upstream |
+| [`packages/cubejs-client-*`](packages) | client libraries, unchanged |
+| [`packages/cubejs-playground`](packages/cubejs-playground) | the Playground UI, served as static files |
+| `packages/cubejs-*` (server, drivers, …) | the upstream Node.js backend, kept until the last migration step removes it |
+
+### Building
+
+```bash
+cd rust/cube
+cargo test -p cubeserver -p cubedriver -p cubeplanner -p cubeorch -p cubesqlbridge
+cargo build --release -p cubeserver                                  # all 27 drivers
+cargo build --release -p cubeserver --no-default-features \
+  --features cubedriver/prestodb,cubedriver/trino                   # a slimmer build
+```
+
+The bundled DuckDB engine takes most of the build time. The Docker build is
+described in [`rust/cube/docker/README.md`](rust/cube/docker/README.md).
+
+The diagrams in this README are generated by
+[`rust/cube/docs/diagrams/generate.mjs`](rust/cube/docs/diagrams/generate.mjs). Open
+the `.excalidraw` files at [excalidraw.com](https://excalidraw.com) to edit them.
+
+---
+
+## About upstream Cube
+
+Cube Core is developed by [Cube Dev](https://cube.dev). For concepts, data modeling
+and the semantic layer itself, the upstream documentation applies to this fork too:
+
+- [Documentation](https://docs.cube.dev) and [Getting Started](https://docs.cube.dev/cube-core/getting-started)
+- [Data modeling reference](https://docs.cube.dev/reference/data-model)
+- [Environment variables](https://docs.cube.dev/reference/configuration/environment-variables)
+- [Upstream repository](https://github.com/cube-js/cube)
 
 ## License
 
-Cube Client is [MIT licensed](./packages/cubejs-client-core/LICENSE).
-
-Cube Backend is [Apache 2.0 licensed](./packages/cubejs-server/LICENSE).
-
-
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fcube-js%2Fcube.js.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2Fcube-js%2Fcube.js?ref=badge_large)
+Same as upstream: the backend is [Apache 2.0](./packages/cubejs-server/LICENSE) and
+the client libraries are [MIT](./packages/cubejs-client-core/LICENSE). The diagrams
+embed the [Virgil](https://github.com/excalidraw/virgil) font (SIL Open Font License 1.1).
