@@ -4,7 +4,19 @@
 
 # Cube, rebuilt in Rust
 
+<p align="center">
+  <a href="https://github.com/TomDatalab/cube"><b>Source code on GitHub</b></a> ·
+  <a href="https://hub.docker.com/r/blockmill/cube">Docker Hub</a> ·
+  <a href="https://github.com/TomDatalab/cube#readme">Architecture &amp; migration</a> ·
+  <a href="https://github.com/TomDatalab/cube/issues">Issues</a> ·
+  <a href="https://docs.cube.dev">Cube docs</a>
+</p>
+
 **The Cube semantic layer as one small Rust binary, with no Node.js inside.**
+
+`blockmill/cube` is the Docker image of
+[github.com/TomDatalab/cube](https://github.com/TomDatalab/cube), a community fork of
+[Cube](https://github.com/cube-js/cube) whose whole backend was rewritten in Rust.
 
 Cube's REST, GraphQL, WebSocket and SQL (Postgres wire) APIs, the query
 planner, the cache and queue, the database drivers and the Playground UI all
@@ -96,20 +108,81 @@ For pre-aggregations, add a `cubejs/cubestore` service and point
 
 ---
 
-## Supported databases
+## Connectors
 
-| | |
-|---|---|
-| **Warehouses** | Snowflake, BigQuery, Redshift, Databricks, Athena, Firebolt |
-| **SQL engines** | Trino, Presto, Dremio, Hive / Spark Thrift |
-| **OLAP & real-time** | ClickHouse, Druid, Pinot, ksqlDB, Materialize, QuestDB, CrateDB |
-| **Relational** | Postgres, MySQL, Aurora Serverless (Data API), SQL Server, Oracle, Vertica, MongoDB BI Connector |
-| **Embedded** | DuckDB (with MotherDuck), SQLite |
-| **Pre-aggregations** | Cube Store |
+**27 native connectors, no JVM, ODBC or Oracle Instant Client.** Pick one with
+`CUBEJS_DB_TYPE`. Most connectors also use the common variables
+`CUBEJS_DB_HOST`, `CUBEJS_DB_PORT`, `CUBEJS_DB_NAME`, `CUBEJS_DB_USER`,
+`CUBEJS_DB_PASS` and `CUBEJS_DB_SSL`. The table lists the settings specific to each
+one. `GET /cube/v1/connectors` on a running server lists the connectors in the
+build and the data sources using them.
 
-Use the same `CUBEJS_DB_TYPE` values as upstream. If a driver does not
-support a feature yet, you get an explicit error instead of a silently
-different result.
+### Cloud data warehouses
+
+| Database | `CUBEJS_DB_TYPE` | Connects via | Specific settings |
+|---|---|---|---|
+| Snowflake | `snowflake` | SQL REST API | `CUBEJS_DB_SNOWFLAKE_ACCOUNT`, `_AUTHENTICATOR`, `_PRIVATE_KEY`, `_OAUTH_TOKEN` |
+| Google BigQuery | `bigquery` | REST API | `CUBEJS_DB_BQ_PROJECT_ID`, `CUBEJS_DB_BQ_KEY_FILE` or `_CREDENTIALS`, `_LOCATION` |
+| Amazon Redshift | `redshift` | Postgres wire | common variables |
+| Databricks | `databricks-jdbc` | SQL Statement Execution API (no JVM) | `CUBEJS_DB_DATABRICKS_URL`, `_TOKEN` or `_OAUTH_CLIENT_ID`/`_SECRET`, `_CATALOG` |
+| Amazon Athena | `athena` | AWS SDK | `CUBEJS_AWS_KEY`, `_SECRET`, `_REGION`, `_S3_OUTPUT_LOCATION`, `CUBEJS_AWS_ATHENA_WORKGROUP` |
+| Firebolt | `firebolt` | HTTP API | `CUBEJS_FIREBOLT_ACCOUNT`, `_ENGINE_NAME`, `_API_ENDPOINT` |
+
+### Query engines and lakehouses
+
+| Database | `CUBEJS_DB_TYPE` | Connects via | Specific settings |
+|---|---|---|---|
+| Trino | `trino` | HTTP client protocol | `CUBEJS_DB_PRESTO_CATALOG`, `CUBEJS_DB_PRESTO_AUTH_TOKEN` |
+| Presto | `prestodb` | HTTP client protocol | `CUBEJS_DB_PRESTO_CATALOG`, `CUBEJS_DB_PRESTO_AUTH_TOKEN` |
+| Dremio (OSS and Cloud) | `dremio` | REST API | `CUBEJS_DB_URL` + `CUBEJS_DB_DREMIO_AUTH_TOKEN` for Cloud |
+| Apache Hive / Spark Thrift | `hive` | Thrift HiveServer2 | `CUBEJS_DB_HIVE_AUTH` (`PLAIN` or `NOSASL`), `CUBEJS_DB_HIVE_VER` |
+
+### Real-time and OLAP
+
+| Database | `CUBEJS_DB_TYPE` | Connects via | Specific settings |
+|---|---|---|---|
+| ClickHouse | `clickhouse` | HTTP interface | `CUBEJS_DB_CLICKHOUSE_READONLY`, `_COMPRESSION` |
+| Apache Druid | `druid` | SQL over HTTP | `CUBEJS_DB_URL` |
+| Apache Pinot | `pinot` | HTTP broker | `CUBEJS_DB_PINOT_AUTH_TOKEN`, `_NULL_HANDLING` |
+| ksqlDB | `ksql` | REST + Kafka | `CUBEJS_DB_URL`, `CUBEJS_DB_KAFKA_HOST`, `_USER`, `_PASS`, `_USE_SSL` |
+| Materialize | `materialize` | Postgres wire | `CUBEJS_DB_MATERIALIZE_CLUSTER` |
+| QuestDB | `questdb` | Postgres wire | common variables |
+| CrateDB | `crate` | Postgres wire | common variables |
+
+### Relational databases
+
+| Database | `CUBEJS_DB_TYPE` | Connects via | Specific settings |
+|---|---|---|---|
+| PostgreSQL | `postgres` | Postgres wire | common variables |
+| MySQL | `mysql` | MySQL protocol | common variables |
+| Aurora Serverless MySQL | `mysqlauroraserverless` | RDS Data API | `CUBEJS_DATABASE_SECRET_ARN`, `CUBEJS_DATABASE_CLUSTER_ARN` |
+| Microsoft SQL Server / Azure SQL | `mssql` | TDS (rustls) | `CUBEJS_DB_SSL_CA`, `CUBEJS_DB_DOMAIN` |
+| Oracle | `oracle` | thin protocol, pure Rust | common variables; no Instant Client needed |
+| Vertica | `vertica` | Vertica protocol | common variables |
+| MongoDB (BI Connector) | `mongobi` | MySQL protocol | common variables |
+
+### Embedded
+
+| Database | `CUBEJS_DB_TYPE` | Connects via | Specific settings |
+|---|---|---|---|
+| DuckDB / MotherDuck | `duckdb` | embedded engine | `CUBEJS_DB_DUCKDB_DATABASE_PATH`, `_MOTHERDUCK_TOKEN`, `_EXTENSIONS`, `_S3_*` |
+| SQLite | `sqlite` | embedded engine | `CUBEJS_DB_NAME` (file path) |
+
+### Pre-aggregation storage
+
+| Database | `CUBEJS_DB_TYPE` | Connects via | Specific settings |
+|---|---|---|---|
+| Cube Store | `cubestore` | WebSocket | `CUBEJS_CUBESTORE_HOST`, `_PORT` |
+
+**Several data sources.** List their names in `CUBEJS_DATASOURCES` and prefix
+each source's variables with `CUBEJS_DS_<NAME>_`, for example
+`CUBEJS_DS_WAREHOUSE_DB_TYPE=snowflake`, as upstream. A `cube.yml` can declare
+them too.
+
+If a connector does not support a feature yet, such as export-bucket unload
+on some warehouses, you get an explicit error instead of a silently different
+result. The full status per connector is in
+[MIGRATION.md](https://github.com/TomDatalab/cube/blob/main/rust/cube/MIGRATION.md#drivers).
 
 ---
 
@@ -149,6 +222,7 @@ Both tags are multi-arch (`linux/amd64`, `linux/arm64`).
 | | |
 |---|---|
 | Source code | [github.com/TomDatalab/cube](https://github.com/TomDatalab/cube), a fork of [cube-js/cube](https://github.com/cube-js/cube) |
+| Docker Hub | [hub.docker.com/r/blockmill/cube](https://hub.docker.com/r/blockmill/cube) |
 | Dockerfile | [`rust/cube/docker/Dockerfile`](https://github.com/TomDatalab/cube/blob/main/rust/cube/docker/Dockerfile) |
 | How it was built | [Architecture and migration write-up](https://github.com/TomDatalab/cube#readme) |
 | Base | `gcr.io/distroless/cc-debian12:nonroot`: no shell, no package manager, non-root user |
