@@ -48,7 +48,7 @@ Rules:
 | `rust/cube/cubequery` | `cubejs-api-gateway/src/query.js`, `date-parser.js`, request parsing | done: lenient `Query` model, `normalize_query` (limits, timezone canonicalization, granularity dimensions, order remap, cache mode), filter normalization with relative dates inside groups, a `chrono-node`/`moment` port for relative date strings, `parse_query_param`, `compare_date_range_transformer`, `get_normalized_queries`, `get_pivot_query`. Wired into `cube-server`'s query handlers. |
 | `rust/cube/cubemodel` | `cubejs-schema-compiler` model loading (YAML + Jinja), validation, views, meta config | done for YAML: loader, Jinja, `extends`, validation with Node's messages, view resolution (`includes`/`excludes`/prefix/alias/join paths), hierarchies, folders, formats, `connectedComponent`, and the `/v1/meta` response. JS and Python models are rejected with a clear error. Wired into `cube-server`. |
 | `rust/cube/cubeplanner` | public planning API over Tesseract without JS callbacks | done: model, evaluator, Rust `build_join`, Postgres + CubeStore dialects, and a member-SQL parser covering `{CUBE.member}`, `FILTER_PARAMS`, `FILTER_GROUP`, `SECURITY_CONTEXT`, `SQL_UTILS`. Unsupported constructs fail with a named error. Wired into `cube-server` for `/v1/sql` and `/v1/dry-run`. Spec: `docs/tesseract-evaluator-spec.md` |
-| `rust/cube/cubedriver` | `cubejs-base-driver` + drivers | done: `Driver` trait (full `DriverInterface` surface), env config incl. multi data source, generic type mapping, result type detection, and a driver for every `CUBEJS_DB_TYPE` except `jdbc` (27 types; table under "Drivers" below). Each driver sits behind its own Cargo feature, all on by default. Wired into `cube-server` for the health probes and for query execution. |
+| `rust/cube/cubedriver` | `cubejs-base-driver` + drivers | done: `Driver` trait (full `DriverInterface` surface), env config incl. multi data source, generic type mapping, result type detection, and a driver for every `CUBEJS_DB_TYPE` except `jdbc` (27 types; table under "Drivers" below). Ten core drivers (postgres, redshift, mysql, mssql, clickhouse, bigquery, snowflake, druid, firebolt and cubestore) are always built; the other 17 sit behind their own Cargo features, all on by default. Wired into `cube-server` for the health probes and for query execution. |
 | `rust/cube/cubesqlplanner` + `rust/cube/cubeplanner` | `BaseQuery.js` planning | done for YAML models: evaluator, Rust `build_join`, member-SQL parser, member expressions, all eleven query options, strict eager validation, the alias→member map, and all 24 dialects of the Node schema compiler and driver packages. `Dialect::for_db_type` maps every `CUBEJS_DB_TYPE`; `cube-server` picks the dialect per data source and refuses an unknown type instead of planning it as Postgres. Spec: `docs/tesseract-evaluator-spec.md` |
 | `rust/cube/cubeorchestrator` | result transform | done |
 | `rust/cube/cubecache` | `QueryCache`'s keys, entries and cache drivers | done: `getCacheHash` byte compatible with Node (golden tested against the JS implementation), the cache decision table, in-memory driver and result LRU |
@@ -221,8 +221,12 @@ indirection and is worth doing before the orchestrator adds more concurrency.
 ## Drivers
 
 Every `CUBEJS_DB_TYPE` of the Node.js server, with the Cargo feature that
-builds it (all in `default`; `cargo build -p cubeserver --no-default-features --features cubedriver/…` builds a
-subset, and a type left out fails at start-up with a named error).
+builds it. Rows with `—` are core drivers, always built. The optional features
+are all in `default`; `cargo build -p cubeserver --no-default-features --features cubedriver/…`
+builds the core drivers plus the listed ones, and an optional type left out fails
+at start-up with a named error. Gating the core drivers too is possible but not
+done: cubestore backs pre-aggregations, and redshift, crate, materialize and
+questdb build on postgres, mongobi on mysql.
 
 | `CUBEJS_DB_TYPE` | Feature | Client | Verified against |
 |---|---|---|---|

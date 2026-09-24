@@ -10,8 +10,11 @@
 //
 // Usage (Node.js is only needed to regenerate the pictures):
 //   npm install roughjs@4
-//   VIRGIL_WOFF2=/path/to/Virgil.woff2 node generate.mjs
-// Without VIRGIL_WOFF2 the SVGs fall back to a system cursive font.
+//   curl -LO https://unpkg.com/@excalidraw/excalidraw@0.17.6/dist/excalidraw-assets/Virgil.woff2
+//   VIRGIL_WOFF2=./Virgil.woff2 node generate.mjs
+// The font is required, so regenerated SVGs match the committed ones. For a
+// quick local preview only, `--allow-system-font` falls back to a system
+// cursive font; do not commit SVGs made that way.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,9 +22,19 @@ import { fileURLToPath } from 'node:url';
 import rough from 'roughjs';
 
 const OUT = path.dirname(fileURLToPath(import.meta.url));
-const FONT = process.env.VIRGIL_WOFF2 && fs.existsSync(process.env.VIRGIL_WOFF2)
-  ? fs.readFileSync(process.env.VIRGIL_WOFF2).toString('base64')
-  : null;
+const FONT = (() => {
+  const file = process.env.VIRGIL_WOFF2;
+  if (file && fs.existsSync(file)) return fs.readFileSync(file).toString('base64');
+  if (process.argv.includes('--allow-system-font')) {
+    console.warn('warning: Virgil not embedded; these SVGs are for preview only');
+    return null;
+  }
+  console.error(file
+    ? `VIRGIL_WOFF2=${file} does not exist.`
+    : 'VIRGIL_WOFF2 is not set.');
+  console.error('The diagrams embed the Virgil font; see the usage notes at the top of generate.mjs.');
+  process.exit(1);
+})();
 
 // Excalidraw's palette.
 const C = {

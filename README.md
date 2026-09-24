@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="rust/cube/docker/logo.svg" alt="cube-rust logo" width="140"/>
+</p>
+
 <h1 align="center">Cube, rebuilt in Rust</h1>
 
 <p align="center">
@@ -90,6 +94,42 @@ cargo run --release -p cubeserver
 
 ---
 
+## Docker image
+
+The server is published on Docker Hub as
+**[`blockmill/cube`](https://hub.docker.com/r/blockmill/cube)**.
+
+```bash
+docker pull blockmill/cube:latest     # or blockmill/cube:0.1.0
+```
+
+| | |
+|---|---|
+| Image | [hub.docker.com/r/blockmill/cube](https://hub.docker.com/r/blockmill/cube) |
+| Tags | `latest`, `0.1.0` (same image) |
+| Platforms | `linux/amd64`, `linux/arm64` |
+| Size | ~70 MB compressed per platform |
+| Base | `gcr.io/distroless/cc-debian12:nonroot`: no shell, no package manager, runs as a non-root user |
+| Contents | `/usr/local/bin/cube-server` with all 27 drivers, and the Playground and Vizard at `/cube/playground` |
+| Your project | mounted at `/cube/conf`: `model/` and an optional `cube.yml` |
+| Ports | `4000` (REST, GraphQL, WebSocket, Playground), `15432` (SQL API, with `CUBEJS_PG_SQL_PORT=15432`) |
+| Node.js | none: not in the image and not used at runtime |
+
+The image is built from [`rust/cube/docker/Dockerfile`](rust/cube/docker/Dockerfile).
+The arm64 variant is cross-compiled rather than emulated, and the runtime stage has
+no `RUN` step. Build it yourself with:
+
+```bash
+docker buildx build -f rust/cube/docker/Dockerfile \
+  --platform linux/amd64,linux/arm64 -t my/cube:dev .
+```
+
+The Playground is copied into the image pre-built; see
+[`rust/cube/docker/README.md`](rust/cube/docker/README.md#building) for the one-time
+`yarn build`. `docker run blockmill/cube --version` prints the server version.
+
+---
+
 ## Architecture
 
 <p align="center">
@@ -109,7 +149,7 @@ traits, so every surface was ported and tested on its own.
 | [`cubeorch`](rust/cube/cubeorch) | `QueryOrchestrator`, `QueryCache`, pre-aggregations | cache decision table, refresh keys, pre-aggregation loader, partitions, external builds |
 | [`cubequeue`](rust/cube/cubequeue) | `QueryQueue` | execute, reconcile, heartbeat, cancellation, the "Continue wait" contract, streaming |
 | [`cubecache`](rust/cube/cubecache) | `QueryCache` keys and cache drivers | `getCacheHash`, byte-compatible with Node (golden-tested against the JS code) |
-| [`cubedriver`](rust/cube/cubedriver) | `base-driver` and 33 driver packages | `Driver` trait and 27 drivers, one Cargo feature each |
+| [`cubedriver`](rust/cube/cubedriver) | `base-driver` and 33 driver packages | `Driver` trait and 27 drivers: 10 always built, 17 behind optional Cargo features |
 | [`cubegraphql`](rust/cube/cubegraphql) | `graphql.ts` | dynamic schema from the meta config, GraphiQL |
 | [`cubesqlbridge`](rust/cube/cubesqlbridge) | the Neon `TransportService` | runs the SQL API (`cubesql`) on the Rust services |
 | [`cubeconfig`](rust/cube/cubeconfig) | `cube.js` configuration | `CUBEJS_*` environment + declarative `cube.yml` (data sources, tenants, API, scheduled refresh) |
@@ -212,8 +252,10 @@ pie showData
 
 ## Databases
 
-Every upstream `CUBEJS_DB_TYPE` except `jdbc` has a native driver. Each driver is a
-Cargo feature, and all of them are on by default.
+Every upstream `CUBEJS_DB_TYPE` except `jdbc` has a native driver. Ten core drivers
+(postgres, redshift, mysql, mssql, clickhouse, bigquery, snowflake, druid, firebolt and cubestore) are always built. The other 17 are optional Cargo
+features, all enabled by default; a build can leave them out (see [Building](#building)).
+A type whose feature was left out fails at start-up with a named error.
 
 | `CUBEJS_DB_TYPE` | Client | Verified against |
 |---|---|---|
@@ -281,8 +323,11 @@ cd rust/cube
 cargo test -p cubeserver -p cubedriver -p cubeplanner -p cubeorch -p cubesqlbridge
 cargo build --release -p cubeserver                                  # all 27 drivers
 cargo build --release -p cubeserver --no-default-features \
-  --features cubedriver/prestodb,cubedriver/trino                   # a slimmer build
+  --features cubedriver/prestodb,cubedriver/trino                   # core drivers + Presto/Trino
 ```
+
+The slim build keeps the ten core drivers, which are not feature-gated, and adds only
+the optional drivers you list.
 
 The bundled DuckDB engine takes most of the build time. The Docker build is
 described in [`rust/cube/docker/README.md`](rust/cube/docker/README.md).

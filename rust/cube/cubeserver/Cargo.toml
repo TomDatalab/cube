@@ -21,8 +21,9 @@ cubeconfig = { path = "../cubeconfig" }
 cubegraphql = { path = "../cubegraphql" }
 cubeorch = { path = "../cubeorch" }
 cubesqlbridge = { path = "../cubesqlbridge" }
-# Drivers come from `all-drivers`; `--no-default-features --features
-# cubedriver/<name>,...` builds a server with only the listed ones.
+# The optional drivers come from `all-drivers`; `--no-default-features
+# --features cubedriver/<name>,...` keeps only the listed ones. cubedriver's
+# ten core drivers (postgres, mysql, cubestore, ...) are always built.
 cubedriver = { path = "../cubedriver", default-features = false }
 cubemodel = { path = "../cubemodel" }
 cubeplanner = { path = "../cubeplanner" }
