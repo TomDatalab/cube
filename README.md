@@ -94,6 +94,42 @@ cargo run --release -p cubeserver
 
 ---
 
+## Docker image
+
+The server is published on Docker Hub as
+**[`blockmill/cube`](https://hub.docker.com/r/blockmill/cube)**.
+
+```bash
+docker pull blockmill/cube:latest     # or blockmill/cube:0.1.0
+```
+
+| | |
+|---|---|
+| Image | [hub.docker.com/r/blockmill/cube](https://hub.docker.com/r/blockmill/cube) |
+| Tags | `latest`, `0.1.0` (same image) |
+| Platforms | `linux/amd64`, `linux/arm64` |
+| Size | ~70 MB compressed per platform |
+| Base | `gcr.io/distroless/cc-debian12:nonroot`: no shell, no package manager, runs as a non-root user |
+| Contents | `/usr/local/bin/cube-server` with all 27 drivers, and the Playground and Vizard at `/cube/playground` |
+| Your project | mounted at `/cube/conf`: `model/` and an optional `cube.yml` |
+| Ports | `4000` (REST, GraphQL, WebSocket, Playground), `15432` (SQL API, with `CUBEJS_PG_SQL_PORT=15432`) |
+| Node.js | none: not in the image and not used at runtime |
+
+The image is built from [`rust/cube/docker/Dockerfile`](rust/cube/docker/Dockerfile).
+The arm64 variant is cross-compiled rather than emulated, and the runtime stage has
+no `RUN` step. Build it yourself with:
+
+```bash
+docker buildx build -f rust/cube/docker/Dockerfile \
+  --platform linux/amd64,linux/arm64 -t my/cube:dev .
+```
+
+The Playground is copied into the image pre-built; see
+[`rust/cube/docker/README.md`](rust/cube/docker/README.md#building) for the one-time
+`yarn build`. `docker run blockmill/cube --version` prints the server version.
+
+---
+
 ## Architecture
 
 <p align="center">

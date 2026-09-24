@@ -141,3 +141,37 @@ Most projects run unchanged. The differences:
 Both tags are multi-arch (`linux/amd64`, `linux/arm64`).
 
 `docker run blockmill/cube --version` prints the server version.
+
+---
+
+## About this image
+
+| | |
+|---|---|
+| Source code | [github.com/TomDatalab/cube](https://github.com/TomDatalab/cube), a fork of [cube-js/cube](https://github.com/cube-js/cube) |
+| Dockerfile | [`rust/cube/docker/Dockerfile`](https://github.com/TomDatalab/cube/blob/main/rust/cube/docker/Dockerfile) |
+| How it was built | [Architecture and migration write-up](https://github.com/TomDatalab/cube#readme) |
+| Base | `gcr.io/distroless/cc-debian12:nonroot`: no shell, no package manager, non-root user |
+| Contents | `/usr/local/bin/cube-server` with all 27 drivers, and the Playground and Vizard at `/cube/playground` |
+| Size | ~70 MB compressed per platform |
+| Issues | [github.com/TomDatalab/cube/issues](https://github.com/TomDatalab/cube/issues) |
+
+The image contains no Node.js. The Rust server is compiled for each platform, with
+arm64 cross-compiled rather than emulated, and copied onto the distroless base. The
+Playground is a static build served by the same process.
+
+## Building
+
+The build context is the root of the [repository](https://github.com/TomDatalab/cube).
+The Playground is copied pre-built, so build it once first. This needs Node.js on
+the build machine only:
+
+```bash
+(cd packages/cubejs-playground && yarn build:playground)
+(cd packages/cubejs-playground/vizard && yarn && yarn build)
+
+docker buildx build -f rust/cube/docker/Dockerfile \
+  --platform linux/amd64,linux/arm64 -t my/cube:dev .
+```
+
+The bundled DuckDB engine accounts for most of the build time.
