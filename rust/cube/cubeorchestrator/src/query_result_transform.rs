@@ -1162,7 +1162,10 @@ pub enum DBResponsePrimitive {
     Float64(f64),
     String(String),
     Timestamp(NaiveDateTime),
-    Uncommon(Value),
+    // Boxed: arrays and objects are rare, and an inline `Value` would size every
+    // cell by its largest form (72 bytes once any crate in the build enables
+    // serde_json's `preserve_order`, as the Rust server's model crates do).
+    Uncommon(Box<Value>),
 }
 
 /// `%Y-%m-%dT%H:%M:%S%.3f`
@@ -1288,7 +1291,7 @@ impl<'de> Deserialize<'de> for DBResponsePrimitive {
                 A: SeqAccess<'de>,
             {
                 let value = Value::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
-                Ok(DBResponsePrimitive::Uncommon(value))
+                Ok(DBResponsePrimitive::Uncommon(Box::new(value)))
             }
 
             fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
@@ -1296,7 +1299,7 @@ impl<'de> Deserialize<'de> for DBResponsePrimitive {
                 A: MapAccess<'de>,
             {
                 let value = Value::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(DBResponsePrimitive::Uncommon(value))
+                Ok(DBResponsePrimitive::Uncommon(Box::new(value)))
             }
         }
 
@@ -1387,9 +1390,12 @@ mod tests {
     /// once per cell across every parse/transform path, so an accidental growth
     /// (e.g. a fat new variant) would regress memory and throughput for large
     /// result sets. Bump this deliberately if the layout must change.
+    ///
+    /// 24 since `Uncommon` holds a `Box<Value>`: the size no longer depends on
+    /// which serde_json features the rest of the build enables.
     #[test]
     fn test_db_response_primitive_size() {
-        assert_eq!(std::mem::size_of::<DBResponsePrimitive>(), 32);
+        assert_eq!(std::mem::size_of::<DBResponsePrimitive>(), 24);
     }
 
     type TestSuiteData = HashMap<String, TestData>;
