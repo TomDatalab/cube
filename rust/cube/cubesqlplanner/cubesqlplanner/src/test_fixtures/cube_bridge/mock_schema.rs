@@ -1,3 +1,4 @@
+use crate::cube_bridge::driver_tools::DriverTools;
 use crate::test_fixtures::cube_bridge::yaml::YamlSchema;
 use crate::test_fixtures::cube_bridge::{
     MockBaseTools, MockCubeDefinition, MockCubeEvaluator, MockDimensionDefinition, MockDriverTools,
@@ -180,7 +181,7 @@ impl MockSchema {
         timezone: String,
     ) -> Result<MockBaseTools, CubeError> {
         let join_graph = Rc::new(self.create_join_graph()?);
-        let driver_tools = Rc::new(MockDriverTools::with_timezone(timezone));
+        let driver_tools = Rc::new(MockDriverTools::with_timezone(timezone)) as Rc<dyn DriverTools>;
 
         // Build cube_members map from schema
         let mut cube_members = HashMap::new();
@@ -217,8 +218,16 @@ impl MockSchema {
         &self,
         driver_tools: MockDriverTools,
     ) -> Result<MockBaseTools, CubeError> {
+        self.create_base_tools_with_dyn_driver(Rc::new(driver_tools))
+    }
+
+    /// Same, for a `DriverTools` implementation defined outside this crate —
+    /// a dialect the `cubeplanner` crate adds, for instance.
+    pub fn create_base_tools_with_dyn_driver(
+        &self,
+        driver_tools: Rc<dyn DriverTools>,
+    ) -> Result<MockBaseTools, CubeError> {
         let join_graph = Rc::new(self.create_join_graph()?);
-        let driver_tools = Rc::new(driver_tools);
 
         let mut cube_members = HashMap::new();
         for (cube_name, cube) in &self.cubes {
@@ -340,6 +349,7 @@ impl MockSchemaBuilder {
             measures: HashMap::new(),
             dimensions: HashMap::new(),
             segments: HashMap::new(),
+            granularities: HashMap::new(),
             default_filters: Vec::new(),
         }
     }
@@ -469,10 +479,29 @@ pub struct MockViewBuilder {
     measures: HashMap<String, Rc<MockMeasureDefinition>>,
     dimensions: HashMap<String, Rc<MockDimensionDefinition>>,
     segments: HashMap<String, Rc<MockSegmentDefinition>>,
+    granularities: HashMap<String, HashMap<String, Rc<MockGranularityDefinition>>>,
     default_filters: Vec<MockViewFilterDefinition>,
 }
 
 impl MockViewBuilder {
+    pub fn view_name(&self) -> String {
+        self.view_name.clone()
+    }
+
+    /// A granularity on a dimension the view declares itself.
+    pub fn add_granularity(
+        mut self,
+        dimension_name: &str,
+        granularity_name: &str,
+        definition: MockGranularityDefinition,
+    ) -> Self {
+        self.granularities
+            .entry(dimension_name.to_string())
+            .or_default()
+            .insert(granularity_name.to_string(), Rc::new(definition));
+        self
+    }
+
     pub fn include_cube(mut self, join_path: impl Into<String>, includes: Vec<String>) -> Self {
         self.view_cubes.push(ViewCube {
             join_path: join_path.into(),
@@ -686,7 +715,7 @@ impl MockViewBuilder {
             dimensions: all_dimensions,
             segments: all_segments,
             pre_aggregations: Vec::new(),
-            granularities: HashMap::new(),
+            granularities: self.granularities,
         };
 
         self.schema_builder.cubes.insert(self.view_name, view_cube);

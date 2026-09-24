@@ -1,0 +1,15 @@
+cubes:
+  - name: users
+    sql: SELECT * FROM public.users
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: city
+        sql: city
+        type: string
+      - name: age
+        sql: age
+        type: number
+        format: number_1

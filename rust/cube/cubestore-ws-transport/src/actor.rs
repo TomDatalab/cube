@@ -12,8 +12,9 @@ use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 use crate::client::ClientConfig;
-use crate::codec::{decode_frame, encode_query, DecodedResponse};
+use crate::codec::{decode_frame, encode_query_with_options, DecodedResponse};
 use crate::error::TransportError;
+use crate::request::QueryOptions;
 use crate::result::QueryResult;
 
 pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -21,6 +22,7 @@ pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub(crate) enum ActorRequest {
     Query {
         sql: String,
+        options: Box<QueryOptions>,
         reply: oneshot::Sender<Result<QueryResult, TransportError>>,
     },
     Close,
@@ -105,10 +107,10 @@ impl Actor {
                                 self.fail_all_pending(TransportError::Closed);
                                 return;
                             }
-                            Some(ActorRequest::Query { sql, reply }) => {
+                            Some(ActorRequest::Query { sql, options, reply }) => {
                                 let msg_id = self.next_msg_id;
                                 self.next_msg_id = self.next_msg_id.wrapping_add(1).max(1);
-                                let buf = encode_query(msg_id, &self.connection_id, &sql);
+                                let buf = encode_query_with_options(msg_id, &self.connection_id, &sql, &options);
                                 self.pending.insert(msg_id, PendingQuery { reply, buffer: buf.clone() });
                                 if let Err(e) = sink.send(Message::Binary(buf)).await {
                                     log::warn!("send failed, will reconnect: {e}");

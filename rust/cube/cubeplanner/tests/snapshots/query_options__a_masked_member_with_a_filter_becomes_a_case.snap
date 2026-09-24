@@ -1,0 +1,9 @@
+---
+source: cubeplanner/tests/query_options.rs
+expression: released.sql
+---
+SELECT CASE WHEN ("users".city = $1) THEN "users".city ELSE '***' END "users__city_masked", count("users".id) "users__count" 
+FROM  public.users  AS "users"
+WHERE ("users".city = $2)
+GROUP BY 1
+ORDER BY  2  DESC

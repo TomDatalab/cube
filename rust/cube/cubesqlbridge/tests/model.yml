@@ -1,0 +1,72 @@
+cubes:
+  - name: orders
+    sql_table: public.orders
+
+    joins:
+      - name: users
+        relationship: many_to_one
+        sql: "{CUBE}.user_id = {users}.id"
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: user_id
+        sql: user_id
+        type: number
+
+      - name: status
+        sql: status
+        type: string
+
+      - name: created_at
+        sql: created_at
+        type: time
+
+    measures:
+      - name: count
+        type: count
+        sql: id
+
+      - name: total_amount
+        type: sum
+        sql: amount
+
+    segments:
+      - name: completed
+        sql: "{CUBE}.status = 'completed'"
+
+  - name: users
+    sql_table: public.users
+    data_source: warehouse
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: city
+        sql: "{CUBE}.city"
+        type: string
+
+    measures:
+      - name: count
+        type: count
+        sql: id
+
+views:
+  - name: sales
+    cubes:
+      - join_path: orders
+        includes:
+          - status
+          - count
+          - total_amount
+
+      - join_path: orders.users
+        prefix: true
+        includes:
+          - city

@@ -1,0 +1,14 @@
+views:
+  - name: sales
+    cubes:
+      - join_path: orders
+        includes:
+          - status
+          - created_at
+          - count
+          - total_amount
+
+      - join_path: orders.users
+        prefix: true
+        includes:
+          - city

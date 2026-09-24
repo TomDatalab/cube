@@ -7,7 +7,7 @@ import { pausePromise } from '@cubejs-backend/shared';
 import { resetLogger } from '@cubejs-backend/native';
 
 import { ApiGateway, ApiGatewayOptions, CubejsHandlerError, Request, RequestContext } from '../src';
-import { AdapterApiMock, DataSourceStorageMock } from './mocks';
+import { AdapterApiMock, DataSourceStorageMock, compilerApi } from './mocks';
 import { generateAuthToken } from './utils';
 
 class ApiGatewayOpenAPI extends ApiGateway {
@@ -42,7 +42,12 @@ class ApiGatewayOpenAPI extends ApiGateway {
   }
 }
 
-function createApiGateway(handler: RequestHandler, logger: () => any, options: Partial<ApiGatewayOptions>) {
+function createApiGateway(
+  handler: RequestHandler,
+  logger: () => any,
+  options: Partial<ApiGatewayOptions>,
+  getCompilerApi: any = null,
+) {
   const adapterApi: any = new AdapterApiMock();
   const dataSourceStorage: any = new DataSourceStorageMock();
 
@@ -60,7 +65,7 @@ function createApiGateway(handler: RequestHandler, logger: () => any, options: P
     }
   }
 
-  const apiGateway = new ApiGatewayFake('secret', <any>null, () => adapterApi, logger, {
+  const apiGateway = new ApiGatewayFake('secret', getCompilerApi, () => adapterApi, logger, {
     standalone: true,
     dataSourceStorage,
     basePath: '/cubejs-api',
@@ -1047,5 +1052,76 @@ describe('test authorization', () => {
       tenantId: 'tenant_123',
       customField: 'from_check_auth',
     });
+  });
+});
+
+describe('REST v1 routes served by the native gateway', () => {
+  let app: ExpressApplication;
+  let apiGateway: ApiGatewayOpenAPI;
+
+  const handlerMock = jest.fn(() => {
+    // must not be reached: the request is proxied to the native gateway
+  });
+  const loggerMock = jest.fn(() => {
+    //
+  });
+  const checkAuthMock = jest.fn((req, token) => {
+    jwt.verify(token, 'secret');
+
+    return {
+      security_context: { uid: 5 }
+    };
+  });
+
+  beforeAll(async () => {
+    process.env.CUBEJS_NATIVE_API_GATEWAY_REST_ROUTES = 'true';
+
+    const result = createApiGateway(handlerMock, loggerMock, {
+      checkAuth: checkAuthMock,
+      gatewayPort: 8586,
+    }, compilerApi);
+
+    app = result.app;
+    apiGateway = result.apiGateway;
+
+    await result.apiGateway.startSQLServer();
+  });
+
+  beforeEach(() => {
+    handlerMock.mockClear();
+    loggerMock.mockClear();
+    checkAuthMock.mockClear();
+  });
+
+  afterAll(async () => {
+    delete process.env.CUBEJS_NATIVE_API_GATEWAY_REST_ROUTES;
+
+    await apiGateway.shutdownSQLServer();
+  });
+
+  it('GET /v1/meta is served by the native gateway', async () => {
+    const token = generateAuthToken({ uid: 5, });
+
+    const res = await request(app)
+      .get('/cubejs-api/v1/meta')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(res.body).toHaveProperty('cubes');
+    expect(res.body).not.toHaveProperty('compilerId');
+    expect(res.body.cubes[0]?.name).toBe('Foo');
+    expect(res.body.cubes[0]?.description).toBe('cube from compilerApi mock');
+
+    expect(checkAuthMock.mock.calls.length).toEqual(1);
+    expect(handlerMock.mock.calls.length).toEqual(0);
+  });
+
+  it('GET /v1/meta - authorization is enforced by the native gateway', async () => {
+    const res = await request(app)
+      .get('/cubejs-api/v1/meta')
+      .expect(401);
+
+    expect(res.body).toEqual({ error: 'No authorization header' });
+    expect(checkAuthMock.mock.calls.length).toEqual(0);
   });
 });

@@ -1,0 +1,30 @@
+cubes:
+  - name: users
+    sql_table: public.users
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: city
+        sql: "{CUBE}.city"
+        type: string
+
+      - name: signed_up_at
+        sql: signed_up_at
+        type: time
+
+      # Rendered as its `mask:` whenever the request lists it in
+      # `maskedMembers` and the accompanying filter does not release it.
+      - name: city_masked
+        sql: "{CUBE}.city"
+        type: string
+        mask:
+          sql: "'***'" 
+
+    measures:
+      - name: count
+        type: count
+        sql: id

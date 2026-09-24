@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Dremio).sql"
+---
+SELECT DATE_TRUNC('month', CONVERT_TIMEZONE('UTC', "orders".created_at)) "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= TO_TIMESTAMP(?, 'YYYY-MM-DD"T"HH24:MI:SS.FFF') AND created_at <= TO_TIMESTAMP(?, 'YYYY-MM-DD"T"HH24:MI:SS.FFF')) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= TO_TIMESTAMP(?, 'YYYY-MM-DD"T"HH24:MI:SS.FFF') AND "orders".created_at <= TO_TIMESTAMP(?, 'YYYY-MM-DD"T"HH24:MI:SS.FFF'))
+GROUP BY 1
+ORDER BY  1  ASC

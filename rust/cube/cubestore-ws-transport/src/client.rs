@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::actor::{connect_ws, Actor, ActorRequest};
 use crate::error::TransportError;
+use crate::request::QueryOptions;
 use crate::result::QueryResult;
 
 #[derive(Debug, Clone)]
@@ -134,12 +135,28 @@ impl Client {
         self.server_version.as_deref()
     }
 
-    /// Execute a SQL statement against cubestore and return the (Legacy-format) result.
+    /// Execute a SQL statement against cubestore with no bound parameters.
     pub async fn query(&self, sql: impl Into<String>) -> Result<QueryResult, TransportError> {
+        self.query_with_options(sql, QueryOptions::default()).await
+    }
+
+    /// Execute a SQL statement with bound parameters, inline tables, a tracing
+    /// object and an explicit response format.
+    ///
+    /// Parameters are sent over the wire as `HttpParameter` values; Cube Store
+    /// only accepts them from version 1.6.38 on, so callers that may talk to an
+    /// older server should interpolate client-side instead (see
+    /// [`Client::server_version`]).
+    pub async fn query_with_options(
+        &self,
+        sql: impl Into<String>,
+        options: QueryOptions,
+    ) -> Result<QueryResult, TransportError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ActorRequest::Query {
                 sql: sql.into(),
+                options: Box::new(options),
                 reply: reply_tx,
             })
             .map_err(|_| TransportError::Closed)?;

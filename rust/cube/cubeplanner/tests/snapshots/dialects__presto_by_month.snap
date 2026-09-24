@@ -1,0 +1,8 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Presto).sql"
+---
+SELECT date_trunc('month', CAST(date_add('minute', timezone_minute(COALESCE("orders".created_at, CAST(NULL AS TIMESTAMP)) AT TIME ZONE 'UTC'), date_add('hour', timezone_hour(COALESCE("orders".created_at, CAST(NULL AS TIMESTAMP)) AT TIME ZONE 'UTC'), COALESCE("orders".created_at, CAST(NULL AS TIMESTAMP)))) AS TIMESTAMP)) "orders__created_at_month", count("orders".id) "orders__count"  
+FROM  (SELECT * FROM public.orders WHERE (created_at >= from_iso8601_timestamp(?) AND created_at <= from_iso8601_timestamp(?)) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= from_iso8601_timestamp(?) AND "orders".created_at <= from_iso8601_timestamp(?)) GROUP BY 1 ORDER BY  1  ASC

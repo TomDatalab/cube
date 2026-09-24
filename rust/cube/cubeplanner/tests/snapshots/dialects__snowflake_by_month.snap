@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Snowflake).sql"
+---
+SELECT date_trunc('MONTH', CONVERT_TIMEZONE('UTC', "orders".created_at::timestamp_tz)::timestamp_ntz) "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= ?::timestamp_tz AND created_at <= ?::timestamp_tz) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= ?::timestamp_tz AND "orders".created_at <= ?::timestamp_tz)
+GROUP BY 1
+ORDER BY  1  ASC

@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: ClickHouse).sql"
+---
+SELECT toDateTime64(toStartOfMonth(toTimeZone(toDateTime64(`orders`.created_at, 0), 'UTC'), 'UTC'), 0, 'UTC') `orders__created_at_month`, count(`orders`.id) `orders__count` 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= parseDateTimeBestEffort(?) AND created_at <= parseDateTimeBestEffort(?)) AND 1 = 1
+)  AS `orders`
+WHERE (`orders`.created_at >= parseDateTimeBestEffort(?) AND `orders`.created_at <= parseDateTimeBestEffort(?))
+GROUP BY 1
+ORDER BY  1  ASC

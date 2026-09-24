@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/member_expressions.rs
+expression: planned.sql
+---
+SELECT "orders".status "orders__status", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+LEFT JOIN (SELECT 1 AS user_id, 'vip' AS tier) AS tiers ON "orders".user_id = tiers.user_id
+GROUP BY 1
+ORDER BY  2  DESC

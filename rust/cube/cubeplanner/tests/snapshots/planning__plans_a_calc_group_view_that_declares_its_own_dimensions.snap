@@ -1,0 +1,29 @@
+---
+source: cubeplanner/tests/planning.rs
+expression: planned.sql
+---
+ WITH 
+cte_0 AS (  SELECT 'A' "source__source", "source_a".product_category "source_a__product_category" 
+  FROM  calc_groups_source_a  AS "source_a"
+  WHERE ('A' = $1)
+  GROUP BY 1, 2
+  ORDER BY  1  ASC),
+cte_1 AS (  SELECT 'B' "source__source", "source_b".product_category "source_b__product_category" 
+  FROM  calc_groups_source_b  AS "source_b"
+  WHERE ('B' = $2)
+  GROUP BY 1, 2
+  ORDER BY  1  ASC),
+cte_2 AS (  SELECT CASE "fk_aggregate_keys"."source__source" WHEN 'A' THEN "q_0"."source_a__product_category" WHEN 'B' THEN "q_1"."source_b__product_category" END "source__product_category", "fk_aggregate_keys"."source__source" "source__source" 
+  FROM (SELECT DISTINCT "source__source" "source__source" 
+  FROM (SELECT DISTINCT "source__source" "source__source" 
+  FROM  cte_0  AS "cte_0"
+   UNION ALL 
+  SELECT DISTINCT "source__source" "source__source" 
+  FROM  cte_1  AS "cte_1") AS "fk_aggregate_keys_source") AS "fk_aggregate_keys"
+  LEFT JOIN  cte_0  AS "q_0" ON (("fk_aggregate_keys"."source__source" IS NOT DISTINCT FROM "q_0"."source__source"))
+  LEFT JOIN  cte_1  AS "q_1" ON (("fk_aggregate_keys"."source__source" IS NOT DISTINCT FROM "q_1"."source__source"))
+  GROUP BY 1, 2)
+SELECT "cte_2"."source__product_category" "source__product_category" 
+FROM  cte_2  AS "cte_2"
+GROUP BY 1
+ORDER BY  1  ASC

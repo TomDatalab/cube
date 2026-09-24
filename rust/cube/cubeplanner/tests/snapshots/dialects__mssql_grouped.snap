@@ -1,0 +1,13 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "grouped(Dialect :: MsSql).sql"
+---
+SELECT "users".city "users__city", sum("orders".amount) "orders__total_amount" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+LEFT JOIN  public.users  AS "users" ON "orders".user_id = "users".id
+WHERE ("orders".status = @_1)
+GROUP BY "users".city
+ORDER BY sum("orders".amount) DESC
+OFFSET 0 ROWS
+FETCH NEXT 10 ROWS ONLY

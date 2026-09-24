@@ -1,0 +1,9 @@
+---
+source: cubeplanner/tests/planning.rs
+expression: planned.sql
+---
+SELECT count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+LEFT JOIN  public.users  AS "users" ON "orders".user_id = "users".id
+WHERE (("orders".status = $1) OR (("orders".status = $2) AND ("users".city IS NOT NULL)))

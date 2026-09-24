@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: MySql).sql"
+---
+SELECT CAST(DATE_FORMAT(CONVERT_TZ(`orders`.created_at, @@session.time_zone, '+00:00'), '%Y-%m-01T00:00:00.000') AS DATETIME) `orders__created_at_month`, count(`orders`.id) `orders__count` 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= TIMESTAMP(convert_tz(?, '+00:00', @@session.time_zone)) AND created_at <= TIMESTAMP(convert_tz(?, '+00:00', @@session.time_zone))) AND 1 = 1
+)  AS `orders`
+WHERE (`orders`.created_at >= TIMESTAMP(convert_tz(?, '+00:00', @@session.time_zone)) AND `orders`.created_at <= TIMESTAMP(convert_tz(?, '+00:00', @@session.time_zone)))
+GROUP BY 1
+ORDER BY  1  ASC

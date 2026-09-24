@@ -99,6 +99,8 @@ export interface MetaPayload {
   request: Request<undefined>,
   session: SessionContext,
   onlyCompilerId?: boolean,
+  /** Native API gateway `GET /v1/meta?onlyViews=true` */
+  onlyViews?: boolean,
 }
 
 export interface CanSwitchUserPayload {

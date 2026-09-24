@@ -1,0 +1,115 @@
+[package]
+name = "cubedriver"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of Cube's database driver layer (@cubejs-backend/base-driver + postgres-driver)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net", "fs"] }
+async-trait = "0.1"
+thiserror = "1"
+chrono = "0.4"
+futures = "0.3"
+log = "0.4"
+bytes = "1"
+base64 = "0.22"
+# Decompresses gzip unload files (pure-Rust `miniz_oxide` backend).
+flate2 = "1"
+
+# MySQL (rustls, never native-tls/OpenSSL)
+mysql_async = { version = "0.34", default-features = false, features = ["minimal", "rustls-tls"] }
+
+# ClickHouse over HTTP (rustls, never native-tls/OpenSSL)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Cube Store (WebSocket + FlatBuffers)
+cubestore-ws-transport = { path = "../cubestore-ws-transport" }
+url = "2"
+
+# BigQuery / Snowflake service-account JWTs (RS256, `ring` backend — no OpenSSL)
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+sha2 = "0.10"
+
+# MS SQL (TDS) with rustls. `rustls-native-certs` brings `openssl-probe`, which
+# is a pure-Rust crate that only looks up the system certificate paths — it
+# links no C library and no OpenSSL. TLS is required by Azure SQL and by any
+# deployment that encrypts its connections.
+# Holds an inline CUBEJS_DB_SSL_CA on disk for tiberius, which reads it from a path.
+tempfile = "3"
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono", "rustls"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+# PostgreSQL
+tokio-postgres = "0.7"
+postgres-protocol = "0.6"
+fallible-iterator = "0.2"
+deadpool-postgres = "0.14"
+tokio-postgres-rustls = { version = "0.14", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
+
+# SQLite / DuckDB are embedded C/C++ engines; `bundled` compiles them from
+# source with the C/C++ compiler (the Node drivers link the same engines).
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "column_decltype"], optional = true }
+duckdb = { version = "1.10505", features = ["bundled"], optional = true }
+
+# ksqlDB: `CUBEJS_DB_KAFKA_*` connectivity check (pure-Rust Kafka client,
+# rustls on `ring`, SASL through the pure-Rust `rsasl`) and the
+# simple-`SELECT *` table extraction.
+rskafka = { version = "0.6", default-features = false, features = ["transport-tls"], optional = true }
+regex = { version = "1", optional = true }
+
+# Oracle: Oracle's own pure-Rust thin-protocol client (TNS/TTC over TCP,
+# rustls for TCPS). No Instant Client, no ODPI-C. Pinned: it is a beta.
+oracledb = { version = "=26.0.0-beta.4", optional = true }
+
+# AWS (Athena, Aurora Serverless Data API): the official AWS SDK for Rust.
+# `default-https-client` is hyper 1 + rustls (aws-lc provider); no OpenSSL,
+# no native-tls. `sso` + `credentials-process` keep the default credential
+# chain equal to the Node SDK's; STS (assume role) is always built in.
+aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest", "sso", "credentials-process"], optional = true }
+aws-sdk-athena = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
+aws-sdk-rdsdata = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
+
+# Hive (HiveServer2 TCLIService over Thrift; pure Rust, binary protocol only)
+thrift = { version = "0.13", default-features = false, optional = true }
+
+# Vertica (own wire client: MD5 password hashing, rustls TLS)
+md-5 = { version = "0.10", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"], optional = true }
+
+[features]
+# Every driver is built by default, so `cube-server` serves every
+# CUBEJS_DB_TYPE. A slimmer build picks its own with
+# `--no-default-features --features ...` (duckdb alone adds ~10 minutes of
+# C++ compilation).
+default = [
+    "athena", "cratedb", "databricks", "dremio", "duckdb", "hive", "ksql",
+    "materialize", "mongobi", "mysqlauroraserverless", "oracle", "pinot",
+    "prestodb", "questdb", "sqlite", "trino", "vertica",
+]
+prestodb = []
+trino = ["prestodb"]
+pinot = []
+cratedb = []
+materialize = []
+questdb = []
+vertica = ["dep:md-5", "dep:tokio-rustls", "tokio/io-util"]
+mongobi = []
+athena = ["dep:aws-config", "dep:aws-sdk-athena", "dep:aws-sdk-s3"]
+mysqlauroraserverless = ["dep:aws-config", "dep:aws-sdk-rdsdata"]
+oracle = ["dep:oracledb"]
+dremio = []
+ksql = ["dep:rskafka", "dep:regex"]
+sqlite = ["dep:rusqlite"]
+duckdb = ["dep:duckdb"]
+databricks = []
+hive = ["dep:thrift"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.11"

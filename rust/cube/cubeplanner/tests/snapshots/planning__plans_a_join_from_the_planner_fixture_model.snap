@@ -1,0 +1,9 @@
+---
+source: cubeplanner/tests/planning.rs
+expression: planned.sql
+---
+SELECT "cube_c".code "cube_c__code", count("cube_a".id) "cube_a__count" 
+FROM  table_a  AS "cube_a"
+LEFT JOIN  table_c  AS "cube_c" ON "cube_a".c_id = "cube_c".id
+GROUP BY 1
+ORDER BY  2  DESC

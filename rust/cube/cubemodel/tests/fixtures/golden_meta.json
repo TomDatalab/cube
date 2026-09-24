@@ -1,0 +1,347 @@
+{
+  "cubes": [
+    {
+      "name": "orders",
+      "type": "cube",
+      "title": "Orders",
+      "isVisible": true,
+      "public": true,
+      "description": "All orders",
+      "connectedComponent": 1,
+      "meta": {
+        "owner": "sales"
+      },
+      "measures": [
+        {
+          "name": "orders.count",
+          "title": "Orders Count",
+          "shortTitle": "Count",
+          "formatDescription": {
+            "name": "number",
+            "specifier": ",.2~f"
+          },
+          "cumulativeTotal": false,
+          "cumulative": false,
+          "type": "number",
+          "aggType": "count",
+          "drillMembers": [
+            "orders.id",
+            "orders.status",
+            "users.city"
+          ],
+          "drillMembersGrouped": {
+            "measures": [],
+            "dimensions": [
+              "orders.id",
+              "orders.status",
+              "users.city"
+            ]
+          },
+          "isVisible": true,
+          "public": true
+        },
+        {
+          "name": "orders.total_amount",
+          "title": "Orders Total Amount",
+          "description": "Total order amount",
+          "shortTitle": "Total Amount",
+          "format": "currency",
+          "formatDescription": {
+            "name": "currency",
+            "specifier": "$,.2~f",
+            "currency": "USD"
+          },
+          "currency": "USD",
+          "cumulativeTotal": false,
+          "cumulative": false,
+          "type": "number",
+          "aggType": "sum",
+          "drillMembers": [],
+          "drillMembersGrouped": {
+            "measures": [],
+            "dimensions": []
+          },
+          "isVisible": true,
+          "public": true
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "orders.status",
+          "title": "Orders Order Status",
+          "type": "string",
+          "shortTitle": "Order Status",
+          "suggestFilterValues": true,
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false
+        },
+        {
+          "name": "orders.created_at",
+          "title": "Orders Created at",
+          "type": "time",
+          "shortTitle": "Created at",
+          "suggestFilterValues": true,
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false,
+          "granularities": [
+            {
+              "name": "fiscal_year",
+              "title": "Fiscal Year",
+              "interval": "1 year",
+              "origin": "2024-02-01"
+            }
+          ]
+        }
+      ],
+      "segments": [
+        {
+          "name": "orders.completed",
+          "title": "Orders Completed",
+          "shortTitle": "Completed",
+          "isVisible": true,
+          "public": true
+        }
+      ],
+      "hierarchies": [
+        {
+          "name": "orders.order_hierarchy",
+          "title": "Order Hierarchy",
+          "public": true,
+          "levels": [
+            "orders.status",
+            "users.city"
+          ]
+        }
+      ],
+      "folders": [],
+      "nestedFolders": []
+    },
+    {
+      "name": "users",
+      "type": "cube",
+      "title": "Users",
+      "isVisible": true,
+      "public": true,
+      "connectedComponent": 1,
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "users.city",
+          "title": "Users City",
+          "type": "string",
+          "shortTitle": "City",
+          "suggestFilterValues": true,
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false
+        },
+        {
+          "name": "users.age",
+          "title": "Users Age",
+          "type": "number",
+          "shortTitle": "Age",
+          "suggestFilterValues": true,
+          "format": {
+            "type": "custom-numeric",
+            "value": ",.1~f",
+            "alias": "number_1"
+          },
+          "formatDescription": {
+            "name": "number_1",
+            "specifier": ",.1~f"
+          },
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false
+        }
+      ],
+      "segments": [],
+      "hierarchies": [],
+      "folders": [],
+      "nestedFolders": []
+    },
+    {
+      "name": "orders_view",
+      "type": "view",
+      "title": "Orders View",
+      "isVisible": true,
+      "public": true,
+      "description": "Orders and their users",
+      "measures": [
+        {
+          "name": "orders_view.count",
+          "title": "Orders View Count",
+          "shortTitle": "Count",
+          "formatDescription": {
+            "name": "number",
+            "specifier": ",.2~f"
+          },
+          "cumulativeTotal": false,
+          "cumulative": false,
+          "type": "number",
+          "aggType": "count",
+          "drillMembers": [
+            "orders_view.id",
+            "orders_view.status",
+            "orders_view.users_city"
+          ],
+          "drillMembersGrouped": {
+            "measures": [],
+            "dimensions": [
+              "orders_view.id",
+              "orders_view.status",
+              "orders_view.users_city"
+            ]
+          },
+          "aliasMember": "orders.count",
+          "isVisible": true,
+          "public": true
+        },
+        {
+          "name": "orders_view.total_amount",
+          "title": "Orders View Total Amount",
+          "description": "Total order amount",
+          "shortTitle": "Total Amount",
+          "format": "currency",
+          "formatDescription": {
+            "name": "currency",
+            "specifier": "$,.2~f",
+            "currency": "USD"
+          },
+          "currency": "USD",
+          "cumulativeTotal": false,
+          "cumulative": false,
+          "type": "number",
+          "aggType": "sum",
+          "drillMembers": [],
+          "drillMembersGrouped": {
+            "measures": [],
+            "dimensions": []
+          },
+          "aliasMember": "orders.total_amount",
+          "isVisible": true,
+          "public": true
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "orders_view.id",
+          "title": "Orders View ID",
+          "type": "number",
+          "shortTitle": "ID",
+          "suggestFilterValues": true,
+          "formatDescription": {
+            "name": "number",
+            "specifier": ",.2~f"
+          },
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false,
+          "aliasMember": "orders.id"
+        },
+        {
+          "name": "orders_view.status",
+          "title": "Orders View Order Status",
+          "type": "string",
+          "shortTitle": "Order Status",
+          "suggestFilterValues": true,
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false,
+          "aliasMember": "orders.status"
+        },
+        {
+          "name": "orders_view.created_at",
+          "title": "Orders View Created at",
+          "type": "time",
+          "shortTitle": "Created at",
+          "suggestFilterValues": true,
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false,
+          "aliasMember": "orders.created_at",
+          "granularities": [
+            {
+              "name": "fiscal_year",
+              "title": "Fiscal Year",
+              "interval": "1 year",
+              "origin": "2024-02-01"
+            }
+          ]
+        },
+        {
+          "name": "orders_view.users_city",
+          "title": "Orders View Users City",
+          "type": "string",
+          "shortTitle": "Users City",
+          "suggestFilterValues": true,
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false,
+          "aliasMember": "orders.users.city"
+        },
+        {
+          "name": "orders_view.users_user_age",
+          "title": "Orders View User Age",
+          "type": "number",
+          "shortTitle": "User Age",
+          "suggestFilterValues": true,
+          "format": {
+            "type": "custom-numeric",
+            "value": ",.1~f",
+            "alias": "number_1"
+          },
+          "formatDescription": {
+            "name": "number_1",
+            "specifier": ",.1~f"
+          },
+          "isVisible": true,
+          "public": true,
+          "primaryKey": false,
+          "aliasMember": "orders.users.age"
+        }
+      ],
+      "segments": [
+        {
+          "name": "orders_view.completed",
+          "title": "Orders View Completed",
+          "shortTitle": "Completed",
+          "isVisible": true,
+          "public": true
+        }
+      ],
+      "hierarchies": [
+        {
+          "name": "orders_view.order_hierarchy",
+          "title": "Order Hierarchy",
+          "public": true,
+          "aliasMember": "orders.order_hierarchy",
+          "levels": [
+            "orders_view.status",
+            "orders_view.users_city"
+          ]
+        }
+      ],
+      "folders": [
+        {
+          "name": "Order details",
+          "members": [
+            "orders_view.status",
+            "orders_view.count"
+          ]
+        }
+      ],
+      "nestedFolders": [
+        {
+          "name": "Order details",
+          "members": [
+            "orders_view.status",
+            "orders_view.count"
+          ]
+        }
+      ]
+    }
+  ]
+}

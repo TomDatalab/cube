@@ -1,0 +1,86 @@
+# A full example configuration, exercising every block of the schema.
+version: 1
+
+log_level: warn
+telemetry: false
+
+model_path: model
+pre_aggregations_schema: prod_pre_aggregations
+app_id: analytics
+
+api:
+  base_path: /cube
+  default_scopes: [meta, data, graphql]
+  max_request_size: 2mb
+  cors:
+    enabled: true
+    origin:
+      - https://app.example.com
+      - https://admin.example.com
+    methods: [GET, POST, OPTIONS]
+    allowed_headers: ["authorization", "content-type"]
+    exposed_headers: ["x-request-id"]
+    credentials: true
+    max_age: 600
+
+data_sources:
+  default:
+    type: postgres
+    host: { env: CUBEJS_DB_HOST, default: localhost }
+    port: 5432
+    database: analytics
+    user: { env: CUBEJS_DB_USER, default: cube }
+    password: { env: CUBEJS_DB_PASS }
+    ssl: true
+    max_pool: 8
+  warehouse:
+    type: snowflake
+    database: SNOW_ANALYTICS
+    user: { env: SNOWFLAKE_USER, default: CUBE }
+    password: { env: SNOWFLAKE_PASSWORD, default: secret }
+    export_bucket: s3://cube-export
+    export_bucket_type: s3
+    options:
+      warehouse: COMPUTE_WH
+      role: ANALYST
+
+tenants:
+  claim: tenant_id
+  on_missing: error
+  default:
+    app_id: shared
+    model_path: model/shared
+    data_source: default
+  rules:
+    - match: acme
+      app_id: acme
+      model_path: model/acme
+      data_source: warehouse
+      pre_aggregations_schema: acme_pre_aggregations
+      api_scopes: [meta, data, sql, jobs]
+      compile_context:
+        region: us
+        tier: enterprise
+    - match_any: [beta, gamma]
+      app_id: "tenant_{value}"
+      model_path: "model/{value}"
+      data_source: default
+    - match_pattern: "eu_*"
+      app_id: "{value}"
+      model_path: model/eu
+      data_source: default
+      orchestrator_id: eu_cluster
+
+scheduled_refresh:
+  enabled: true
+  interval: 60
+  timezones: [UTC, America/Los_Angeles]
+  concurrency: 4
+  batch_size: 2
+  contexts:
+    - security_context:
+        tenant_id: acme
+    - security_context:
+        tenant_id: beta
+    - security_context:
+        tenant_id: eu_west

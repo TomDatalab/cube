@@ -8,7 +8,11 @@ description = "Async WebSocket client for CubeStore's binary protocol."
 cubeshared = { path = "../cubeshared" }
 flatbuffers = "25.12.19"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+# rustls (ring), never native-tls: the Rust backend must not link OpenSSL.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# Pin the crypto provider explicitly so `rustls::ClientConfig::builder()` has a
+# default one even when this crate is built on its own.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 futures-util = "0.3"
 bytes = "1"
 url = "2"

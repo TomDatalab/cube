@@ -1,0 +1,20 @@
+views:
+  - name: orders_view
+    description: Orders and their users
+    cubes:
+      - join_path: orders
+        includes: "*"
+        excludes:
+          - internal_note
+      - join_path: orders.users
+        prefix: true
+        includes:
+          - city
+          - name: age
+            alias: user_age
+            title: User Age
+    folders:
+      - name: Order details
+        includes:
+          - status
+          - count

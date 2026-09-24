@@ -1,0 +1,8 @@
+---
+source: cubeplanner/tests/query_options.rs
+expression: masked.sql
+---
+SELECT '***' "users__city_masked", count("users".id) "users__count" 
+FROM  public.users  AS "users"
+GROUP BY 1
+ORDER BY  2  DESC

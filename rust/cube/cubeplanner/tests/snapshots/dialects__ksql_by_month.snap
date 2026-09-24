@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Ksql).sql"
+---
+SELECT PARSE_TIMESTAMP(FORMAT_TIMESTAMP(CONVERT_TZ(`orders`.created_at, 'UTC', 'UTC'), 'yyyy-MM-01''T''00:00:00.000'), 'yyyy-MM-dd''T''HH:mm:ss.SSS', 'UTC') `orders__created_at_month`, count(`orders`.id) `orders__count` 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= CAST(? as TIMESTAMP) AND created_at <= CAST(? as TIMESTAMP)) AND 1 = 1
+)  AS `orders`
+WHERE (`orders`.created_at >= CAST(? as TIMESTAMP) AND `orders`.created_at <= CAST(? as TIMESTAMP))
+GROUP BY PARSE_TIMESTAMP(FORMAT_TIMESTAMP(CONVERT_TZ(`orders`.created_at, 'UTC', 'UTC'), 'yyyy-MM-01''T''00:00:00.000'), 'yyyy-MM-dd''T''HH:mm:ss.SSS', 'UTC')
+ORDER BY  1  ASC

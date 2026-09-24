@@ -1,0 +1,59 @@
+cubes:
+  - name: orders
+    # Exercises both request-dependent context variables in a cube `sql`:
+    # the filter push-down and the security context.
+    sql: >
+      SELECT * FROM public.orders
+      WHERE {FILTER_PARAMS.orders.created_at.filter('created_at')}
+      AND {SECURITY_CONTEXT.tenant_id.filter('tenant_id')}
+
+    joins:
+      - name: users
+        relationship: many_to_one
+        sql: "{CUBE}.user_id = {users}.id"
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: user_id
+        sql: user_id
+        type: number
+
+      - name: status
+        sql: status
+        type: string
+
+      - name: created_at
+        sql: created_at
+        type: time
+        granularities:
+          - name: half_year
+            interval: 6 months
+            origin: "2024-01-01"
+
+      # `SQL_UTILS.convertTz` is resolved through the dialect at compile time.
+      - name: created_at_local
+        sql: "{SQL_UTILS.convertTz(`{CUBE}.created_at`)}"
+        type: time
+
+    measures:
+      - name: count
+        type: count
+        sql: id
+
+      - name: total_amount
+        type: sum
+        sql: amount
+
+      - name: completed_amount
+        type: sum
+        sql: amount
+        filters:
+          - sql: "{CUBE}.status = 'completed'"
+
+    segments:
+      - name: completed
+        sql: "{CUBE}.status = 'completed'"

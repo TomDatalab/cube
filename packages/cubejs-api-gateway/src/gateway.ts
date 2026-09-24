@@ -329,6 +329,12 @@ class ApiGateway {
 
     const guestMiddlewares = [];
 
+    // Must be mounted before the Node.js handlers so that migrated endpoints
+    // are served by the native gateway (Express matches routes in order).
+    if (getEnv('nativeApiGateway')) {
+      this.enableNativeApiGateway(app);
+    }
+
     app.get('/readyz', guestMiddlewares, cachedHandler(this.readiness));
     app.get('/livez', guestMiddlewares, cachedHandler(this.liveness));
 
@@ -690,22 +696,49 @@ class ApiGateway {
       }));
     }
 
-    if (getEnv('nativeApiGateway')) {
-      this.enableNativeApiGateway(app);
-    }
-
     app.use(this.handleErrorMiddleware);
   }
 
+  /**
+   * REST API v1 endpoints already implemented by the native (Rust) API gateway,
+   * see packages/cubejs-backend-native/src/gateway/router.rs. When the native
+   * gateway is enabled and CUBEJS_NATIVE_API_GATEWAY_REST_ROUTES is set,
+   * requests to these paths are proxied to it; otherwise the Node.js handlers
+   * below keep serving them.
+   */
+  protected static readonly NATIVE_V1_ROUTES: string[] = [
+    '/v1/meta',
+  ];
+
   protected enableNativeApiGateway(app: ExpressApplication) {
-    const proxyMiddleware = createProxyMiddleware<Request, Response>({
-      target: `http://127.0.0.1:${this.sqlServer.getNativeGatewayPort()}/v2`,
+    const nativeGatewayUrl = `http://127.0.0.1:${this.sqlServer.getNativeGatewayPort()}`;
+
+    // Express strips the mount path, so the target must carry the native path.
+    const proxyTo = (path: string) => createProxyMiddleware<Request, Response>({
+      target: `${nativeGatewayUrl}${path}`,
       changeOrigin: true,
     });
 
+    if (getEnv('nativeApiGatewayRestRoutes')) {
+      const v1Proxy = proxyTo('/v1');
+
+      // Mounted on `/v1` (not on each route) so the proxied path is
+      // `/v1<req.path>` and not `/v1/meta/` with a trailing slash.
+      app.use(
+        `${this.basePath}/v1`,
+        (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+          if (ApiGateway.NATIVE_V1_ROUTES.includes(`/v1${req.path}`)) {
+            return (v1Proxy as any)(req, res, next);
+          }
+
+          return next();
+        }
+      );
+    }
+
     app.use(
       `${this.basePath}/v2`,
-      proxyMiddleware as any
+      proxyTo('/v2') as any
     );
   }
 

@@ -1,0 +1,17 @@
+[package]
+name = "cubemodel"
+version = "0.1.0"
+edition = "2021"
+description = "Cube data model loader: YAML/Jinja cubes and views, validation, view resolution and /v1/meta"
+license = "Apache-2.0"
+
+[dependencies]
+indexmap = { version = "2.0", features = ["serde"] }
+minijinja = { version = "1", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml = "0.9"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

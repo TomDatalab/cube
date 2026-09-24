@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Druid).sql"
+---
+SELECT DATE_TRUNC('month', CAST(TIME_FORMAT("orders".created_at, 'yyyy-MM-dd HH:mm:ss', 'UTC') AS TIMESTAMP)) "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= TIME_PARSE(?) AND created_at <= TIME_PARSE(?)) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= TIME_PARSE(?) AND "orders".created_at <= TIME_PARSE(?))
+GROUP BY 1
+ORDER BY  1  ASC

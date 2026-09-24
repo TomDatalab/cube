@@ -1,0 +1,12 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "grouped(Dialect :: Ksql).sql"
+---
+SELECT `users`.city `users__city`, sum(`orders`.amount) `orders__total_amount` 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS `orders`
+LEFT JOIN  public.users  AS `users` ON `orders`.user_id = `users`.id
+WHERE (`orders`.status = ?)
+GROUP BY `users`.city
+ORDER BY  2  DESC
+LIMIT 10

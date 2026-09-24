@@ -183,6 +183,7 @@ impl GatewayAuthContext for NativeGatewayAuthContext {
 
 #[derive(Debug, Serialize)]
 struct ContextToApiScopesTransportRequest<'ref_auth_context> {
+    #[serde(rename = "securityContext")]
     security_context: &'ref_auth_context Option<serde_json::Value>,
 }
 

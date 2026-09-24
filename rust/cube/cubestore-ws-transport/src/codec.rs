@@ -4,27 +4,98 @@ use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
 use bytes::Bytes;
 use cubeshared::codegen::{
-    root_as_http_message, HttpCommand, HttpMessage, HttpMessageArgs, HttpQuery, HttpQueryArgs,
-    HttpQueryResultData, QueryResultFormat,
+    root_as_http_message, BinaryValue, BinaryValueArgs, BoolValue, BoolValueArgs, Float64Value,
+    Float64ValueArgs, HttpCommand, HttpMessage, HttpMessageArgs, HttpParameter, HttpParameterArgs,
+    HttpParameterValue, HttpQuery, HttpQueryArgs, HttpQueryResultData, HttpTable, HttpTableArgs,
+    Int64Value, Int64ValueArgs, NullValue, NullValueArgs, QueryResultFormat, StringValue,
+    StringValueArgs,
 };
 use flatbuffers::FlatBufferBuilder;
 
 use crate::error::TransportError;
-use crate::result::{QueryResult, ResultData};
+use crate::request::{QueryOptions, QueryParameter};
+use crate::result::{QueryResult, ResponseFormat, ResultData};
+
+/// Build a binary FlatBuffer payload carrying an `HttpQuery` command with no
+/// parameters, no inline tables and the Arrow response format.
+pub fn encode_query(message_id: u32, connection_id: &str, sql: &str) -> Bytes {
+    encode_query_with_options(message_id, connection_id, sql, &QueryOptions::default())
+}
 
 /// Build a binary FlatBuffer payload carrying an `HttpQuery` command.
-pub fn encode_query(message_id: u32, connection_id: &str, sql: &str) -> Bytes {
+///
+/// Mirrors `WebSocketConnection.query`: the optional `trace_obj`,
+/// `inline_tables` and `parameters` fields are only written when non-empty, so
+/// a plain query serialises exactly as it did before parameters existed.
+pub fn encode_query_with_options(
+    message_id: u32,
+    connection_id: &str,
+    sql: &str,
+    options: &QueryOptions,
+) -> Bytes {
     let mut builder = FlatBufferBuilder::with_capacity(1024);
     let query_offset = builder.create_string(sql);
+
+    let trace_obj_offset = options
+        .trace_obj
+        .as_deref()
+        .map(|t| builder.create_string(t));
+
+    let inline_tables_offset = if options.inline_tables.is_empty() {
+        None
+    } else {
+        let mut table_offsets = Vec::with_capacity(options.inline_tables.len());
+        for table in &options.inline_tables {
+            let name = builder.create_string(&table.name);
+            let column_offsets: Vec<_> = table
+                .columns
+                .iter()
+                .map(|c| builder.create_string(c))
+                .collect();
+            let columns = builder.create_vector(&column_offsets);
+            let type_offsets: Vec<_> = table
+                .types
+                .iter()
+                .map(|t| builder.create_string(t))
+                .collect();
+            let types = builder.create_vector(&type_offsets);
+            let csv_rows = builder.create_string(&table.csv_rows);
+            table_offsets.push(HttpTable::create(
+                &mut builder,
+                &HttpTableArgs {
+                    name: Some(name),
+                    columns: Some(columns),
+                    types: Some(types),
+                    csv_rows: Some(csv_rows),
+                },
+            ));
+        }
+        Some(builder.create_vector(&table_offsets))
+    };
+
+    let parameters_offset = if options.parameters.is_empty() {
+        None
+    } else {
+        let offsets: Vec<_> = options
+            .parameters
+            .iter()
+            .map(|p| serialize_parameter(&mut builder, p))
+            .collect();
+        Some(builder.create_vector(&offsets))
+    };
 
     let http_query = HttpQuery::create(
         &mut builder,
         &HttpQueryArgs {
             query: Some(query_offset),
-            trace_obj: None,
-            inline_tables: None,
-            parameters: None,
-            response_format: QueryResultFormat::Arrow,
+            trace_obj: trace_obj_offset,
+            inline_tables: inline_tables_offset,
+            parameters: parameters_offset,
+            response_format: match options.response_format {
+                ResponseFormat::Legacy => QueryResultFormat::Legacy,
+                // `Completed` can never be requested; Arrow is the closest.
+                ResponseFormat::Arrow | ResponseFormat::Completed => QueryResultFormat::Arrow,
+            },
         },
     );
 
@@ -41,6 +112,53 @@ pub fn encode_query(message_id: u32, connection_id: &str, sql: &str) -> Bytes {
     );
     builder.finish(message, None);
     Bytes::copy_from_slice(builder.finished_data())
+}
+
+/// Port of `WebSocketConnection.serializeParameter`.
+fn serialize_parameter<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    parameter: &QueryParameter,
+) -> flatbuffers::WIPOffset<HttpParameter<'a>> {
+    let (value_type, value) = match parameter {
+        QueryParameter::Null => (
+            HttpParameterValue::NullValue,
+            NullValue::create(builder, &NullValueArgs {}).as_union_value(),
+        ),
+        QueryParameter::Bool(v) => (
+            HttpParameterValue::BoolValue,
+            BoolValue::create(builder, &BoolValueArgs { v: *v }).as_union_value(),
+        ),
+        QueryParameter::Int64(v) => (
+            HttpParameterValue::Int64Value,
+            Int64Value::create(builder, &Int64ValueArgs { v: *v }).as_union_value(),
+        ),
+        QueryParameter::Float64(v) => (
+            HttpParameterValue::Float64Value,
+            Float64Value::create(builder, &Float64ValueArgs { v: *v }).as_union_value(),
+        ),
+        QueryParameter::String(v) => {
+            let s = builder.create_string(v);
+            (
+                HttpParameterValue::StringValue,
+                StringValue::create(builder, &StringValueArgs { v: Some(s) }).as_union_value(),
+            )
+        }
+        QueryParameter::Binary(v) => {
+            let b = builder.create_vector(v);
+            (
+                HttpParameterValue::BinaryValue,
+                BinaryValue::create(builder, &BinaryValueArgs { v: Some(b) }).as_union_value(),
+            )
+        }
+    };
+
+    HttpParameter::create(
+        builder,
+        &HttpParameterArgs {
+            value_type,
+            value: Some(value),
+        },
+    )
 }
 
 /// Decoded response from the server.

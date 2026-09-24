@@ -325,3 +325,67 @@ fn decode_query_result_completed() -> Result<(), TransportError> {
 
     Ok(())
 }
+
+#[test]
+fn query_with_parameters_round_trip() -> Result<(), TransportError> {
+    use cubeshared::codegen::HttpParameterValue;
+    use cubestore_ws_transport::codec::encode_query_with_options;
+    use cubestore_ws_transport::{InlineTable, QueryOptions, QueryParameter};
+
+    let options = QueryOptions {
+        parameters: vec![
+            QueryParameter::Null,
+            QueryParameter::Bool(true),
+            QueryParameter::Int64(-7),
+            QueryParameter::Float64(1.5),
+            QueryParameter::String("it's".into()),
+            QueryParameter::Binary(vec![1, 2, 3]),
+        ],
+        inline_tables: vec![InlineTable {
+            name: "t".into(),
+            columns: vec!["a".into(), "b".into()],
+            types: vec!["int".into(), "string".into()],
+            csv_rows: "1,x\n".into(),
+        }],
+        trace_obj: Some(r#"{"requestId":"r1"}"#.into()),
+        response_format: ResponseFormat::Legacy,
+    };
+
+    let bytes = encode_query_with_options(3, "conn-1", "SELECT ?", &options);
+    let msg = root_as_http_message(&bytes).expect("parse encoded message");
+    let q = msg.command_as_http_query().expect("HttpQuery variant");
+
+    assert_eq!(msg.message_id(), 3);
+    assert_eq!(q.query(), Some("SELECT ?"));
+    assert_eq!(q.response_format(), QueryResultFormat::Legacy);
+    assert_eq!(q.trace_obj(), Some(r#"{"requestId":"r1"}"#));
+
+    let tables = q.inline_tables().expect("inline tables");
+    assert_eq!(tables.len(), 1);
+    let table = tables.get(0);
+    assert_eq!(table.name(), Some("t"));
+    assert_eq!(table.csv_rows(), Some("1,x\n"));
+    let columns = table.columns().expect("columns");
+    assert_eq!(columns.iter().collect::<Vec<_>>(), vec!["a", "b"]);
+    let types = table.types().expect("types");
+    assert_eq!(types.iter().collect::<Vec<_>>(), vec!["int", "string"]);
+
+    let params = q.parameters().expect("parameters");
+    assert_eq!(params.len(), 6);
+    assert_eq!(params.get(0).value_type(), HttpParameterValue::NullValue);
+    assert_eq!(params.get(1).value_type(), HttpParameterValue::BoolValue);
+    assert!(params.get(1).value_as_bool_value().unwrap().v());
+    assert_eq!(params.get(2).value_type(), HttpParameterValue::Int64Value);
+    assert_eq!(params.get(2).value_as_int_64_value().unwrap().v(), -7);
+    assert_eq!(params.get(3).value_type(), HttpParameterValue::Float64Value);
+    assert_eq!(params.get(3).value_as_float_64_value().unwrap().v(), 1.5);
+    assert_eq!(params.get(4).value_type(), HttpParameterValue::StringValue);
+    assert_eq!(params.get(4).value_as_string_value().unwrap().v(), "it's");
+    assert_eq!(params.get(5).value_type(), HttpParameterValue::BinaryValue);
+    assert_eq!(
+        params.get(5).value_as_binary_value().unwrap().v().bytes(),
+        &[1, 2, 3]
+    );
+
+    Ok(())
+}

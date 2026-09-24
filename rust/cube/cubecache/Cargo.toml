@@ -1,0 +1,20 @@
+[package]
+name = "cubecache"
+version = "0.1.0"
+edition = "2021"
+description = "Query cache keys, cache drivers and cache decision logic for Cube (port of cubejs-query-orchestrator caching to Rust)"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+futures = "0.3"
+lru = "0.12"
+md-5 = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
