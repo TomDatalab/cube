@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Vertica).sql"
+---
+SELECT TRUNC("orders".created_at AT TIME ZONE 'UTC', 'MM') "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= ?::timestamptz AND created_at <= ?::timestamptz) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= ?::timestamptz AND "orders".created_at <= ?::timestamptz)
+GROUP BY 1
+ORDER BY  1  ASC

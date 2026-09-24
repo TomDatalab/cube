@@ -1,6 +1,7 @@
 #[macro_use]
 mod macros;
 
+pub mod member_sql_parser;
 pub mod yaml;
 
 pub mod base_query_options;
@@ -43,6 +44,7 @@ mod mock_timeshift_definition;
 mod mock_view_filter_definition;
 
 pub use base_query_options::{members_from_strings, MockBaseQueryOptions};
+pub use member_sql_parser::ParsedMemberSql;
 pub use mock_base_tools::MockBaseTools;
 pub use mock_case_definition::MockCaseDefinition;
 pub use mock_case_else_item::MockCaseElseItem;

@@ -1,0 +1,8 @@
+---
+source: cubeplanner/tests/query_options.rs
+expression: planned.sql
+---
+SELECT "visitors__source" "visitors__source", date_trunc('day', "visitors__created_at_day") "visitors__created_at_day", sum("visitors__count") "visitors__count" 
+FROM  visitors__daily_rollup__usage_0  AS "visitors__daily_rollup"
+GROUP BY 1, 2
+ORDER BY  2  ASC

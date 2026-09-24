@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Databricks).sql"
+---
+SELECT date_trunc('month', from_utc_timestamp(`orders`.created_at, 'UTC')) `orders__created_at_month`, count(`orders`.id) `orders__count` 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= from_utc_timestamp(replace(replace(?, 'T', ' '), 'Z', ''), 'UTC') AND created_at <= from_utc_timestamp(replace(replace(?, 'T', ' '), 'Z', ''), 'UTC')) AND 1 = 1
+)  AS `orders`
+WHERE (`orders`.created_at >= from_utc_timestamp(replace(replace(?, 'T', ' '), 'Z', ''), 'UTC') AND `orders`.created_at <= from_utc_timestamp(replace(replace(?, 'T', ' '), 'Z', ''), 'UTC'))
+GROUP BY 1
+ORDER BY  1  ASC

@@ -1,0 +1,19 @@
+[package]
+name = "cubeplanner"
+version = "0.1.0"
+edition = "2021"
+description = "Plans SQL from a YAML data model with the Tesseract planner, without Node.js"
+
+[dependencies]
+# For the Jinja engine, so a model renders identically here and in cubemodel.
+cubemodel = { path = "../cubemodel" }
+cubesqlplanner = { path = "../cubesqlplanner/cubesqlplanner" }
+cubenativeutils = { path = "../cubenativeutils" }
+chrono = "0.4"
+chrono-tz = "0.8.2"
+serde = { version = "1.0.115", features = ["derive"] }
+serde_json = "1.0.56"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+insta = "1.34"

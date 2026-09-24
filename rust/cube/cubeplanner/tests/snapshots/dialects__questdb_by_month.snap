@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: QuestDb).sql"
+---
+SELECT timestamp_floor('M', to_timezone("orders".created_at, 'UTC')) "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= $1 AND created_at <= $2) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= $3 AND "orders".created_at <= $4)
+GROUP BY timestamp_floor('M', to_timezone("orders".created_at, 'UTC'))
+ORDER BY 1 ASC

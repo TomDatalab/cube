@@ -1,0 +1,63 @@
+cubes:
+  - name: orders
+    sql_table: public.orders
+    title: Orders
+    description: All orders
+    meta:
+      owner: sales
+    joins:
+      - name: users
+        sql: "{CUBE}.user_id = {users}.id"
+        relationship: many_to_one
+    measures:
+      - name: count
+        sql: id
+        type: count
+        drill_members:
+          - id
+          - status
+          - users.city
+      - name: total_amount
+        sql: amount
+        type: sum
+        format: currency
+        currency: usd
+        description: Total order amount
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+        title: Order Status
+      - name: created_at
+        sql: created_at
+        type: time
+        granularities:
+          - name: fiscal_year
+            interval: 1 year
+            origin: "2024-02-01"
+      - name: internal_note
+        sql: note
+        type: string
+        public: false
+    segments:
+      - name: completed
+        sql: "{CUBE}.status = 'completed'"
+    hierarchies:
+      - name: order_hierarchy
+        title: Order Hierarchy
+        levels:
+          - "{CUBE}.status"
+          - users.city
+    pre_aggregations:
+      - name: main
+        type: rollup
+        measures:
+          - count
+        dimensions:
+          - status
+        time_dimension: created_at
+        granularity: day

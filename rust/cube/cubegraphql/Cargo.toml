@@ -1,0 +1,19 @@
+[package]
+name = "cubegraphql"
+version = "0.1.0"
+edition = "2021"
+description = "Cube GraphQL API (port of cubejs-api-gateway/src/graphql.ts to Rust)"
+license = "Apache-2.0"
+
+[dependencies]
+async-graphql = { version = "7", default-features = false, features = ["dynamic-schema"] }
+async-graphql-value = "7"
+async-trait = "0.1.36"
+chrono = "0.4.31"
+chrono-tz = "0.8.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

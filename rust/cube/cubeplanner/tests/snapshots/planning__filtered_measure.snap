@@ -1,0 +1,7 @@
+---
+source: cubeplanner/tests/planning.rs
+expression: planned.sql
+---
+SELECT sum(CASE WHEN ("orders".status = 'completed') THEN "orders".amount END) "orders__completed_amount" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"

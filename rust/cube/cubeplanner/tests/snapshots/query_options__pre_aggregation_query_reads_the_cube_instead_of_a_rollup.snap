@@ -1,0 +1,7 @@
+---
+source: cubeplanner/tests/query_options.rs
+expression: planned.sql
+---
+SELECT "visitors".source "visitors__source", date_trunc('day', ("visitors".created_at::timestamptz AT TIME ZONE 'UTC')) "visitors__created_at_day", count("visitors".id) "visitors__count" 
+FROM  visitors  AS "visitors"
+GROUP BY 1, 2

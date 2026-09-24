@@ -2,6 +2,7 @@ pub mod auth_middleware;
 pub mod auth_service;
 pub mod handlers;
 pub mod http_error;
+pub mod meta_service;
 pub mod router;
 pub mod server;
 pub mod state;
@@ -11,6 +12,7 @@ pub use auth_service::{
     GatewayAuthContext, GatewayAuthContextRef, GatewayAuthService, GatewayAuthenticateResponse,
     GatewayCheckAuthRequest,
 };
+pub use meta_service::{GatewayMetaRequest, GatewayMetaService};
 pub use router::{ApiGatewayRouterBuilder, RApiGatewayRouter};
 pub use server::{ApiGatewayServer, ApiGatewayServerImpl};
 pub use state::{ApiGatewayState, ApiGatewayStateRef};

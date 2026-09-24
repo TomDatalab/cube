@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/planning.rs
+expression: planned.sql
+---
+SELECT "users".city "sales__users_city", sum("orders".amount) "sales__total_amount" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+LEFT JOIN  public.users  AS "users" ON "orders".user_id = "users".id
+GROUP BY 1
+ORDER BY  2  DESC

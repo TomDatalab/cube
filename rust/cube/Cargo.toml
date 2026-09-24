@@ -8,4 +8,17 @@ members = [
     "cubesqlplanner/nativebridge",
     "cubestore-ws-transport",
     "cubestore-cli",
+    # Node.js → Rust backend migration (see MIGRATION.md)
+    "cubeauth",
+    "cubequery",
+    "cubedriver",
+    "cubemodel",
+    "cubeserver",
+    "cubeplanner",
+    "cubecache",
+    "cubequeue",
+    "cubegraphql",
+    "cubeconfig",
+    "cubeorch",
+    "cubesqlbridge",
 ]

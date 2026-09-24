@@ -77,9 +77,19 @@ struct YamlPreAggregationEntry {
 #[derive(Debug, Deserialize)]
 struct YamlView {
     name: String,
+    /// A view usually only re-exports cube members, but a calc-group view
+    /// declares members of its own instead (a `switch` dimension plus the
+    /// `case` dimensions that fan out over it), so `cubes:` is optional.
+    #[serde(default)]
     cubes: Vec<YamlViewCube>,
     #[serde(default)]
     default_filters: Vec<YamlViewDefaultFilter>,
+    #[serde(default)]
+    dimensions: Vec<YamlDimensionEntry>,
+    #[serde(default)]
+    measures: Vec<YamlMeasureEntry>,
+    #[serde(default)]
+    segments: Vec<YamlSegmentEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +183,37 @@ impl YamlSchema {
 
         for view in self.views {
             let mut view_builder = builder.add_view(view.name);
+
+            // A view's own members are added before the included cube members,
+            // so `finish_view` sees them and reports a collision rather than
+            // silently overwriting one with the other.
+            for dim_entry in view.dimensions {
+                let result = dim_entry.definition.build();
+                view_builder =
+                    view_builder.add_dimension(dim_entry.name.clone(), result.definition);
+                for (gran_name, gran_def) in result.granularities {
+                    view_builder =
+                        view_builder.add_granularity(&dim_entry.name, &gran_name, gran_def);
+                }
+            }
+
+            for meas_entry in view.measures {
+                let meas_rc = meas_entry
+                    .definition
+                    .build_with_cube_name(Some(&view_builder.view_name()));
+                let meas_def = Rc::try_unwrap(meas_rc)
+                    .ok()
+                    .expect("Rc should have single owner");
+                view_builder = view_builder.add_measure(meas_entry.name, meas_def);
+            }
+
+            for seg_entry in view.segments {
+                let seg_rc = seg_entry.definition.build();
+                let seg_def = Rc::try_unwrap(seg_rc)
+                    .ok()
+                    .expect("Rc should have single owner");
+                view_builder = view_builder.add_segment(seg_entry.name, seg_def);
+            }
 
             for view_cube in view.cubes {
                 let includes = match view_cube.includes {

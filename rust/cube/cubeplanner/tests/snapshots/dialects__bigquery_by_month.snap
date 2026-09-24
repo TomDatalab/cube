@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: BigQuery).sql"
+---
+SELECT TIMESTAMP(DATETIME_TRUNC(TIMESTAMP(DATETIME(`orders`.created_at, 'UTC')), MONTH)) `orders__created_at_month`, count(`orders`.id) `orders__count` 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= TIMESTAMP(?) AND created_at <= TIMESTAMP(?)) AND 1 = 1
+)  AS `orders`
+WHERE (`orders`.created_at >= TIMESTAMP(?) AND `orders`.created_at <= TIMESTAMP(?))
+GROUP BY 1
+ORDER BY  1  ASC

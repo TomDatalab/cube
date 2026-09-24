@@ -1,0 +1,8 @@
+---
+source: cubeplanner/tests/member_expressions.rs
+expression: planned.sql
+---
+SELECT count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+WHERE ("orders".id > 100)

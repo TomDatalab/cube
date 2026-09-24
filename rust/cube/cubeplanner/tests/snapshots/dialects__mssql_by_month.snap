@@ -1,0 +1,12 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: MsSql).sql"
+---
+SELECT dateadd(month, DATEDIFF(month, 0, CAST(SWITCHOFFSET(TODATETIMEOFFSET("orders".created_at, '+00:00'), '+00:00') AS DATETIME2)), 0) "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= CAST(@_1 AS DATETIMEOFFSET) AND created_at <= CAST(@_2 AS DATETIMEOFFSET)) AND 1 = 1
+)  AS "orders"
+WHERE ("orders".created_at >= CAST(@_3 AS DATETIMEOFFSET) AND "orders".created_at <= CAST(@_4 AS DATETIMEOFFSET))
+GROUP BY dateadd(month, DATEDIFF(month, 0, CAST(SWITCHOFFSET(TODATETIMEOFFSET("orders".created_at, '+00:00'), '+00:00') AS DATETIME2)), 0)
+ORDER BY dateadd(month, DATEDIFF(month, 0, CAST(SWITCHOFFSET(TODATETIMEOFFSET("orders".created_at, '+00:00'), '+00:00') AS DATETIME2)), 0) ASC
+OFFSET 0 ROWS
+FETCH NEXT 2147483647 ROWS ONLY

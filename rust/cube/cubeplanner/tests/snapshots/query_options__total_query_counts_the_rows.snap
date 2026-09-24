@@ -1,0 +1,9 @@
+---
+source: cubeplanner/tests/query_options.rs
+expression: planned.sql
+---
+SELECT COUNT(*) "total_count" 
+FROM (SELECT "orders".status "orders__status", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+GROUP BY 1) AS "original_query"

@@ -1,0 +1,27 @@
+[package]
+name = "cubesqlbridge"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust TransportService / SqlAuthService for the Cube SQL API (no JavaScript)"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1.36"
+cubeauth = { path = "../cubeauth" }
+cubemodel = { path = "../cubemodel" }
+cubeplanner = { path = "../cubeplanner" }
+cubeclient = { path = "../../cubesql/cubeclient" }
+cubesql = { path = "../../cubesql/cubesql" }
+cubesqlplanner = { path = "../cubesqlplanner/cubesqlplanner" }
+minijinja = { version = "1", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v5"] }
+
+[dev-dependencies]
+portpicker = "0.1.1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7.7"

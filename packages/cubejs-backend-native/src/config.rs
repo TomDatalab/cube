@@ -1,6 +1,7 @@
 use crate::gateway::server::ApiGatewayServerImpl;
 use crate::gateway::{
     ApiGatewayRouterBuilder, ApiGatewayServer, ApiGatewayState, GatewayAuthService,
+    GatewayMetaService,
 };
 use crate::{auth::NodeBridgeAuthService, transport::NodeBridgeTransport};
 use async_trait::async_trait;
@@ -153,8 +154,13 @@ impl NodeConfiguration for NodeConfigurationImpl {
 
         self.config.configure().await;
 
+        let transport_to_move = transport.clone();
         injector
-            .register_typed::<dyn TransportService, _, _, _>(|_| async move { transport })
+            .register_typed::<dyn TransportService, _, _, _>(|_| async move { transport_to_move })
+            .await;
+
+        injector
+            .register_typed::<dyn GatewayMetaService, _, _, _>(|_| async move { transport })
             .await;
 
         let auth_to_move = auth.clone();

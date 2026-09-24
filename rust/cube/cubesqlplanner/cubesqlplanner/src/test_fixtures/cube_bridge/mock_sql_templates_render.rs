@@ -26,12 +26,29 @@ impl MockSqlTemplatesRender {
         Ok(Self { templates, jinja })
     }
 
+    /// Every template this set carries, keyed `"<group>/<name>"`. A caller
+    /// that has to know which templates a dialect defines — the SQL API
+    /// deciding what it may push down, for instance — reads them from here
+    /// instead of keeping its own list.
+    pub fn templates_map(&self) -> &HashMap<String, String> {
+        &self.templates
+    }
+
+    /// The names of every template this set carries, in no particular order.
+    pub fn template_names(&self) -> impl Iterator<Item = &str> {
+        self.templates.keys().map(String::as_str)
+    }
+
     pub fn default_templates() -> Self {
         Self::try_new(Self::default_templates_map())
             .expect("Default templates should always parse successfully")
     }
 
-    fn default_templates_map() -> HashMap<String, String> {
+    /// The flattened `"<group>/<name>" -> Jinja template` map every dialect
+    /// starts from. Public so a dialect defined outside this crate can build
+    /// its own template set as a delta over it, the way `sqlTemplates()`
+    /// overrides `super.sqlTemplates()` in the JS adapters.
+    pub fn default_templates_map() -> HashMap<String, String> {
         let mut templates = HashMap::new();
 
         // Functions - based on BaseQuery.js:4241-4315

@@ -163,7 +163,7 @@ export class SQLServer {
           throw e;
         }
       },
-      meta: async ({ request, session, onlyCompilerId }) => {
+      meta: async ({ request, session, onlyCompilerId, onlyViews }) => {
         const context = await this.apiGateway.contextByReq(<any> request, session.securityContext, request.id);
 
         // eslint-disable-next-line no-async-promise-executor
@@ -187,7 +187,8 @@ export class SQLServer {
                 }
               },
               includeCompilerId: true,
-              onlyCompilerId
+              onlyCompilerId,
+              onlyViews,
             });
           } catch (e) {
             reject(e);

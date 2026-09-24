@@ -31,6 +31,13 @@ impl HttpError {
         }
     }
 
+    pub fn not_implemented(message: String) -> HttpError {
+        Self {
+            code: HttpErrorCode::StatusCode(HttpStatusCode::NOT_IMPLEMENTED),
+            message,
+        }
+    }
+
     pub fn status_code(&self) -> HttpStatusCode {
         match self.code {
             HttpErrorCode::StatusCode(code) => code,
@@ -63,9 +70,10 @@ impl HttpError {
     }
 }
 
+/// Same shape as the Node.js API gateway error body: `{ "error": "..." }`.
 #[derive(Serialize)]
 pub struct HttpErrorResponse {
-    message: String,
+    error: String,
 }
 
 impl IntoResponse for HttpError {
@@ -75,7 +83,7 @@ impl IntoResponse for HttpError {
         (
             status_code,
             Json(HttpErrorResponse {
-                message: self.message,
+                error: self.message,
             }),
         )
             .into_response()

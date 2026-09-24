@@ -1,0 +1,9 @@
+---
+source: cubeplanner/tests/planning.rs
+expression: planned.sql
+---
+SELECT ('2024-01-01T00:00:00.000' ::timestamp + INTERVAL '6 month' * FLOOR(EXTRACT(EPOCH FROM (("orders".created_at::timestamptz AT TIME ZONE 'UTC') - '2024-01-01T00:00:00.000'::timestamp)) / EXTRACT(EPOCH FROM INTERVAL '6 month'))) "orders__created_at_half_year", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE 1 = 1 AND 1 = 1
+)  AS "orders"
+GROUP BY 1
+ORDER BY  1  ASC

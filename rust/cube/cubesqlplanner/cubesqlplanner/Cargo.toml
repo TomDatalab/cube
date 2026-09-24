@@ -23,9 +23,18 @@ regex = "1.3.9"
 typed-builder = "0.21.2"
 indoc = "2.0.7"
 indexmap = "2.12"
+# Optional, enabled by the default `rust-model` feature: the pure-Rust YAML
+# model + cube_bridge implementations exposed as `cubesqlplanner::rust_model`.
+serde_yaml = { version = "0.9", optional = true }
+petgraph = { version = "0.6", optional = true }
 
 
 [features]
+default = ["rust-model"]
+# Pure-Rust data model: parses a YAML model and implements every `cube_bridge`
+# trait over it, so the planner runs with no JavaScript. Consumed by the
+# `cubeplanner` crate and by this crate's own tests.
+rust-model = ["dep:serde_yaml", "dep:petgraph"]
 integration-postgres = []
 # Runs queries over external pre-aggregations against a locally built
 # cubestored binary (CUBESTORED_BIN_PATH or rust/cubestore/target/*).

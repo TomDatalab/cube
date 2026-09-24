@@ -1,0 +1,10 @@
+---
+source: cubeplanner/tests/dialects.rs
+expression: "by_month(Dialect :: Oracle).sql"
+---
+SELECT TRUNC("orders".created_at, 'MM') "orders__created_at_month", count("orders".id) "orders__count" 
+FROM  (SELECT * FROM public.orders WHERE (created_at >= TO_TIMESTAMP_TZ(?, 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"') AND created_at <= TO_TIMESTAMP_TZ(?, 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"')) AND 1 = 1
+)  "orders"
+WHERE ("orders".created_at >= TO_TIMESTAMP_TZ(?, 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"') AND "orders".created_at <= TO_TIMESTAMP_TZ(?, 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"'))
+GROUP BY TRUNC("orders".created_at, 'MM')
+ORDER BY  1  ASC

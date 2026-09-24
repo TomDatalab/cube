@@ -3,8 +3,9 @@ use neon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::auth::NativeSQLAuthContext;
+use crate::auth::{NativeGatewayAuthContext, NativeSQLAuthContext};
 use crate::channel::{call_raw_js_with_channel_as_callback, NodeSqlGenerator, ValueFromJs};
+use crate::gateway::{GatewayAuthContextRef, GatewayMetaRequest, GatewayMetaService};
 use crate::node_obj_deserializer::JsValueDeserializer;
 use crate::node_obj_serializer::NodeObjSerializer;
 use crate::orchestrator::ResultWrapper;
@@ -112,6 +113,9 @@ struct MetaRequest {
     session: SessionContext,
     #[serde(rename = "onlyCompilerId")]
     only_compiler_id: bool,
+    /// Omitted when false so SQL API payloads are unchanged.
+    #[serde(rename = "onlyViews", skip_serializing_if = "std::ops::Not::not")]
+    only_views: bool,
 }
 
 #[async_trait]
@@ -136,6 +140,7 @@ impl TransportService for NodeBridgeTransport {
                 security_context: native_auth.security_context.clone(),
             },
             only_compiler_id: false,
+            only_views: false,
         })?;
 
         let response = call_js_with_channel_as_callback::<TransportMetaResponse>(
@@ -237,6 +242,7 @@ impl TransportService for NodeBridgeTransport {
                 security_context: native_auth.security_context.clone(),
             },
             only_compiler_id: true,
+            only_views: false,
         })?;
         let response = call_js_with_channel_as_callback::<TransportMetaResponse>(
             self.channel.clone(),
@@ -737,7 +743,62 @@ fn key_to_values<T>(
     Ok(values)
 }
 
-di_service!(NodeBridgeTransport, [TransportService]);
+#[async_trait]
+impl GatewayMetaService for NodeBridgeTransport {
+    /// `GET /v1/meta` for the native API gateway. Calls back into the JS
+    /// `ApiGateway.meta` until the schema compiler is available in Rust.
+    async fn meta(
+        &self,
+        auth_context: &GatewayAuthContextRef,
+        request: GatewayMetaRequest,
+    ) -> Result<serde_json::Value, CubeError> {
+        trace!("[transport] Gateway meta ->");
+
+        let native_auth = auth_context
+            .as_any()
+            .downcast_ref::<NativeGatewayAuthContext>()
+            .ok_or_else(|| {
+                CubeError::internal(
+                    "Unable to cast GatewayAuthContext to NativeGatewayAuthContext".to_string(),
+                )
+            })?;
+
+        let request_id = Uuid::new_v4().to_string();
+        let extra = serde_json::to_string(&MetaRequest {
+            request: TransportRequest {
+                id: format!("{}-span-1", request_id),
+                meta: None,
+            },
+            session: SessionContext {
+                user: None,
+                superuser: false,
+                security_context: native_auth.security_context.clone(),
+            },
+            only_compiler_id: false,
+            only_views: request.only_views,
+        })?;
+
+        let mut response = call_js_with_channel_as_callback::<serde_json::Value>(
+            self.channel.clone(),
+            self.on_meta.clone(),
+            Some(extra),
+        )
+        .await?;
+
+        // The bridge always asks for `compilerId` because the SQL API needs it,
+        // but the REST contract (`ApiGateway.meta` without `includeCompilerId`)
+        // does not expose it.
+        if let Some(object) = response.as_object_mut() {
+            object.remove("compilerId");
+        }
+
+        trace!("[transport] Gateway meta <-");
+
+        Ok(response)
+    }
+}
+
+di_service!(NodeBridgeTransport, [TransportService, GatewayMetaService]);
 
 // Extension trait to map abstract errors to CubeError
 pub trait MapCubeErrExt<T> {

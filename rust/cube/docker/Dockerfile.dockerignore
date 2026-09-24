@@ -1,0 +1,12 @@
+# Build context is the repository root; send only what the image needs.
+**
+!LICENSE
+!rust/cube/
+!rust/cubesql/
+!packages/cubejs-playground/build/
+!packages/cubejs-playground/vizard/build/
+!rust/cube/docker/patch-playground.py
+
+rust/**/target/
+rust/cube/target-*/
+**/node_modules/

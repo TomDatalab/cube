@@ -2062,6 +2062,12 @@ const variables: Record<string, (...args: any) => any> = {
   // Internal testing, please don't enable it. It's not ready for public preview
   nativeApiGateway: () => get('CUBE_JS_NATIVE_API_GATEWAY_INTERNAL')
     .asBool(),
+  // Serve the REST API v1 endpoints already ported to Rust from the native
+  // gateway instead of Express. Requires nativeApiGateway. Part of the
+  // Node.js → Rust migration, see rust/cube/MIGRATION.md
+  nativeApiGatewayRestRoutes: () => get('CUBEJS_NATIVE_API_GATEWAY_REST_ROUTES')
+    .default('false')
+    .asBoolStrict(),
   // Experiments & Preview flags
   livePreview: () => get('CUBEJS_LIVE_PREVIEW')
     .default('true')
