@@ -10,7 +10,8 @@ async-trait = "0.1"
 chrono = "0.4"
 chrono-tz = "0.8.2"
 cubecache = { path = "../cubecache" }
-cubedriver = { path = "../cubedriver" }
+# The orchestrator needs the trait, not the drivers; the binary picks those.
+cubedriver = { path = "../cubedriver", default-features = false }
 cubequeue = { path = "../cubequeue" }
 futures = "0.3"
 lru = "0.12"

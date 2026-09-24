@@ -221,7 +221,7 @@ indirection and is worth doing before the orchestrator adds more concurrency.
 ## Drivers
 
 Every `CUBEJS_DB_TYPE` of the Node.js server, with the Cargo feature that
-builds it (all in `default`; `--no-default-features --features …` builds a
+builds it (all in `default`; `cargo build -p cubeserver --no-default-features --features cubedriver/…` builds a
 subset, and a type left out fails at start-up with a named error).
 
 | `CUBEJS_DB_TYPE` | Feature | Client | Verified against |
