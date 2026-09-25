@@ -200,10 +200,14 @@ impl TenantRegistry {
             )
         })?;
 
+        // A cube that declares its own data source is planned in that one's
+        // dialect; the rest in the tenant's.
+        let (by_data_source, _) = data_source_dialects(&self.config);
         let planner = Arc::new(
-            PlannerQueryService::load_with_context(
+            PlannerQueryService::load_with_dialects(
                 &model_path,
                 dialect,
+                by_data_source,
                 self.planner_workers,
                 context,
             )

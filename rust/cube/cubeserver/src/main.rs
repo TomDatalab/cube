@@ -74,6 +74,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    // Drivers read `CUBEJS_*` variables; this lets them find a data source
+    // only `cube.yml` declares.
+    cubeserver::orchestrator_adapter::declare_data_sources(&cube_config);
+
     // The environment wins over the file, so it is applied last.
     let config = ServerConfig::default()
         .with_cube_config(&cube_config)
@@ -156,8 +160,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|n| n.get())
         .unwrap_or(2);
     let planner = match &default_dialect {
-        Ok(dialect) => PlannerQueryService::load(&config.schema_path, *dialect, planner_workers)
-            .map_err(|err| err.message()),
+        Ok(dialect) => PlannerQueryService::load_with_dialects(
+            &config.schema_path,
+            *dialect,
+            data_source_dialects.clone(),
+            planner_workers,
+            cubemodel::TemplateContext::default(),
+        )
+        .map_err(|err| err.message()),
         Err(reason) => Err(reason.clone()),
     };
     let query: QueryServiceRef = match planner {

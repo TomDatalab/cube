@@ -10,6 +10,7 @@
 //! OS thread and talks to those threads over channels, which confines the
 //! `Rc`s to one thread and still plans several requests in parallel.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -82,10 +83,15 @@ pub struct PlannedStatement {
     pub params: Vec<Option<String>>,
     /// `orders__status` → `orders.status` (`BaseQuery.aliasNameToMember`).
     pub alias_name_to_member: std::collections::HashMap<String, String>,
+    /// The data source the query's cubes declare, `None` when they declare
+    /// none and the query runs on the caller's default one.
+    pub data_source: Option<String>,
 }
 
 struct Job {
     query: PlannerQuery,
+    /// Every member and cube name the query mentions, to find its data source.
+    members: Vec<String>,
     security_context: Value,
     reply: oneshot::Sender<Result<PlannedStatement, PlanFailure>>,
 }
@@ -129,7 +135,21 @@ impl PlannerPool {
         workers: usize,
         context: cubemodel::TemplateContext,
     ) -> Result<Self, PlannerError> {
+        Self::load_with_dialects(model_path, dialect, HashMap::new(), workers, context)
+    }
+
+    /// As [`Self::load_with_context`], planning a query whose cubes declare a
+    /// `data_source` in that data source's dialect. `dialect` covers the cubes
+    /// that declare none.
+    pub fn load_with_dialects(
+        model_path: impl AsRef<Path>,
+        dialect: Dialect,
+        by_data_source: HashMap<String, Dialect>,
+        workers: usize,
+        context: cubemodel::TemplateContext,
+    ) -> Result<Self, PlannerError> {
         let model_path = model_path.as_ref().to_path_buf();
+        let by_data_source = Arc::new(by_data_source);
         // Fail fast on a broken model instead of inside every worker.
         Model::from_dir_with_context(&model_path, &context)?;
 
@@ -141,9 +161,10 @@ impl PlannerPool {
             let receiver = Arc::clone(&receiver);
             let path = model_path.clone();
             let context = context.clone();
+            let by_data_source = by_data_source.clone();
             thread::Builder::new()
                 .name(format!("cube-planner-{index}"))
-                .spawn(move || Self::worker(receiver, path, dialect, context))
+                .spawn(move || Self::worker(receiver, path, dialect, by_data_source, context))
                 .map_err(|e| {
                     PlannerError::model(format!("Failed to spawn a planner thread: {e}"))
                 })?;
@@ -160,34 +181,54 @@ impl PlannerPool {
         receiver: Arc<Mutex<Receiver<Job>>>,
         model_path: PathBuf,
         dialect: Dialect,
+        by_data_source: Arc<HashMap<String, Dialect>>,
         context: cubemodel::TemplateContext,
     ) {
-        let model = match Model::from_dir_with_context(&model_path, &context) {
-            Ok(model) => model,
-            Err(err) => {
+        let compiled = Model::from_dir_with_context(&model_path, &context)
+            .map_err(|err| err.message())
+            .and_then(|model| {
+                let sources = DataSources::load(&model_path, &context)?;
+                Ok((model, sources))
+            });
+        let (model, sources) = match compiled {
+            Ok(compiled) => compiled,
+            Err(message) => {
                 // The model compiled at start-up, so this is unexpected;
                 // answer every job with the error rather than exiting quietly.
                 loop {
                     let Ok(job) = Self::next_job(&receiver) else {
                         return;
                     };
-                    let _ = job.reply.send(Err(PlanFailure::internal(err.message())));
+                    let _ = job.reply.send(Err(PlanFailure::internal(message.clone())));
                 }
             }
         };
 
         while let Ok(job) = Self::next_job(&receiver) {
-            let options = PlanOptions::default()
-                .with_dialect(dialect)
-                .with_security_context(job.security_context);
+            let result = sources
+                .of_query(&job.members)
+                .and_then(|data_source| {
+                    let dialect = match &data_source {
+                        None => dialect,
+                        Some(name) => by_data_source.get(name).copied().ok_or_else(|| {
+                            PlanFailure::internal(format!(
+                                "The {name} data source is not declared in cube.yml, or its type has no SQL dialect"
+                            ))
+                        })?,
+                    };
+                    let options = PlanOptions::default()
+                        .with_dialect(dialect)
+                        .with_security_context(job.security_context);
 
-            let result = plan(&model, &job.query, &options)
-                .map(|planned| PlannedStatement {
-                    sql: planned.sql.clone(),
-                    params: planned.param_strings(),
-                    alias_name_to_member: planned.alias_name_to_member.clone(),
-                })
-                .map_err(PlanFailure::from_planner);
+                    plan(&model, &job.query, &options)
+                        .map(|planned| PlannedStatement {
+                            sql: planned.sql.clone(),
+                            params: planned.param_strings(),
+                            alias_name_to_member: planned.alias_name_to_member.clone(),
+                            data_source,
+                        })
+                        .map_err(PlanFailure::from_planner)
+                });
 
             // A dropped receiver means the request is gone; nothing to do.
             let _ = job.reply.send(result);
@@ -203,6 +244,7 @@ impl PlannerPool {
     pub async fn plan(
         &self,
         query: PlannerQuery,
+        members: Vec<String>,
         security_context: Value,
     ) -> Result<PlannedStatement, PlanFailure> {
         let (reply, response) = oneshot::channel();
@@ -210,6 +252,7 @@ impl PlannerPool {
         self.jobs
             .send(Job {
                 query,
+                members,
                 security_context,
                 reply,
             })
@@ -251,6 +294,26 @@ impl PlannerQueryService {
         })
     }
 
+    /// As [`Self::load_with_context`], with a dialect per declared data source
+    /// (see [`PlannerPool::load_with_dialects`]).
+    pub fn load_with_dialects(
+        model_path: impl AsRef<Path>,
+        dialect: Dialect,
+        by_data_source: HashMap<String, Dialect>,
+        workers: usize,
+        context: cubemodel::TemplateContext,
+    ) -> Result<Self, PlannerError> {
+        Ok(Self {
+            pool: PlannerPool::load_with_dialects(
+                model_path,
+                dialect,
+                by_data_source,
+                workers,
+                context,
+            )?,
+        })
+    }
+
     /// A planning failure caused by the request is a client error; anything
     /// else is not, like `ApiGateway.handleError`.
     fn api_error(failure: PlanFailure) -> ApiError {
@@ -275,8 +338,11 @@ impl PlannerQueryService {
             }
         }
 
+        let members = query_members(&value);
         let query = PlannerQuery::from_value(value).map_err(PlanFailure::from_planner)?;
-        self.pool.plan(query, security_context.clone()).await
+        self.pool
+            .plan(query, members, security_context.clone())
+            .await
     }
 
     async fn plan_all(
@@ -303,12 +369,13 @@ impl PlannerQueryService {
                     object.remove("rowLimit");
                 }
             }
+            let members = query_members(&value);
             let query = PlannerQuery::from_value(value)
                 .map_err(|e| Self::api_error(PlanFailure::from_planner(e)))?;
 
             let statement = self
                 .pool
-                .plan(query, ctx.security_context.clone())
+                .plan(query, members, ctx.security_context.clone())
                 .await
                 .map_err(Self::api_error)?;
 
@@ -332,6 +399,151 @@ impl PlannerQueryService {
 
         Ok(planned)
     }
+}
+
+/// Which data source each cube and member of a model reads from, as
+/// `CompilerApi.memberToDataSource` answers it.
+struct DataSources {
+    /// `cube.member` → data source; a view's member maps to the data source
+    /// of the cube it was included from.
+    members: HashMap<String, String>,
+    /// Cube name → data source, for a query that names a cube but no member.
+    cubes: HashMap<String, String>,
+}
+
+impl DataSources {
+    fn load(model_path: &Path, context: &cubemodel::TemplateContext) -> Result<Self, String> {
+        let model = cubemodel::ModelLoader::with_context(context.clone())
+            .load_dir_with(model_path)
+            .map_err(|e| e.to_string())?;
+
+        let cubes = model
+            .cube_list()
+            .into_iter()
+            .filter(|cube| !cube.is_view)
+            .map(|cube| {
+                let data_source = cube
+                    .data_source
+                    .clone()
+                    .unwrap_or_else(|| cubesqlbridge::DEFAULT_DATA_SOURCE.to_string());
+                (cube.name.clone(), data_source)
+            })
+            .collect();
+
+        Ok(Self {
+            members: cubesqlbridge::member_to_data_source(&model),
+            cubes,
+        })
+    }
+
+    /// The one data source `members` read from, `None` for the default one.
+    ///
+    /// A query spanning two data sources is refused, as the Node.js
+    /// `CompilerApi` does: no single database can run its SQL.
+    fn of_query(&self, members: &[String]) -> Result<Option<String>, PlanFailure> {
+        let found: BTreeSet<&str> = members
+            .iter()
+            .filter_map(|name| {
+                let mut path = name.split('.');
+                let cube = path.next()?;
+                match path.next() {
+                    Some(member) => self
+                        .members
+                        .get(&format!("{cube}.{member}"))
+                        .or_else(|| self.cubes.get(cube)),
+                    None => self.cubes.get(cube),
+                }
+            })
+            .map(String::as_str)
+            .collect();
+
+        let mut found = found.into_iter();
+        match (found.next(), found.next()) {
+            (None, _) => Ok(None),
+            (Some(only), None) if only == cubesqlbridge::DEFAULT_DATA_SOURCE => Ok(None),
+            (Some(only), None) => Ok(Some(only.to_string())),
+            (Some(first), Some(second)) => {
+                let rest: Vec<&str> = found.collect();
+                let names = std::iter::once(first)
+                    .chain(std::iter::once(second))
+                    .chain(rest)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(PlanFailure {
+                    user_error: true,
+                    message: format!(
+                        "The query reads from more than one data source ({names}); a query can only use cubes of one data source"
+                    ),
+                })
+            }
+        }
+    }
+}
+
+/// Every member and cube name a normalized query mentions: its measures,
+/// dimensions, segments, time dimensions, filters (nested `and`/`or`
+/// included), member expressions' cubes and join hints.
+fn query_members(query: &Value) -> Vec<String> {
+    fn push_str(out: &mut Vec<String>, value: Option<&Value>) {
+        if let Some(name) = value.and_then(Value::as_str) {
+            out.push(name.to_string());
+        }
+    }
+
+    fn filters(out: &mut Vec<String>, value: &Value) {
+        for filter in value.as_array().into_iter().flatten() {
+            push_str(out, filter.get("member"));
+            push_str(out, filter.get("dimension"));
+            for group in ["and", "or"] {
+                if let Some(nested) = filter.get(group) {
+                    filters(out, nested);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for key in ["measures", "dimensions", "segments"] {
+        for member in query
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            match member {
+                Value::String(name) => out.push(name.clone()),
+                // A member expression names the cube it is evaluated in.
+                Value::Object(_) => push_str(&mut out, member.get("cubeName")),
+                _ => {}
+            }
+        }
+    }
+    for time_dimension in query
+        .get("timeDimensions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        push_str(&mut out, time_dimension.get("dimension"));
+    }
+    if let Some(value) = query.get("filters") {
+        filters(&mut out, value);
+    }
+    for hint in query
+        .get("joinHints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match hint {
+            Value::String(cube) => out.push(cube.clone()),
+            Value::Array(path) => {
+                out.extend(path.iter().filter_map(Value::as_str).map(str::to_string))
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -372,5 +584,89 @@ impl QueryService for PlannerQueryService {
                 .collect::<Vec<_>>(),
             "pivotQuery": request.pivot_query,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODEL: &str = r#"
+cubes:
+  - name: orders
+    sql_table: public.orders
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+    measures:
+      - name: count
+        type: count
+
+  - name: events
+    data_source: warehouse
+    sql_table: events
+    dimensions:
+      - name: kind
+        sql: kind
+        type: string
+      - name: ts
+        sql: ts
+        type: time
+    measures:
+      - name: count
+        type: count
+
+views:
+  - name: activity
+    cubes:
+      - join_path: events
+        includes: [kind, count]
+"#;
+
+    fn sources() -> DataSources {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model.yml"), MODEL).unwrap();
+        DataSources::load(dir.path(), &cubemodel::TemplateContext::default()).unwrap()
+    }
+
+    fn of(query: Value) -> Result<Option<String>, PlanFailure> {
+        sources().of_query(&query_members(&query))
+    }
+
+    #[test]
+    fn a_cube_without_a_data_source_runs_on_the_default_one() {
+        let query = json!({ "measures": ["orders.count"], "dimensions": ["orders.status"] });
+        assert_eq!(of(query).unwrap(), None);
+    }
+
+    #[test]
+    fn a_cube_that_declares_one_runs_there() {
+        let query = json!({
+            "measures": ["events.count"],
+            "timeDimensions": [{ "dimension": "events.ts", "granularity": "day" }],
+        });
+        assert_eq!(of(query).unwrap().as_deref(), Some("warehouse"));
+    }
+
+    #[test]
+    fn a_view_member_runs_where_its_cube_does() {
+        let query = json!({ "measures": ["activity.count"], "dimensions": ["activity.kind"] });
+        assert_eq!(of(query).unwrap().as_deref(), Some("warehouse"));
+    }
+
+    #[test]
+    fn nested_filters_count() {
+        let query = json!({
+            "measures": ["orders.count"],
+            "filters": [{ "or": [{ "member": "events.kind", "operator": "set" }] }],
+        });
+        let failure = of(query).unwrap_err();
+        assert!(failure.user_error);
+        assert!(
+            failure.message.contains("default, warehouse"),
+            "{}",
+            failure.message
+        );
     }
 }
