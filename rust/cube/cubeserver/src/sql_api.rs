@@ -74,6 +74,12 @@ impl QueryExecutor for OrchestratedExecutor {
             .await
             .map_err(|failure| CubeError::internal(failure.message))?;
 
+        // The cubes' own data source, or this executor's when they name none.
+        let data_source = statement
+            .data_source
+            .clone()
+            .unwrap_or_else(|| self.data_source.clone());
+
         let body = QueryBody {
             query: Some(statement.sql),
             values: Some(
@@ -84,7 +90,7 @@ impl QueryExecutor for OrchestratedExecutor {
                     .map(Option::unwrap_or_default)
                     .collect(),
             ),
-            data_source: Some(self.data_source.clone()),
+            data_source: Some(data_source.clone()),
             ..QueryBody::default()
         };
 
@@ -106,7 +112,7 @@ impl QueryExecutor for OrchestratedExecutor {
             &fetched.data,
             &statement.alias_name_to_member,
             fetched.last_refresh_time,
-            self.data_source.clone(),
+            data_source,
         ))
     }
 
@@ -137,7 +143,12 @@ impl QueryExecutor for OrchestratedExecutor {
                     .map(Option::unwrap_or_default)
                     .collect(),
             ),
-            data_source: Some(self.data_source.clone()),
+            data_source: Some(
+                statement
+                    .data_source
+                    .clone()
+                    .unwrap_or_else(|| self.data_source.clone()),
+            ),
             // A persistent query is answered with a stream rather than rows.
             persistent: true,
             alias_name_to_member: serde_json::to_value(&statement.alias_name_to_member).ok(),
