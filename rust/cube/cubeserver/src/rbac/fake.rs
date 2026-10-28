@@ -283,13 +283,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failing_returns_unavailable() {
+    async fn connection_query_manage_branch_unreleased() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "admin"),
+            rel("workspace", "w1", "organization", "organization", "o1"),
+            rel("workspace", "w1", "viewer", "user", "bob"),
+            rel("connection", "c2", "organization", "organization", "o1"),
+        ])
+        .await
+        .unwrap();
+        let c = ObjectRef::new("connection", "c2");
+        assert!(a.check(&c, "query", "admin").await.unwrap());
+        assert!(!a.check(&c, "query", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn org_view_member_and_manage_connections() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "admin"),
+            rel("organization", "o1", "member", "user", "mem"),
+        ])
+        .await
+        .unwrap();
+        let o = ObjectRef::new("organization", "o1");
+        assert!(a.check(&o, "view", "mem").await.unwrap());
+        assert!(!a.check(&o, "view", "stranger").await.unwrap());
+        assert!(!a.check(&o, "admin", "mem").await.unwrap());
+        assert!(!a.check(&o, "manage_connections", "mem").await.unwrap());
+        assert!(a.check(&o, "manage_connections", "admin").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn editor_writes_objects_and_owner_executes() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("workspace", "w1", "editor", "user", "ed"),
+            rel("workspace", "w1", "owner", "user", "own"),
+            rel("object", "d1", "workspace", "workspace", "w1"),
+        ])
+        .await
+        .unwrap();
+        let obj = ObjectRef::new("object", "d1");
+        let w = ObjectRef::new("workspace", "w1");
+        assert!(a.check(&obj, "write", "ed").await.unwrap());
+        assert!(a.check(&obj, "read", "ed").await.unwrap());
+        assert!(a.check(&w, "execute", "own").await.unwrap());
+        assert!(!a.check(&w, "execute", "ed").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lookup_follows_arrows() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("workspace", "w1", "viewer", "user", "bob"),
+            rel("connection", "c1", "workspace", "workspace", "w1"),
+            rel("connection", "c2", "workspace", "workspace", "w2"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            a.lookup_resources("connection", "query", "bob")
+                .await
+                .unwrap(),
+            vec!["c1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_makes_every_method_unavailable() {
         let a = FakeAuthz::new();
         a.set_failing(true);
-        assert!(matches!(
-            a.check(&ObjectRef::new("organization", "o"), "admin", "u")
-                .await,
-            Err(AuthzError::Unavailable(_))
-        ));
+        let o = ObjectRef::new("organization", "o");
+        let r = rel("organization", "o", "owner", "user", "u");
+        let f = RelationshipFilter {
+            kind: "organization",
+            id: None,
+            relation: None,
+            subject: None,
+        };
+        let un = |e: Result<(), AuthzError>| assert!(matches!(e, Err(AuthzError::Unavailable(_))));
+        un(a.check(&o, "admin", "u").await.map(|_| ()));
+        un(a.lookup_resources("organization", "admin", "u")
+            .await
+            .map(|_| ()));
+        un(a.read(&f).await.map(|_| ()));
+        un(a.touch(std::slice::from_ref(&r)).await);
+        un(a.delete(std::slice::from_ref(&r)).await);
+        un(a.delete_matching(&f).await);
+        un(a.ensure_schema("").await);
     }
 }

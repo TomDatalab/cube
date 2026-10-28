@@ -135,7 +135,11 @@ impl HttpAuthz {
         Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             key: preshared_key.to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
         }
     }
 
@@ -157,7 +161,7 @@ impl HttpAuthz {
             .map_err(|e| AuthzError::Unavailable(e.to_string()))?;
         if status.is_success() {
             Ok(text)
-        } else if status.is_server_error() || status.as_u16() == 429 {
+        } else if status.is_server_error() || matches!(status.as_u16(), 401 | 403 | 429) {
             Err(AuthzError::Unavailable(format!("{status}: {text}")))
         } else {
             Err(AuthzError::Rejected(format!("{status}: {text}")))
@@ -251,7 +255,9 @@ impl Authz for HttpAuthz {
                 get(&rel["subject"]["object"], "objectType"),
                 get(&rel["subject"]["object"], "objectId"),
             ) else {
-                continue;
+                return Err(AuthzError::Unavailable(format!(
+                    "malformed relationship row: {rel}"
+                )));
             };
             out.push(Relationship {
                 resource: ObjectRef {
@@ -293,9 +299,10 @@ impl Authz for HttpAuthz {
                     return Ok(());
                 }
             }
-            // "No schema has been defined" is a normal first-run condition.
-            Err(AuthzError::Rejected(_)) => {}
-            Err(AuthzError::Unavailable(m)) if m.contains("No schema has been defined") => {}
+            // Only "No schema has been defined" means absent; anything else
+            // is an error and must never be followed by a write.
+            Err(AuthzError::Rejected(m)) | Err(AuthzError::Unavailable(m))
+                if m.contains("No schema has been defined") => {}
             Err(e) => return Err(e),
         }
         self.post("/v1/schema/write", json!({"schema": schema}))
