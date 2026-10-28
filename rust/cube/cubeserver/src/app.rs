@@ -101,12 +101,10 @@ pub fn build_app(state: AppState) -> Router {
     let base = state.config.base_path.trim_end_matches('/').to_string();
     let max_request_size = state.config.max_request_size;
 
-    let authenticated = Router::new()
-        .route(&format!("{base}/v1/meta"), get(handlers::meta::meta))
-        .route(
-            &format!("{base}/v1/connectors"),
-            get(handlers::connectors::list),
-        )
+    // Managing the connections and running statements on them: behind the
+    // auth middleware like the rest of `/v1`, but outside the CORS layer
+    // below, so no other site's page can call them from a browser.
+    let managing = Router::new()
         .route(
             &format!("{base}/v1/data-sources"),
             get(handlers::data_sources::v1_list).post(handlers::data_sources::v1_create),
@@ -124,6 +122,17 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             &format!("{base}/v1/execute"),
             axum::routing::post(handlers::data_sources::v1_execute),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            handlers::auth::auth_middleware,
+        ));
+
+    let authenticated = Router::new()
+        .route(&format!("{base}/v1/meta"), get(handlers::meta::meta))
+        .route(
+            &format!("{base}/v1/connectors"),
+            get(handlers::connectors::list),
         )
         .route(
             &format!("{base}/v1/load"),
@@ -242,15 +251,16 @@ pub fn build_app(state: AppState) -> Router {
         // message, so it is not behind the HTTP auth middleware.
         .route(&format!("{base}/ws"), get(crate::ws::ws_handler))
         .merge(authenticated)
-        // Cross-origin callers are the API's. The Playground's helper API,
-        // merged below, is for the page this server serves: another site
-        // gets no CORS answer from it, so it can neither read the key
+        // Cross-origin callers are the API's. The Playground's helper API and
+        // the connection-managing routes, merged below, are not: another
+        // site gets no CORS answer from them, so it can neither read the key
         // `/playground/context` hands out nor send the JSON the routes take.
-        .layer(cors);
+        .layer(cors)
+        .merge(managing);
 
     let router = match playground {
         Some(assets) => router
-            .merge(handlers::playground::routes())
+            .merge(handlers::playground::routes(state.clone()))
             .route_service("/", get_service(assets.index()))
             // Assets live at the root too (`/assets/...`, `/antd.min.css`).
             // A path with no file behind it must still get the API's JSON

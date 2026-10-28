@@ -60,6 +60,10 @@ pub struct ServerConfig {
     /// Whether adding a data source restarts the server so it takes effect.
     /// Only the binary turns this on; a test must not replace its process.
     pub restart_on_config_change: bool,
+    /// Host names the Playground answers under besides `localhost` and IP
+    /// addresses (`CUBEJS_PLAYGROUND_HOSTS`, comma-separated); see
+    /// `handlers::playground`.
+    pub playground_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -76,6 +80,7 @@ impl Default for ServerConfig {
             playground_path: None,
             config_file: None,
             restart_on_config_change: false,
+            playground_hosts: Vec::new(),
         }
     }
 }
@@ -165,6 +170,14 @@ impl ServerConfig {
             },
             config_file: defaults.config_file,
             restart_on_config_change: defaults.restart_on_config_change,
+            playground_hosts: match env::var("CUBEJS_PLAYGROUND_HOSTS") {
+                Ok(hosts) => hosts
+                    .split(',')
+                    .map(|h| h.trim().to_ascii_lowercase())
+                    .filter(|h| !h.is_empty())
+                    .collect(),
+                Err(_) => defaults.playground_hosts,
+            },
         })
     }
 

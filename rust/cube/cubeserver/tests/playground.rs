@@ -26,6 +26,7 @@ impl AuthService for TokenIssuingAuth {
         Ok(AuthenticatedRequest {
             security_context: json!({}),
             signed_with_playground_auth_secret: false,
+            token_verified: true,
         })
     }
 
@@ -48,6 +49,7 @@ impl AuthService for CannotIssue {
         Ok(AuthenticatedRequest {
             security_context: json!({}),
             signed_with_playground_auth_secret: false,
+            token_verified: true,
         })
     }
 
@@ -820,6 +822,7 @@ impl AuthService for DataSourcesAuth {
         Ok(AuthenticatedRequest {
             security_context: json!({}),
             signed_with_playground_auth_secret: false,
+            token_verified: true,
         })
     }
 
@@ -899,6 +902,7 @@ impl AuthService for ExecuteAuth {
         Ok(AuthenticatedRequest {
             security_context: json!({}),
             signed_with_playground_auth_secret: false,
+            token_verified: true,
         })
     }
 
@@ -1109,7 +1113,13 @@ async fn only_the_rest_api_answers_another_site() {
         .await
         .unwrap();
     assert!(allows(&api));
-    for path in ["/playground/context", "/playground/data-sources"] {
+    for path in [
+        "/playground/context",
+        "/playground/data-sources",
+        "/cube/v1/data-sources",
+        "/cube/v1/data-sources/default",
+        "/cube/v1/execute",
+    ] {
         let response = router.clone().oneshot(preflight(path)).await.unwrap();
         assert!(!allows(&response), "{path}");
     }
@@ -1249,4 +1259,160 @@ async fn a_source_a_tenants_cube_uses_is_not_deleted() {
         "{body}"
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), yml);
+}
+
+/// Security checks off and no token, as a request from anywhere would be,
+/// with default scopes that list `data_sources` and `execute`.
+#[derive(Debug)]
+struct NoToken;
+
+#[async_trait]
+impl AuthService for NoToken {
+    async fn authenticate(&self, _: Option<&str>) -> Result<AuthenticatedRequest, ApiError> {
+        Ok(AuthenticatedRequest {
+            security_context: json!({}),
+            signed_with_playground_auth_secret: false,
+            token_verified: false,
+        })
+    }
+
+    async fn api_scopes(&self, _: &Value) -> Result<Vec<String>, ApiError> {
+        Ok(vec!["data_sources".to_string(), "execute".to_string()])
+    }
+}
+
+#[tokio::test]
+async fn managing_connections_takes_a_verified_token_whatever_the_default_scopes() {
+    let (dir, mut config) = fixture();
+    let file = with_config_file(&dir, &mut config);
+    let before = std::fs::read_to_string(&file).unwrap();
+    let router = || app(config.clone(), Arc::new(NoToken));
+
+    let (status, body) = send_json(router(), "GET", "/cube/v1/data-sources", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let (status, body) = send_json(
+        router(),
+        "POST",
+        "/cube/v1/execute",
+        Some(json!({
+            "connection": { "CUBEJS_DB_TYPE": "sqlite", "CUBEJS_DB_NAME": ":memory:" },
+            "query": "SELECT 1",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let (status, body) = send_json(
+        router(),
+        "POST",
+        "/cube/v1/data-sources",
+        Some(json!({
+            "name": "x",
+            "variables": { "CUBEJS_DB_TYPE": "sqlite", "CUBEJS_DB_NAME": ":memory:" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+}
+
+async fn get_with_host(router: axum::Router, path: &str, host: &str) -> StatusCode {
+    let request = Request::builder()
+        .uri(path)
+        .header(header::HOST, host)
+        .header(PLAYGROUND_KEY_HEADER, playground_key())
+        .body(Body::empty())
+        .unwrap();
+    router.oneshot(request).await.unwrap().status()
+}
+
+/// A rebound domain would make another site's page the same origin.
+#[tokio::test]
+async fn the_playground_answers_only_under_names_that_cannot_be_rebound() {
+    let (dir, mut config) = fixture();
+    with_config_file(&dir, &mut config);
+    config.playground_hosts = vec!["cube.lan".to_string()];
+    let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
+
+    for host in [
+        "localhost:4000",
+        "127.0.0.1:4000",
+        "[::1]:4000",
+        "cube.lan:4000",
+    ] {
+        let status = get_with_host(router(), "/playground/context", host).await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+    }
+    for path in [
+        "/playground/context",
+        "/playground/data-sources",
+        "/playground/files",
+    ] {
+        let status = get_with_host(router(), path, "rebound.example:4000").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_key_or_a_secret_in_a_jdbc_url_is_not_sent_back() {
+    let (dir, mut config) = fixture();
+    with_local_source(&dir, &mut config).await;
+    let env = dir.path().join(".env");
+    let mut text = std::fs::read_to_string(&env).unwrap();
+    text.push_str("CUBEJS_DS_LOCAL_DB_SSL_KEY='-----BEGIN PRIVATE KEY-----'\n");
+    text.push_str(
+        "CUBEJS_DS_LOCAL_DB_URL='jdbc:databricks://h:443/default;UID=token;PWD=dapi123'\n",
+    );
+    std::fs::write(&env, text).unwrap();
+    let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
+
+    let (status, body) = get_json(router(), "/playground/data-sources/local").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let secrets = body["secrets"].as_array().unwrap();
+    assert!(secrets.contains(&json!("CUBEJS_DB_SSL_KEY")), "{body}");
+    assert!(secrets.contains(&json!("CUBEJS_DB_URL")), "{body}");
+    assert!(!body.to_string().contains("BEGIN"), "{body}");
+    assert!(!body.to_string().contains("dapi123"), "{body}");
+
+    let (status, body) = get_json(router(), "/playground/data-sources").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.to_string().contains("dapi123"), "{body}");
+}
+
+/// `CUBEJS_DS_SALES_` is also the start of `CUBEJS_DS_SALES_EU_`.
+#[tokio::test]
+async fn a_source_named_like_the_start_of_another_keeps_to_its_own_settings() {
+    let (dir, mut config) = fixture();
+    with_config_file(&dir, &mut config);
+    let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
+    for name in ["sales", "sales_eu"] {
+        let database = dir.path().join(format!("{name}.db"));
+        let (status, body) = post_json(
+            router(),
+            "/playground/data-sources",
+            json!({
+                "name": name,
+                "variables": {
+                    "CUBEJS_DB_TYPE": "sqlite",
+                    "CUBEJS_DB_NAME": database.to_string_lossy(),
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, body) = get_json(router(), "/playground/data-sources/sales").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["variables"].as_object().unwrap().len(), 1, "{body}");
+    let database = body["variables"]["CUBEJS_DB_NAME"].as_str().unwrap();
+    assert!(database.ends_with("sales.db"), "{body}");
+
+    let (status, body) =
+        send_json(router(), "DELETE", "/playground/data-sources/sales", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert!(!env.contains("CUBEJS_DS_SALES_DB_NAME"), "{env}");
+    assert!(env.contains("CUBEJS_DS_SALES_EU_DB_NAME="), "{env}");
 }

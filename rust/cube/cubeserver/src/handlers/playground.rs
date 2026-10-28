@@ -15,8 +15,11 @@
 //! database, also want the key `/playground/context` hands the page
 //! ([`playground_key`]). The server sends these routes no CORS headers (see
 //! `app.rs`), so another site the developer visits cannot read the key, nor
-//! send the JSON the routes take.
+//! send the JSON the routes take. Nor can it rebind a domain of its own to
+//! this server to become the same origin: every route here answers only
+//! under `localhost`, an IP address, or a name in `CUBEJS_PLAYGROUND_HOSTS`.
 
+use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -48,7 +51,7 @@ pub fn playground_key() -> &'static str {
     KEY.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
 }
 
-pub fn routes() -> Router<AppState> {
+pub fn routes(state: AppState) -> Router<AppState> {
     let keyed = Router::new()
         .route("/playground/generate-schema", post(generate_schema))
         .route(
@@ -79,6 +82,7 @@ pub fn routes() -> Router<AppState> {
         .route("/playground/env", post(not_ported))
         .route("/playground/test-connection", post(not_ported))
         .route("/playground/schema/pre-aggregation", post(not_ported))
+        .route_layer(axum::middleware::from_fn_with_state(state, require_host))
 }
 
 /// `GET /playground/context` — the only call the app must have to boot.
@@ -330,12 +334,58 @@ async fn generate_schema(
     Ok(Json(json!({ "files": files })))
 }
 
+/// Refuses a request whose `Host` is a name the deployment did not list.
+/// A DNS-rebinding page points a domain of its own at this server, which
+/// makes it the same origin as the Playground; an IP address or `localhost`
+/// cannot be rebound like that. A request without `Host` is not a browser's.
+async fn require_host(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .map(|v| v.to_str().unwrap_or_default());
+    if let Some(host) = host {
+        if !host_allowed(host, &state.config.playground_hosts) {
+            return ApiError::forbidden(format!(
+                "The Playground answers only under localhost, an IP address or a name \
+                 in CUBEJS_PLAYGROUND_HOSTS, not {host}"
+            ))
+            .into_response();
+        }
+    }
+    next.run(request).await
+}
+
+fn host_allowed(host: &str, listed: &[String]) -> bool {
+    // `name:port`, `[v6]:port`, or either without the port.
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) && !name.ends_with(':') => {
+            name
+        }
+        _ => host,
+    };
+    let name = name.to_ascii_lowercase();
+    let bare = name.trim_start_matches('[').trim_end_matches(']');
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || bare.parse::<IpAddr>().is_ok()
+        || listed.contains(&name)
+}
+
+/// Compares in time that does not depend on where the two first differ.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
 async fn require_key(request: Request, next: Next) -> Response {
     let key = request
         .headers()
         .get(PLAYGROUND_KEY_HEADER)
         .and_then(|v| v.to_str().ok());
-    if key != Some(playground_key()) {
+    if !key.is_some_and(|key| same_secret(key, playground_key())) {
         return ApiError::forbidden(
             "This Playground action needs the key the page gets from /playground/context; \
              reload the Playground.",
@@ -353,4 +403,41 @@ async fn not_ported() -> ApiError {
          does not have. Edit the YAML model files directly; the server \
          reloads them while it runs.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_names_that_cannot_be_rebound_or_are_listed_pass() {
+        let listed = vec!["cube.lan".to_string()];
+        for host in [
+            "localhost",
+            "localhost:4000",
+            "app.localhost:4000",
+            "127.0.0.1:4000",
+            "10.0.0.5",
+            "[::1]:4000",
+            "::1",
+            "CUBE.LAN:4000",
+        ] {
+            assert!(host_allowed(host, &listed), "{host}");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:4000",
+            "localhost.evil.example",
+            "127.0.0.1.nip.io",
+        ] {
+            assert!(!host_allowed(host, &listed), "{host}");
+        }
+    }
+
+    #[test]
+    fn the_key_comparison_is_exact() {
+        assert!(same_secret("abc", "abc"));
+        assert!(!same_secret("abc", "abd"));
+        assert!(!same_secret("abc", "ab"));
+    }
 }

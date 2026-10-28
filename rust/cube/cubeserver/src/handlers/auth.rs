@@ -53,6 +53,7 @@ pub async fn auth_middleware(
         request_id,
         security_context: authenticated.security_context,
         signed_with_playground_auth_secret: authenticated.signed_with_playground_auth_secret,
+        token_verified: authenticated.token_verified,
     });
 
     Ok(next.run(req).await.into_response())
