@@ -1,10 +1,12 @@
 //! The Playground's helper API (`/playground/*`).
 //!
-//! Only the part the query builder needs is implemented. The Node.js dev
-//! server (`cubejs-server-core/src/core/DevServer.ts`) also generates a data
-//! model from a database, edits `.env` and scaffolds a dashboard app through
-//! npm; none of that belongs in a deployment with no Node.js, so those routes
-//! answer 501 with a message naming the alternative.
+//! The query builder's part is implemented, generating a YAML data model
+//! from the database (`scaffold.rs`) and the "Data Source" page
+//! (`data_sources.rs`). The Node.js dev server
+//! (`cubejs-server-core/src/core/DevServer.ts`) also runs a connection wizard
+//! that rewrites the default source in `.env`, and scaffolds a dashboard app
+//! through npm; those routes answer 501 with a message naming the
+//! alternative.
 //!
 //! These routes are not behind the auth middleware, because the app fetches
 //! `/playground/context` to *obtain* its token. That is why the server mounts
@@ -20,6 +22,9 @@ use serde_json::{json, Map, Value};
 use crate::app::AppState;
 use crate::error::ApiError;
 
+/// The Cube release whose API this server implements (`lerna.json`).
+pub const CUBE_API_VERSION: &str = "1.7.40";
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/playground/context", get(context))
@@ -27,9 +32,20 @@ pub fn routes() -> Router<AppState> {
         .route("/playground/token", post(token))
         .route("/playground/db-schema", get(db_schema))
         .route("/playground/driver", get(driver))
+        .route("/playground/generate-schema", post(generate_schema))
+        .route(
+            "/playground/data-sources",
+            get(super::data_sources::list).post(super::data_sources::create),
+        )
+        .route("/playground/data-sources/test", post(super::data_sources::test))
+        .route(
+            "/playground/data-sources/:name",
+            get(super::data_sources::get)
+                .put(super::data_sources::update)
+                .delete(super::data_sources::delete),
+        )
         // Not ported. Named individually so the message says why, rather
         // than letting the app see an unexplained 404.
-        .route("/playground/generate-schema", post(not_ported))
         .route("/playground/env", post(not_ported))
         .route("/playground/test-connection", post(not_ported))
         .route("/playground/schema/pre-aggregation", post(not_ported))
@@ -59,7 +75,11 @@ async fn context(State(state): State<AppState>) -> Result<impl IntoResponse, Api
         // browser keep their own query tabs.
         "identifier": state.config.app_identifier(),
         "anonymousId": Value::Null,
-        "coreServerVersion": env!("CARGO_PKG_VERSION"),
+        // The app gates features on this (YAML generation needs 0.31,
+        // GraphQL 0.29), reading it as a Cube release. This crate's own
+        // version would turn them all off, so the Cube release whose API
+        // this server implements is sent instead.
+        "coreServerVersion": CUBE_API_VERSION,
         "dockerVersion": Value::Null,
         "projectFingerprint": Value::Null,
         "isDocker": false,
@@ -171,25 +191,76 @@ async fn driver(Query(query): Query<DriverQuery>) -> Result<impl IntoResponse, A
     })))
 }
 
-/// `GET /playground/db-schema` — the tables of the data source, for the
+/// `GET /playground/db-schema` — the tables of the data sources, for the
 /// data-model page.
 ///
 /// The driver is built the same way the orchestrator builds it, from the
 /// environment, so the page describes the database queries actually run
 /// against.
-async fn db_schema(Query(query): Query<DataSourceQuery>) -> Result<impl IntoResponse, ApiError> {
-    let data_source = query.data_source.unwrap_or_else(|| "default".to_string());
+///
+/// With `?dataSource=` it answers for that source alone, as Node.js does.
+/// Without it, Node.js describes only `default`, and the app never sends the
+/// parameter: a second source's tables would never show. So every configured
+/// source is listed, the schemas of all but `default` named
+/// `<data source>.<schema>` so two sources' schemas cannot collide. A source
+/// that cannot be read is logged and left out rather than hiding the others.
+async fn db_schema(
+    State(state): State<AppState>,
+    Query(query): Query<DataSourceQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    if let Some(data_source) = query.data_source {
+        let structure = data_source_schema(&data_source).await?;
+        return Ok(Json(json!({ "tablesSchema": structure })));
+    }
 
-    let driver = crate::orchestrator_adapter::driver_factory()(data_source.clone())
+    let mut names: Vec<String> = state
+        .config
+        .data_sources
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect();
+    if names.is_empty() {
+        names.push("default".to_string());
+    }
+
+    let results = futures::future::join_all(names.iter().map(|n| data_source_schema(n))).await;
+
+    let mut merged = cubedriver::DatabaseStructure::new();
+    let mut errors = Vec::new();
+    for (name, result) in names.iter().zip(results) {
+        match result {
+            Ok(structure) => {
+                for (schema, tables) in structure {
+                    let key = if name == "default" {
+                        schema
+                    } else {
+                        format!("{name}.{schema}")
+                    };
+                    merged.entry(key).or_default().extend(tables);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(data_source = %name, error = %e.body.error, "cannot list the tables of a data source");
+                errors.push(e.body.error);
+            }
+        }
+    }
+
+    if merged.is_empty() && !errors.is_empty() {
+        return Err(ApiError::bad_request(errors.join("; ")));
+    }
+    Ok(Json(json!({ "tablesSchema": merged })))
+}
+
+async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
+    let driver = crate::orchestrator_adapter::driver_factory()(data_source.to_string())
         .await
         .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))?;
 
-    let structure = driver
+    driver
         .tables_schema()
         .await
-        .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))?;
-
-    Ok(Json(json!({ "tablesSchema": structure })))
+        .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,11 +269,26 @@ struct DataSourceQuery {
     data_source: Option<String>,
 }
 
+/// `POST /playground/generate-schema` — writes YAML cubes for the tables
+/// picked on the data-model page; see `scaffold.rs`.
+async fn generate_schema(
+    State(state): State<AppState>,
+    Json(request): Json<super::scaffold::GenerateRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let files = super::scaffold::generate(
+        std::path::Path::new(&state.config.schema_path),
+        &state.config.data_sources,
+        &request,
+    )?;
+
+    Ok(Json(json!({ "files": files })))
+}
+
 async fn not_ported() -> ApiError {
     ApiError::not_implemented(
         "This Playground action is not available on the Rust server. \
-         Generating a data model from the database, editing .env and the \
-         dashboard-app scaffolding all run JavaScript, which this deployment \
+         Data sources are added on the Data Source page, and the \
+         dashboard-app scaffolding runs JavaScript, which this deployment \
          does not have. Edit the YAML model files directly; the server \
          reloads them while it runs.",
     )

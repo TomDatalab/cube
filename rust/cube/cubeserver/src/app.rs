@@ -108,6 +108,20 @@ pub fn build_app(state: AppState) -> Router {
             get(handlers::connectors::list),
         )
         .route(
+            &format!("{base}/v1/data-sources"),
+            get(handlers::data_sources::v1_list).post(handlers::data_sources::v1_create),
+        )
+        .route(
+            &format!("{base}/v1/data-sources/test"),
+            axum::routing::post(handlers::data_sources::v1_test),
+        )
+        .route(
+            &format!("{base}/v1/data-sources/:name"),
+            get(handlers::data_sources::v1_get)
+                .put(handlers::data_sources::v1_update)
+                .delete(handlers::data_sources::v1_delete),
+        )
+        .route(
             &format!("{base}/v1/load"),
             get(handlers::query::load_get).post(handlers::query::load_post),
         )
@@ -193,7 +207,13 @@ pub fn build_app(state: AppState) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         // Same list as `@cubejs-backend/server` (`server.ts`).
         .allow_headers([
             header::AUTHORIZATION,

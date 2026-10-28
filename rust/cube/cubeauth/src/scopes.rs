@@ -5,8 +5,9 @@ use serde_json::Value;
 use crate::config::AuthConfig;
 use crate::error::AuthError;
 
-/// Every scope the gateway knows about (the `ApiScopes` TypeScript type).
-pub const ALL_API_SCOPES: [&str; 5] = ["graphql", "meta", "data", "sql", "jobs"];
+/// Every scope the gateway knows about (the `ApiScopes` TypeScript type),
+/// plus `data_sources`, which only the Rust server has.
+pub const ALL_API_SCOPES: [&str; 6] = ["graphql", "meta", "data", "sql", "jobs", "data_sources"];
 
 /// `contextToApiScopesDefFn`: scopes granted when neither
 /// `CUBEJS_DEFAULT_API_SCOPES` nor a user hook is configured. Note that

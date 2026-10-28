@@ -54,6 +54,12 @@ pub struct ServerConfig {
     /// the Playground's build output is not in version control, so a clean
     /// checkout would not compile.
     pub playground_path: Option<String>,
+    /// The `cube.yml` the server started from, which the Playground's Data
+    /// Source page adds data sources to. `None` when there is no such file.
+    pub config_file: Option<std::path::PathBuf>,
+    /// Whether adding a data source restarts the server so it takes effect.
+    /// Only the binary turns this on; a test must not replace its process.
+    pub restart_on_config_change: bool,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +74,8 @@ impl Default for ServerConfig {
             max_request_size: parse_size(DEFAULT_MAX_REQUEST_SIZE).expect("valid default"),
             data_sources: Vec::new(),
             playground_path: None,
+            config_file: None,
+            restart_on_config_change: false,
         }
     }
 }
@@ -85,6 +93,7 @@ impl ServerConfig {
             .values()
             .map(|source| (source.name.clone(), source.db_type.clone()))
             .collect();
+        self.config_file = config.source.is_file().then(|| config.source.clone());
         self
     }
 
@@ -154,6 +163,8 @@ impl ServerConfig {
                     .playground_path
                     .or_else(|| default_playground_path().map(|p| p.to_string_lossy().into_owned())),
             },
+            config_file: defaults.config_file,
+            restart_on_config_change: defaults.restart_on_config_change,
         })
     }
 
