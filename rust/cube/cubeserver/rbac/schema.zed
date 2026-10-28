@@ -1,0 +1,45 @@
+definition user {}
+
+definition platform {
+    relation admin: user
+    permission manage = admin
+}
+
+definition organization {
+    relation platform: platform
+    relation owner: user
+    // Quem tem qualquer papel em algum workspace da organização; serve para listar a organização.
+    relation member: user
+
+    permission admin = owner + platform->manage
+    permission view = admin + member
+    permission manage_connections = admin
+}
+
+definition workspace {
+    relation organization: organization
+    relation owner: user
+    relation editor: user
+    relation viewer: user
+
+    permission manage = owner + organization->admin
+    permission edit = editor + manage
+    permission view = viewer + edit
+    permission query = view
+    permission execute = manage
+}
+
+definition connection {
+    relation organization: organization
+    // Workspaces para os quais a conexão foi liberada.
+    relation workspace: workspace
+
+    permission manage = organization->admin
+    permission query = workspace->query + manage
+}
+
+definition object {
+    relation workspace: workspace
+    permission read = workspace->view
+    permission write = workspace->edit
+}
