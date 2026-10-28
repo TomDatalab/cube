@@ -207,8 +207,8 @@ struct Owner {
     generated: bool,
     /// The cube's `data_source`, if it names one.
     data_source: Option<String>,
-    /// Its `sql_table` or `sql`.
-    sql: String,
+    /// The table it reads; see [`table_of`].
+    table: Option<String>,
 }
 
 impl Owner {
@@ -217,10 +217,27 @@ impl Owner {
     fn reads(&self, data_source: &str, table: &str) -> bool {
         self.data_source.as_deref().is_none_or(|d| d == data_source)
             && self
-                .sql
-                .to_ascii_lowercase()
-                .contains(&table.to_ascii_lowercase())
+                .table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(table))
     }
+}
+
+/// The table a cube reads, unquoted: the last part of its `sql_table`
+/// (`dfos.fiberCable`), or of the name after `FROM` in its `sql`
+/// (`SELECT * FROM dfos.fibersegment FINAL`).
+fn table_of(sql_table: Option<&str>, sql: Option<&str>) -> Option<String> {
+    let reference = match sql_table {
+        Some(table) => table.trim().to_string(),
+        None => {
+            let mut words = sql?.split_whitespace();
+            words.find(|w| w.eq_ignore_ascii_case("from"))?;
+            words.next()?.to_string()
+        }
+    };
+    let last = reference.rsplit('.').next()?;
+    let unquoted = last.trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'));
+    (!unquoted.is_empty()).then(|| unquoted.to_string())
 }
 
 /// Every cube and view name defined under `dir`, with the file defining it.
@@ -271,9 +288,7 @@ fn walk(dir: &Path, out: &mut BTreeMap<String, Owner>) {
                     path: path.clone(),
                     generated,
                     data_source: text("data_source"),
-                    sql: text("sql_table")
-                        .or_else(|| text("sql"))
-                        .unwrap_or_default(),
+                    table: table_of(text("sql_table").as_deref(), text("sql").as_deref()),
                 },
             );
         }
@@ -493,6 +508,30 @@ mod tests {
         assert_eq!(cube_type("point"), Some("string"));
         assert_eq!(cube_type("Array(Int32)"), None);
         assert_eq!(cube_type("integer[]"), None);
+    }
+
+    #[test]
+    fn the_table_a_cube_reads_is_its_last_identifier() {
+        assert_eq!(
+            table_of(Some("dfos.`fiberCable`"), None).as_deref(),
+            Some("fiberCable")
+        );
+        assert_eq!(
+            table_of(None, Some("SELECT * FROM dfos.fibersegment FINAL")).as_deref(),
+            Some("fibersegment")
+        );
+        assert_eq!(
+            table_of(Some("\"public\".\"orders\""), None).as_deref(),
+            Some("orders")
+        );
+        // A table whose name only contains the picked one is another table.
+        let owner = Owner {
+            path: PathBuf::new(),
+            generated: true,
+            data_source: None,
+            table: table_of(Some("dfos.orders_archive"), None),
+        };
+        assert!(!owner.reads("default", "orders"));
     }
 
     #[test]
