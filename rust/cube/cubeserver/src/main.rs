@@ -97,7 +97,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // route, so mounting it where authentication is enforced would hand the
     // API away to anyone who can reach the port. Node.js has the same
     // property and only runs its dev server outside production.
-    let mut config = config;
     if config.playground_path.is_some() && auth_config.enforce_security_checks {
         eprintln!(
             "⚠️  The Playground is not mounted: NODE_ENV=production enforces \
