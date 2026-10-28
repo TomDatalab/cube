@@ -12,6 +12,25 @@ use crate::error::ApiError;
 
 pub const MIN_PASSWORD_LENGTH: usize = 10;
 
+/// Longest user id.
+pub const MAX_USER_ID_LENGTH: usize = 64;
+
+/// A user id is 1 to 64 of `a-z`, `0-9`, `_` and `-`. SpiceDB object ids
+/// reject `.`, and `*` is its wildcard, so neither is ever allowed.
+pub fn validate_user_id(id: &str) -> Result<(), ApiError> {
+    let valid = (1..=MAX_USER_ID_LENGTH).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(format!(
+            "Invalid user id: use 1 to {MAX_USER_ID_LENGTH} characters among a-z, 0-9, _ and -"
+        )))
+    }
+}
+
 /// argon2id with the crate's default (OWASP) parameters.
 pub fn hash_password(password: &str) -> Result<String, ApiError> {
     if password.chars().count() < MIN_PASSWORD_LENGTH {
@@ -41,35 +60,46 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 
 /// Checked when the user does not exist, so an unknown name costs the same
 /// time as a wrong password.
+/// An empty hash would fail fast and reveal the user does not exist, so this
+/// panics instead; [`Rbac::with_parts`] forces it at start-up.
 static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(b"no user has this password", &salt)
         .map(|hash| hash.to_string())
-        .unwrap_or_default()
+        .expect("argon2 hashes a constant password")
 });
+
+/// Computes the dummy hash now rather than on the first failed login.
+pub(crate) fn prepare_dummy_hash() {
+    LazyLock::force(&DUMMY_HASH);
+}
 
 /// The user `username` when `password` is theirs and they are enabled.
 ///
-/// Runs the hash on a blocking thread. Unknown users are checked against a
+/// Unknown users, and names that are not valid ids, are checked against a
 /// dummy hash so their answer takes as long as a wrong password.
 pub(crate) async fn check_credentials(
     rbac: &Rbac,
     username: &str,
     password: &str,
 ) -> Result<Option<crate::rbac::store::User>, ApiError> {
-    let user = rbac.store.user(username).await.map_err(|e| {
-        tracing::error!("RBAC store unavailable: {e}");
-        unavailable()
-    })?;
+    let user = if validate_user_id(username).is_ok() {
+        rbac.store.user(username).await.map_err(|e| {
+            tracing::error!("RBAC store unavailable: {e}");
+            unavailable()
+        })?
+    } else {
+        None
+    };
     let hash = match &user {
         Some(user) => user.password_hash.clone(),
         None => DUMMY_HASH.clone(),
     };
     let password = password.to_string();
-    let matches = tokio::task::spawn_blocking(move || verify_password(&hash, &password))
-        .await
-        .map_err(|_| ApiError::internal())?;
+    let matches = rbac
+        .run_hashing(move || verify_password(&hash, &password))
+        .await?;
 
     Ok(user.filter(|user| matches && !user.disabled))
 }
@@ -83,7 +113,7 @@ pub async fn resolve_identity(
     let sub = security_context
         .get("sub")
         .and_then(Value::as_str)
-        .filter(|sub| !sub.is_empty())
+        .filter(|sub| validate_user_id(sub).is_ok())
         .ok_or_else(unauthenticated)?;
     // Tokens without `iat` cannot be compared with the last password change.
     let issued_at = security_context
@@ -144,6 +174,27 @@ pub fn user_token_claims(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_ids() {
+        for good in ["ann", "a", "tom_datalab", "svc-etl-01", &"a".repeat(64)] {
+            assert!(validate_user_id(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "Ana",
+            "a b",
+            "a.b",
+            "*",
+            "user:*",
+            "ann\n",
+            "jos\u{e9}",
+            &"a".repeat(65),
+        ] {
+            let err = validate_user_id(bad).unwrap_err();
+            assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
 
     #[test]
     fn iat_round_trips_to_the_millisecond() {

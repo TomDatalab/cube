@@ -37,8 +37,12 @@ pub async fn auth_middleware(
             value
                 .to_str()
                 .map_err(|_| {
-                    ApiError::forbidden("Invalid token")
-                        .with_request_id_if(state.config.dev_mode, &request_id)
+                    // With RBAC on, any unusable token is 401.
+                    match state.rbac {
+                        Some(_) => crate::rbac::unauthenticated(),
+                        None => ApiError::forbidden("Invalid token"),
+                    }
+                    .with_request_id_if(state.config.dev_mode, &request_id)
                 })?
                 .to_string(),
         ),

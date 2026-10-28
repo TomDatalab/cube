@@ -8,6 +8,18 @@ pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 /// How long a failed login waits before answering, to slow down guessing.
 pub const DEFAULT_FAILURE_DELAY: Duration = Duration::from_secs(1);
 
+/// How long a login waits for a free hashing slot before answering 503.
+pub const DEFAULT_HASH_QUEUE_WAIT: Duration = Duration::from_secs(2);
+
+/// Password hashes run at once: each argon2 run holds ~19 MiB, so an
+/// unbounded login flood could exhaust memory. Two per CPU.
+pub fn default_max_concurrent_hashes() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        * 2
+}
+
 #[derive(Clone)]
 pub struct RbacConfig {
     pub spicedb_endpoint: String,
@@ -22,6 +34,11 @@ pub struct RbacConfig {
     /// Wait before answering a failed login or password check. Always
     /// [`DEFAULT_FAILURE_DELAY`] outside tests.
     pub failure_delay: Duration,
+    /// Password hashes and verifications run at once (see
+    /// [`default_max_concurrent_hashes`]).
+    pub max_concurrent_hashes: usize,
+    /// Wait for a hashing slot before answering 503.
+    pub hash_queue_wait: Duration,
 }
 
 /// Secrets stay out of logs and panics.
@@ -32,6 +49,8 @@ impl std::fmt::Debug for RbacConfig {
             .field("admins", &self.admins)
             .field("token_ttl", &self.token_ttl)
             .field("failure_delay", &self.failure_delay)
+            .field("max_concurrent_hashes", &self.max_concurrent_hashes)
+            .field("hash_queue_wait", &self.hash_queue_wait)
             .finish_non_exhaustive()
     }
 }
@@ -68,7 +87,7 @@ impl RbacConfig {
         let preshared_key = required("SPICEDB_PRESHARED_KEY")?;
         let db_url = required("CUBE_APP_DB_URL")?;
 
-        let admins = var("CUBE_RBAC_ADMINS")
+        let admins: Vec<String> = var("CUBE_RBAC_ADMINS")
             .map(|list| {
                 list.split(',')
                     .map(str::trim)
@@ -77,6 +96,10 @@ impl RbacConfig {
                     .collect()
             })
             .unwrap_or_default();
+        for id in &admins {
+            super::identity::validate_user_id(id)
+                .map_err(|e| format!("CUBE_RBAC_ADMINS: `{id}`: {}", e.body.error))?;
+        }
 
         let token_ttl = match var("CUBE_RBAC_TOKEN_TTL") {
             Some(value) => {
@@ -93,6 +116,8 @@ impl RbacConfig {
             admin_password: var("CUBE_RBAC_ADMIN_PASSWORD"),
             token_ttl,
             failure_delay: DEFAULT_FAILURE_DELAY,
+            max_concurrent_hashes: default_max_concurrent_hashes(),
+            hash_queue_wait: DEFAULT_HASH_QUEUE_WAIT,
         }))
     }
 }
@@ -206,6 +231,17 @@ mod tests {
         // The key and password never show in debug output.
         let debug = format!("{config:?}");
         assert!(!debug.contains("a-long-password") && !debug.contains("\"key\""));
+    }
+
+    #[test]
+    fn admin_ids_follow_the_user_id_rule() {
+        for bad in ["Tom", "tom.datalab", "*", "a b"] {
+            let mut vars = FULL.to_vec();
+            let list = format!("ann,{bad}");
+            vars.push(("CUBE_RBAC_ADMINS", &list));
+            let err = RbacConfig::from_lookup(lookup(&vars)).unwrap_err();
+            assert!(err.contains("CUBE_RBAC_ADMINS"), "{err}");
+        }
     }
 
     #[test]

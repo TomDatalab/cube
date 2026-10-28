@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use super::rbac_of;
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::rbac::identity::{check_credentials, hash_password, user_token_claims};
+use crate::rbac::identity::{
+    check_credentials, hash_password, user_token_claims, validate_user_id,
+};
 use crate::rbac::store::StoreError;
 use crate::rbac::{unauthenticated, unavailable, Rbac};
 use crate::services::RequestContext;
@@ -51,11 +53,19 @@ pub async fn login(
     let rbac = rbac_of(&state)?;
     let request = body(request)?;
 
+    // SpiceDB is asked before the password is checked, so an outage answers
+    // 503 whether or not the password is right: the answer never tells a
+    // correct password from a wrong one. A name that is not a valid id
+    // cannot be asked about, and is refused below like an unknown user.
+    let platform_admin = if validate_user_id(&request.username).is_ok() {
+        rbac.is_platform_admin(&request.username).await?
+    } else {
+        false
+    };
+
     let Some(user) = check_credentials(rbac, &request.username, &request.password).await? else {
         return Err(failure(rbac, ApiError::new(StatusCode::UNAUTHORIZED, INVALID_LOGIN)).await);
     };
-
-    let platform_admin = rbac.is_platform_admin(&user.id).await?;
     let (claims, expires_at) = user_token_claims(&user.id, rbac.config.token_ttl);
     let token = state.auth.issue_token(claims).await?;
 
@@ -93,9 +103,9 @@ pub async fn change_password(
     }
 
     let new_password = request.new_password;
-    let hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
-        .await
-        .map_err(|_| ApiError::internal())??;
+    let hash = rbac
+        .run_hashing(move || hash_password(&new_password))
+        .await??;
     rbac.store
         .set_password_hash(user, &hash)
         .await

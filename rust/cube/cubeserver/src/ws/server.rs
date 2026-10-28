@@ -169,6 +169,40 @@ impl SubscriptionServer {
             return;
         };
 
+        // With RBAC on, the user is checked again before every method and
+        // every subscription re-run: a disabled user, or one whose password
+        // changed, loses the connection at the next tick.
+        let auth_context = match &self.state.rbac {
+            None => auth_context,
+            Some(rbac) => {
+                match crate::rbac::identity::resolve_identity(rbac, &auth_context.security_context)
+                    .await
+                {
+                    Ok((user, platform_admin)) => RequestContext {
+                        user: Some(user),
+                        platform_admin,
+                        ..auth_context
+                    },
+                    Err(err) => {
+                        // 401: the identity is gone, so are the connection's
+                        // subscriptions and authorization. 503 is transient and
+                        // keeps them for the next tick.
+                        if err.status == axum::http::StatusCode::UNAUTHORIZED {
+                            self.store.disconnect(connection_id).await;
+                        }
+                        self.send_error(
+                            connection_id,
+                            Some(message.message_id.clone()),
+                            err.status.as_u16(),
+                            &err.body.error,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+        };
+
         let subscription_id = message.message_id.clone();
         let base_request_id = message
             .request_id

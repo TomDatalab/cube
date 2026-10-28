@@ -10,6 +10,7 @@ pub mod store;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use tokio::sync::Semaphore;
 
 pub use authz::{Authz, AuthzError, HttpAuthz, ObjectRef, Relationship, RelationshipFilter};
 pub use config::RbacConfig;
@@ -34,6 +35,8 @@ pub struct Rbac {
     pub authz: Arc<dyn Authz>,
     pub store: Store,
     pub config: RbacConfig,
+    /// Bounds concurrent argon2 runs (`config.max_concurrent_hashes`).
+    hashing: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -69,10 +72,13 @@ impl Rbac {
             .ensure_schema(SCHEMA)
             .await
             .map_err(|e| format!("Cannot write the SpiceDB schema (SPICEDB_ENDPOINT): {e}"))?;
+        identity::prepare_dummy_hash();
+        let hashing = Arc::new(Semaphore::new(config.max_concurrent_hashes.max(1)));
         let rbac = Self {
             authz,
             store,
             config,
+            hashing,
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)
@@ -126,6 +132,43 @@ impl Rbac {
                 .map_err(|e| format!("Cannot grant the platform admins in SpiceDB: {e}"))?;
         }
         Ok(())
+    }
+
+    /// Runs a password hash or verification on a blocking thread, at most
+    /// `max_concurrent_hashes` at once. 503 when no slot frees up within
+    /// `hash_queue_wait`: a login flood is refused instead of exhausting
+    /// memory. The slot is held until the hash finishes, even if the request
+    /// is dropped.
+    pub async fn run_hashing<T, F>(&self, work: F) -> Result<T, ApiError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = tokio::time::timeout(
+            self.config.hash_queue_wait,
+            self.hashing.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!("Too many password checks at once; answering 503");
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Too many login attempts, try again shortly",
+            )
+        })?
+        .map_err(|_| ApiError::internal())?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+        .map_err(|_| ApiError::internal())
+    }
+
+    /// Test hook: the semaphore bounding concurrent hashes, so a test can
+    /// hold its permits as an in-flight verification would.
+    pub fn hashing_permits(&self) -> Arc<Semaphore> {
+        self.hashing.clone()
     }
 
     pub async fn is_platform_admin(&self, user: &str) -> Result<bool, ApiError> {

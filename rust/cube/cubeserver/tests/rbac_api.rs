@@ -57,6 +57,8 @@ fn rbac_config(failure_delay: Duration) -> RbacConfig {
         admin_password: Some(ADMIN_PASSWORD.into()),
         token_ttl: Duration::from_secs(3600),
         failure_delay,
+        max_concurrent_hashes: 4,
+        hash_queue_wait: Duration::from_secs(2),
     }
 }
 
@@ -84,9 +86,13 @@ struct Env {
 }
 
 async fn env(store: Store, failure_delay: Duration) -> Env {
+    env_with(store, rbac_config(failure_delay)).await
+}
+
+async fn env_with(store: Store, config: RbacConfig) -> Env {
     let authz = Arc::new(FakeAuthz::new());
     let rbac = Arc::new(
-        Rbac::with_parts(authz.clone(), store, rbac_config(failure_delay))
+        Rbac::with_parts(authz.clone(), store, config)
             .await
             .expect("rbac starts"),
     );
@@ -390,3 +396,138 @@ fn startup_refuses_tenants_with_rbac() {
         cubeconfig::CubeConfig::load_with_env(plain_dir.path(), &cubeconfig::Env::new()).unwrap();
     assert!(check_rbac_compatible(&plain).is_ok());
 }
+
+db_test!(
+    an_outage_answers_alike_for_right_and_wrong_passwords,
+    |store| {
+        let env = env(store, Duration::ZERO).await;
+        env.authz.set_failing(true);
+        let right = login(&env.router, ADMIN, ADMIN_PASSWORD).await;
+        let wrong = login(&env.router, ADMIN, "not-the-password").await;
+        assert_eq!(right.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(right, wrong);
+    }
+);
+
+db_test!(
+    a_login_flood_is_refused_instead_of_queued_forever,
+    |store| {
+        let mut config = rbac_config(Duration::ZERO);
+        config.max_concurrent_hashes = 1;
+        config.hash_queue_wait = Duration::from_millis(200);
+        let env = env_with(store, config).await;
+
+        // A verification in flight holds the only slot.
+        let held = env.rbac.hashing_permits().acquire_owned().await.unwrap();
+        let (status, body) = login(&env.router, ADMIN, ADMIN_PASSWORD).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        drop(held);
+        login_token(&env.router, ADMIN, ADMIN_PASSWORD).await;
+    }
+);
+
+db_test!(names_that_are_not_user_ids_get_the_usual_answer, |store| {
+    let delay = Duration::from_millis(200);
+    let env = env(store, delay).await;
+    let unknown = login(&env.router, "nobody", ADMIN_PASSWORD).await;
+    for name in ["Admin", "admin.x", "*", "a b", ""] {
+        let started = Instant::now();
+        let answer = login(&env.router, name, ADMIN_PASSWORD).await;
+        assert!(started.elapsed() >= delay, "{name}");
+        assert_eq!(answer, unknown, "{name}");
+    }
+});
+
+db_test!(a_token_whose_sub_is_not_a_user_id_is_refused, |store| {
+    let env = env(store, Duration::ZERO).await;
+    for sub in ["Admin", "admin.x", "*"] {
+        let mut claims = Map::new();
+        claims.insert("sub".into(), json!(sub));
+        claims.insert("iat".into(), json!(chrono::Utc::now().timestamp() + 60));
+        let token = cubeauth::issue_token(&auth_config(), claims, 3600).unwrap();
+        assert_eq!(
+            meta(&env.router, Some(&token)).await,
+            StatusCode::UNAUTHORIZED,
+            "{sub}"
+        );
+    }
+});
+
+#[tokio::test]
+async fn a_non_ascii_authorization_header_is_401_with_rbac() {
+    let Some(db) = TestDb::create().await else {
+        return;
+    };
+    let env = env(db.store.clone(), Duration::ZERO).await;
+    let request = Request::builder()
+        .uri("/cube/v1/meta")
+        .header(
+            header::AUTHORIZATION,
+            axum::http::HeaderValue::from_bytes(b"Bearer \xff\xfe").unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let status = env.router.clone().oneshot(request).await.unwrap().status();
+    db.drop_db().await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Records what the WebSocket server sent.
+#[derive(Debug, Default)]
+struct Recorder {
+    sent: tokio::sync::Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl cubeserver::ws::WsConnection for Recorder {
+    async fn send(&self, _connection_id: &str, message: Value) {
+        self.sent.lock().await.push(message);
+    }
+}
+
+impl Recorder {
+    async fn last(&self) -> Value {
+        self.sent.lock().await.last().cloned().expect("a message")
+    }
+}
+
+db_test!(a_websocket_loses_its_user_at_the_next_message, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let user = cubeserver::rbac::store::NewUser {
+        id: "ann".into(),
+        name: None,
+        email: None,
+        password_hash: hash_password("ann-password-1").unwrap(),
+    };
+    env.rbac.store.create_user(&user).await.unwrap();
+    let token = login_token(&env.router, "ann", "ann-password-1").await;
+
+    let recorder = Arc::new(Recorder::default());
+    let server =
+        cubeserver::ws::SubscriptionServer::new(state(Some(env.rbac.clone())), recorder.clone());
+    let meta_message = |id: u32| json!({ "method": "meta", "messageId": id }).to_string();
+    server
+        .process_message("c1", &json!({ "authorization": token }).to_string())
+        .await;
+    assert_eq!(recorder.last().await, json!({ "handshake": true }));
+    server.process_message("c1", &meta_message(1)).await;
+    assert_eq!(recorder.last().await, json!({ "messageProcessedId": "1" }));
+
+    // Disabled: the next method (as every subscription re-run) is refused,
+    // and the connection loses its authorization and subscriptions.
+    env.rbac
+        .store
+        .update_user("ann", None, None, Some(true))
+        .await
+        .unwrap();
+    server.process_message("c1", &meta_message(2)).await;
+    assert_eq!(recorder.last().await["status"], json!(401));
+    env.rbac
+        .store
+        .update_user("ann", None, None, Some(false))
+        .await
+        .unwrap();
+    server.process_message("c1", &meta_message(3)).await;
+    assert_eq!(recorder.last().await["status"], json!(403));
+});
