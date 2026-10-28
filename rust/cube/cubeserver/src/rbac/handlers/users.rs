@@ -14,7 +14,7 @@ use super::{body, rbac_of, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::{hash_password, user_token_claims, validate_user_id};
-use crate::rbac::store::{NewUser, User};
+use crate::rbac::store::{NewUser, StoreError, User};
 use crate::rbac::{unauthenticated, Rbac};
 use crate::services::RequestContext;
 
@@ -84,7 +84,7 @@ pub async fn create(
             password_hash,
         })
         .await
-        .map_err(|e| store_error(e, "User already exists"))?;
+        .map_err(|e| store_error(e, "A user with this id already exists"))?;
     Ok((StatusCode::CREATED, Json(view(&user))))
 }
 
@@ -98,7 +98,7 @@ pub async fn list(
         .store
         .users()
         .await
-        .map_err(|e| store_error(e, "User already exists"))?;
+        .map_err(|e| store_error(e, "Conflict"))?;
     let users: Vec<Value> = users.iter().map(view).collect();
     Ok(Json(json!({ "users": users })))
 }
@@ -113,11 +113,18 @@ pub async fn update(
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
     validate_user_id(&id)?;
+    if request.name.is_none() && request.email.is_none() && request.disabled.is_none() {
+        return Err(ApiError::bad_request("Nothing to update"));
+    }
+    // Disabling the only admin would lock user management out for good.
+    if request.disabled == Some(true) && ctx.user.as_deref() == Some(id.as_str()) {
+        return Err(ApiError::bad_request("You cannot disable your own account"));
+    }
     let user = rbac
         .store
         .update_user(&id, request.name, request.email, request.disabled)
         .await
-        .map_err(|e| store_error(e, "User already exists"))?
+        .map_err(|e| store_error(e, "This email is already in use"))?
         .ok_or_else(user_not_found)?;
     Ok(Json(view(&user)))
 }
@@ -139,8 +146,8 @@ pub async fn set_password(
         .set_password_hash(&id, &hash)
         .await
         .map_err(|e| match e {
-            crate::rbac::store::StoreError::NotFound => user_not_found(),
-            e => store_error(e, "User already exists"),
+            StoreError::NotFound => user_not_found(),
+            e => store_error(e, "Conflict"),
         })?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -158,7 +165,7 @@ pub async fn issue_token(
         .store
         .user(&id)
         .await
-        .map_err(|e| store_error(e, "User already exists"))?
+        .map_err(|e| store_error(e, "Conflict"))?
         .ok_or_else(user_not_found)?;
     if user.disabled {
         return Err(ApiError::new(StatusCode::CONFLICT, "The user is disabled"));

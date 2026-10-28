@@ -761,3 +761,53 @@ db_test!(an_admin_password_reset_invalidates_old_tokens, |store| {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 });
+
+db_test!(patch_guards_and_bad_requests, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+
+    // An admin cannot disable themselves, and can still log in.
+    let (status, body) = send(
+        &env.router,
+        Method::PATCH,
+        "/cube/v1/users/admin",
+        Some(&admin),
+        Some(json!({ "disabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    login_token(&env.router, ADMIN, ADMIN_PASSWORD).await;
+
+    // An empty patch is refused.
+    let (status, _) = send(
+        &env.router,
+        Method::PATCH,
+        "/cube/v1/users/admin",
+        Some(&admin),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Malformed JSON.
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/cube/v1/users")
+        .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let response = env.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A bad id on the token route.
+    let (status, _) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/users/Ana/tokens",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+});
