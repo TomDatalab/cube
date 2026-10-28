@@ -309,6 +309,11 @@ pub struct Store {
 impl Store {
     /// Connects and applies the (idempotent) migrations.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
+        Self::connect_with_pool_size(url, 8).await
+    }
+
+    /// Like [`Store::connect`] with an explicit pool size (tests use 1).
+    pub async fn connect_with_pool_size(url: &str, max_size: usize) -> Result<Self, StoreError> {
         let config: tokio_postgres::Config = url
             .parse()
             .map_err(|e: tokio_postgres::Error| StoreError::Db(e.to_string()))?;
@@ -320,7 +325,7 @@ impl Store {
             },
         );
         let pool = Pool::builder(manager)
-            .max_size(8)
+            .max_size(max_size)
             .build()
             .map_err(|e| StoreError::Db(e.to_string()))?;
         let store = Self { pool };
@@ -328,8 +333,11 @@ impl Store {
         // Serialize concurrent starts: CREATE TABLE IF NOT EXISTS can race.
         c.batch_execute("SELECT pg_advisory_lock(7263541)").await?;
         let applied = c.batch_execute(MIGRATIONS).await;
-        c.batch_execute("SELECT pg_advisory_unlock(7263541)")
-            .await?;
+        if let Err(e) = c.batch_execute("SELECT pg_advisory_unlock(7263541)").await {
+            // Still holding the lock: close the connection instead of pooling it.
+            let _ = Object::take(c);
+            return Err(e.into());
+        }
         applied?;
         drop(c);
         Ok(store)
