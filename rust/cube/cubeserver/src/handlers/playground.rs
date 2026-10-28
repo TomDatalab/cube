@@ -11,9 +11,18 @@
 //! These routes are not behind the auth middleware, because the app fetches
 //! `/playground/context` to *obtain* its token. That is why the server mounts
 //! the Playground only when authentication is not enforced; see `main.rs`.
+//! The routes that write the model or the data sources, or connect to a
+//! database, also want the key `/playground/context` hands the page
+//! ([`playground_key`]). The server sends these routes no CORS headers (see
+//! `app.rs`), so another site the developer visits cannot read the key, nor
+//! send the JSON the routes take.
 
-use axum::extract::{Query, State};
-use axum::response::IntoResponse;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use axum::extract::{Query, Request, State};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -25,25 +34,46 @@ use crate::error::ApiError;
 /// The Cube release whose API this server implements (`lerna.json`).
 pub const CUBE_API_VERSION: &str = "1.7.40";
 
+/// The header the page sends [`playground_key`] in.
+pub const PLAYGROUND_KEY_HEADER: &str = "x-playground-key";
+
+/// How long one data source may take to describe its tables.
+const SCHEMA_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A secret made when the process starts, which `/playground/context` hands
+/// the page. A restart makes a new one; the Data Source page fetches it
+/// again once the server is back.
+pub fn playground_key() -> &'static str {
+    static KEY: OnceLock<String> = OnceLock::new();
+    KEY.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/playground/context", get(context))
-        .route("/playground/files", get(files))
-        .route("/playground/token", post(token))
-        .route("/playground/db-schema", get(db_schema))
-        .route("/playground/driver", get(driver))
+    let keyed = Router::new()
         .route("/playground/generate-schema", post(generate_schema))
         .route(
             "/playground/data-sources",
             get(super::data_sources::list).post(super::data_sources::create),
         )
-        .route("/playground/data-sources/test", post(super::data_sources::test))
+        .route(
+            "/playground/data-sources/test",
+            post(super::data_sources::test),
+        )
         .route(
             "/playground/data-sources/:name",
             get(super::data_sources::get)
                 .put(super::data_sources::update)
                 .delete(super::data_sources::delete),
         )
+        .route_layer(axum::middleware::from_fn(require_key));
+
+    Router::new()
+        .route("/playground/context", get(context))
+        .route("/playground/files", get(files))
+        .route("/playground/token", post(token))
+        .route("/playground/db-schema", get(db_schema))
+        .route("/playground/driver", get(driver))
+        .merge(keyed)
         // Not ported. Named individually so the message says why, rather
         // than letting the app see an unexplained 404.
         .route("/playground/env", post(not_ported))
@@ -62,6 +92,7 @@ async fn context(State(state): State<AppState>) -> Result<impl IntoResponse, Api
 
     Ok(Json(json!({
         "cubejsToken": token,
+        "playgroundKey": playground_key(),
         "basePath": state.config.base_path,
         // The wizard writes `.env` and installs npm driver packages, neither
         // of which exists here, so the app must not be sent to it.
@@ -202,8 +233,10 @@ async fn driver(Query(query): Query<DriverQuery>) -> Result<impl IntoResponse, A
 /// Without it, Node.js describes only `default`, and the app never sends the
 /// parameter: a second source's tables would never show. So every configured
 /// source is listed, the schemas of all but `default` named
-/// `<data source>.<schema>` so two sources' schemas cannot collide. A source
-/// that cannot be read is logged and left out rather than hiding the others.
+/// `<data source>.<schema>` so two sources' schemas cannot collide (and a
+/// `default` schema that would read as one of those, `default.<schema>`). A
+/// source that cannot be read is left out rather than hiding the others, and
+/// named in `errors`.
 async fn db_schema(
     State(state): State<AppState>,
     Query(query): Query<DataSourceQuery>,
@@ -231,10 +264,12 @@ async fn db_schema(
         match result {
             Ok(structure) => {
                 for (schema, tables) in structure {
-                    let key = if name == "default" {
-                        schema
-                    } else {
+                    let key = if name != "default" {
                         format!("{name}.{schema}")
+                    } else if super::scaffold::is_prefixed(&schema, &state.config.data_sources) {
+                        format!("default.{schema}")
+                    } else {
+                        schema
                     };
                     merged.entry(key).or_default().extend(tables);
                 }
@@ -249,7 +284,7 @@ async fn db_schema(
     if merged.is_empty() && !errors.is_empty() {
         return Err(ApiError::bad_request(errors.join("; ")));
     }
-    Ok(Json(json!({ "tablesSchema": merged })))
+    Ok(Json(json!({ "tablesSchema": merged, "errors": errors })))
 }
 
 async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
@@ -257,10 +292,18 @@ async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStr
         .await
         .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))?;
 
-    driver
-        .tables_schema()
-        .await
-        .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))
+    // A database that accepts the connection and then never answers would
+    // otherwise hold up every other source's tables.
+    let result = tokio::time::timeout(SCHEMA_TIMEOUT, driver.tables_schema()).await;
+    let _ = driver.release().await;
+    match result {
+        Ok(Ok(structure)) => Ok(structure),
+        Ok(Err(e)) => Err(ApiError::bad_request(format!("{data_source}: {e}"))),
+        Err(_) => Err(ApiError::bad_request(format!(
+            "{data_source}: no answer in {}s",
+            SCHEMA_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +318,9 @@ async fn generate_schema(
     State(state): State<AppState>,
     Json(request): Json<super::scaffold::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Not while a data source is being deleted: the delete checks no cube
+    // uses it, and a cube written meanwhile would.
+    let _guard = super::data_sources::WRITE.lock().await;
     let files = super::scaffold::generate(
         std::path::Path::new(&state.config.schema_path),
         &state.config.data_sources,
@@ -282,6 +328,21 @@ async fn generate_schema(
     )?;
 
     Ok(Json(json!({ "files": files })))
+}
+
+async fn require_key(request: Request, next: Next) -> Response {
+    let key = request
+        .headers()
+        .get(PLAYGROUND_KEY_HEADER)
+        .and_then(|v| v.to_str().ok());
+    if key != Some(playground_key()) {
+        return ApiError::forbidden(
+            "This Playground action needs the key the page gets from /playground/context; \
+             reload the Playground.",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 async fn not_ported() -> ApiError {

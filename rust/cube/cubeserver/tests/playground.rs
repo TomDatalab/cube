@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
+use cubeserver::handlers::playground::{playground_key, PLAYGROUND_KEY_HEADER};
 use cubeserver::services::{
     AlwaysHealthy, AuthService, AuthenticatedRequest, MetaService, RequestContext,
     UnimplementedQueryService,
@@ -111,9 +112,13 @@ fn app(config: ServerConfig, auth: Arc<dyn AuthService>) -> axum::Router {
     })
 }
 
+/// Every helper sends the key the page gets from `/playground/context`, as
+/// the page does; `the_playground_key_is_needed_to_change_anything` goes
+/// without it.
 async fn get(router: axum::Router, path: &str) -> (StatusCode, String) {
     let request = Request::builder()
         .uri(path)
+        .header(PLAYGROUND_KEY_HEADER, playground_key())
         .body(Body::empty())
         .expect("a request");
     let response = router.oneshot(request).await.unwrap();
@@ -290,6 +295,7 @@ async fn post_json(router: axum::Router, path: &str, body: Value) -> (StatusCode
         .method("POST")
         .uri(path)
         .header(header::CONTENT_TYPE, "application/json")
+        .header(PLAYGROUND_KEY_HEADER, playground_key())
         .body(Body::from(body.to_string()))
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -358,12 +364,15 @@ async fn yaml_cubes_are_written_for_the_picked_tables() {
 
     let written = std::fs::read_to_string(dir.path().join("model/dfos_fiber_cable.yml")).unwrap();
     assert!(written.contains("data_source: sofiadb"), "{written}");
-    assert!(
-        written.contains("sql_table: dfos.`fiberCable`"),
-        "{written}"
-    );
+    assert!(written.contains("`dfos`.`fiberCable`"), "{written}");
     assert!(written.contains("name: fiber_count"), "{written}");
     assert!(written.contains("primary_key: true"), "{written}");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&written).unwrap();
+    assert_eq!(
+        doc["cubes"][0]["measures"],
+        serde_yaml::from_str::<serde_yaml::Value>("[{ name: count, type: count }]").unwrap(),
+        "{written}"
+    );
     // No Cube type for an array.
     assert!(!written.contains("tags"), "{written}");
     assert!(dir.path().join("model/dfos_fibersegment.yml").exists());
@@ -484,8 +493,11 @@ async fn the_data_sources_are_listed_without_their_passwords() {
     let (dir, mut config) = fixture();
     with_config_file(&dir, &mut config);
 
-    let (status, body) =
-        get_json(app(config, Arc::new(TokenIssuingAuth)), "/playground/data-sources").await;
+    let (status, body) = get_json(
+        app(config, Arc::new(TokenIssuingAuth)),
+        "/playground/data-sources",
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["editable"], json!(true));
@@ -525,11 +537,17 @@ async fn a_data_source_that_connects_is_added_to_cube_yml_and_env() {
     let yml = std::fs::read_to_string(&file).unwrap();
     assert!(yml.contains("  local:\n    type: sqlite\n"), "{yml}");
     // Still before the next top-level key, and that key is intact.
-    assert!(yml.ends_with("scheduled_refresh:\n  enabled: false\n"), "{yml}");
+    assert!(
+        yml.ends_with("scheduled_refresh:\n  enabled: false\n"),
+        "{yml}"
+    );
 
     let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
     assert!(env.starts_with("PORT=4000\n"), "{env}");
-    assert!(env.contains("CUBEJS_DS_LOCAL_DB_PASS='it'\\''s'\n"), "{env}");
+    assert!(
+        env.contains("CUBEJS_DS_LOCAL_DB_PASS='it'\\''s'\n"),
+        "{env}"
+    );
     assert!(!env.contains("CUBEJS_DS_LOCAL_DB_TYPE"), "{env}");
     assert!(!yml.contains("it's"), "{yml}");
 }
@@ -557,9 +575,15 @@ async fn a_data_source_that_does_not_connect_is_not_saved() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("Cannot connect"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("Cannot connect"),
+        "{body}"
+    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
-    assert_eq!(std::fs::read_to_string(dir.path().join(".env")).unwrap(), "PORT=4000\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "PORT=4000\n"
+    );
 }
 
 #[tokio::test]
@@ -576,7 +600,10 @@ async fn a_taken_or_malformed_name_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("already exists"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("already exists"),
+        "{body}"
+    );
 
     let (status, _) = post_json(
         router(),
@@ -627,13 +654,17 @@ async fn send_json(
         .method(method)
         .uri(path)
         .header(header::CONTENT_TYPE, "application/json")
+        .header(PLAYGROUND_KEY_HEADER, playground_key())
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
 
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// Adds a SQLite data source `local` to a deployment with a `cube.yml`.
@@ -678,9 +709,13 @@ async fn the_edit_form_gets_the_settings_but_not_the_password() {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["type"], "sqlite");
-    assert!(body["variables"]["CUBEJS_DB_NAME"].as_str().unwrap().ends_with("local.db"));
+    assert!(body["variables"]["CUBEJS_DB_NAME"]
+        .as_str()
+        .unwrap()
+        .ends_with("local.db"));
     assert_eq!(body["hasPassword"], json!(true));
-    assert!(!body.to_string().contains("secret"), "{body}");
+    assert_eq!(body["secrets"], json!(["CUBEJS_DB_PASS"]));
+    assert!(!body.to_string().contains("\"secret\""), "{body}");
 }
 
 #[tokio::test]
@@ -704,8 +739,12 @@ async fn an_edit_changes_the_setting_in_place_and_keeps_the_password() {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    let expected = format!("CUBEJS_DS_LOCAL_DB_NAME='{}'\n", other.to_string_lossy());
     assert_eq!(env.matches("CUBEJS_DS_LOCAL_DB_NAME=").count(), 1, "{env}");
-    assert!(env.contains("other.db"), "{env}");
+    assert!(env.contains(&expected), "{env}");
+    assert!(!env.contains("local.db"), "{env}");
+    // Not the variable the default source reads.
+    assert!(!env.contains("\nCUBEJS_DB_NAME="), "{env}");
     assert!(env.contains("CUBEJS_DS_LOCAL_DB_PASS='secret'"), "{env}");
 }
 
@@ -758,9 +797,13 @@ async fn a_source_a_cube_uses_or_the_default_one_is_not_deleted() {
     let yml = std::fs::read_to_string(&file).unwrap();
     let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
 
-    let (status, body) = send_json(router(), "DELETE", "/playground/data-sources/local", None).await;
+    let (status, body) =
+        send_json(router(), "DELETE", "/playground/data-sources/local", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("local_orders"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("local_orders"),
+        "{body}"
+    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), yml);
 
     let (status, _) = send_json(router(), "DELETE", "/playground/data-sources/default", None).await;
@@ -821,7 +864,9 @@ async fn the_rest_api_lists_and_adds_data_sources() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(std::fs::read_to_string(&file).unwrap().contains("  from_api:\n"));
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("  from_api:\n"));
 
     // What the Playground's Data Source page reads.
     let (status, body) = send_json(router(), "GET", "/playground/data-sources", None).await;
@@ -838,7 +883,8 @@ async fn the_rest_api_lists_and_adds_data_sources() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["type"], "sqlite");
 
-    let (status, body) = send_json(router(), "DELETE", "/cube/v1/data-sources/from_api", None).await;
+    let (status, body) =
+        send_json(router(), "DELETE", "/cube/v1/data-sources/from_api", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!std::fs::read_to_string(&file).unwrap().contains("from_api"));
 }
@@ -912,7 +958,10 @@ async fn tables_and_views_are_created_through_execute() {
     // A database error is the caller's, not the server's.
     let (status, body) = run("CREATE TABLE produtos (id INTEGER)").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("already exists"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("already exists"),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -933,10 +982,12 @@ async fn the_database_parameter_picks_where_the_statement_runs() {
     assert_eq!(body["database"], json!(other.to_string_lossy()));
     // SQLite's database is the file: the table is in the other one.
     assert!(other.exists());
-    assert!(!dir.path().join("local.db").exists() || {
-        let bytes = std::fs::read(dir.path().join("local.db")).unwrap();
-        !String::from_utf8_lossy(&bytes).contains("em_outro")
-    });
+    assert!(
+        !dir.path().join("local.db").exists() || {
+            let bytes = std::fs::read(dir.path().join("local.db")).unwrap();
+            !String::from_utf8_lossy(&bytes).contains("em_outro")
+        }
+    );
 }
 
 #[tokio::test]
@@ -966,9 +1017,21 @@ async fn a_request_without_a_connection_is_refused() {
     with_config_file(&dir, &mut config);
     let router = || app(config.clone(), Arc::new(ExecuteAuth));
 
-    let (status, body) = send_json(router(), "POST", "/cube/v1/execute", Some(json!({ "query": "SELECT 1" }))).await;
+    let (status, body) = send_json(
+        router(),
+        "POST",
+        "/cube/v1/execute",
+        Some(json!({ "query": "SELECT 1" })),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("Name the connection"), "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Name the connection"),
+        "{body}"
+    );
 
     let (status, _) = send_json(
         router(),
@@ -978,4 +1041,212 @@ async fn a_request_without_a_connection_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_playground_key_is_needed_to_change_anything() {
+    let (dir, mut config) = fixture();
+    two_sources(&mut config);
+    with_config_file(&dir, &mut config);
+    let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
+
+    let (_, context) = get_json(router(), "/playground/context").await;
+    assert_eq!(context["playgroundKey"], playground_key());
+
+    for (method, path) in [
+        ("POST", "/playground/generate-schema"),
+        ("GET", "/playground/data-sources"),
+        ("POST", "/playground/data-sources"),
+        ("POST", "/playground/data-sources/test"),
+        ("GET", "/playground/data-sources/default"),
+        ("PUT", "/playground/data-sources/default"),
+        ("DELETE", "/playground/data-sources/default"),
+    ] {
+        for key in [None, Some("not-the-key")] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(key) = key {
+                request = request.header(PLAYGROUND_KEY_HEADER, key);
+            }
+            let request = request
+                .body(Body::from(generate_request("yaml").to_string()))
+                .unwrap();
+            let response = router().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+    assert!(!dir.path().join("model/dfos_fiber_cable.yml").exists());
+}
+
+/// Another site may call the REST API, but gets no CORS answer from the
+/// Playground's helper API, so its page can neither read the key nor send
+/// the JSON the routes take.
+#[tokio::test]
+async fn only_the_rest_api_answers_another_site() {
+    let (_dir, config) = fixture();
+    let preflight = |path: &str| {
+        Request::builder()
+            .method("OPTIONS")
+            .uri(path)
+            .header(header::ORIGIN, "https://elsewhere.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let allows = |response: &axum::response::Response| {
+        response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    };
+
+    let router = app(config, Arc::new(TokenIssuingAuth));
+    let api = router
+        .clone()
+        .oneshot(preflight("/cube/v1/load"))
+        .await
+        .unwrap();
+    assert!(allows(&api));
+    for path in ["/playground/context", "/playground/data-sources"] {
+        let response = router.clone().oneshot(preflight(path)).await.unwrap();
+        assert!(!allows(&response), "{path}");
+    }
+}
+
+/// `customers` in two schemas of the default source.
+#[tokio::test]
+async fn same_named_tables_of_two_schemas_both_get_a_cube() {
+    let (dir, config) = fixture();
+    let columns = json!([{ "name": "id", "type": "integer", "attributes": [] }]);
+
+    let (status, body) = post_json(
+        app(config, Arc::new(TokenIssuingAuth)),
+        "/playground/generate-schema",
+        json!({
+            "format": "yaml",
+            "tables": [["public", "customers"], ["archive", "customers"]],
+            "tablesSchema": { "public": { "customers": columns }, "archive": { "customers": columns } },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let archive = std::fs::read_to_string(dir.path().join("model/archive_customers.yml")).unwrap();
+    assert!(archive.contains("\"archive\".\"customers\""), "{archive}");
+    let public = std::fs::read_to_string(dir.path().join("model/customers.yml")).unwrap();
+    assert!(public.contains("\"public\".\"customers\""), "{public}");
+}
+
+/// A generator's cube with the same name but for another table is left
+/// alone, not adopted in the picked table's place.
+#[tokio::test]
+async fn another_tables_generated_cube_is_not_adopted() {
+    let (dir, mut config) = fixture();
+    two_sources(&mut config);
+    let generated_dir = dir.path().join("model/sofiadb");
+    std::fs::create_dir_all(&generated_dir).unwrap();
+    let generated = "# Generated by sync. Do not edit.\ncubes:\n- name: dfos_fibersegment\n  data_source: sofiadb\n  sql_table: dfos.fiber_segment_v2\n";
+    std::fs::write(generated_dir.join("dfos_fibersegment.yml"), generated).unwrap();
+
+    let (status, body) = post_json(
+        app(config, Arc::new(TokenIssuingAuth)),
+        "/playground/generate-schema",
+        generate_request("yaml"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        std::fs::read_to_string(generated_dir.join("dfos_fibersegment.yml")).unwrap(),
+        generated
+    );
+    assert!(!dir.path().join("model/dfos_fiber_cable.yml").exists());
+}
+
+#[tokio::test]
+async fn a_password_in_a_url_is_neither_listed_nor_sent_to_the_form() {
+    let (dir, mut config) = fixture();
+    let file = dir.path().join("cube.yml");
+    std::fs::write(
+        &file,
+        "version: 1\ndata_sources:\n  default:\n    type: postgres\n    url: postgres://reader:hunter2@db:5432/sales\n",
+    )
+    .unwrap();
+    config.config_file = Some(file);
+    let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
+
+    let (status, body) = get_json(router(), "/playground/data-sources").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["dataSources"][0]["host"],
+        "postgres://reader@db:5432/sales"
+    );
+    assert!(!body.to_string().contains("hunter2"), "{body}");
+
+    let (status, body) = get_json(router(), "/playground/data-sources/default").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["secrets"], json!(["CUBEJS_DB_URL"]));
+    assert!(!body.to_string().contains("hunter2"), "{body}");
+}
+
+#[tokio::test]
+async fn a_value_written_in_cube_yml_is_not_cleared_from_the_form() {
+    let (dir, mut config) = fixture();
+    let file = with_config_file(&dir, &mut config);
+    let before = std::fs::read_to_string(&file).unwrap();
+
+    let (status, body) = send_json(
+        app(config, Arc::new(TokenIssuingAuth)),
+        "PUT",
+        "/playground/data-sources/default",
+        Some(json!({ "variables": { "CUBEJS_DB_HOST": "" } })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("cube.yml"),
+        "{body}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "PORT=4000\n"
+    );
+}
+
+#[tokio::test]
+async fn a_source_a_tenants_cube_uses_is_not_deleted() {
+    let (dir, mut config) = fixture();
+    let (file, _, _) = with_local_source(&dir, &mut config).await;
+    let tenant_model = dir.path().join("tenants/acme");
+    std::fs::create_dir_all(&tenant_model).unwrap();
+    std::fs::write(
+        tenant_model.join("orders.yml"),
+        "cubes:\n- name: acme_orders\n  data_source: local\n  sql_table: orders\n",
+    )
+    .unwrap();
+    let yml = std::fs::read_to_string(&file).unwrap()
+        + &format!(
+            "\ntenants:\n  claim: tenant\n  rules:\n    - match: acme\n      model_path: {}\n",
+            tenant_model.display()
+        );
+    std::fs::write(&file, &yml).unwrap();
+
+    let (status, body) = send_json(
+        app(config, Arc::new(TokenIssuingAuth)),
+        "DELETE",
+        "/playground/data-sources/local",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("acme_orders"),
+        "{body}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), yml);
 }

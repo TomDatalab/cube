@@ -241,7 +241,12 @@ pub fn build_app(state: AppState) -> Router {
         // The WebSocket transport authenticates with its own `authorization`
         // message, so it is not behind the HTTP auth middleware.
         .route(&format!("{base}/ws"), get(crate::ws::ws_handler))
-        .merge(authenticated);
+        .merge(authenticated)
+        // Cross-origin callers are the API's. The Playground's helper API,
+        // merged below, is for the page this server serves: another site
+        // gets no CORS answer from it, so it can neither read the key
+        // `/playground/context` hands out nor send the JSON the routes take.
+        .layer(cors);
 
     let router = match playground {
         Some(assets) => router
@@ -271,7 +276,6 @@ pub fn build_app(state: AppState) -> Router {
 
     router
         .layer(RequestBodyLimitLayer::new(max_request_size))
-        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
