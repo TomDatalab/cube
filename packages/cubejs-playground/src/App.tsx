@@ -20,6 +20,7 @@ import {
 } from './events';
 import { useAppContext } from './hooks';
 import { QUERY_BUILDER_COLOR_TOKENS } from './QueryBuilderV2';
+import { setPlaygroundKey } from './shared/helpers';
 
 const StyledLayoutContent = styled(Layout.Content)`
   height: 100%;
@@ -70,6 +71,7 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
     const res = await fetch('playground/context');
     const context = await res.json();
 
+    setPlaygroundKey(context.playgroundKey);
     setTelemetry(context.telemetry);
     setTracker(trackImpl);
     setAnonymousId(context.anonymousId, {

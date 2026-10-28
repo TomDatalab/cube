@@ -27,6 +27,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import envVarsDbMap from '../../shared/env-vars-db-map';
+import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
 import { Content, Header } from '../components/Ui';
 
@@ -76,7 +77,11 @@ const NAME_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
 async function request(url: string, options: RequestInit = {}) {
   const response = await fetch(url, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...playgroundKeyHeaders(),
+      ...(options.headers || {}),
+    },
   });
   let body: any = null;
   try {
@@ -91,7 +96,9 @@ async function request(url: string, options: RequestInit = {}) {
 }
 
 function databasesFor(connectors: string[]): Database[] {
-  const known: Database[] = envVarsDbMap.flatMap((group) => group.databases.map((db) => ({ ...db, settings: group.settings as Setting[] })));
+  const known: Database[] = envVarsDbMap.flatMap((group) => group.databases.map(
+    (db) => ({ ...db, settings: group.settings as Setting[] })
+  ));
   const list = known.filter((db) => connectors.includes(db.driver));
   connectors
     .filter((driver) => !known.some((db) => db.driver === driver))
@@ -126,7 +133,8 @@ export function DataSourcesPage() {
 
   const [adding, setAdding] = useState(false);
   // The data source being edited; `adding` is set too, for the form.
-  const [editing, setEditing] = useState<{ name: string; hasPassword: boolean } | null>(null);
+  // `secrets` are the settings it has but the server does not send back.
+  const [editing, setEditing] = useState<{ name: string; secrets: string[] } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [initialValues, setInitialValues] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<Database | null>(null);
@@ -172,7 +180,8 @@ export function DataSourcesPage() {
   }
 
   // When editing, every field the form shows is sent, empty ones too: the
-  // server clears an emptied setting, and keeps the password if it is empty.
+  // server clears an emptied setting, and keeps a secret (the password, say)
+  // if it is empty.
   function variables(values: Record<string, string>) {
     const out: Record<string, string> = editing ? {} : { CUBEJS_DB_TYPE: selected!.driver };
     selected!.settings
@@ -206,15 +215,16 @@ export function DataSourcesPage() {
   }
 
   // The server replaces itself to load the new source; wait until it
-  // answers again, then show the list it now serves.
-  async function waitForRestart() {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    for (let i = 0; i < 60; i++) {
-      try {
-        await request('playground/context');
-        break;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+  // answers again, then show the list it now serves. The new process has a
+  // new key, so it is taken from the answer.
+  async function waitForRestart(attempts = 60): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, attempts === 60 ? 2000 : 1000));
+    try {
+      const context = await request('playground/context');
+      setPlaygroundKey(context.playgroundKey);
+    } catch {
+      if (attempts > 1) {
+        await waitForRestart(attempts - 1);
       }
     }
   }
@@ -258,7 +268,7 @@ export function DataSourcesPage() {
       const body = await request(`playground/data-sources/${encodeURIComponent(ds.name)}`);
       const db = databaseOf(body.type) || { title: body.type, driver: body.type, settings: GENERIC_SETTINGS };
       closeForm();
-      setEditing({ name: ds.name, hasPassword: !!body.hasPassword });
+      setEditing({ name: ds.name, secrets: body.secrets || [] });
       setSelected(db);
       setInitialValues({ name: ds.name, ...body.variables });
       setAdding(true);
@@ -275,7 +285,7 @@ export function DataSourcesPage() {
       });
       await afterChange(body, 'deleted');
     } catch (e: any) {
-      message.error({ content: e.message, duration: 8 });
+      message.error(e.message, 8);
     } finally {
       setDeleting(null);
     }
@@ -498,8 +508,8 @@ export function DataSourcesPage() {
               <Form.Item key={setting.env} label={setting.title || setting.env} name={setting.env}>
                 <SettingControl
                   setting={setting}
-                  placeholder={editing?.hasPassword && setting.env === 'CUBEJS_DB_PASS'
-                    ? 'Leave empty to keep the current password'
+                  placeholder={editing?.secrets.includes(setting.env)
+                    ? 'Leave empty to keep the current value'
                     : undefined}
                 />
               </Form.Item>

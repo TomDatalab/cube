@@ -112,6 +112,13 @@ type Result = {
   body: string;
 };
 
+function statusColor(status: number) {
+  if (status < 300) {
+    return 'green';
+  }
+  return status < 500 ? 'orange' : 'red';
+}
+
 export function ApiConsole() {
   const playgroundContext = usePlaygroundContext();
   // The token set on the Playground page (security context), or the one the
@@ -325,7 +332,7 @@ export function ApiConsole() {
             style={{ marginTop: 16 }}
             title={(
               <Space data-testid="api-console-status">
-                <Tag color={result.status < 300 ? 'green' : result.status < 500 ? 'orange' : 'red'}>
+                <Tag color={statusColor(result.status)}>
                   {result.status} {result.statusText}
                 </Tag>
                 <Text type="secondary">{result.ms} ms</Text>

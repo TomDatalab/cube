@@ -6,10 +6,25 @@ export function ucfirst(s: string): string {
   return s[0].toUpperCase() + s.slice(1);
 }
 
+// The key `playground/context` hands the page; the server wants it on the
+// routes that change the data model or the data sources.
+let playgroundKey = '';
+
+export function setPlaygroundKey(key?: string | null) {
+  playgroundKey = key || '';
+}
+
+export function playgroundKeyHeaders(): Record<string, string> {
+  return playgroundKey ? { 'X-Playground-Key': playgroundKey } : {};
+}
+
 export function playgroundFetch(url, options: any = {}) {
   const { retries = 0, ...restOptions } = options;
 
-  return fetch(url, restOptions)
+  return fetch(url, {
+    ...restOptions,
+    headers: { ...(restOptions.headers || {}), ...playgroundKeyHeaders() },
+  })
     .then(async (r) => {
       if (r.status === 500) {
         let errorText = await r.text();
