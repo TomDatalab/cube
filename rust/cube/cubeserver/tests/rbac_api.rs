@@ -16,11 +16,15 @@ use axum::http::{header, Method, Request, StatusCode};
 use cubeauth::AuthConfig;
 use cubeserver::auth_adapter::CubeAuthService;
 use cubeserver::rbac::config::{check_rbac_compatible, RbacConfig};
+use cubeserver::rbac::enforce::WORKSPACE_REQUIRED;
 use cubeserver::rbac::identity::{hash_password, verify_password};
 use cubeserver::rbac::store::Store;
 use cubeserver::rbac::testing::FakeAuthz;
 use cubeserver::rbac::{Authz, ObjectRef, Rbac, Relationship, RelationshipFilter};
-use cubeserver::services::{AlwaysHealthy, MetaService, RequestContext, UnimplementedQueryService};
+use cubeserver::services::{
+    AlwaysHealthy, MetaService, NormalizedRequest, QueryService, RequestContext,
+    UnimplementedQueryService,
+};
 use cubeserver::{build_app, ApiError, AppState, ServerConfig};
 use http_body_util::BodyExt;
 use serde_json::{json, Map, Value};
@@ -45,8 +49,17 @@ fn auth_config() -> AuthConfig {
     AuthConfig::builder()
         .api_secret(SECRET)
         .enforce_security_checks(true)
-        // `data_sources` too, so a 403 there comes from the RBAC check.
-        .default_api_scopes(["graphql", "meta", "data", "sql", "data_sources"])
+        // `data_sources`, `execute` and `jobs` too, so a 403 there comes from
+        // the RBAC check.
+        .default_api_scopes([
+            "graphql",
+            "meta",
+            "data",
+            "sql",
+            "data_sources",
+            "execute",
+            "jobs",
+        ])
         .build()
 }
 
@@ -840,6 +853,10 @@ async fn scenario(store: Store) -> Scenario {
 
 async fn scenario_with(store: Store, server: ServerConfig) -> Scenario {
     let env = env_with_server(store, rbac_config(Duration::ZERO), server).await;
+    scenario_from_env(env).await
+}
+
+async fn scenario_from_env(env: Env) -> Scenario {
     let admin = admin_token(&env).await;
     for id in ["ana", "bia", "caio"] {
         let (status, body) = create_user_as(&env, &admin, id, &format!("{id}-password-1")).await;
@@ -2180,3 +2197,1087 @@ db_test!(a_release_needs_the_connection_still_in_the_org, |store| {
         .unwrap();
     assert!(releases.is_empty(), "{releases:?}");
 });
+
+// ---- objects and per-workspace data access ----
+
+const DATA_MODEL: &str = r#"
+cubes:
+  - name: a_orders
+    data_source: a_sqlite
+    sql_table: orders
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+    measures:
+      - name: count
+        type: count
+
+  - name: b_orders
+    data_source: b_sqlite
+    sql_table: orders
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+    measures:
+      - name: count
+        type: count
+
+views:
+  - name: b_view
+    cubes:
+      - join_path: b_orders
+        includes: [status, count]
+"#;
+
+/// Answers every query with no rows and keeps what it was asked.
+#[derive(Debug, Default)]
+struct RecordingQuery {
+    seen: std::sync::Mutex<Vec<Value>>,
+}
+
+impl RecordingQuery {
+    fn record(&self, request: &NormalizedRequest) -> Value {
+        let queries: Vec<Value> = request
+            .queries
+            .iter()
+            .map(|q| serde_json::to_value(q).unwrap())
+            .collect();
+        self.seen.lock().unwrap().extend(queries.iter().cloned());
+        queries.into_iter().next().unwrap_or(Value::Null)
+    }
+
+    fn seen(&self) -> Vec<Value> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl QueryService for RecordingQuery {
+    async fn load(
+        &self,
+        _: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        let query = self.record(&request);
+        Ok(json!({ "data": [], "query": query }))
+    }
+
+    async fn sql(&self, _: &RequestContext, request: NormalizedRequest) -> Result<Value, ApiError> {
+        self.record(&request);
+        Ok(json!({ "sql": { "sql": ["SELECT 1", []] } }))
+    }
+
+    async fn dry_run(
+        &self,
+        _: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        self.record(&request);
+        Ok(json!({ "queryType": "regularQuery" }))
+    }
+}
+
+struct DataScenario {
+    s: Scenario,
+    _dir: tempfile::TempDir,
+    /// Owned by ana (organization A); `a_sqlite` is released to it; bia is
+    /// a viewer and caio an editor.
+    w1: String,
+    /// Organization A too; `b_sqlite` is released to it; nobody else is in it.
+    w2: String,
+    queries: Arc<RecordingQuery>,
+    /// The server's state, for the WebSocket transport.
+    state: AppState,
+}
+
+/// Organization A with the connections `a_sqlite` and `b_sqlite`, a server
+/// whose model has `a_orders` (on `a_sqlite`), `b_orders` and `b_view` (on
+/// `b_sqlite`), and a query service that records what reaches it.
+async fn data_scenario(store: Store) -> DataScenario {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("cube.yml");
+    std::fs::write(
+        &file,
+        "version: 1\ndata_sources:\n  default:\n    type: postgres\n    host: db\n    password: secret\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".env"), "PORT=4000\n").unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir(&model).unwrap();
+    std::fs::write(model.join("model.yml"), DATA_MODEL).unwrap();
+    let server = ServerConfig {
+        config_file: Some(file),
+        schema_path: model.to_string_lossy().into_owned(),
+        ..ServerConfig::default()
+    };
+
+    let queries = Arc::new(RecordingQuery::default());
+    let authz = Arc::new(FakeAuthz::new());
+    let rbac = Arc::new(
+        Rbac::with_parts(authz.clone(), store, rbac_config(Duration::ZERO))
+            .await
+            .expect("rbac starts"),
+    );
+    let mut state = state_with(Some(rbac.clone()), server);
+    state.query = queries.clone();
+    state.meta = Arc::new(cubeserver::meta_adapter::ModelMetaService::load(&model, false).unwrap());
+    let env = Env {
+        router: build_app(state.clone()),
+        rbac,
+        authz,
+    };
+    let s = scenario_from_env(env).await;
+    let env = &s.env;
+    for name in ["a_sqlite", "b_sqlite"] {
+        let (status, body) = add_connection(env, &s.ana, &s.org_a, name, &dir).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let w2 = workspace_id(env, &s.ana, &s.org_a, "W2").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "a_sqlite").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w2, "b_sqlite").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "viewer").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "caio", "editor").await,
+        StatusCode::OK
+    );
+    DataScenario {
+        s,
+        _dir: dir,
+        w1,
+        w2,
+        queries,
+        state,
+    }
+}
+
+struct Answer {
+    status: StatusCode,
+    headers: axum::http::HeaderMap,
+    bytes: Vec<u8>,
+}
+
+impl Answer {
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.bytes).unwrap_or(Value::Null)
+    }
+}
+
+/// A request with extra headers, answered with its raw body.
+async fn call(
+    router: &axum::Router,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<Value>,
+) -> Answer {
+    let mut request = Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = match body {
+        Some(body) => request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    Answer {
+        status,
+        headers,
+        bytes,
+    }
+}
+
+/// `POST /v1/load` in `workspace` (no header when `None`).
+async fn load_in(
+    env: &Env,
+    token: &str,
+    workspace: Option<&str>,
+    query: Value,
+) -> (StatusCode, Value) {
+    let headers: Vec<(&str, &str)> = workspace
+        .map(|ws| vec![("x-cube-workspace", ws)])
+        .unwrap_or_default();
+    let answer = call(
+        &env.router,
+        Method::POST,
+        "/cube/v1/load",
+        Some(token),
+        &headers,
+        Some(json!({ "query": query })),
+    )
+    .await;
+    (answer.status, answer.json())
+}
+
+async fn meta_cubes(env: &Env, token: &str, workspace: Option<&str>) -> (StatusCode, Vec<String>) {
+    let headers: Vec<(&str, &str)> = workspace
+        .map(|ws| vec![("x-cube-workspace", ws)])
+        .unwrap_or_default();
+    let answer = call(
+        &env.router,
+        Method::GET,
+        "/cube/v1/meta",
+        Some(token),
+        &headers,
+        None,
+    )
+    .await;
+    let body = answer.json();
+    let mut cubes: Vec<String> = body["cubes"]
+        .as_array()
+        .map(|cubes| {
+            cubes
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    cubes.sort();
+    (answer.status, cubes)
+}
+
+async fn create_object(env: &Env, token: &str, ws: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/workspaces/{ws}/objects"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+fn pipeline(name: &str, content: &str) -> Value {
+    json!({ "type": "pipeline", "name": name, "contentType": "application/json", "content": content })
+}
+
+db_test!(
+    editor_creates_and_updates_objects_viewer_only_reads,
+    |store| {
+        let d = data_scenario(store).await;
+        let (env, w1) = (&d.s.env, &d.w1);
+
+        let (status, _) = create_object(env, &d.s.bia, w1, pipeline("p", "{}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, created) = create_object(env, &d.s.caio, w1, pipeline("p", "{\"a\":1}")).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["version"], json!(1));
+        assert_eq!(created["workspaceId"], json!(w1));
+        assert_eq!(created["createdBy"], "caio");
+        let id = created["id"].as_str().unwrap().to_string();
+        let path = format!("/cube/v1/objects/{id}");
+
+        let (status, read) = send(&env.router, Method::GET, &path, Some(&d.s.bia), None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["content"], "{\"a\":1}");
+        assert_eq!(read["name"], "p");
+
+        let update = json!({ "content": "{\"a\":2}", "version": 1 });
+        let (status, _) = send(
+            &env.router,
+            Method::PUT,
+            &path,
+            Some(&d.s.bia),
+            Some(update.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = send(&env.router, Method::DELETE, &path, Some(&d.s.bia), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, updated) = send(
+            &env.router,
+            Method::PUT,
+            &path,
+            Some(&d.s.caio),
+            Some(update),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["version"], json!(2));
+        assert_eq!(updated["updatedBy"], "caio");
+        let (_, read) = send(&env.router, Method::GET, &path, Some(&d.s.bia), None).await;
+        assert_eq!(read["content"], "{\"a\":2}");
+
+        let (status, _) = send(&env.router, Method::DELETE, &path, Some(&d.s.caio), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(&env.router, Method::GET, &path, Some(&d.s.caio), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(env
+            .rbac
+            .store
+            .object(id.parse().unwrap())
+            .await
+            .unwrap()
+            .is_none());
+    }
+);
+
+db_test!(stale_version_is_409, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let (_, created) = create_object(env, &d.s.caio, &d.w1, pipeline("p", "1")).await;
+    let path = format!("/cube/v1/objects/{}", created["id"].as_str().unwrap());
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &path,
+        Some(&d.s.caio),
+        Some(json!({ "content": "2", "version": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A second writer still holding version 1.
+    let (status, body) = send(
+        &env.router,
+        Method::PUT,
+        &path,
+        Some(&d.s.ana),
+        Some(json!({ "content": "3", "version": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, read) = send(&env.router, Method::GET, &path, Some(&d.s.caio), None).await;
+    assert_eq!(read["content"], "2");
+    assert_eq!(read["version"], json!(2));
+    // `version` is required.
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &path,
+        Some(&d.s.caio),
+        Some(json!({ "content": "4" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+});
+
+db_test!(object_listing_filters_by_type_and_omits_content, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    create_object(env, &d.s.caio, &d.w1, pipeline("p1", "secret-1")).await;
+    create_object(env, &d.s.caio, &d.w1, pipeline("p2", "secret-2")).await;
+    let (status, _) = create_object(
+        env,
+        &d.s.caio,
+        &d.w1,
+        json!({ "type": "dashboard", "name": "d", "contentType": "text/plain", "content": "secret-3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Another workspace's object never shows up.
+    create_object(env, &d.s.ana, &d.w2, pipeline("other", "secret-4")).await;
+
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{}/objects?type=pipeline", d.w1),
+        Some(&d.s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(names(&list, "objects"), ["p1", "p2"]);
+    assert!(!list.to_string().contains("secret"), "{list}");
+    assert!(list["objects"][0]["content"].is_null(), "{list}");
+
+    let (_, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{}/objects", d.w1),
+        Some(&d.s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(names(&list, "objects"), ["d", "p1", "p2"]);
+    // bia is not in W2.
+    let (status, _) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{}/objects", d.w2),
+        Some(&d.s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+db_test!(raw_content_with_accept_header, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let xml = "<pipeline><step name=\"a\"/></pipeline>";
+    let (status, created) = create_object(
+        env,
+        &d.s.caio,
+        &d.w1,
+        json!({ "type": "pipeline", "name": "x", "contentType": "application/xml", "content": xml }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let path = format!("/cube/v1/objects/{}", created["id"].as_str().unwrap());
+
+    let raw = call(
+        &env.router,
+        Method::GET,
+        &path,
+        Some(&d.s.bia),
+        &[("accept", "application/xml")],
+        None,
+    )
+    .await;
+    assert_eq!(raw.status, StatusCode::OK);
+    assert_eq!(raw.headers[header::CONTENT_TYPE], "application/xml");
+    assert_eq!(raw.bytes, xml.as_bytes());
+
+    // Any other Accept gets the JSON envelope.
+    let wrapped = call(
+        &env.router,
+        Method::GET,
+        &path,
+        Some(&d.s.bia),
+        &[("accept", "application/json")],
+        None,
+    )
+    .await;
+    assert_eq!(wrapped.status, StatusCode::OK);
+    assert_eq!(wrapped.json()["content"], xml);
+    assert_eq!(wrapped.json()["contentType"], "application/xml");
+
+    // A content type that could not be a header value is refused.
+    let (status, _) = create_object(
+        env,
+        &d.s.caio,
+        &d.w1,
+        json!({ "type": "pipeline", "name": "y", "contentType": "text/plain\r\nX-Evil: 1", "content": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+});
+
+db_test!(base64_content_roundtrips_binary, |store| {
+    use base64::Engine;
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let bytes: Vec<u8> = vec![0, 159, 146, 150, 255, 10, 13];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let (status, created) = create_object(
+        env,
+        &d.s.caio,
+        &d.w1,
+        json!({ "type": "model", "name": "bin", "contentType": "application/octet-stream",
+                "content": encoded, "encoding": "base64" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        env.rbac.store.object(id).await.unwrap().unwrap().content,
+        bytes
+    );
+    let path = format!("/cube/v1/objects/{id}");
+
+    let (_, read) = send(&env.router, Method::GET, &path, Some(&d.s.bia), None).await;
+    assert_eq!(read["encoding"], "base64");
+    assert_eq!(read["content"], json!(encoded));
+
+    let raw = call(
+        &env.router,
+        Method::GET,
+        &path,
+        Some(&d.s.bia),
+        &[("accept", "application/octet-stream")],
+        None,
+    )
+    .await;
+    assert_eq!(raw.bytes, bytes);
+
+    // Malformed base64 is a 400, not stored garbage.
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &path,
+        Some(&d.s.caio),
+        Some(json!({ "content": "not base64!", "encoding": "base64", "version": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+});
+
+db_test!(another_orgs_object_is_404, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let (status, body) = create_user_as(env, &d.s.admin, "dan", "dan-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let dan = login_token(&env.router, "dan", "dan-password-1").await;
+    let org_b = create_org(env, &d.s.admin, "B", "dan").await;
+    let wb = workspace_id(env, &dan, &org_b, "WB").await;
+    let (status, created) = create_object(env, &dan, &wb, pipeline("theirs", "secret")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let path = format!("/cube/v1/objects/{}", created["id"].as_str().unwrap());
+
+    // Neither a member of organization A nor its owner sees it.
+    for token in [&d.s.caio, &d.s.ana] {
+        let (status, body) = send(&env.router, Method::GET, &path, Some(token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(!body.to_string().contains("secret"));
+        let (status, _) = send(
+            &env.router,
+            Method::PUT,
+            &path,
+            Some(token),
+            Some(json!({ "content": "mine", "version": 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(&env.router, Method::DELETE, &path, Some(token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = create_object(env, token, &wb, pipeline("intruder", "x")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    // Unknown and malformed ids look the same.
+    for path in [
+        format!("/cube/v1/objects/{}", uuid::Uuid::new_v4()),
+        "/cube/v1/objects/not-a-uuid".to_string(),
+    ] {
+        let (status, _) = send(&env.router, Method::GET, &path, Some(&d.s.caio), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    // The platform admin sees it.
+    let (status, _) = send(&env.router, Method::GET, &path, Some(&d.s.admin), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, read) = send(&env.router, Method::GET, &path, Some(&dan), None).await;
+    assert_eq!(read["content"], "secret");
+});
+
+db_test!(a_query_on_a_released_connection_runs, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let query = json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.status"] });
+    let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(d.queries.seen().len(), 1);
+    assert_eq!(d.queries.seen()[0]["measures"], json!(["a_orders.count"]));
+    for path in ["/cube/v1/sql", "/cube/v1/dry-run", "/cube/v1/subscribe"] {
+        let answer = call(
+            &env.router,
+            Method::POST,
+            path,
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": query })),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "{path} {}", answer.json());
+    }
+    assert_eq!(d.queries.seen().len(), 4);
+});
+
+db_test!(a_query_touching_an_unreleased_cube_is_403, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let query = json!({ "measures": ["a_orders.count", "b_orders.count"] });
+    let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("b_orders"),
+        "{body}"
+    );
+    // Not even an organization owner: the workspace decides.
+    let (status, _) = load_in(env, &d.s.ana, Some(&d.w1), query.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    for path in ["/cube/v1/sql", "/cube/v1/dry-run"] {
+        let answer = call(
+            &env.router,
+            Method::POST,
+            path,
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": query })),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{path}");
+    }
+    // A member not in the model fails closed.
+    let (status, _) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["nowhere.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // A member of the workspace only: bia is not in W2.
+    let (status, _) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w2),
+        json!({ "measures": ["b_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(d.queries.seen().is_empty(), "{:?}", d.queries.seen());
+});
+
+db_test!(
+    a_forbidden_member_hidden_in_a_nested_or_filter_is_403,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let query = json!({
+            "measures": ["a_orders.count"],
+            "filters": [{ "or": [
+                { "member": "a_orders.status", "operator": "equals", "values": ["x"] },
+                { "and": [
+                    { "member": "a_orders.status", "operator": "set" },
+                    { "member": "b_orders.status", "operator": "equals", "values": ["shipped"] },
+                ] },
+            ] }],
+        });
+        let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("b_orders"),
+            "{body}"
+        );
+        // Ordering and time dimensions count as well.
+        for query in [
+            json!({ "measures": ["a_orders.count"], "order": [["b_orders.status", "asc"]] }),
+            json!({ "measures": ["a_orders.count"], "segments": ["b_orders.some_segment"] }),
+            json!({ "measures": ["a_orders.count"],
+                "timeDimensions": [{ "dimension": "b_orders.status", "granularity": "day" }] }),
+        ] {
+            let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{query} {body}");
+        }
+        assert!(d.queries.seen().is_empty(), "{:?}", d.queries.seen());
+    }
+);
+
+db_test!(a_view_over_an_unreleased_cube_is_403, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["b_view.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("b_view"), "{body}");
+    assert!(d.queries.seen().is_empty());
+    // In W2, where b_sqlite is released, the view runs.
+    let (status, body) = load_in(
+        env,
+        &d.s.ana,
+        Some(&d.w2),
+        json!({ "measures": ["b_view.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(meta_shows_only_released_cubes, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    assert_eq!(
+        meta_cubes(env, &d.s.bia, Some(&d.w1)).await,
+        (StatusCode::OK, vec!["a_orders".to_string()])
+    );
+    assert_eq!(
+        meta_cubes(env, &d.s.ana, Some(&d.w2)).await,
+        (
+            StatusCode::OK,
+            vec!["b_orders".to_string(), "b_view".to_string()]
+        )
+    );
+    // Without a workspace: the connections the user can query somewhere.
+    assert_eq!(
+        meta_cubes(env, &d.s.bia, None).await,
+        (StatusCode::OK, vec!["a_orders".to_string()])
+    );
+    assert_eq!(
+        meta_cubes(env, &d.s.ana, None).await.1,
+        ["a_orders", "b_orders", "b_view"]
+    );
+    // A workspace the user is not in shows nothing of it.
+    let (status, cubes) = meta_cubes(env, &d.s.bia, Some(&d.w2)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(cubes.is_empty());
+    // The platform admin sees everything, with or without a workspace.
+    assert_eq!(
+        meta_cubes(env, &d.s.admin, None).await.1,
+        ["a_orders", "b_orders", "b_view"]
+    );
+    // A user with no workspace sees no cube.
+    let (status, body) = create_user_as(env, &d.s.admin, "dan", "dan-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let dan = login_token(&env.router, "dan", "dan-password-1").await;
+    assert_eq!(meta_cubes(env, &dan, None).await, (StatusCode::OK, vec![]));
+});
+
+db_test!(
+    data_requests_without_a_workspace_are_400_for_members_and_fine_for_admins,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let query = json!({ "measures": ["a_orders.count"] });
+        for path in [
+            "/cube/v1/load",
+            "/cube/v1/sql",
+            "/cube/v1/dry-run",
+            "/cube/v1/subscribe",
+        ] {
+            let answer = call(
+                &env.router,
+                Method::POST,
+                path,
+                Some(&d.s.bia),
+                &[],
+                Some(json!({ "query": query })),
+            )
+            .await;
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(answer.json()["error"], "X-Cube-Workspace is required");
+        }
+        assert!(d.queries.seen().is_empty());
+        let (status, body) = load_in(
+            env,
+            &d.s.admin,
+            None,
+            json!({ "measures": ["a_orders.count", "b_orders.count"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(d.queries.seen().len(), 1);
+    }
+);
+
+db_test!(graphql_goes_through_the_same_check, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let graphql = |token: String, workspace: Option<String>, query: &'static str| {
+        let router = env.router.clone();
+        async move {
+            let headers: Vec<(&str, &str)> = workspace
+                .as_deref()
+                .map(|ws| vec![("x-cube-workspace", ws)])
+                .unwrap_or_default();
+            call(
+                &router,
+                Method::POST,
+                "/cube/graphql",
+                Some(&token),
+                &headers,
+                Some(json!({ "query": query })),
+            )
+            .await
+            .json()
+        }
+    };
+    let b = "{ cube { b_orders { count } } }";
+    let a = "{ cube { a_orders { count } } }";
+
+    let body = graphql(d.s.bia.clone(), Some(d.w1.clone()), b).await;
+    assert!(!body["errors"].as_array().unwrap().is_empty(), "{body}");
+    // Without a workspace the query check refuses even a released cube.
+    let body = graphql(d.s.bia.clone(), None, a).await;
+    let errors = body["errors"].to_string();
+    assert!(errors.contains("X-Cube-Workspace is required"), "{body}");
+    // ana sees b_orders in the schema without a workspace (she manages the
+    // connection), but W1 has not released it: the query check refuses.
+    let body = graphql(d.s.ana.clone(), Some(d.w1.clone()), b).await;
+    assert!(!body["errors"].as_array().unwrap().is_empty(), "{body}");
+    assert!(d.queries.seen().is_empty(), "{:?}", d.queries.seen());
+
+    let body = graphql(d.s.bia.clone(), Some(d.w1.clone()), a).await;
+    assert!(body["errors"].is_null(), "{body}");
+    assert_eq!(d.queries.seen().len(), 1);
+});
+
+const ADMIN_ONLY: &str = "Permission denied: platform admins only";
+
+db_test!(cubesql_is_admin_only, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let routes = [
+        (
+            Method::POST,
+            "/cube/v1/cubesql",
+            Some(json!({ "query": "SELECT 1" })),
+        ),
+        (
+            Method::POST,
+            "/cube/v1/convert-query",
+            Some(json!({ "query": "SELECT 1" })),
+        ),
+        (
+            Method::POST,
+            "/cube/v1/pre-aggregations/can-use",
+            Some(json!({})),
+        ),
+        (
+            Method::POST,
+            "/cube/v1/pre-aggregations/jobs",
+            Some(json!({})),
+        ),
+        (Method::GET, "/cube-system/v1/context", None),
+        (Method::GET, "/cube-system/v1/pre-aggregations", None),
+        (
+            Method::POST,
+            "/cube-system/v1/pre-aggregations/build",
+            Some(json!({})),
+        ),
+    ];
+    for (method, path, body) in routes {
+        let answer = call(
+            &env.router,
+            method.clone(),
+            path,
+            Some(&d.s.ana),
+            &[("x-cube-workspace", &d.w1)],
+            body.clone(),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{method} {path}");
+        assert_eq!(answer.json()["error"], ADMIN_ONLY, "{method} {path}");
+        // The admin gets past the RBAC check (the route's own checks, such
+        // as the Playground signature of /cube-system, still apply).
+        let answer = call(
+            &env.router,
+            method.clone(),
+            path,
+            Some(&d.s.admin),
+            &[],
+            body,
+        )
+        .await;
+        assert_ne!(answer.json()["error"], ADMIN_ONLY, "{method} {path}");
+    }
+});
+
+db_test!(
+    execute_needs_workspace_owner_and_a_released_connection,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let execute = |token: String, workspace: Option<String>, connection: Value| {
+            let router = env.router.clone();
+            async move {
+                let headers: Vec<(&str, &str)> = workspace
+                    .as_deref()
+                    .map(|ws| vec![("x-cube-workspace", ws)])
+                    .unwrap_or_default();
+                let answer = call(
+                    &router,
+                    Method::POST,
+                    "/cube/v1/execute",
+                    Some(&token),
+                    &headers,
+                    Some(json!({ "connection": connection, "query": "SELECT 1 AS one" })),
+                )
+                .await;
+                (answer.status, answer.json())
+            }
+        };
+        let w1 = Some(d.w1.clone());
+
+        // An editor cannot execute; an owner can, on a released connection only.
+        let (status, _) = execute(d.s.caio.clone(), w1.clone(), json!("a_sqlite")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            set_role(env, &d.s.ana, &d.w1, "caio", "owner").await,
+            StatusCode::OK
+        );
+        let (status, body) = execute(d.s.caio.clone(), None, json!("a_sqlite")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "X-Cube-Workspace is required");
+        let (status, body) = execute(d.s.caio.clone(), w1.clone(), json!("b_sqlite")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, _) = execute(d.s.caio.clone(), w1.clone(), json!("default")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, body) = execute(d.s.caio.clone(), w1.clone(), json!("a_sqlite")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["rows"], json!([[1]]), "{body}");
+
+        // Ad hoc settings: platform admins only.
+        let database = d._dir.path().join("adhoc.db");
+        let settings =
+            json!({ "CUBEJS_DB_TYPE": "sqlite", "CUBEJS_DB_NAME": database.to_string_lossy() });
+        let (status, _) = execute(d.s.caio.clone(), w1.clone(), settings.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, body) = execute(d.s.admin.clone(), None, settings).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = execute(d.s.admin.clone(), None, json!("b_sqlite")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+);
+
+db_test!(spicedb_down_means_503_not_data, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let (_, created) = create_object(env, &d.s.caio, &d.w1, pipeline("p", "secret")).await;
+    let path = format!("/cube/v1/objects/{}", created["id"].as_str().unwrap());
+
+    env.authz.set_failing(true);
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, _) = login(&env.router, "bia", "bia-password-1").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, body) = send(&env.router, Method::GET, &path, Some(&d.s.bia), None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(!body.to_string().contains("secret"));
+    let (status, _) = meta_cubes(env, &d.s.bia, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    env.authz.set_failing(false);
+    assert!(d.queries.seen().is_empty());
+});
+
+// The middleware already answers 503 when SpiceDB is down (it resolves the
+// identity there), so this calls the RBAC services directly with an
+// identity in hand: they must fail closed on their own.
+db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
+    use cubeserver::rbac::enforce::{ModelIndex, RbacMetaService, RbacQueryService};
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let model = Arc::new(ModelIndex::new(
+        d._dir.path().join("model"),
+        cubemodel::TemplateContext::default(),
+    ));
+    let query = RbacQueryService::new(d.queries.clone(), env.rbac.clone(), model.clone());
+    let meta = RbacMetaService::new(
+        Arc::new(
+            cubeserver::meta_adapter::ModelMetaService::load(d._dir.path().join("model"), false)
+                .unwrap(),
+        ),
+        env.rbac.clone(),
+        model,
+    );
+    let ctx = RequestContext {
+        user: Some("bia".into()),
+        workspace: Some(d.w1.clone()),
+        ..RequestContext::default()
+    };
+    let request = |measure: &str| {
+        let value = json!({ "measures": [measure] });
+        let (query_type, queries) = cubequery::get_normalized_queries(
+            &value,
+            false,
+            None,
+            &cubequery::QueryConfig::default(),
+        )
+        .unwrap();
+        let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+        NormalizedRequest {
+            query_type,
+            queries,
+            pivot_query,
+        }
+    };
+
+    query.load(&ctx, request("a_orders.count")).await.unwrap();
+    assert_eq!(d.queries.seen().len(), 1);
+    let err = query
+        .load(&ctx, request("b_orders.count"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::FORBIDDEN);
+    let cubes = meta.meta(&ctx, false).await.unwrap();
+    assert_eq!(cubes["cubes"].as_array().unwrap().len(), 1, "{cubes}");
+
+    env.authz.set_failing(true);
+    let err = query
+        .load(&ctx, request("a_orders.count"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    for ctx in [
+        ctx.clone(),
+        RequestContext {
+            workspace: None,
+            ..ctx.clone()
+        },
+    ] {
+        let err = meta.meta(&ctx, false).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    env.authz.set_failing(false);
+    assert_eq!(d.queries.seen().len(), 1);
+});
+
+db_test!(
+    the_websocket_names_its_workspace_when_authenticating,
+    |store| {
+        let d = data_scenario(store).await;
+        let load = |id: u32, measure: &str| {
+            json!({ "method": "load", "messageId": id, "params": { "query": { "measures": [measure] } } })
+            .to_string()
+        };
+
+        // No workspace: data methods are refused like the HTTP ones.
+        let recorder = Arc::new(Recorder::default());
+        let server = cubeserver::ws::SubscriptionServer::new(d.state.clone(), recorder.clone());
+        server
+            .process_message("c1", &json!({ "authorization": d.s.bia }).to_string())
+            .await;
+        server
+            .process_message("c1", &load(1, "a_orders.count"))
+            .await;
+        let answer = recorder.last().await;
+        assert_eq!(answer["status"], json!(400), "{answer}");
+        assert_eq!(answer["message"]["error"], WORKSPACE_REQUIRED);
+
+        // With W1: a_orders runs, b_orders is refused.
+        let recorder = Arc::new(Recorder::default());
+        let server = cubeserver::ws::SubscriptionServer::new(d.state.clone(), recorder.clone());
+        server
+            .process_message(
+                "c2",
+                &json!({ "authorization": d.s.bia, "workspace": d.w1 }).to_string(),
+            )
+            .await;
+        assert_eq!(recorder.last().await, json!({ "handshake": true }));
+        server
+            .process_message("c2", &load(2, "b_orders.count"))
+            .await;
+        assert_eq!(recorder.last().await["status"], json!(403));
+        assert!(d.queries.seen().is_empty());
+        server
+            .process_message("c2", &load(3, "a_orders.count"))
+            .await;
+        assert_eq!(recorder.last().await, json!({ "messageProcessedId": "3" }));
+        assert_eq!(d.queries.seen().len(), 1);
+    }
+);

@@ -619,6 +619,25 @@ impl Store {
             .collect())
     }
 
+    /// The objects of a workspace, optionally of one `type`, by name. The
+    /// content is left out (empty): listings carry metadata only.
+    pub async fn objects_of_workspace(
+        &self,
+        workspace_id: Uuid,
+        r#type: Option<&str>,
+    ) -> Result<Vec<StoredObject>, StoreError> {
+        let c = self.conn().await?;
+        let sql = "SELECT id, workspace_id, type, name, content_type, ''::bytea, version, \
+                   created_at, created_by, updated_at, updated_by FROM objects \
+                   WHERE workspace_id = $1 AND ($2::text IS NULL OR type = $2) \
+                   ORDER BY name, id";
+        Ok(c.query(sql, &[&workspace_id, &r#type])
+            .await?
+            .iter()
+            .map(object_from)
+            .collect())
+    }
+
     /// Optimistic update: succeeds only when the stored version equals
     /// `expected_version`, then increments it. `Conflict` on a stale version,
     /// `NotFound` when the object does not exist. `None` fields are kept.

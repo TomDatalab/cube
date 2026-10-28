@@ -403,7 +403,7 @@ impl PlannerQueryService {
 
 /// Which data source each cube and member of a model reads from, as
 /// `CompilerApi.memberToDataSource` answers it.
-struct DataSources {
+pub(crate) struct DataSources {
     /// `cube.member` → data source; a view's member maps to the data source
     /// of the cube it was included from.
     members: HashMap<String, String>,
@@ -412,7 +412,10 @@ struct DataSources {
 }
 
 impl DataSources {
-    fn load(model_path: &Path, context: &cubemodel::TemplateContext) -> Result<Self, String> {
+    pub(crate) fn load(
+        model_path: &Path,
+        context: &cubemodel::TemplateContext,
+    ) -> Result<Self, String> {
         let model = cubemodel::ModelLoader::with_context(context.clone())
             .load_dir_with(model_path)
             .map_err(|e| e.to_string())?;
@@ -436,6 +439,47 @@ impl DataSources {
         })
     }
 
+    /// The data source one member (`cube.member`, optionally followed by a
+    /// granularity) or cube name reads from; `None` when the model has no
+    /// such cube or view member. A view's member answers its source cube's.
+    pub(crate) fn data_source_of(&self, name: &str) -> Option<&str> {
+        let mut path = name.split('.');
+        let cube = path.next()?;
+        match path.next() {
+            Some(member) => self
+                .members
+                .get(&format!("{cube}.{member}"))
+                .or_else(|| self.cubes.get(cube)),
+            None => self.cubes.get(cube),
+        }
+        .map(String::as_str)
+    }
+
+    /// Every data source `members` read from, `default` included by name.
+    /// Unlike [`Self::of_query`], several are not an error, and a name the
+    /// model does not know is left out.
+    pub(crate) fn data_sources_of(&self, members: &[String]) -> BTreeSet<String> {
+        members
+            .iter()
+            .filter_map(|name| self.data_source_of(name))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The data sources of a cube (one) or of a view (those of every member
+    /// it includes). Empty for a name the model does not know.
+    pub(crate) fn data_sources_of_cube(&self, cube: &str) -> BTreeSet<String> {
+        if let Some(data_source) = self.cubes.get(cube) {
+            return BTreeSet::from([data_source.clone()]);
+        }
+        let prefix = format!("{cube}.");
+        self.members
+            .iter()
+            .filter(|(member, _)| member.starts_with(&prefix))
+            .map(|(_, data_source)| data_source.clone())
+            .collect()
+    }
+
     /// The one data source `members` read from, `None` for the default one.
     ///
     /// A query spanning two data sources is refused, as the Node.js
@@ -443,18 +487,7 @@ impl DataSources {
     fn of_query(&self, members: &[String]) -> Result<Option<String>, PlanFailure> {
         let found: BTreeSet<&str> = members
             .iter()
-            .filter_map(|name| {
-                let mut path = name.split('.');
-                let cube = path.next()?;
-                match path.next() {
-                    Some(member) => self
-                        .members
-                        .get(&format!("{cube}.{member}"))
-                        .or_else(|| self.cubes.get(cube)),
-                    None => self.cubes.get(cube),
-                }
-            })
-            .map(String::as_str)
+            .filter_map(|name| self.data_source_of(name))
             .collect();
 
         let mut found = found.into_iter();
@@ -653,6 +686,35 @@ views:
     fn a_view_member_runs_where_its_cube_does() {
         let query = json!({ "measures": ["activity.count"], "dimensions": ["activity.kind"] });
         assert_eq!(of(query).unwrap().as_deref(), Some("warehouse"));
+    }
+
+    #[test]
+    fn data_sources_of_names_every_source_and_the_default_one() {
+        let sources = sources();
+        let members = query_members(&json!({
+            "measures": ["orders.count"],
+            "filters": [{ "or": [{ "member": "activity.kind", "operator": "set" }] }],
+        }));
+        assert_eq!(
+            sources.data_sources_of(&members),
+            BTreeSet::from(["default".to_string(), "warehouse".to_string()])
+        );
+        assert_eq!(sources.data_source_of("nowhere.count"), None);
+        assert_eq!(sources.data_source_of("activity"), None);
+    }
+
+    #[test]
+    fn a_view_spans_the_sources_of_its_members() {
+        let sources = sources();
+        assert_eq!(
+            sources.data_sources_of_cube("activity"),
+            BTreeSet::from(["warehouse".to_string()])
+        );
+        assert_eq!(
+            sources.data_sources_of_cube("orders"),
+            BTreeSet::from(["default".to_string()])
+        );
+        assert!(sources.data_sources_of_cube("nowhere").is_empty());
     }
 
     #[test]

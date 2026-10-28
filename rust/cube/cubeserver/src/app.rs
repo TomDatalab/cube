@@ -54,18 +54,41 @@ impl AppState {
     }
 
     /// The data model this request reads.
+    ///
+    /// With RBAC on it shows only the cubes and views the request may read
+    /// ([`crate::rbac::enforce::RbacMetaService`]).
     pub async fn meta_for(&self, ctx: &RequestContext) -> Result<MetaServiceRef, ApiError> {
-        Ok(match self.runtime_for(ctx).await? {
+        let meta = match self.runtime_for(ctx).await? {
             Some(runtime) => runtime.meta.clone(),
             None => self.meta.clone(),
+        };
+        Ok(match &self.rbac {
+            Some(rbac) => Arc::new(crate::rbac::enforce::RbacMetaService::new(
+                meta,
+                rbac.clone(),
+                rbac.model_index(&self.config.schema_path),
+            )),
+            None => meta,
         })
     }
 
     /// The query service this request runs on.
+    ///
+    /// With RBAC on every query is checked against the request's workspace
+    /// first ([`crate::rbac::enforce::RbacQueryService`]). REST, GraphQL and
+    /// the WebSocket transport all come through here.
     pub async fn query_for(&self, ctx: &RequestContext) -> Result<QueryServiceRef, ApiError> {
-        Ok(match self.runtime_for(ctx).await? {
+        let query = match self.runtime_for(ctx).await? {
             Some(runtime) => runtime.query.clone(),
             None => self.query.clone(),
+        };
+        Ok(match &self.rbac {
+            Some(rbac) => Arc::new(crate::rbac::enforce::RbacQueryService::new(
+                query,
+                rbac.clone(),
+                rbac.model_index(&self.config.schema_path),
+            )),
+            None => query,
         })
     }
 
@@ -74,6 +97,12 @@ impl AppState {
         &self,
         ctx: &RequestContext,
     ) -> Result<Arc<crate::graphql_adapter::GraphQLSchemaCache>, ApiError> {
+        // With RBAC on the schema is built from the request's filtered meta,
+        // which differs between users and workspaces: a shared cache could
+        // hand one request a schema built for another.
+        if self.rbac.is_some() {
+            return Ok(Default::default());
+        }
         Ok(match self.runtime_for(ctx).await? {
             Some(runtime) => runtime.graphql.clone(),
             None => self.graphql.clone(),
@@ -157,20 +186,23 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::delete(handlers::query::cancel_running_query),
         )
         .route(
-            &format!("{base}/v1/convert-query"),
-            axum::routing::post(handlers::sql_convert::convert_query),
-        )
-        .route(
-            &format!("{base}/v1/cubesql"),
-            axum::routing::post(handlers::sql_convert::cubesql),
-        )
-        .route(
             &format!("{base}/v1/graphql-to-json"),
             axum::routing::post(handlers::graphql::graphql_to_json),
         )
         .route(
             &format!("{base}/graphql"),
             get(handlers::graphql::graphiql).post(handlers::graphql::graphql),
+        );
+    // With RBAC on these run SQL or build data without the cube checks, so
+    // only platform admins reach them.
+    let admin_only = Router::new()
+        .route(
+            &format!("{base}/v1/convert-query"),
+            axum::routing::post(handlers::sql_convert::convert_query),
+        )
+        .route(
+            &format!("{base}/v1/cubesql"),
+            axum::routing::post(handlers::sql_convert::cubesql),
         )
         .route(
             &format!("{base}/v1/pre-aggregations/can-use"),
@@ -213,7 +245,12 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/cube-system/v1/pre-aggregations/cancel",
             axum::routing::post(handlers::preaggs::cancel),
-        );
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::rbac::enforce::platform_admin_only,
+        ));
+    authenticated = authenticated.merge(admin_only);
     if let Some((_, rbac_authenticated)) = &rbac_routes {
         authenticated = authenticated.merge(rbac_authenticated.clone());
     }

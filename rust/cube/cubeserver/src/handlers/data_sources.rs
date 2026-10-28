@@ -489,7 +489,16 @@ pub async fn v1_execute(
     Extension(ctx): Extension<RequestContext>,
     Json(request): Json<ExecuteRequest>,
 ) -> Response {
-    v1_scoped(&state, &ctx, EXECUTE_SCOPE, execute(&state, request)).await
+    let handler = async {
+        // With RBAC on: the workspace's owners, on its released connections.
+        let named = match &request.connection {
+            Some(Connection::Name(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        crate::rbac::enforce::authorize_execute(&state, &ctx, named).await?;
+        execute(&state, request).await
+    };
+    v1_scoped(&state, &ctx, EXECUTE_SCOPE, handler).await
 }
 
 async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value>, ApiError> {

@@ -86,8 +86,12 @@ impl SubscriptionServer {
 
     async fn handle_message(&self, connection_id: &str, message: WsMessage, is_subscription: bool) {
         match message {
-            WsMessage::Auth { authorization } => {
-                self.handle_auth(connection_id, &authorization).await;
+            WsMessage::Auth {
+                authorization,
+                workspace,
+            } => {
+                self.handle_auth(connection_id, &authorization, workspace)
+                    .await;
             }
             WsMessage::Unsubscribe { message_id } => {
                 self.store.unsubscribe(connection_id, &message_id).await;
@@ -99,7 +103,12 @@ impl SubscriptionServer {
         }
     }
 
-    async fn handle_auth(&self, connection_id: &str, authorization: &str) {
+    async fn handle_auth(
+        &self,
+        connection_id: &str,
+        authorization: &str,
+        workspace: Option<String>,
+    ) {
         let authenticated = match self.state.auth.authenticate(Some(authorization)).await {
             Ok(authenticated) => self.resolve_rbac_identity(authenticated).await,
             Err(err) => Err(err),
@@ -114,7 +123,8 @@ impl SubscriptionServer {
                             security_context: authenticated.security_context,
                             signed_with_playground_auth_secret: authenticated
                                 .signed_with_playground_auth_secret,
-                            workspace: None,
+                            // Only RBAC reads it, as it does the header.
+                            workspace: workspace.filter(|_| self.state.rbac.is_some()),
                             user,
                             platform_admin,
                         },

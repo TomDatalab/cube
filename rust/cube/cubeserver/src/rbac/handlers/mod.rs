@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod connections;
+pub mod objects;
 pub mod organizations;
 pub mod users;
 pub mod workspaces;
@@ -96,6 +97,16 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/workspaces/:id/connections/:name"),
             put(connections::release).delete(connections::withdraw),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id/objects"),
+            get(objects::list).post(objects::create),
+        )
+        .route(
+            &format!("{base}/v1/objects/:id"),
+            get(objects::get)
+                .put(objects::update)
+                .delete(objects::delete),
         )
 }
 
