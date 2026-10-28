@@ -531,3 +531,233 @@ db_test!(a_websocket_loses_its_user_at_the_next_message, |store| {
     server.process_message("c1", &meta_message(3)).await;
     assert_eq!(recorder.last().await["status"], json!(403));
 });
+
+// ---- user management (platform admins) ----
+
+async fn admin_token(env: &Env) -> String {
+    login_token(&env.router, ADMIN, ADMIN_PASSWORD).await
+}
+
+async fn create_user_as(env: &Env, token: &str, id: &str, password: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/users",
+        Some(token),
+        Some(
+            json!({ "id": id, "name": "Some One", "email": "x@example.org", "password": password }),
+        ),
+    )
+    .await
+}
+
+db_test!(only_platform_admins_manage_users, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    let (status, body) = create_user_as(&env, &admin, "ann", "ann-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ann = login_token(&env.router, "ann", "ann-password-1").await;
+
+    let calls = [
+        (
+            Method::POST,
+            "/cube/v1/users",
+            Some(json!({ "id": "bob", "password": "bob-password-1" })),
+        ),
+        (Method::GET, "/cube/v1/users", None),
+        (
+            Method::PATCH,
+            "/cube/v1/users/ann",
+            Some(json!({ "name": "Ann" })),
+        ),
+        (
+            Method::PUT,
+            "/cube/v1/users/ann/password",
+            Some(json!({ "password": "another-pass-1" })),
+        ),
+        (Method::POST, "/cube/v1/users/ann/tokens", None),
+    ];
+    for (method, path, body) in calls {
+        let (status, answer) =
+            send(&env.router, method.clone(), path, Some(&ann), body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} {answer}");
+        let (status, _) = send(&env.router, method.clone(), path, None, body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+    }
+    // Nothing happened.
+    assert!(env.rbac.store.user("bob").await.unwrap().is_none());
+    login_token(&env.router, "ann", "ann-password-1").await;
+});
+
+db_test!(user_listing_never_shows_password_hashes, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    let (status, created) = create_user_as(&env, &admin, "ann", "ann-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["id"], "ann");
+    assert_eq!(created["disabled"], json!(false));
+
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/users",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let ids: Vec<&str> = list["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["admin", "ann"]);
+
+    let (status, patched) = send(
+        &env.router,
+        Method::PATCH,
+        "/cube/v1/users/ann",
+        Some(&admin),
+        Some(json!({ "name": "Ann Lee", "disabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["name"], "Ann Lee");
+
+    for text in [created.to_string(), list.to_string(), patched.to_string()] {
+        assert!(!text.contains("argon2"), "{text}");
+        assert!(!text.to_lowercase().contains("password"), "{text}");
+    }
+
+    // Duplicates and unknown users.
+    let (status, _) = create_user_as(&env, &admin, "ann", "ann-password-1").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = send(
+        &env.router,
+        Method::PATCH,
+        "/cube/v1/users/nobody",
+        Some(&admin),
+        Some(json!({ "name": "x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+db_test!(a_service_token_authenticates_as_its_user, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    create_user_as(&env, &admin, "etl", "etl-password-1").await;
+
+    let (status, body) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/users/etl/tokens",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["expiresAt"].is_string());
+    let token = body["token"].as_str().unwrap();
+    assert_eq!(meta(&env.router, Some(token)).await, StatusCode::OK);
+
+    // Disabled users get no token (409), and the old one stops working.
+    send(
+        &env.router,
+        Method::PATCH,
+        "/cube/v1/users/etl",
+        Some(&admin),
+        Some(json!({ "disabled": true })),
+    )
+    .await;
+    assert_eq!(
+        meta(&env.router, Some(token)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, _) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/users/etl/tokens",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/users/nobody/tokens",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+db_test!(invalid_user_ids_are_refused, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    for id in ["Ana", "a b", "joao.silva", "", "*"] {
+        let (status, body) = create_user_as(&env, &admin, id, "long-password-1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id:?} {body}");
+    }
+    for path in ["/cube/v1/users/Ana", "/cube/v1/users/joao.silva"] {
+        let (status, _) = send(
+            &env.router,
+            Method::PATCH,
+            path,
+            Some(&admin),
+            Some(json!({ "name": "x" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+    }
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/users/Ana/password",
+        Some(&admin),
+        Some(json!({ "password": "long-password-1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // A short password is refused too, and nothing was created.
+    let (status, _) = create_user_as(&env, &admin, "ann", "short").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(env.rbac.store.user("ann").await.unwrap().is_none());
+});
+
+db_test!(an_admin_password_reset_invalidates_old_tokens, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    create_user_as(&env, &admin, "ann", "ann-password-1").await;
+    let old = login_token(&env.router, "ann", "ann-password-1").await;
+    assert_eq!(meta(&env.router, Some(&old)).await, StatusCode::OK);
+
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/users/ann/password",
+        Some(&admin),
+        Some(json!({ "password": "reset-password-2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        meta(&env.router, Some(&old)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let new = login_token(&env.router, "ann", "reset-password-2").await;
+    assert_eq!(meta(&env.router, Some(&new)).await, StatusCode::OK);
+
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/users/nobody/password",
+        Some(&admin),
+        Some(json!({ "password": "reset-password-2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});

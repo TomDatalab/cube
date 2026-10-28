@@ -7,7 +7,7 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::rbac_of;
+use super::{body, rbac_of};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::{
@@ -31,12 +31,6 @@ pub struct LoginRequest {
 pub struct ChangePasswordRequest {
     current_password: String,
     new_password: String,
-}
-
-fn body<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
-    request
-        .map(|Json(body)| body)
-        .map_err(|e| ApiError::bad_request(e.body_text()))
 }
 
 /// Waits before answering a failure, to slow down guessing.
