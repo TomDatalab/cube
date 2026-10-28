@@ -334,25 +334,30 @@ async fn generate_schema(
     Ok(Json(json!({ "files": files })))
 }
 
-/// Refuses a request whose `Host` is a name the deployment did not list.
-/// A DNS-rebinding page points a domain of its own at this server, which
-/// makes it the same origin as the Playground; an IP address or `localhost`
-/// cannot be rebound like that. A request without `Host` is not a browser's.
+/// Refuses a request whose host is a name the deployment did not list, or
+/// that names none. A DNS-rebinding page points a domain of its own at this
+/// server, which makes it the same origin as the Playground; an IP address
+/// or `localhost` cannot be rebound like that. The host is the `Host`
+/// header, or over HTTP/2 the URI's authority.
 async fn require_host(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get(axum::http::header::HOST)
-        .map(|v| v.to_str().unwrap_or_default());
-    if let Some(host) = host {
-        if !host_allowed(host, &state.config.playground_hosts) {
-            return ApiError::forbidden(format!(
-                "The Playground answers only under localhost, an IP address or a name \
-                 in CUBEJS_PLAYGROUND_HOSTS, not {host}"
-            ))
-            .into_response();
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| request.uri().authority().map(|a| a.to_string()));
+    match host {
+        Some(host) if host_allowed(&host, &state.config.playground_hosts) => {
+            next.run(request).await
         }
+        Some(host) => ApiError::forbidden(format!(
+            "The Playground answers only under localhost, an IP address or a name \
+             in CUBEJS_PLAYGROUND_HOSTS, not {host}"
+        ))
+        .into_response(),
+        None => ApiError::forbidden("The Playground needs to know the host it is called under")
+            .into_response(),
     }
-    next.run(request).await
 }
 
 fn host_allowed(host: &str, listed: &[String]) -> bool {

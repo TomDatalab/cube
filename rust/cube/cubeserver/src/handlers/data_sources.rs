@@ -745,10 +745,10 @@ fn own_setting<'a>(key: &'a str, name: &str, sources: &[&str]) -> Option<&'a str
 
 /// A setting the edit form is not sent, so an empty field keeps it: one
 /// whose name says it is a password, key, token or credentials, or a URL
-/// carrying one.
+/// (`CUBEJS_DB_URL`, `CUBEJS_DB_DATABRICKS_URL`, ...) carrying one.
 fn kept_if_empty(var: &str, current: &BTreeMap<String, String>) -> bool {
     is_secret(var)
-        || (var == "CUBEJS_DB_URL" && current.get(var).is_some_and(|url| without_password(url).1))
+        || (var.ends_with("_URL") && current.get(var).is_some_and(|url| without_password(url).1))
 }
 
 fn is_secret(var: &str) -> bool {
@@ -1513,6 +1513,11 @@ mod tests {
         ]);
         let (set, cleared) = split_changes(&form, &current).unwrap();
         assert!(set.is_empty());
+        let databricks = BTreeMap::from([(
+            "CUBEJS_DB_DATABRICKS_URL".to_string(),
+            "jdbc:databricks://h:443/default;UID=token;PWD=dapi123".to_string(),
+        )]);
+        assert!(kept_if_empty("CUBEJS_DB_DATABRICKS_URL", &databricks));
         assert_eq!(cleared, BTreeSet::from(["CUBEJS_DB_HOST".to_string()]));
     }
 

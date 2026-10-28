@@ -120,6 +120,7 @@ fn app(config: ServerConfig, auth: Arc<dyn AuthService>) -> axum::Router {
 async fn get(router: axum::Router, path: &str) -> (StatusCode, String) {
     let request = Request::builder()
         .uri(path)
+        .header(header::HOST, "localhost:4000")
         .header(PLAYGROUND_KEY_HEADER, playground_key())
         .body(Body::empty())
         .expect("a request");
@@ -296,6 +297,7 @@ async fn post_json(router: axum::Router, path: &str, body: Value) -> (StatusCode
     let request = Request::builder()
         .method("POST")
         .uri(path)
+        .header(header::HOST, "localhost:4000")
         .header(header::CONTENT_TYPE, "application/json")
         .header(PLAYGROUND_KEY_HEADER, playground_key())
         .body(Body::from(body.to_string()))
@@ -459,6 +461,7 @@ async fn a_security_context_token_carries_the_claims_the_user_typed() {
     let request = Request::builder()
         .method("POST")
         .uri("/playground/token")
+        .header(header::HOST, "localhost:4000")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({ "payload": { "tenant": "acme" } }).to_string(),
@@ -655,6 +658,7 @@ async fn send_json(
     let request = Request::builder()
         .method(method)
         .uri(path)
+        .header(header::HOST, "localhost:4000")
         .header(header::CONTENT_TYPE, "application/json")
         .header(PLAYGROUND_KEY_HEADER, playground_key())
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
@@ -1070,6 +1074,7 @@ async fn the_playground_key_is_needed_to_change_anything() {
             let mut request = Request::builder()
                 .method(method)
                 .uri(path)
+                .header(header::HOST, "localhost:4000")
                 .header(header::CONTENT_TYPE, "application/json");
             if let Some(key) = key {
                 request = request.header(PLAYGROUND_KEY_HEADER, key);
@@ -1094,6 +1099,7 @@ async fn only_the_rest_api_answers_another_site() {
         Request::builder()
             .method("OPTIONS")
             .uri(path)
+            .header(header::HOST, "localhost:4000")
             .header(header::ORIGIN, "https://elsewhere.example")
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
             .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
@@ -1364,6 +1370,10 @@ async fn a_key_or_a_secret_in_a_jdbc_url_is_not_sent_back() {
     text.push_str(
         "CUBEJS_DS_LOCAL_DB_URL='jdbc:databricks://h:443/default;UID=token;PWD=dapi123'\n",
     );
+    // The variable the Playground's Databricks form keeps its JDBC URL in.
+    text.push_str(
+        "CUBEJS_DS_LOCAL_DB_DATABRICKS_URL='jdbc:databricks://h:443/default;UID=token;PWD=dapi456'\n",
+    );
     std::fs::write(&env, text).unwrap();
     let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
 
@@ -1372,6 +1382,11 @@ async fn a_key_or_a_secret_in_a_jdbc_url_is_not_sent_back() {
     let secrets = body["secrets"].as_array().unwrap();
     assert!(secrets.contains(&json!("CUBEJS_DB_SSL_KEY")), "{body}");
     assert!(secrets.contains(&json!("CUBEJS_DB_URL")), "{body}");
+    assert!(
+        secrets.contains(&json!("CUBEJS_DB_DATABRICKS_URL")),
+        "{body}"
+    );
+    assert!(!body.to_string().contains("dapi456"), "{body}");
     assert!(!body.to_string().contains("BEGIN"), "{body}");
     assert!(!body.to_string().contains("dapi123"), "{body}");
 
@@ -1415,4 +1430,28 @@ async fn a_source_named_like_the_start_of_another_keeps_to_its_own_settings() {
     let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
     assert!(!env.contains("CUBEJS_DS_SALES_DB_NAME"), "{env}");
     assert!(env.contains("CUBEJS_DS_SALES_EU_DB_NAME="), "{env}");
+}
+
+/// Over HTTP/2 the host is the URI's authority; a request naming no host
+/// at all is refused.
+#[tokio::test]
+async fn a_request_naming_no_host_is_refused() {
+    let (_dir, config) = fixture();
+    let router = || app(config.clone(), Arc::new(TokenIssuingAuth));
+    let send = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+
+    let response = router().oneshot(send("/playground/context")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = router()
+        .oneshot(send("http://localhost:4000/playground/context"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router()
+        .oneshot(send("http://rebound.example:4000/playground/context"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
