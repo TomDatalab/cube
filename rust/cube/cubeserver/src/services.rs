@@ -20,6 +20,13 @@ pub struct RequestContext {
     pub request_id: String,
     pub security_context: Value,
     pub signed_with_playground_auth_secret: bool,
+    /// RBAC only: the `X-Cube-Workspace` header.
+    pub workspace: Option<String>,
+    /// RBAC only: the user the token speaks for (`sub`, checked against the
+    /// users table on every request).
+    pub user: Option<String>,
+    /// RBAC only: whether `user` is a platform admin.
+    pub platform_admin: bool,
 }
 
 #[async_trait]

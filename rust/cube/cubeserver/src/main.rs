@@ -110,6 +110,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let auth = CubeAuthService::new(auth_config);
     auth.prefetch_jwks().await;
 
+    // RBAC (`CUBE_RBAC=spicedb`): when asked for, it starts or the server
+    // does not. Falling back to no RBAC would open everything up.
+    let rbac = match start_rbac(&cube_config, &auth).await {
+        Ok(rbac) => rbac,
+        Err(message) => {
+            eprintln!("RBAC error: {message}");
+            std::process::exit(1);
+        }
+    };
+
     // A model that does not compile must not take the server down silently:
     // the error is reported and `/v1/meta` answers 503 until it is fixed.
     let meta: MetaServiceRef = match ModelMetaService::load(&config.schema_path, config.dev_mode) {
@@ -311,6 +321,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         graphql: Default::default(),
         ws: ws_state.clone(),
+        rbac,
     };
 
     // Re-runs live WebSocket subscriptions, like `processSubscriptions` in
@@ -335,6 +346,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, build_app(state)).await?;
 
     Ok(())
+}
+
+/// Reads the RBAC settings and, when RBAC is on, connects to SpiceDB and the
+/// RBAC database. `Ok(None)` when `CUBE_RBAC` is unset.
+async fn start_rbac(
+    cube_config: &cubeconfig::CubeConfig,
+    auth: &CubeAuthService,
+) -> Result<Option<Arc<cubeserver::rbac::Rbac>>, String> {
+    let Some(rbac_config) = cubeserver::rbac::RbacConfig::from_env()? else {
+        return Ok(None);
+    };
+    cubeserver::rbac::config::check_rbac_compatible(cube_config)?;
+    // Logins are tokens this server signs; without a secret none would work.
+    let mut probe = serde_json::Map::new();
+    probe.insert("sub".into(), serde_json::Value::from("probe"));
+    cubeserver::services::AuthService::issue_token(auth, probe)
+        .await
+        .map_err(|e| format!("cannot sign login tokens (set CUBEJS_API_SECRET): {e}"))?;
+
+    let rbac = cubeserver::rbac::Rbac::start(rbac_config).await?;
+    println!(
+        "🔐 RBAC on (SpiceDB), {} platform admin(s) from CUBE_RBAC_ADMINS",
+        rbac.config.admins.len()
+    );
+    Ok(Some(Arc::new(rbac)))
 }
 
 /// How often the data model is checked for changes, or `None` to never check.

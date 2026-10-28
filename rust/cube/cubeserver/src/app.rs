@@ -35,6 +35,9 @@ pub struct AppState {
     /// Per-tenant runtimes. When absent the fields above answer every request,
     /// which is the single-tenant deployment.
     pub tenants: Option<Arc<crate::tenants::TenantRegistry>>,
+    /// RBAC (`CUBE_RBAC=spicedb`). When absent no RBAC route is mounted and
+    /// every request is authorized as before.
+    pub rbac: Option<Arc<crate::rbac::Rbac>>,
 }
 
 impl AppState {
@@ -101,7 +104,14 @@ pub fn build_app(state: AppState) -> Router {
     let base = state.config.base_path.trim_end_matches('/').to_string();
     let max_request_size = state.config.max_request_size;
 
-    let authenticated = Router::new()
+    let rbac_routes = state.rbac.is_some().then(|| {
+        (
+            crate::rbac::handlers::public_routes(&base),
+            crate::rbac::handlers::authenticated_routes(&base),
+        )
+    });
+
+    let mut authenticated = Router::new()
         .route(&format!("{base}/v1/meta"), get(handlers::meta::meta))
         .route(
             &format!("{base}/v1/connectors"),
@@ -203,27 +213,40 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/cube-system/v1/pre-aggregations/cancel",
             axum::routing::post(handlers::preaggs::cancel),
-        )
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            handlers::auth::auth_middleware,
-        ));
+        );
+    if let Some((_, rbac_authenticated)) = &rbac_routes {
+        authenticated = authenticated.merge(rbac_authenticated.clone());
+    }
+    let authenticated = authenticated.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        handlers::auth::auth_middleware,
+    ));
 
+    let mut methods = vec![
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    // Same list as `@cubejs-backend/server` (`server.ts`).
+    let mut headers = vec![
+        header::AUTHORIZATION,
+        header::CONTENT_TYPE,
+        header::HeaderName::from_static("x-request-id"),
+    ];
+    if rbac_routes.is_some() {
+        // The management routes edit with PATCH, and data requests name
+        // their workspace.
+        methods.push(Method::PATCH);
+        headers.push(header::HeaderName::from_static(
+            handlers::auth::WORKSPACE_HEADER,
+        ));
+    }
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        // Same list as `@cubejs-backend/server` (`server.ts`).
-        .allow_headers([
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            header::HeaderName::from_static("x-request-id"),
-        ]);
+        .allow_methods(methods)
+        .allow_headers(headers);
 
     // The Playground, when its assets are configured. It is served at `/`
     // because the bundle fetches its helper API relatively and derives the
@@ -242,6 +265,11 @@ pub fn build_app(state: AppState) -> Router {
         // message, so it is not behind the HTTP auth middleware.
         .route(&format!("{base}/ws"), get(crate::ws::ws_handler))
         .merge(authenticated);
+    // Login is public: it is how a token is obtained.
+    let router = match rbac_routes {
+        Some((public, _)) => router.merge(public),
+        None => router,
+    };
 
     let router = match playground {
         Some(assets) => router

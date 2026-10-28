@@ -152,6 +152,7 @@ fn app(registry: Arc<TenantRegistry>) -> axum::Router {
         graphql: Default::default(),
         ws: Default::default(),
         tenants: Some(registry),
+        rbac: None,
     })
 }
 

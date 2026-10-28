@@ -15,6 +15,7 @@ default = ["all-drivers"]
 all-drivers = ["cubedriver/default"]
 
 [dependencies]
+argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1.36"
 cubeauth = { path = "../cubeauth" }
 cubeconfig = { path = "../cubeconfig" }

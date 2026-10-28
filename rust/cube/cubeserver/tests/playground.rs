@@ -108,6 +108,7 @@ fn app(config: ServerConfig, auth: Arc<dyn AuthService>) -> axum::Router {
         graphql: Default::default(),
         ws: Default::default(),
         tenants: None,
+        rbac: None,
     })
 }
 

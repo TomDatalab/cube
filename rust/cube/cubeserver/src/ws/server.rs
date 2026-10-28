@@ -100,8 +100,12 @@ impl SubscriptionServer {
     }
 
     async fn handle_auth(&self, connection_id: &str, authorization: &str) {
-        match self.state.auth.authenticate(Some(authorization)).await {
-            Ok(authenticated) => {
+        let authenticated = match self.state.auth.authenticate(Some(authorization)).await {
+            Ok(authenticated) => self.resolve_rbac_identity(authenticated).await,
+            Err(err) => Err(err),
+        };
+        match authenticated {
+            Ok((authenticated, user, platform_admin)) => {
                 self.store
                     .set_auth_context(
                         connection_id,
@@ -110,6 +114,9 @@ impl SubscriptionServer {
                             security_context: authenticated.security_context,
                             signed_with_playground_auth_secret: authenticated
                                 .signed_with_playground_auth_secret,
+                            workspace: None,
+                            user,
+                            platform_admin,
                         },
                     )
                     .await;
@@ -125,6 +132,23 @@ impl SubscriptionServer {
                     )
                     .await;
             }
+        }
+    }
+
+    /// With RBAC on, the connection carries the token's user, or is refused
+    /// like an HTTP request would be.
+    async fn resolve_rbac_identity(
+        &self,
+        authenticated: crate::services::AuthenticatedRequest,
+    ) -> Result<(crate::services::AuthenticatedRequest, Option<String>, bool), ApiError> {
+        match &self.state.rbac {
+            Some(rbac) => {
+                let (user, platform_admin) =
+                    crate::rbac::identity::resolve_identity(rbac, &authenticated.security_context)
+                        .await?;
+                Ok((authenticated, Some(user), platform_admin))
+            }
+            None => Ok((authenticated, None, false)),
         }
     }
 

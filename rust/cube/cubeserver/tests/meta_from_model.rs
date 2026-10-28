@@ -84,6 +84,7 @@ fn app(dev_mode: bool, playground: bool) -> (tempfile::TempDir, axum::Router) {
         graphql: Default::default(),
         ws: Default::default(),
         tenants: None,
+        rbac: None,
     });
 
     (dir, router)

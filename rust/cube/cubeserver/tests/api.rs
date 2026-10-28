@@ -120,6 +120,7 @@ fn app_with_config(
         graphql: Default::default(),
         ws: Default::default(),
         tenants: None,
+        rbac: None,
     })
 }
 
@@ -432,6 +433,7 @@ async fn real_authenticator_end_to_end() {
         graphql: Default::default(),
         ws: Default::default(),
         tenants: None,
+        rbac: None,
     });
 
     let token = encode(
