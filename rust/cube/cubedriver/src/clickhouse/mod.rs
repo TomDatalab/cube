@@ -501,18 +501,20 @@ impl Driver for ClickHouseDriver {
         }
     }
 
+    // Every database but the system ones, where Node.js lists only the
+    // configured one: a ClickHouse server is one catalog with many
+    // databases, and a cube may read any of them with `db.table`, so the
+    // Playground should show them all. Only `tables_schema` reads this.
     fn information_schema_query(&self) -> String {
-        format!(
-            "
+        "
       SELECT name as column_name,
              table as table_name,
              database as table_schema,
              type as data_type
         FROM system.columns
-       WHERE database = '{}'
-    ",
-            self.config.database
-        )
+       WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+    "
+        .to_string()
     }
 
     fn get_tables_for_specific_schemas_query(&self, schemas_placeholders: &str) -> String {
@@ -867,7 +869,8 @@ mod tests {
         let d = driver();
         let q = d.information_schema_query();
         assert!(q.contains("FROM system.columns"));
-        assert!(q.contains("WHERE database = 'test'"));
+        assert!(q.contains("WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')"));
+        assert!(!q.contains("'test'"));
         assert!(q.contains("SELECT name as column_name"));
 
         let q = d.get_tables_for_specific_schemas_query("?, ?");
