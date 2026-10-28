@@ -58,10 +58,6 @@ export default function Header({ selectedKeys }: Props) {
             <Link to="/frontend-integrations">Frontend Integrations</Link>
           </StyledMenuItem>
 
-          <StyledMenuItem key="/cube-bi">
-            <Link to="/cube-bi">Cube BI</Link>
-          </StyledMenuItem>
-
           <RunOnCubeCloud />
         </StyledMenu>
       )}

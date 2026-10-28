@@ -9,7 +9,6 @@ import {
   ConnectionWizardPage,
   SchemaPage,
   IndexPage,
-  CubeBiPage,
   FrontendIntegrationsPage,
   DataSourcesPage,
 } from './pages';
@@ -77,11 +76,6 @@ ReactDOM.render(
           key="connection"
           path="/connection"
           component={() => <ConnectionWizardPage history={history} />}
-        />
-        <Route
-          key="cube-bi"
-          path="/cube-bi"
-          component={CubeBiPage}
         />
         <Route
           key="frontend-integrations"
