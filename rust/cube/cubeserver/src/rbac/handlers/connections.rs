@@ -27,9 +27,10 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::{self, data_source_types, CreateRequest, UpdateRequest};
-use crate::rbac::store::{ConnectionRow, Workspace};
+use crate::rbac::store::{ConnectionRow, StoreError, Workspace};
 use crate::rbac::{
-    authz_error, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter, Update,
+    authz_error, unavailable, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter,
+    Update,
 };
 use crate::services::RequestContext;
 
@@ -79,14 +80,25 @@ fn connection_name(name: &str) -> Result<(), ApiError> {
     }
 }
 
-/// The names of the connections released to `workspace`
-/// (`connection:<name>#workspace@workspace:<id>`). Empty for an id that is
-/// not a workspace id.
+/// 503 for any RBAC database failure: these reads only grant access.
+fn read_error(e: StoreError) -> ApiError {
+    tracing::error!("RBAC store failed: {e}");
+    unavailable()
+}
+
+/// The names of the connections released to `workspace`: the
+/// `connection:<name>#workspace@workspace:<id>` relationships whose
+/// connection belongs to the workspace's organization (a release from
+/// another organization's connection never counts). Empty for an unknown
+/// workspace; 503 when SpiceDB or the RBAC database cannot answer.
 pub async fn released_connections(
     rbac: &Rbac,
     workspace: &str,
 ) -> Result<BTreeSet<String>, ApiError> {
     let Ok(id) = workspace.parse::<Uuid>() else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(ws) = rbac.store.workspace(id).await.map_err(read_error)? else {
         return Ok(BTreeSet::new());
     };
     let releases = rbac
@@ -99,7 +111,17 @@ pub async fn released_connections(
         })
         .await
         .map_err(authz_error)?;
-    Ok(releases.into_iter().map(|r| r.resource.id).collect())
+    let names: Vec<String> = releases.into_iter().map(|r| r.resource.id).collect();
+    let rows = rbac
+        .store
+        .connections_by_names(&names)
+        .await
+        .map_err(read_error)?;
+    Ok(rows
+        .into_iter()
+        .filter(|c| c.organization_id == ws.organization_id)
+        .map(|c| c.name)
+        .collect())
 }
 
 /// The workspaces `name` is released to, as relationships.
@@ -246,27 +268,43 @@ pub async fn update(
         .map(IntoResponse::into_response)
 }
 
-/// `connection#manage`. Its relationships go first (restored if the data
-/// source cannot be deleted), then the data source, then the row.
+/// `connection#manage`: [`delete_with_grants`].
 pub async fn delete(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
-    let row = managed_connection(rbac, &ctx, user, &name).await?;
-    let filter = RelationshipFilter {
-        kind: "connection",
-        id: Some(name.clone()),
-        relation: None,
-        subject: None,
-    };
-    let existing = rbac.authz.read(&filter).await.map_err(authz_error)?;
-    rbac.authz
-        .delete_matching(&filter)
-        .await
-        .map_err(authz_error)?;
-    let response = match data_sources::delete(State(state.clone()), Path(name.clone())).await {
+    managed_connection(rbac, &ctx, user, &name).await?;
+    delete_with_grants(&state, rbac, &name).await
+}
+
+/// Deletes data source `name` with everything RBAC holds about it, so a
+/// later data source of the same name inherits no grant: its relationships
+/// first (restored if the data source cannot be deleted), then the data
+/// source, then its `connections` row. Also behind `DELETE /v1/data-sources`.
+pub(crate) async fn delete_with_grants(
+    state: &AppState,
+    rbac: &Rbac,
+    name: &str,
+) -> Result<Response, ApiError> {
+    // A name SpiceDB could not hold never got a grant or a row.
+    let tracked = connection_name(name).is_ok();
+    let mut existing = Vec::new();
+    if tracked {
+        let filter = RelationshipFilter {
+            kind: "connection",
+            id: Some(name.to_string()),
+            relation: None,
+            subject: None,
+        };
+        existing = rbac.authz.read(&filter).await.map_err(authz_error)?;
+        rbac.authz
+            .delete_matching(&filter)
+            .await
+            .map_err(authz_error)?;
+    }
+    let response = match data_sources::delete(State(state.clone()), Path(name.to_string())).await {
         Ok(response) => response.into_response(),
         Err(e) => {
             if !existing.is_empty() {
@@ -277,13 +315,31 @@ pub async fn delete(
             return Err(e);
         }
     };
-    if row.is_some() {
+    if tracked {
         rbac.store
-            .delete_connection(&name)
+            .delete_connection(name)
             .await
             .map_err(|e| store_error(e, "Conflict"))?;
     }
     Ok(response)
+}
+
+/// 409 when `name` (as `POST /v1/data-sources` trims it) still has a
+/// `connections` row: a new data source never adopts an old one's
+/// organization and releases.
+pub(crate) async fn refuse_tracked_name(rbac: &Rbac, name: &str) -> Result<(), ApiError> {
+    let row = rbac
+        .store
+        .connection(name.trim())
+        .await
+        .map_err(read_error)?;
+    if row.is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "A connection with this name still belongs to an organization",
+        ));
+    }
+    Ok(())
 }
 
 /// `{organizationId}`: platform admins. Assigns a data source of
@@ -430,20 +486,11 @@ pub async fn of_workspace(
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let ws = visible_workspace(rbac, &id, "view", user).await?;
-    let names: Vec<String> = released_connections(rbac, &ws.id.to_string())
+    let types = data_source_types(&state);
+    let connections: Vec<Value> = released_connections(rbac, &ws.id.to_string())
         .await?
         .into_iter()
-        .collect();
-    let rows = rbac
-        .store
-        .connections_by_names(&names)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?;
-    let types = data_source_types(&state);
-    let connections: Vec<Value> = rows
-        .iter()
-        .filter(|c| c.organization_id == ws.organization_id)
-        .map(|c| json!({ "name": c.name, "type": types.get(&c.name) }))
+        .map(|name| json!({ "type": types.get(&name), "name": name }))
         .collect();
     Ok(Json(json!({ "connections": connections })))
 }

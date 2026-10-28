@@ -19,7 +19,7 @@ use cubeserver::rbac::config::{check_rbac_compatible, RbacConfig};
 use cubeserver::rbac::identity::{hash_password, verify_password};
 use cubeserver::rbac::store::Store;
 use cubeserver::rbac::testing::FakeAuthz;
-use cubeserver::rbac::{Authz, ObjectRef, Rbac};
+use cubeserver::rbac::{Authz, ObjectRef, Rbac, Relationship, RelationshipFilter};
 use cubeserver::services::{AlwaysHealthy, MetaService, RequestContext, UnimplementedQueryService};
 use cubeserver::{build_app, ApiError, AppState, ServerConfig};
 use http_body_util::BodyExt;
@@ -2016,4 +2016,167 @@ db_test!(a_failed_spicedb_write_adds_no_connection, |store| {
     assert!(env.rbac.store.connection("broken").await.unwrap().is_none());
     let connection = ObjectRef::new("connection", "broken");
     assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+});
+
+db_test!(a_recreated_data_source_inherits_no_grant, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "viewer").await,
+        StatusCode::OK
+    );
+
+    // A platform admin deletes x through /v1/data-sources and makes a new x.
+    let (status, body) = send(
+        &env.router,
+        Method::DELETE,
+        "/cube/v1/data-sources/x",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+    let database = dir.path().join("x2.db");
+    let (status, body) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "x",
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": database.to_string_lossy(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert!(released(env, &w1).await.is_empty());
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/connections/x",
+        Some(&s.ana),
+        Some(json!({ "variables": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, list) = workspace_connections(env, &s.bia, &w1).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list, json!({ "connections": [] }));
+    let connection = ObjectRef::new("connection", "x");
+    assert!(!env.authz.check(&connection, "query", "bia").await.unwrap());
+});
+
+db_test!(a_data_source_never_adopts_a_stale_row, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // A row left behind (its data source removed by hand, say).
+    env.rbac
+        .store
+        .create_connection("z", s.org_a.parse().unwrap())
+        .await
+        .unwrap();
+    let (status, body) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "z",
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": dir.path().join("z.db").to_string_lossy(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(!yml.contains("  z:"), "{yml}");
+});
+
+db_test!(another_orgs_release_is_never_listed, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let org_b = create_org(env, &s.admin, "B", "bia").await;
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/connections/default/organization",
+        Some(&s.admin),
+        Some(json!({ "organizationId": org_b })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // A release that should never have been written: B's connection on
+    // A's workspace.
+    env.authz
+        .touch(&[Relationship {
+            resource: ObjectRef::new("connection", "default"),
+            relation: "workspace",
+            subject: ObjectRef::new("workspace", w1.clone()),
+        }])
+        .await
+        .unwrap();
+
+    assert!(released(env, &w1).await.is_empty());
+    let (status, list) = workspace_connections(env, &s.ana, &w1).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list, json!({ "connections": [] }));
+
+    // Failures answer 503, never a partial list.
+    env.authz.set_failing(true);
+    let err = cubeserver::rbac::handlers::connections::released_connections(&env.rbac, &w1)
+        .await
+        .unwrap_err();
+    env.authz.set_failing(false);
+    assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+});
+
+db_test!(a_release_needs_the_connection_still_in_the_org, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    // SpiceDB already moved x away (a reassignment midway): the row still
+    // says A, the relationship no longer does.
+    let org_rel = Relationship {
+        resource: ObjectRef::new("connection", "x"),
+        relation: "organization",
+        subject: ObjectRef::new("organization", s.org_a.clone()),
+    };
+    env.authz.delete(&[org_rel]).await.unwrap();
+
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::CONFLICT
+    );
+    let releases = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "connection",
+            id: Some("x".into()),
+            relation: Some("workspace"),
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(releases.is_empty(), "{releases:?}");
 });

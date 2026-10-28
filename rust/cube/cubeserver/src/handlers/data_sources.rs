@@ -415,7 +415,13 @@ pub async fn v1_create(
     Extension(ctx): Extension<RequestContext>,
     request: Json<CreateRequest>,
 ) -> Response {
-    v1(&state, &ctx, create(State(state.clone()), request)).await
+    let handler = async {
+        if let Some(rbac) = state.rbac.as_deref() {
+            crate::rbac::handlers::connections::refuse_tracked_name(rbac, &request.name).await?;
+        }
+        create(State(state.clone()), request).await
+    };
+    v1(&state, &ctx, handler).await
 }
 
 /// `PUT /v1/data-sources/:name`
@@ -434,7 +440,18 @@ pub async fn v1_delete(
     Extension(ctx): Extension<RequestContext>,
     name: UrlPath<String>,
 ) -> Response {
-    v1(&state, &ctx, delete(State(state.clone()), name)).await
+    // With RBAC on, the connection's grants and row go too.
+    let handler = async {
+        match state.rbac.as_deref() {
+            Some(rbac) => {
+                crate::rbac::handlers::connections::delete_with_grants(&state, rbac, &name).await
+            }
+            None => delete(State(state.clone()), name)
+                .await
+                .map(IntoResponse::into_response),
+        }
+    };
+    v1(&state, &ctx, handler).await
 }
 
 /// Where `/v1/execute` runs a statement.
