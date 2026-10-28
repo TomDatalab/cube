@@ -479,6 +479,21 @@ impl Store {
         Ok(rows.iter().map(workspace_from).collect())
     }
 
+    pub async fn workspaces_of_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<Workspace>, StoreError> {
+        let c = self.conn().await?;
+        let rows = c
+            .query(
+                "SELECT id, organization_id, name, created_at, created_by \
+                 FROM workspaces WHERE organization_id = $1 ORDER BY name",
+                &[&organization_id],
+            )
+            .await?;
+        Ok(rows.iter().map(workspace_from).collect())
+    }
+
     pub async fn update_workspace(
         &self,
         id: Uuid,

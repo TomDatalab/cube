@@ -1,18 +1,23 @@
 //! HTTP routes that exist only with RBAC on.
 
 pub mod auth;
+pub mod organizations;
 pub mod users;
+pub mod workspaces;
 
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 use axum::Json;
 use axum::Router;
+use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::rbac::store::StoreError;
-use crate::rbac::Rbac;
+use crate::rbac::identity::validate_user_id;
+use crate::rbac::store::{StoreError, User};
+use crate::rbac::{unauthenticated, Rbac};
+use crate::services::RequestContext;
 
 /// Routes reachable without a token (`POST /v1/auth/login`).
 pub fn public_routes(base: &str) -> Router<AppState> {
@@ -39,6 +44,38 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             &format!("{base}/v1/users/:id/tokens"),
             post(users::issue_token),
         )
+        .route(
+            &format!("{base}/v1/organizations"),
+            get(organizations::list).post(organizations::create),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id"),
+            get(organizations::get)
+                .patch(organizations::update)
+                .delete(organizations::delete),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/owners/:user"),
+            put(organizations::add_owner).delete(organizations::remove_owner),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/workspaces"),
+            get(workspaces::list).post(workspaces::create),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id"),
+            get(workspaces::get)
+                .patch(workspaces::update)
+                .delete(workspaces::delete),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id/members"),
+            get(workspaces::members),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id/members/:user"),
+            put(workspaces::set_member).delete(workspaces::remove_member),
+        )
 }
 
 /// The JSON body of a request, or 400.
@@ -57,6 +94,41 @@ pub(crate) fn store_error(error: StoreError, conflict: &str) -> ApiError {
             crate::rbac::unavailable()
         }
     }
+}
+
+/// The RBAC and the caller's user id, or 401 without an identity.
+pub(crate) fn caller<'a>(
+    state: &'a AppState,
+    ctx: &'a RequestContext,
+) -> Result<(&'a Rbac, &'a str), ApiError> {
+    let rbac = rbac_of(state)?;
+    let user = ctx.user.as_deref().ok_or_else(unauthenticated)?;
+    Ok((rbac, user))
+}
+
+/// A resource id from the path. Anything that is not a UUID cannot exist: 404.
+pub(crate) fn resource_id(id: &str, kind: &str) -> Result<Uuid, ApiError> {
+    id.parse()
+        .map_err(|_| ApiError::not_found(format!("{kind} not found")))
+}
+
+/// A display name: trimmed, not empty.
+pub(crate) fn resource_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("The name cannot be empty"));
+    }
+    Ok(name.to_string())
+}
+
+/// A user given as a path or body id: 400 when malformed, 404 when unknown.
+pub(crate) async fn existing_user(rbac: &Rbac, id: &str) -> Result<User, ApiError> {
+    validate_user_id(id)?;
+    rbac.store
+        .user(id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .ok_or_else(|| ApiError::not_found("User not found"))
 }
 
 /// The RBAC of a route mounted only when it is on.

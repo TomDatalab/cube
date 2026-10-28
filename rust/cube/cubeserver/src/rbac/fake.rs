@@ -39,6 +39,7 @@ fn definition(kind: &str, name: &str) -> Option<Vec<Term>> {
 pub struct FakeAuthz {
     relationships: Mutex<Vec<Relationship>>,
     failing: AtomicBool,
+    failing_writes: AtomicBool,
 }
 
 impl FakeAuthz {
@@ -48,6 +49,23 @@ impl FakeAuthz {
 
     pub fn set_failing(&self, failing: bool) {
         self.failing.store(failing, Ordering::SeqCst);
+    }
+
+    /// Fails only touch and delete, so a write can fail after its checks
+    /// passed.
+    pub fn set_failing_writes(&self, failing: bool) {
+        self.failing_writes.store(failing, Ordering::SeqCst);
+    }
+
+    fn write_guard(&self) -> Result<(), AuthzError> {
+        self.guard()?;
+        if self.failing_writes.load(Ordering::SeqCst) {
+            Err(AuthzError::Unavailable(
+                "fake authz set to fail writes".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn guard(&self) -> Result<(), AuthzError> {
@@ -152,7 +170,7 @@ impl Authz for FakeAuthz {
     }
 
     async fn touch(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {
-        self.guard()?;
+        self.write_guard()?;
         let mut rels = self.relationships.lock().unwrap();
         for r in relationships {
             if !rels.contains(r) {
@@ -163,7 +181,7 @@ impl Authz for FakeAuthz {
     }
 
     async fn delete(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {
-        self.guard()?;
+        self.write_guard()?;
         self.relationships
             .lock()
             .unwrap()
@@ -172,7 +190,7 @@ impl Authz for FakeAuthz {
     }
 
     async fn delete_matching(&self, filter: &RelationshipFilter) -> Result<(), AuthzError> {
-        self.guard()?;
+        self.write_guard()?;
         self.relationships
             .lock()
             .unwrap()
