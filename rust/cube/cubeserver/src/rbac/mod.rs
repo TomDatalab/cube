@@ -2,6 +2,7 @@
 
 pub mod authz;
 pub mod fake;
+pub mod store;
 
 pub use authz::{Authz, AuthzError, HttpAuthz, ObjectRef, Relationship, RelationshipFilter};
 

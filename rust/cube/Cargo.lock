@@ -2317,6 +2317,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "cubeauth",
  "cubeconfig",
  "cubedriver",
@@ -2326,6 +2327,7 @@ dependencies = [
  "cubeplanner",
  "cubequery",
  "cubesqlbridge",
+ "deadpool-postgres",
  "futures",
  "http-body-util",
  "jsonwebtoken",
@@ -2337,6 +2339,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-postgres",
  "tower",
  "tower-http",
  "tracing",
@@ -5128,8 +5131,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator 0.2.0",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
+ "uuid 1.26.1",
 ]
 
 [[package]]
