@@ -392,11 +392,11 @@ pub async fn delete(
     // Only the variables that exist for this source alone go; one that a
     // `{ env: ... }` field names may be read by something else too. Those
     // of the running process go as well, or the restart would keep them.
-    let prefix = key_by_data_source("CUBEJS_", &name);
+    let sources: Vec<&str> = config.data_sources.keys().map(String::as_str).collect();
     let mut to_remove: Vec<String> = env_keys(&paths.env)
         .into_iter()
         .chain(std::env::vars().map(|(key, _)| key))
-        .filter(|key| key.starts_with(&prefix))
+        .filter(|key| own_setting(key, &name, &sources).is_some())
         .collect();
     to_remove.sort();
     to_remove.dedup();
@@ -431,6 +431,17 @@ async fn v1_scoped<R: IntoResponse>(
     scope: &str,
     handler: impl std::future::Future<Output = Result<R, ApiError>>,
 ) -> Response {
+    // With security checks off, a request without a token (or with one that
+    // did not verify) is let through with the default scopes. Those may list
+    // these scopes, but changing the connections or running statements on
+    // them always takes a real token.
+    if !ctx.token_verified {
+        return ApiError::forbidden(format!(
+            "The {scope} scope needs a verified token, whatever the default scopes grant"
+        ))
+        .with_request_id(&ctx.request_id)
+        .into_response();
+    }
     if let Err(e) = assert_api_scope(state, ctx, scope).await {
         return e.into_response();
     }
@@ -699,7 +710,7 @@ fn current_variables(
     put("CUBEJS_DB_PASS", ds.password.clone());
     put("CUBEJS_DB_SSL", ds.ssl.then(|| "true".to_string()));
 
-    let prefix = key_by_data_source("CUBEJS_", name);
+    let sources: Vec<&str> = config.data_sources.keys().map(String::as_str).collect();
     for key in env.names() {
         let var = if name == "default" {
             DEFAULT_DRIVER_PREFIXES
@@ -707,8 +718,7 @@ fn current_variables(
                 .any(|p| key.starts_with(p))
                 .then(|| key.to_string())
         } else {
-            key.strip_prefix(&prefix)
-                .map(|rest| format!("CUBEJS_{rest}"))
+            own_setting(key, name, &sources).map(|rest| format!("CUBEJS_{rest}"))
         };
         let value = env.get(key).unwrap_or_default();
         if let Some(var) = var {
@@ -720,31 +730,77 @@ fn current_variables(
     Ok(out)
 }
 
-/// A setting the edit form is not sent, so an empty field keeps it: a
-/// password, key or token, or a URL carrying a password.
+/// What follows `CUBEJS_DS_<NAME>_` in one of `name`'s own variables. A
+/// source whose name starts the same (`sales_eu` for `sales`) has variables
+/// with that prefix too, and they are not `name`'s.
+fn own_setting<'a>(key: &'a str, name: &str, sources: &[&str]) -> Option<&'a str> {
+    let rest = key.strip_prefix(&key_by_data_source("CUBEJS_", name))?;
+    let another = sources.iter().any(|other| {
+        other.len() > name.len()
+            && *other != "default"
+            && key.starts_with(&key_by_data_source("CUBEJS_", other))
+    });
+    (!another).then_some(rest)
+}
+
+/// A setting the edit form is not sent, so an empty field keeps it: one
+/// whose name says it is a password, key, token or credentials, or a URL
+/// carrying one.
 fn kept_if_empty(var: &str, current: &BTreeMap<String, String>) -> bool {
-    let secret = ["PASS", "SECRET", "TOKEN", "CREDENTIALS", "PRIVATE_KEY"]
-        .iter()
-        .any(|word| var.contains(word));
-    secret
+    is_secret(var)
         || (var == "CUBEJS_DB_URL" && current.get(var).is_some_and(|url| without_password(url).1))
 }
 
-/// `url` without the password it may carry (`postgres://u:p@h/db` →
-/// `postgres://u@h/db`), and whether it had one.
+fn is_secret(var: &str) -> bool {
+    let var = var.to_ascii_uppercase();
+    [
+        "PASS",
+        "PWD",
+        "SECRET",
+        "TOKEN",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+    ]
+    .iter()
+    .any(|word| var.contains(word))
+        || var.ends_with("KEY")
+}
+
+/// `url` without the secrets it may carry, and whether it had any: the
+/// password of `postgres://u:p@h/db` (→ `postgres://u@h/db`), and the value
+/// of a parameter such as `?password=`, `&token=` or JDBC's `;PWD=` (→ `***`).
 fn without_password(url: &str) -> (String, bool) {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return (url.to_string(), false);
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    match authority.rsplit_once('@') {
-        Some((userinfo, host)) if userinfo.contains(':') => {
-            let user = userinfo.split(':').next().unwrap_or_default();
-            (format!("{scheme}://{user}@{host}{tail}"), true)
+    let mut hidden = false;
+    let mut out = url.to_string();
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let end = rest.find(['/', '?', '#', ';']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(end);
+        if let Some((userinfo, host)) = authority.rsplit_once('@') {
+            if userinfo.contains(':') {
+                let user = userinfo.split(':').next().unwrap_or_default();
+                out = format!("{scheme}://{user}@{host}{tail}");
+                hidden = true;
+            }
         }
-        _ => (url.to_string(), false),
     }
+
+    let mut redacted = String::with_capacity(out.len());
+    for piece in out.split_inclusive(['?', '&', ';']) {
+        let (param, separator) = match piece.char_indices().last() {
+            Some((i, '?' | '&' | ';')) => piece.split_at(i),
+            _ => (piece, ""),
+        };
+        match param.split_once('=') {
+            Some((key, value)) if !value.is_empty() && is_secret(key) && !key.contains('/') => {
+                redacted.push_str(key);
+                redacted.push_str("=***");
+                hidden = true;
+            }
+            _ => redacted.push_str(param),
+        }
+        redacted.push_str(separator);
+    }
+    (redacted, hidden)
 }
 
 /// The form's fields, split into the ones to set and the ones emptied. An
@@ -1378,10 +1434,66 @@ mod tests {
             ("postgres://u@db:5432/x?sslmode=require".to_string(), true)
         );
         assert_eq!(
+            without_password("postgres://db/x?user=u&password=p&sslmode=require"),
+            (
+                "postgres://db/x?user=u&password=***&sslmode=require".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            without_password("jdbc:databricks://h:443/default;AuthMech=3;UID=token;PWD=dapi123"),
+            (
+                "jdbc:databricks://h:443/default;AuthMech=3;UID=token;PWD=***".to_string(),
+                true
+            )
+        );
+        assert_eq!(
             without_password("clickhouse://db:8123/x"),
             ("clickhouse://db:8123/x".to_string(), false)
         );
         assert_eq!(without_password("db"), ("db".to_string(), false));
+    }
+
+    #[test]
+    fn secrets_are_known_by_their_names() {
+        for var in [
+            "CUBEJS_DB_PASS",
+            "CUBEJS_DB_SSL_KEY",
+            "CUBEJS_DB_SSL_PASSPHRASE",
+            "CUBEJS_DB_EXPORT_BUCKET_AZURE_KEY",
+            "CUBEJS_DB_PINOT_APIKEY_KEY",
+            "CUBEJS_AWS_SECRET",
+            "CUBEJS_DB_BQ_CREDENTIALS",
+            "CUBEJS_DB_DATABRICKS_TOKEN",
+            "CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY_PATH",
+        ] {
+            assert!(is_secret(var), "{var}");
+        }
+        for var in [
+            "CUBEJS_DB_HOST",
+            "CUBEJS_DB_BQ_KEY_FILE",
+            "CUBEJS_DB_SSL_CERT",
+            "CUBEJS_DB_NAME",
+        ] {
+            assert!(!is_secret(var), "{var}");
+        }
+    }
+
+    #[test]
+    fn a_sources_settings_are_not_a_longer_named_ones() {
+        let sources = ["default", "sales", "sales_eu"];
+        assert_eq!(
+            own_setting("CUBEJS_DS_SALES_DB_HOST", "sales", &sources),
+            Some("DB_HOST")
+        );
+        assert_eq!(
+            own_setting("CUBEJS_DS_SALES_EU_DB_HOST", "sales", &sources),
+            None
+        );
+        assert_eq!(
+            own_setting("CUBEJS_DS_SALES_EU_DB_HOST", "sales_eu", &sources),
+            Some("DB_HOST")
+        );
     }
 
     #[test]
