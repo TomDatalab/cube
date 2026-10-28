@@ -122,6 +122,10 @@ pub fn build_app(state: AppState) -> Router {
                 .delete(handlers::data_sources::v1_delete),
         )
         .route(
+            &format!("{base}/v1/execute"),
+            axum::routing::post(handlers::data_sources::v1_execute),
+        )
+        .route(
             &format!("{base}/v1/load"),
             get(handlers::query::load_get).post(handlers::query::load_post),
         )

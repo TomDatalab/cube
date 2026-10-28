@@ -842,3 +842,140 @@ async fn the_rest_api_lists_and_adds_data_sources() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!std::fs::read_to_string(&file).unwrap().contains("from_api"));
 }
+
+/// Grants `execute` too, as `CUBEJS_DEFAULT_API_SCOPES` would.
+#[derive(Debug)]
+struct ExecuteAuth;
+
+#[async_trait]
+impl AuthService for ExecuteAuth {
+    async fn authenticate(&self, _: Option<&str>) -> Result<AuthenticatedRequest, ApiError> {
+        Ok(AuthenticatedRequest {
+            security_context: json!({}),
+            signed_with_playground_auth_secret: false,
+        })
+    }
+
+    async fn api_scopes(&self, _: &Value) -> Result<Vec<String>, ApiError> {
+        Ok(vec!["execute".to_string()])
+    }
+}
+
+#[tokio::test]
+async fn executing_a_statement_needs_the_execute_scope() {
+    let (dir, mut config) = fixture();
+    with_local_source(&dir, &mut config).await;
+
+    // data_sources manages connections; it does not run statements.
+    let (status, body) = send_json(
+        app(config, Arc::new(DataSourcesAuth)),
+        "POST",
+        "/cube/v1/execute",
+        Some(json!({ "connection": "local", "query": "CREATE TABLE t (id INTEGER)" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "API scope is missing: execute");
+}
+
+#[tokio::test]
+async fn tables_and_views_are_created_through_execute() {
+    let (dir, mut config) = fixture();
+    with_local_source(&dir, &mut config).await;
+    let router = || app(config.clone(), Arc::new(ExecuteAuth));
+    let run = |query: &str| {
+        send_json(
+            router(),
+            "POST",
+            "/cube/v1/execute",
+            Some(json!({ "connection": "local", "query": query })),
+        )
+    };
+
+    for statement in [
+        "CREATE TABLE produtos (id INTEGER PRIMARY KEY, nome TEXT, preco REAL)",
+        "INSERT INTO produtos (nome, preco) VALUES ('Cabo', 10.5), ('Conector', 2)",
+        "CREATE VIEW caros AS SELECT nome FROM produtos WHERE preco > 5",
+    ] {
+        let (status, body) = run(statement).await;
+        assert_eq!(status, StatusCode::OK, "{statement}: {body}");
+    }
+
+    let (status, body) = run("SELECT nome FROM caros").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["columns"], json!(["nome"]));
+    assert_eq!(body["rowCount"], json!(1));
+    assert_eq!(body["rows"][0][0], "Cabo");
+    assert_eq!(body["dataSource"], "local");
+
+    // A database error is the caller's, not the server's.
+    let (status, body) = run("CREATE TABLE produtos (id INTEGER)").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("already exists"), "{body}");
+}
+
+#[tokio::test]
+async fn the_database_parameter_picks_where_the_statement_runs() {
+    let (dir, mut config) = fixture();
+    with_local_source(&dir, &mut config).await;
+    let other = dir.path().join("other.db");
+
+    let (status, body) = send_json(
+        app(config, Arc::new(ExecuteAuth)),
+        "POST",
+        "/cube/v1/execute",
+        Some(json!({ "connection": "local", "database": other.to_string_lossy(), "query": "CREATE TABLE em_outro (id INTEGER)" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["database"], json!(other.to_string_lossy()));
+    // SQLite's database is the file: the table is in the other one.
+    assert!(other.exists());
+    assert!(!dir.path().join("local.db").exists() || {
+        let bytes = std::fs::read(dir.path().join("local.db")).unwrap();
+        !String::from_utf8_lossy(&bytes).contains("em_outro")
+    });
+}
+
+#[tokio::test]
+async fn a_connection_can_be_given_by_its_settings() {
+    let (dir, config) = fixture();
+    let database = dir.path().join("adhoc.db");
+
+    let (status, body) = send_json(
+        app(config, Arc::new(ExecuteAuth)),
+        "POST",
+        "/cube/v1/execute",
+        Some(json!({
+            "connection": { "CUBEJS_DB_TYPE": "sqlite", "CUBEJS_DB_NAME": database.to_string_lossy(), "CUBEJS_DB_MAX_POOL": 1 },
+            "query": "CREATE TABLE avulsa (id INTEGER)"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["dataSource"], "(ad hoc)");
+    assert!(database.exists());
+}
+
+#[tokio::test]
+async fn a_request_without_a_connection_is_refused() {
+    let (dir, mut config) = fixture();
+    with_config_file(&dir, &mut config);
+    let router = || app(config.clone(), Arc::new(ExecuteAuth));
+
+    let (status, body) = send_json(router(), "POST", "/cube/v1/execute", Some(json!({ "query": "SELECT 1" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("Name the connection"), "{body}");
+
+    let (status, _) = send_json(
+        router(),
+        "POST",
+        "/cube/v1/execute",
+        Some(json!({ "connection": "missing", "query": "SELECT 1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

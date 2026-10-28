@@ -75,6 +75,19 @@ export function endpoints(measure: string): Endpoint[] {
       body: { variables: { CUBEJS_DB_NAME: '/tmp/cube-example-2.db' } },
     },
     {
+      key: 'ds-execute',
+      group: 'Data Source',
+      name: 'Run a statement (tables, views...)',
+      method: 'POST',
+      path: '/v1/execute',
+      scope: 'execute',
+      body: {
+        connection: 'default',
+        database: 'analytics',
+        query: 'CREATE TABLE IF NOT EXISTS exemplo (id serial PRIMARY KEY, nome text)',
+      },
+    },
+    {
       key: 'ds-delete',
       group: 'Data Source',
       name: 'Delete a data source',
@@ -240,12 +253,14 @@ export function ApiConsole() {
           style={{ marginTop: 16 }}
           type="info"
           showIcon
-          message="The data_sources scope"
+          message="The data_sources and execute scopes"
           description={(
             <>
               The Data Source endpoints read and write connection settings, passwords included,
-              so no token has their scope unless the server grants it: add{' '}
-              <Text code>data_sources</Text> to <Text code>CUBEJS_DEFAULT_API_SCOPES</Text>.
+              and <Text code>execute</Text> runs any statement on the database, so no token has
+              these scopes unless the server grants them: add{' '}
+              <Text code>data_sources</Text> or <Text code>execute</Text> to{' '}
+              <Text code>CUBEJS_DEFAULT_API_SCOPES</Text>.
               A data source added, edited or deleted here shows on the Data Source page once
               the server has restarted, a few seconds later.
             </>

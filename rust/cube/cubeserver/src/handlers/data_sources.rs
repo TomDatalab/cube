@@ -40,6 +40,17 @@ use crate::services::RequestContext;
 /// The scope `/v1/data-sources` requires.
 const SCOPE: &str = "data_sources";
 
+/// The scope `/v1/execute` requires: it runs whatever
+/// statement it is given against the database, so it is kept apart from
+/// managing the connection settings.
+const EXECUTE_SCOPE: &str = "execute";
+
+/// A statement running longer than this is abandoned.
+const EXECUTE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// At most this many rows of a statement's result are sent back.
+const EXECUTE_MAX_ROWS: usize = 1000;
+
 /// A connection test longer than this is reported as a failure.
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -347,7 +358,16 @@ async fn v1<R: IntoResponse>(
     ctx: &RequestContext,
     handler: impl std::future::Future<Output = Result<R, ApiError>>,
 ) -> Response {
-    if let Err(e) = assert_api_scope(state, ctx, SCOPE).await {
+    v1_scoped(state, ctx, SCOPE, handler).await
+}
+
+async fn v1_scoped<R: IntoResponse>(
+    state: &AppState,
+    ctx: &RequestContext,
+    scope: &str,
+    handler: impl std::future::Future<Output = Result<R, ApiError>>,
+) -> Response {
+    if let Err(e) = assert_api_scope(state, ctx, scope).await {
         return e.into_response();
     }
     match handler.await {
@@ -408,6 +428,146 @@ pub async fn v1_delete(
     name: UrlPath<String>,
 ) -> Response {
     v1(&state, &ctx, delete(State(state.clone()), name)).await
+}
+
+/// Where `/v1/execute` runs a statement.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Connection {
+    /// A configured data source, by name: run with its settings.
+    Name(String),
+    /// A connection described by its `CUBEJS_DB_*` variables, for a
+    /// database that is not a data source (`CUBEJS_DB_TYPE` required).
+    /// Values may be strings, numbers or booleans (`"CUBEJS_DB_PORT": 8201`).
+    Settings(BTreeMap<String, Value>),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteRequest {
+    #[serde(default)]
+    connection: Option<Connection>,
+    /// The database to run in, instead of the connection's own:
+    /// `CUBEJS_DB_NAME` for this one statement (a file for SQLite).
+    #[serde(default)]
+    database: Option<String>,
+    /// One statement: `CREATE TABLE`, `CREATE VIEW`, `INSERT`, `SELECT`...
+    #[serde(default)]
+    query: String,
+}
+
+/// `POST /v1/execute` — runs one statement on the connection the request
+/// names, to create tables, views and the like.
+///
+/// Cube itself only ever reads; this hands the statement to the
+/// connection's driver as it is, on a connection of its own.
+pub async fn v1_execute(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(request): Json<ExecuteRequest>,
+) -> Response {
+    v1_scoped(&state, &ctx, EXECUTE_SCOPE, execute(&state, request)).await
+}
+
+async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value>, ApiError> {
+    let query = request.query.trim();
+    if query.is_empty() {
+        return Err(ApiError::bad_request("The query is empty"));
+    }
+
+    let (name, mut variables) = match request.connection {
+        None => {
+            return Err(ApiError::bad_request(
+                "Name the connection: a data source name, or its CUBEJS_DB_* settings",
+            ))
+        }
+        Some(Connection::Name(name)) => {
+            let Some(config_file) = &state.config.config_file else {
+                return Err(ApiError::not_implemented(
+                    "This deployment has no cube.yml to read the data source from",
+                ));
+            };
+            let env = env_with_file(&config_file.with_file_name(".env"));
+            let variables = current_variables(&load(config_file, &env)?, &name, &env)?;
+            (name, variables)
+        }
+        Some(Connection::Settings(settings)) => {
+            let mut text = BTreeMap::new();
+            for (key, value) in settings {
+                let value = match value {
+                    Value::String(s) => s,
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Null => continue,
+                    _ => return Err(ApiError::bad_request(format!("{key} must be a single value"))),
+                };
+                text.insert(key, value);
+            }
+            let variables = clean(&text)?;
+            match variables.get("CUBEJS_DB_TYPE") {
+                Some(db_type) if cubedriver::DriverFactory::is_implemented(db_type) => {}
+                Some(db_type) => {
+                    return Err(ApiError::bad_request(format!(
+                        "This server has no {db_type} connector"
+                    )))
+                }
+                None => return Err(ApiError::bad_request("The connection needs CUBEJS_DB_TYPE")),
+            }
+            // Named in the log and the response; the settings stay out.
+            ("(ad hoc)".to_string(), variables)
+        }
+    };
+    let name = name.as_str();
+    if let Some(database) = request.database.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        if database.contains(['\n', '\r', '\0']) {
+            return Err(ApiError::bad_request("The database name cannot span several lines"));
+        }
+        variables.insert("CUBEJS_DB_NAME".to_string(), database.to_string());
+    }
+
+    let env: std::collections::HashMap<String, String> = variables.into_iter().collect();
+    let config = cubedriver::DriverConfig::from_env_source(&env, None, false)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let db_type = config.data_source.db_type.clone().unwrap_or_default();
+    let database = config.data_source.database.clone();
+    let driver = cubedriver::DriverFactory::create(&db_type, config)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    tracing::info!(
+        data_source = %name,
+        database = database.as_deref().unwrap_or(""),
+        query = %query.chars().take(200).collect::<String>(),
+        "executing a statement through /v1/execute"
+    );
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        EXECUTE_TIMEOUT,
+        driver.query(query, &[], &cubedriver::QueryOptions::default()),
+    )
+    .await;
+    let _ = driver.release().await;
+    let result = match result {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => return Err(ApiError::bad_request(e.to_string())),
+        Err(_) => {
+            return Err(ApiError::bad_request(format!(
+                "The statement did not finish in {}s",
+                EXECUTE_TIMEOUT.as_secs()
+            )))
+        }
+    };
+
+    let row_count = result.rows.len();
+    let columns: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+    let rows: Vec<_> = result.rows.iter().take(EXECUTE_MAX_ROWS).collect();
+    Ok(Json(json!({
+        "dataSource": name,
+        "database": database,
+        "columns": columns,
+        "rows": rows,
+        "rowCount": row_count,
+        "truncated": row_count > EXECUTE_MAX_ROWS,
+        "ms": started.elapsed().as_millis() as u64,
+    })))
 }
 
 struct Paths {
