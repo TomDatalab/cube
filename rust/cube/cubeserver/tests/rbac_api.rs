@@ -45,6 +45,8 @@ fn auth_config() -> AuthConfig {
     AuthConfig::builder()
         .api_secret(SECRET)
         .enforce_security_checks(true)
+        // `data_sources` too, so a 403 there comes from the RBAC check.
+        .default_api_scopes(["graphql", "meta", "data", "sql", "data_sources"])
         .build()
 }
 
@@ -63,8 +65,12 @@ fn rbac_config(failure_delay: Duration) -> RbacConfig {
 }
 
 fn state(rbac: Option<Arc<Rbac>>) -> AppState {
+    state_with(rbac, ServerConfig::default())
+}
+
+fn state_with(rbac: Option<Arc<Rbac>>, config: ServerConfig) -> AppState {
     AppState {
-        config: Arc::new(ServerConfig::default()),
+        config: Arc::new(config),
         query_config: Arc::new(cubequery::QueryConfig::default()),
         auth: Arc::new(CubeAuthService::new(auth_config())),
         meta: Arc::new(NoMeta),
@@ -90,6 +96,10 @@ async fn env(store: Store, failure_delay: Duration) -> Env {
 }
 
 async fn env_with(store: Store, config: RbacConfig) -> Env {
+    env_with_server(store, config, ServerConfig::default()).await
+}
+
+async fn env_with_server(store: Store, config: RbacConfig, server: ServerConfig) -> Env {
     let authz = Arc::new(FakeAuthz::new());
     let rbac = Arc::new(
         Rbac::with_parts(authz.clone(), store, config)
@@ -97,7 +107,7 @@ async fn env_with(store: Store, config: RbacConfig) -> Env {
             .expect("rbac starts"),
     );
     Env {
-        router: build_app(state(Some(rbac.clone()))),
+        router: build_app(state_with(Some(rbac.clone()), server)),
         rbac,
         authz,
     }
@@ -825,7 +835,11 @@ struct Scenario {
 }
 
 async fn scenario(store: Store) -> Scenario {
-    let env = env(store, Duration::ZERO).await;
+    scenario_with(store, ServerConfig::default()).await
+}
+
+async fn scenario_with(store: Store, server: ServerConfig) -> Scenario {
+    let env = env_with_server(store, rbac_config(Duration::ZERO), server).await;
     let admin = admin_token(&env).await;
     for id in ["ana", "bia", "caio"] {
         let (status, body) = create_user_as(&env, &admin, id, &format!("{id}-password-1")).await;
@@ -1536,4 +1550,470 @@ db_test!(disabled_users_get_no_roles, |store| {
     assert_eq!(body["error"], "User is disabled");
     let org = ObjectRef::new("organization", s.org_a.clone());
     assert!(!env.authz.check(&org, "view", "caio").await.unwrap());
+});
+
+// ---- connections ----
+
+/// A scenario whose server reads a `cube.yml` (with the data source
+/// `default`) and an `.env` from `dir`.
+async fn connections_scenario(store: Store, dir: &tempfile::TempDir) -> Scenario {
+    let file = dir.path().join("cube.yml");
+    std::fs::write(
+        &file,
+        "version: 1\ndata_sources:\n  default:\n    type: postgres\n    host: db\n    password: secret\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".env"), "PORT=4000\n").unwrap();
+    let server = ServerConfig {
+        config_file: Some(file),
+        schema_path: dir.path().join("model").to_string_lossy().into_owned(),
+        ..ServerConfig::default()
+    };
+    scenario_with(store, server).await
+}
+
+/// `POST /v1/organizations/{org}/connections`: a SQLite data source in `dir`.
+async fn add_connection(
+    env: &Env,
+    token: &str,
+    org: &str,
+    name: &str,
+    dir: &tempfile::TempDir,
+) -> (StatusCode, Value) {
+    let database = dir.path().join(format!("{name}.db"));
+    send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{org}/connections"),
+        Some(token),
+        Some(json!({
+            "name": name,
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": database.to_string_lossy(),
+            }
+        })),
+    )
+    .await
+}
+
+async fn release(env: &Env, token: &str, method: Method, ws: &str, name: &str) -> StatusCode {
+    send(
+        &env.router,
+        method,
+        &format!("/cube/v1/workspaces/{ws}/connections/{name}"),
+        Some(token),
+        None,
+    )
+    .await
+    .0
+}
+
+async fn workspace_connections(env: &Env, token: &str, ws: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{ws}/connections"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+async fn released(env: &Env, ws: &str) -> Vec<String> {
+    cubeserver::rbac::handlers::connections::released_connections(&env.rbac, ws)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+db_test!(org_owner_adds_a_connection_and_releases_it, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["name"], "x");
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(yml.contains("  x:\n    type: sqlite\n"), "{yml}");
+    // The same name again, as `POST /v1/data-sources` answers it.
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("already exists"),
+        "{body}"
+    );
+    // A data source that exists without an organization is not taken over.
+    let (status, _) = add_connection(env, &s.ana, &s.org_a, "default", &dir).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(env
+        .rbac
+        .store
+        .connection("default")
+        .await
+        .unwrap()
+        .is_none());
+
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let w2 = workspace_id(env, &s.ana, &s.org_a, "W2").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "viewer").await,
+        StatusCode::OK
+    );
+
+    for token in [&s.ana, &s.bia] {
+        let (status, list) = workspace_connections(env, token, &w1).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(
+            list,
+            json!({ "connections": [{ "name": "x", "type": "sqlite" }] })
+        );
+    }
+    let (status, list) = workspace_connections(env, &s.ana, &w2).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list, json!({ "connections": [] }));
+    assert_eq!(released(env, &w1).await, ["x"]);
+
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(
+        list,
+        json!({ "connections": [{ "name": "x", "type": "sqlite", "workspaces": [w1] }] })
+    );
+
+    // Withdrawn, released again, then the connection is deleted.
+    assert_eq!(
+        release(env, &s.ana, Method::DELETE, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(released(env, &w1).await.is_empty());
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = send(
+        &env.router,
+        Method::DELETE,
+        "/cube/v1/connections/x",
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(!yml.contains("  x:"), "{yml}");
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+    assert!(released(env, &w1).await.is_empty());
+    let connection = ObjectRef::new("connection", "x");
+    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+});
+
+db_test!(
+    a_connection_cannot_be_released_to_another_orgs_workspace,
+    |store| {
+        let dir = tempfile::tempdir().unwrap();
+        let s = connections_scenario(store, &dir).await;
+        let env = &s.env;
+        let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let org_b = create_org(env, &s.admin, "B", "bia").await;
+        let wb = workspace_id(env, &s.bia, &org_b, "WB").await;
+
+        // Even a platform admin, who administers both organizations.
+        for token in [&s.admin, &s.ana, &s.bia] {
+            assert_eq!(
+                release(env, token, Method::PUT, &wb, "x").await,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert!(released(env, &wb).await.is_empty());
+    }
+);
+
+db_test!(workspace_members_cannot_manage_connections, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "owner").await,
+        StatusCode::OK
+    );
+
+    // `bia` owns W1 and sees x through it, but administers nothing.
+    let (status, list) = workspace_connections(env, &s.bia, &w1).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    for method in [Method::PUT, Method::DELETE] {
+        assert_eq!(
+            release(env, &s.bia, method.clone(), &w1, "x").await,
+            StatusCode::FORBIDDEN,
+            "{method}"
+        );
+    }
+    let (status, _) = add_connection(env, &s.bia, &s.org_a, "y", &dir).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    for (method, path, body) in [
+        (
+            Method::GET,
+            format!("/cube/v1/organizations/{}/connections", s.org_a),
+            None,
+        ),
+        (
+            Method::PUT,
+            "/cube/v1/connections/x".to_string(),
+            Some(json!({ "variables": {} })),
+        ),
+        (Method::DELETE, "/cube/v1/connections/x".to_string(), None),
+    ] {
+        let (status, _) = send(&env.router, method.clone(), &path, Some(&s.bia), body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
+    }
+    assert!(env.rbac.store.connection("x").await.unwrap().is_some());
+    assert_eq!(released(env, &w1).await, ["x"]);
+});
+
+db_test!(assigning_an_existing_data_source_to_an_org, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let assign = |token: String, name: &'static str, org: String| {
+        let router = env.router.clone();
+        async move {
+            send(
+                &router,
+                Method::PUT,
+                &format!("/cube/v1/connections/{name}/organization"),
+                Some(&token),
+                Some(json!({ "organizationId": org })),
+            )
+            .await
+            .0
+        }
+    };
+    // Platform admins only.
+    assert_eq!(
+        assign(s.ana.clone(), "default", s.org_a.clone()).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        assign(s.admin.clone(), "nope", s.org_a.clone()).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        assign(
+            s.admin.clone(),
+            "default",
+            "00000000-0000-0000-0000-000000000000".into()
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        assign(s.admin.clone(), "default", s.org_a.clone()).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let row = env.rbac.store.connection("default").await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), s.org_a);
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(
+        list,
+        json!({ "connections": [{ "name": "default", "type": "postgres", "workspaces": [] }] })
+    );
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "default").await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Moving it to another organization withdraws the old releases.
+    let org_b = create_org(env, &s.admin, "B", "bia").await;
+    assert_eq!(
+        assign(s.admin.clone(), "default", org_b.clone()).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(released(env, &w1).await.is_empty());
+    let connection = ObjectRef::new("connection", "default");
+    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+    assert!(env.authz.check(&connection, "manage", "bia").await.unwrap());
+    let row = env.rbac.store.connection("default").await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), org_b);
+});
+
+db_test!(data_sources_routes_are_admin_only_with_rbac, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/data-sources",
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    for (method, path) in [
+        (Method::GET, "/cube/v1/data-sources/default"),
+        (Method::DELETE, "/cube/v1/data-sources/default"),
+    ] {
+        let (status, _) = send(&env.router, method.clone(), path, Some(&s.ana), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
+    }
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(another_orgs_connection_is_404, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    let org_b = create_org(env, &s.admin, "B", "bia").await;
+    let wb = workspace_id(env, &s.bia, &org_b, "WB").await;
+
+    for (method, path, body) in [
+        (
+            Method::GET,
+            format!("/cube/v1/organizations/{}/connections", s.org_a),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/cube/v1/organizations/{}/connections", s.org_a),
+            Some(json!({ "name": "y", "variables": { "CUBEJS_DB_TYPE": "sqlite" } })),
+        ),
+        (
+            Method::PUT,
+            "/cube/v1/connections/x".to_string(),
+            Some(json!({ "variables": {} })),
+        ),
+        (Method::DELETE, "/cube/v1/connections/x".to_string(), None),
+        (
+            Method::PUT,
+            "/cube/v1/connections/nope".to_string(),
+            Some(json!({ "variables": {} })),
+        ),
+        (
+            Method::GET,
+            format!("/cube/v1/workspaces/{w1}/connections"),
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/cube/v1/workspaces/{w1}/connections/x"),
+            None,
+        ),
+        (
+            Method::DELETE,
+            format!("/cube/v1/workspaces/{w1}/connections/x"),
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/cube/v1/workspaces/{wb}/connections/x"),
+            None,
+        ),
+        (
+            Method::DELETE,
+            format!("/cube/v1/workspaces/{wb}/connections/x"),
+            None,
+        ),
+    ] {
+        let (status, _) = send(&env.router, method.clone(), &path, Some(&s.bia), body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    // Listings never show it.
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{org_b}/connections"),
+        Some(&s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list, json!({ "connections": [] }));
+    let (status, list) = workspace_connections(env, &s.bia, &wb).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list, json!({ "connections": [] }));
+    assert_eq!(released(env, &w1).await, ["x"]);
+});
+
+db_test!(a_failed_spicedb_write_adds_no_connection, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let before = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    env.authz.set_failing_writes(true);
+    let (status, _) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    env.authz.set_failing_writes(false);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("cube.yml")).unwrap(),
+        before
+    );
+
+    // A connection that does not connect leaves nothing either.
+    let (status, _) = send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        Some(json!({
+            "name": "broken",
+            "variables": {
+                "CUBEJS_DB_TYPE": "postgres",
+                "CUBEJS_DB_HOST": "127.0.0.1",
+                "CUBEJS_DB_PORT": "1",
+                "CUBEJS_DB_NAME": "x",
+                "CUBEJS_DB_USER": "x",
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(env.rbac.store.connection("broken").await.unwrap().is_none());
+    let connection = ObjectRef::new("connection", "broken");
+    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
 });

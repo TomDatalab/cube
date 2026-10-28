@@ -59,7 +59,7 @@ fn not_found() -> ApiError {
 
 /// The workspace in the path, after `permission` is checked (404 when the
 /// caller cannot view it, 403 when they lack `permission`).
-async fn visible_workspace(
+pub(crate) async fn visible_workspace(
     rbac: &Rbac,
     id: &str,
     permission: &str,

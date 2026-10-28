@@ -182,7 +182,7 @@ pub async fn test(
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
-    name: String,
+    pub(crate) name: String,
     variables: BTreeMap<String, String>,
 }
 
@@ -358,6 +358,13 @@ async fn v1<R: IntoResponse>(
     ctx: &RequestContext,
     handler: impl std::future::Future<Output = Result<R, ApiError>>,
 ) -> Response {
+    // With RBAC on, data sources are managed per organization
+    // (`/v1/organizations/{id}/connections`); these routes see them all.
+    if state.rbac.is_some() && !ctx.platform_admin {
+        return ApiError::forbidden("Only platform admins manage /v1/data-sources")
+            .for_context(state, ctx)
+            .into_response();
+    }
     v1_scoped(state, ctx, SCOPE, handler).await
 }
 
@@ -570,6 +577,23 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
     })))
 }
 
+/// Each data source's type, by name: as `cube.yml` has them now, or as the
+/// server started with when there is no file or it cannot be read.
+pub(crate) fn data_source_types(state: &AppState) -> BTreeMap<String, String> {
+    let from_file = state.config.config_file.as_ref().and_then(|path| {
+        load(path, &env_with_file(&path.with_file_name(".env")))
+            .ok()
+            .map(|config| {
+                config
+                    .data_sources
+                    .values()
+                    .map(|ds| (ds.name.clone(), ds.db_type.clone()))
+                    .collect()
+            })
+    });
+    from_file.unwrap_or_else(|| state.config.data_sources.iter().cloned().collect())
+}
+
 struct Paths {
     config: PathBuf,
     env: PathBuf,
@@ -778,7 +802,7 @@ fn clean(variables: &BTreeMap<String, String>) -> Result<BTreeMap<String, String
 
 /// Lower case, digits and `_`, starting with a letter: it becomes part of
 /// `CUBEJS_DS_<NAME>_*` and of `data_source:` in the model.
-fn validate_name(name: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), ApiError> {
     let valid = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         && name
             .chars()

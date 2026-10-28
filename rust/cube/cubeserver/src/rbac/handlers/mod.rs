@@ -1,6 +1,7 @@
 //! HTTP routes that exist only with RBAC on.
 
 pub mod auth;
+pub mod connections;
 pub mod organizations;
 pub mod users;
 pub mod workspaces;
@@ -75,6 +76,26 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/workspaces/:id/members/:user"),
             put(workspaces::set_member).delete(workspaces::remove_member),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/connections"),
+            get(connections::list).post(connections::create),
+        )
+        .route(
+            &format!("{base}/v1/connections/:name"),
+            put(connections::update).delete(connections::delete),
+        )
+        .route(
+            &format!("{base}/v1/connections/:name/organization"),
+            put(connections::assign_organization),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id/connections"),
+            get(connections::of_workspace),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id/connections/:name"),
+            put(connections::release).delete(connections::withdraw),
         )
 }
 
