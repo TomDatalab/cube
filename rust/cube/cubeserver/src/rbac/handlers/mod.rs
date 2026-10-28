@@ -121,14 +121,20 @@ pub(crate) fn resource_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
-/// A user given as a path or body id: 400 when malformed, 404 when unknown.
+/// A user to grant something to: 400 when the id is malformed or the user
+/// is disabled, 404 when unknown.
 pub(crate) async fn existing_user(rbac: &Rbac, id: &str) -> Result<User, ApiError> {
     validate_user_id(id)?;
-    rbac.store
+    let user = rbac
+        .store
         .user(id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(|| ApiError::not_found("User not found"))
+        .ok_or_else(|| ApiError::not_found("User not found"))?;
+    if user.disabled {
+        return Err(ApiError::bad_request("User is disabled"));
+    }
+    Ok(user)
 }
 
 /// The RBAC of a route mounted only when it is on.

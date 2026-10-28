@@ -36,12 +36,30 @@ pub struct RelationshipFilter {
     pub subject: Option<ObjectRef>,
 }
 
+/// One change in an atomic [`Authz::write`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    Touch(Relationship),
+    Delete(Relationship),
+}
+
+/// A condition an atomic [`Authz::write`] requires, checked at write time.
+#[derive(Debug, Clone)]
+pub enum Precondition {
+    /// At least one relationship matches the filter.
+    MustMatch(RelationshipFilter),
+    /// No relationship matches the filter.
+    MustNotMatch(RelationshipFilter),
+}
+
 #[derive(Debug)]
 pub enum AuthzError {
     /// SpiceDB unreachable or failing (maps to 503).
     Unavailable(String),
     /// SpiceDB rejected the request (validation error).
     Rejected(String),
+    /// A write precondition did not hold; nothing was written (maps to 409).
+    PreconditionFailed(String),
 }
 
 impl std::fmt::Display for AuthzError {
@@ -49,6 +67,7 @@ impl std::fmt::Display for AuthzError {
         match self {
             AuthzError::Unavailable(m) => write!(f, "authorization unavailable: {m}"),
             AuthzError::Rejected(m) => write!(f, "authorization rejected: {m}"),
+            AuthzError::PreconditionFailed(m) => write!(f, "write precondition failed: {m}"),
         }
     }
 }
@@ -75,6 +94,14 @@ pub trait Authz: Send + Sync + std::fmt::Debug {
     /// OPERATION_DELETE
     async fn delete(&self, relationships: &[Relationship]) -> Result<(), AuthzError>;
     async fn delete_matching(&self, filter: &RelationshipFilter) -> Result<(), AuthzError>;
+    /// Applies all `updates` atomically, only if every precondition holds
+    /// (else [`AuthzError::PreconditionFailed`] and nothing changes). A
+    /// relationship may appear in at most one update.
+    async fn write(
+        &self,
+        updates: &[Update],
+        preconditions: &[Precondition],
+    ) -> Result<(), AuthzError>;
     async fn ensure_schema(&self, schema: &str) -> Result<(), AuthzError>;
 }
 
@@ -126,6 +153,25 @@ fn filter_json(f: &RelationshipFilter) -> Value {
     v
 }
 
+/// The gRPC status code SpiceDB answers when a write precondition fails.
+const FAILED_PRECONDITION: i64 = 9;
+
+fn update_json(u: &Update) -> Value {
+    let (operation, r) = match u {
+        Update::Touch(r) => ("OPERATION_TOUCH", r),
+        Update::Delete(r) => ("OPERATION_DELETE", r),
+    };
+    json!({"operation": operation, "relationship": relationship_json(r)})
+}
+
+fn precondition_json(p: &Precondition) -> Value {
+    let (operation, f) = match p {
+        Precondition::MustMatch(f) => ("OPERATION_MUST_MATCH", f),
+        Precondition::MustNotMatch(f) => ("OPERATION_MUST_NOT_MATCH", f),
+    };
+    json!({"operation": operation, "filter": filter_json(f)})
+}
+
 fn user_subject(user: &str) -> Value {
     json!({"object": {"objectType": "user", "objectId": user}})
 }
@@ -161,6 +207,10 @@ impl HttpAuthz {
             .map_err(|e| AuthzError::Unavailable(e.to_string()))?;
         if status.is_success() {
             Ok(text)
+        } else if serde_json::from_str::<Value>(&text)
+            .is_ok_and(|v| v["code"] == json!(FAILED_PRECONDITION))
+        {
+            Err(AuthzError::PreconditionFailed(text))
         } else if status.is_server_error() || matches!(status.as_u16(), 401 | 403 | 429) {
             Err(AuthzError::Unavailable(format!("{status}: {text}")))
         } else {
@@ -184,7 +234,7 @@ impl HttpAuthz {
         Ok(out)
     }
 
-    async fn write(&self, operation: &str, rels: &[Relationship]) -> Result<(), AuthzError> {
+    async fn write_all(&self, operation: &str, rels: &[Relationship]) -> Result<(), AuthzError> {
         if rels.is_empty() {
             return Ok(());
         }
@@ -275,17 +325,35 @@ impl Authz for HttpAuthz {
     }
 
     async fn touch(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {
-        self.write("OPERATION_TOUCH", relationships).await
+        self.write_all("OPERATION_TOUCH", relationships).await
     }
 
     async fn delete(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {
-        self.write("OPERATION_DELETE", relationships).await
+        self.write_all("OPERATION_DELETE", relationships).await
     }
 
     async fn delete_matching(&self, filter: &RelationshipFilter) -> Result<(), AuthzError> {
         self.post(
             "/v1/relationships/delete",
             json!({"relationshipFilter": filter_json(filter)}),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn write(
+        &self,
+        updates: &[Update],
+        preconditions: &[Precondition],
+    ) -> Result<(), AuthzError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let updates: Vec<Value> = updates.iter().map(update_json).collect();
+        let preconditions: Vec<Value> = preconditions.iter().map(precondition_json).collect();
+        self.post(
+            "/v1/relationships/write",
+            json!({"updates": updates, "optionalPreconditions": preconditions}),
         )
         .await
         .map(|_| ())
@@ -348,5 +416,49 @@ mod tests {
         assert_eq!(read, vec![rel.clone()]);
         authz.delete(std::slice::from_ref(&rel)).await.unwrap();
         assert!(!authz.check(&org, "admin", "roundtrip-user").await.unwrap());
+
+        // An atomic mixed write, then one whose precondition fails.
+        let ws_rel = |relation| Relationship {
+            resource: ObjectRef::new("workspace", "roundtrip-ws"),
+            relation,
+            subject: ObjectRef::new("user", "roundtrip-user"),
+        };
+        let ws_filter = |relation| RelationshipFilter {
+            kind: "workspace",
+            id: Some("roundtrip-ws".into()),
+            relation: Some(relation),
+            subject: Some(ObjectRef::new("user", "roundtrip-user")),
+        };
+        let ws = ObjectRef::new("workspace", "roundtrip-ws");
+        authz.touch(&[ws_rel("editor")]).await.unwrap();
+        authz
+            .write(
+                &[
+                    Update::Delete(ws_rel("editor")),
+                    Update::Touch(ws_rel("viewer")),
+                ],
+                &[Precondition::MustMatch(ws_filter("editor"))],
+            )
+            .await
+            .unwrap();
+        assert!(authz.check(&ws, "view", "roundtrip-user").await.unwrap());
+        assert!(!authz.check(&ws, "edit", "roundtrip-user").await.unwrap());
+        let failed = authz
+            .write(
+                &[
+                    Update::Delete(ws_rel("viewer")),
+                    Update::Touch(ws_rel("owner")),
+                ],
+                &[Precondition::MustMatch(ws_filter("editor"))],
+            )
+            .await;
+        assert!(
+            matches!(failed, Err(AuthzError::PreconditionFailed(_))),
+            "{failed:?}"
+        );
+        // Nothing of the failed write was applied.
+        assert!(authz.check(&ws, "view", "roundtrip-user").await.unwrap());
+        assert!(!authz.check(&ws, "manage", "roundtrip-user").await.unwrap());
+        authz.delete(&[ws_rel("viewer")]).await.unwrap();
     }
 }

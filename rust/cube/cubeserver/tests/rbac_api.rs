@@ -1345,3 +1345,195 @@ db_test!(a_failed_spicedb_write_leaves_no_row, |store| {
     workspace_id(env, &s.ana, &s.org_a, "W1").await;
     assert_eq!(org_names(env, &s.admin).await, ["A"]);
 });
+
+db_test!(a_workspace_owner_cannot_act_as_org_owner, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "owner").await,
+        StatusCode::OK
+    );
+    let org = format!("/cube/v1/organizations/{}", s.org_a);
+
+    // Organization-level actions: visible (bia is a member), but forbidden.
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &format!("{org}/owners/bia"),
+        Some(&s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("{org}/owners/ana"),
+        Some(&s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &env.router,
+        Method::PATCH,
+        &org,
+        Some(&s.bia),
+        Some(json!({ "name": "mine" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(&env.router, Method::DELETE, &org, Some(&s.bia), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{w1}"),
+        Some(&s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = create_workspace(env, &s.bia, &s.org_a, "W9").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let org_ref = ObjectRef::new("organization", s.org_a.clone());
+    assert!(!env.authz.check(&org_ref, "admin", "bia").await.unwrap());
+
+    // Workspace-level management is hers.
+    let (status, _) = send(
+        &env.router,
+        Method::PATCH,
+        &format!("/cube/v1/workspaces/{w1}"),
+        Some(&s.bia),
+        Some(json!({ "name": "W1b" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        set_role(env, &s.bia, &w1, "caio", "editor").await,
+        StatusCode::OK
+    );
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{w1}/members/caio"),
+        Some(&s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+});
+
+db_test!(a_viewer_cannot_remove_members, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    set_role(env, &s.ana, &w1, "bia", "viewer").await;
+    set_role(env, &s.ana, &w1, "caio", "editor").await;
+    for target in ["caio", "bia"] {
+        let (status, _) = send(
+            &env.router,
+            Method::DELETE,
+            &format!("/cube/v1/workspaces/{w1}/members/{target}"),
+            Some(&s.bia),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{target}");
+    }
+    // An editor cannot manage members either.
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{w1}/members/bia"),
+        Some(&s.caio),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let ws = ObjectRef::new("workspace", w1.clone());
+    assert!(env.authz.check(&ws, "edit", "caio").await.unwrap());
+    assert!(env.authz.check(&ws, "view", "bia").await.unwrap());
+});
+
+db_test!(workspace_listings_stay_within_their_organization, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let org_b = create_org(env, &s.admin, "B", "bia").await;
+    let wa = workspace_id(env, &s.ana, &s.org_a, "WA").await;
+    let wb = workspace_id(env, &s.bia, &org_b, "WB").await;
+    workspace_id(env, &s.ana, &s.org_a, "WA2").await;
+    set_role(env, &s.ana, &wa, "caio", "viewer").await;
+    set_role(env, &s.bia, &wb, "caio", "editor").await;
+
+    assert_eq!(org_names(env, &s.caio).await, ["A", "B"]);
+    for (org, expected) in [(&s.org_a, "WA"), (&org_b, "WB")] {
+        let (status, list) = send(
+            &env.router,
+            Method::GET,
+            &format!("/cube/v1/organizations/{org}/workspaces"),
+            Some(&s.caio),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(names(&list, "workspaces"), [expected]);
+    }
+    // The platform admin sees every workspace, still split by organization.
+    let (_, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{}/workspaces", s.org_a),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(names(&list, "workspaces"), ["WA", "WA2"]);
+});
+
+db_test!(a_spicedb_outage_fails_listings_closed, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    env.authz.set_failing(true);
+    for path in [
+        "/cube/v1/organizations".to_string(),
+        format!("/cube/v1/organizations/{}/workspaces", s.org_a),
+    ] {
+        let (status, _) = send(&env.router, Method::GET, &path, Some(&s.ana), None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
+    env.authz.set_failing(false);
+});
+
+db_test!(disabled_users_get_no_roles, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let (status, _) = send(
+        &env.router,
+        Method::PATCH,
+        "/cube/v1/users/caio",
+        Some(&s.admin),
+        Some(json!({ "disabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "caio", "viewer").await,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, body) = send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/organizations/{}/owners/caio", s.org_a),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "User is disabled");
+    let org = ObjectRef::new("organization", s.org_a.clone());
+    assert!(!env.authz.check(&org, "view", "caio").await.unwrap());
+});

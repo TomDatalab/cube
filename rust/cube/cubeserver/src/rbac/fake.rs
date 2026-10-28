@@ -6,7 +6,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use super::authz::{Authz, AuthzError, ObjectRef, Relationship, RelationshipFilter};
+use super::authz::{
+    Authz, AuthzError, ObjectRef, Precondition, Relationship, RelationshipFilter, Update,
+};
 
 /// One term of a permission expression: a direct relation or `relation->perm`.
 enum Term {
@@ -195,6 +197,35 @@ impl Authz for FakeAuthz {
             .lock()
             .unwrap()
             .retain(|r| !matches(filter, r));
+        Ok(())
+    }
+
+    async fn write(
+        &self,
+        updates: &[Update],
+        preconditions: &[Precondition],
+    ) -> Result<(), AuthzError> {
+        self.write_guard()?;
+        let mut rels = self.relationships.lock().unwrap();
+        for p in preconditions {
+            let (filter, must_match) = match p {
+                Precondition::MustMatch(f) => (f, true),
+                Precondition::MustNotMatch(f) => (f, false),
+            };
+            if rels.iter().any(|r| matches(filter, r)) != must_match {
+                return Err(AuthzError::PreconditionFailed(format!("{p:?}")));
+            }
+        }
+        for u in updates {
+            match u {
+                Update::Touch(r) => {
+                    if !rels.contains(r) {
+                        rels.push(r.clone());
+                    }
+                }
+                Update::Delete(r) => rels.retain(|x| x != r),
+            }
+        }
         Ok(())
     }
 
@@ -391,5 +422,83 @@ mod tests {
         un(a.delete(std::slice::from_ref(&r)).await);
         un(a.delete_matching(&f).await);
         un(a.ensure_schema("").await);
+    }
+
+    #[tokio::test]
+    async fn a_failing_precondition_applies_no_update() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "ann"),
+            rel("organization", "o1", "owner", "user", "bob"),
+        ])
+        .await
+        .unwrap();
+        let owner = |u: &str| RelationshipFilter {
+            kind: "organization",
+            id: Some("o1".into()),
+            relation: Some("owner"),
+            subject: Some(ObjectRef::new("user", u)),
+        };
+        // `bob` was removed concurrently: removing `ann` on the condition
+        // that `bob` is still an owner must change nothing.
+        a.delete(&[rel("organization", "o1", "owner", "user", "bob")])
+            .await
+            .unwrap();
+        let result = a
+            .write(
+                &[
+                    Update::Delete(rel("organization", "o1", "owner", "user", "ann")),
+                    Update::Touch(rel("organization", "o1", "member", "user", "cid")),
+                ],
+                &[Precondition::MustMatch(owner("bob"))],
+            )
+            .await;
+        assert!(matches!(result, Err(AuthzError::PreconditionFailed(_))));
+        let org = ObjectRef::new("organization", "o1");
+        assert!(a.check(&org, "admin", "ann").await.unwrap());
+        assert!(!a.check(&org, "view", "cid").await.unwrap());
+
+        // MustNotMatch, then a write whose conditions hold.
+        let result = a
+            .write(
+                &[Update::Touch(rel(
+                    "organization",
+                    "o1",
+                    "member",
+                    "user",
+                    "cid",
+                ))],
+                &[Precondition::MustNotMatch(owner("ann"))],
+            )
+            .await;
+        assert!(matches!(result, Err(AuthzError::PreconditionFailed(_))));
+        a.write(
+            &[
+                Update::Delete(rel("organization", "o1", "owner", "user", "ann")),
+                Update::Touch(rel("organization", "o1", "owner", "user", "cid")),
+            ],
+            &[Precondition::MustMatch(owner("ann"))],
+        )
+        .await
+        .unwrap();
+        assert!(!a.check(&org, "admin", "ann").await.unwrap());
+        assert!(a.check(&org, "admin", "cid").await.unwrap());
+
+        // A write fails like any other while the fake is failing.
+        a.set_failing_writes(true);
+        let result = a
+            .write(
+                &[Update::Touch(rel(
+                    "organization",
+                    "o1",
+                    "member",
+                    "user",
+                    "x",
+                ))],
+                &[],
+            )
+            .await;
+        assert!(matches!(result, Err(AuthzError::Unavailable(_))));
+        assert!(!a.check(&org, "view", "x").await.unwrap());
     }
 }

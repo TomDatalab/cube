@@ -21,7 +21,7 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
 use crate::rbac::store::Workspace;
-use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter};
+use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
 
 /// The workspace roles, i.e. the relations a member can hold.
@@ -335,21 +335,21 @@ pub async fn set_member(
         .ok_or_else(|| ApiError::bad_request("The role must be owner, editor or viewer"))?;
     let member = existing_user(rbac, &member).await?;
 
-    rbac.authz
-        .delete(&role_relationships(ws.id, &member.id))
-        .await
-        .map_err(authz_error)?;
-    rbac.authz
-        .touch(&[
-            Relationship {
-                resource: workspace_ref(ws.id),
-                relation: role,
-                subject: user_ref(&member.id),
-            },
-            membership(ws.organization_id, &member.id),
-        ])
-        .await
-        .map_err(authz_error)?;
+    // One atomic write, so concurrent changes cannot leave two roles.
+    // SpiceDB refuses the same relationship twice in a request: delete only
+    // the other roles.
+    let mut updates: Vec<Update> = role_relationships(ws.id, &member.id)
+        .into_iter()
+        .filter(|r| r.relation != role)
+        .map(Update::Delete)
+        .collect();
+    updates.push(Update::Touch(Relationship {
+        resource: workspace_ref(ws.id),
+        relation: role,
+        subject: user_ref(&member.id),
+    }));
+    updates.push(Update::Touch(membership(ws.organization_id, &member.id)));
+    rbac.authz.write(&updates, &[]).await.map_err(authz_error)?;
     Ok(Json(json!({ "user": member.id, "role": role })))
 }
 

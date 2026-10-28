@@ -12,7 +12,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use tokio::sync::Semaphore;
 
-pub use authz::{Authz, AuthzError, HttpAuthz, ObjectRef, Relationship, RelationshipFilter};
+pub use authz::{
+    Authz, AuthzError, HttpAuthz, ObjectRef, Precondition, Relationship, RelationshipFilter, Update,
+};
 pub use config::RbacConfig;
 
 use crate::error::ApiError;
@@ -224,7 +226,8 @@ impl Rbac {
     }
 }
 
-/// 503 for an unreachable SpiceDB, 500 for a request it refused.
+/// 503 for an unreachable SpiceDB, 500 for a request it refused, 409 for a
+/// write whose precondition no longer held.
 pub fn authz_error(err: AuthzError) -> ApiError {
     match err {
         AuthzError::Unavailable(m) => {
@@ -234,6 +237,13 @@ pub fn authz_error(err: AuthzError) -> ApiError {
         AuthzError::Rejected(m) => {
             tracing::error!("SpiceDB rejected a request: {m}");
             ApiError::internal()
+        }
+        AuthzError::PreconditionFailed(m) => {
+            tracing::warn!("SpiceDB write precondition failed: {m}");
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "The resource changed concurrently; try again",
+            )
         }
     }
 }

@@ -16,7 +16,9 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
 use crate::rbac::store::{Organization, StoreError};
-use crate::rbac::{authz_error, platform, ObjectRef, Rbac, Relationship, RelationshipFilter};
+use crate::rbac::{
+    authz_error, platform, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter, Update,
+};
 use crate::services::RequestContext;
 
 #[derive(Deserialize)]
@@ -267,13 +269,23 @@ pub async fn remove_owner(
     if !owners.contains(&owner.as_str()) {
         return Ok(StatusCode::NO_CONTENT);
     }
-    if owners.len() == 1 {
+    // Remove only while another owner is still there: two concurrent
+    // removals cannot leave the organization without owners.
+    let Some(other) = owners.iter().find(|o| **o != owner.as_str()) else {
         return Err(ApiError::bad_request(
             "The last owner of an organization cannot be removed",
         ));
-    }
+    };
     rbac.authz
-        .delete(&[owner_relationship(org.id, &owner)])
+        .write(
+            &[Update::Delete(owner_relationship(org.id, &owner))],
+            &[Precondition::MustMatch(RelationshipFilter {
+                kind: "organization",
+                id: Some(org.id.to_string()),
+                relation: Some("owner"),
+                subject: Some(user_ref(other)),
+            })],
+        )
         .await
         .map_err(authz_error)?;
     Ok(StatusCode::NO_CONTENT)
