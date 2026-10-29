@@ -198,6 +198,7 @@ export const QUERY_BUILDER_DARK: Record<string, string> = Object.entries(
 // playground roles; light = what the Playground paints today
 export const PG_LIGHT: Record<string, string> = {
   '--pg-bar': '#43436b', // header, var(--dark-02-color)
+  '--pg-bar-text': '#fff', // the bar is dark in both themes
   '--pg-bg': '#f6f6f8', // @layout-body-background
   '--pg-surface': '#ffffff',
   '--pg-raised': '#ffffff', // antd popovers and menus
@@ -246,11 +247,19 @@ export const PG_LIGHT: Record<string, string> = {
   '--pg-alert-info-bg': '#E6F7FF',
   '--pg-alert-success-border': '#B7EB8F',
   '--pg-alert-success-bg': '#F6FFED',
+  // error output (components/Error/utils.ts), the terminal's named colors
+  '--pg-ansi-black': 'black',
+  '--pg-ansi-red': 'red',
+  '--pg-ansi-green': 'green',
+  '--pg-ansi-blue': 'blue',
+  '--pg-ansi-gray': 'gray',
+  '--pg-ansi-darkgrey': 'darkgrey',
 };
 
 // palette C
 export const PG_DARK: Record<string, string> = {
   '--pg-bar': '#17171f',
+  '--pg-bar-text': '#fff',
   '--pg-bg': '#1c1c24',
   '--pg-surface': '#23232d',
   '--pg-raised': '#2b2b37',
@@ -295,6 +304,12 @@ export const PG_DARK: Record<string, string> = {
   '--pg-alert-info-bg': 'rgba(64, 169, 255, 0.12)',
   '--pg-alert-success-border': 'rgba(63, 191, 127, 0.45)',
   '--pg-alert-success-bg': 'rgba(63, 191, 127, 0.12)',
+  '--pg-ansi-black': '#e7e7ef',
+  '--pg-ansi-red': '#ff7a65',
+  '--pg-ansi-green': '#3fbf7f',
+  '--pg-ansi-blue': '#8f8bff',
+  '--pg-ansi-gray': '#9a9aaf',
+  '--pg-ansi-darkgrey': '#9a9aaf',
 };
 
 function declarations(map: Record<string, string>) {

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync, statSync } from 'fs';
 import { createRequire } from 'module';
 import { dirname, resolve } from 'path';
 import { createElement, act } from 'react';
@@ -140,6 +140,25 @@ describe('dark tokens', () => {
       expect(contrast(rgb(`${type}-strong`), rgb(`${type}-hover`)), type).toBeGreaterThanOrEqual(4.5);
       expect(contrast(rgb(`${type}-text`), BG), type).toBeGreaterThanOrEqual(4.5);
     }
+  });
+
+  it('defines every --pg-* variable the components use', () => {
+    const src = resolve(__dirname, '..');
+    const used = new Set<string>();
+    const walk = (dir: string) => readdirSync(dir).forEach((name) => {
+      const path = resolve(dir, name);
+      if (statSync(path).isDirectory()) {
+        walk(path);
+      } else if (/\.(tsx?|less|css)$/.test(name)) {
+        for (const m of readFileSync(path, 'utf8').matchAll(/var\(\s*(--pg-[\w-]+)/g)) {
+          used.add(m[1]);
+        }
+      }
+    });
+    walk(src);
+
+    expect(used.size).toBeGreaterThan(10);
+    expect([...used].filter((name) => !(name in PG_LIGHT))).toEqual([]);
   });
 
   it('reaches WCAG AA contrast on the dark background', () => {
