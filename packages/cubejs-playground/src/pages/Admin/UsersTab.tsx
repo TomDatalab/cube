@@ -108,6 +108,8 @@ export function UsersTab({ api, currentUser }: Props) {
         <Table<User>
           rowKey="id"
           size="small"
+          // the tag and action buttons can outgrow the column; scroll inside it
+          scroll={{ x: 'max-content' }}
           loading={loading}
           dataSource={result?.items || []}
           pagination={{
