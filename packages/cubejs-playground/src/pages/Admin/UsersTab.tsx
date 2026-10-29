@@ -1,9 +1,11 @@
+import { HolderOutlined } from '@ant-design/icons';
 import {
-  Alert, Button, Form, Input, message, Modal, Space, Switch, Table, Tag,
+  Alert, Button, Col, Form, Input, message, Modal, Row, Space, Switch, Table, Tag, Typography,
 } from 'antd';
 import { useState } from 'react';
 
 import { AdminApi, User } from './api';
+import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
 
 type Props = {
   api: AdminApi;
@@ -80,123 +82,148 @@ export function UsersTab({ api, users, currentUser, reload }: Props) {
   }
 
   return (
-    <>
-      <Space style={{ marginBottom: 16 }}>
-        <Button type="primary" onClick={() => open(setCreating, true)}>
-          New user
-        </Button>
-      </Space>
+    <Row gutter={24}>
+      <Col xs={24} xl={14}>
+        <Space style={{ marginBottom: 16 }}>
+          <Button type="primary" onClick={() => open(setCreating, true)}>
+            New user
+          </Button>
+        </Space>
 
-      <Table<User>
-        rowKey="id"
-        size="small"
-        loading={users == null}
-        dataSource={users || []}
-        pagination={false}
-        columns={[
-          { title: 'Username', dataIndex: 'id' },
-          { title: 'Name', dataIndex: 'name', render: (v) => v || '—' },
-          { title: 'Email', dataIndex: 'email', render: (v) => v || '—' },
-          {
-            title: 'Enabled',
-            render: (_, user) => (
-              <Switch
-                size="small"
-                checked={!user.disabled}
-                // A platform admin cannot lock themselves out.
-                disabled={user.id === currentUser}
-                onChange={(enabled) => toggle(user, enabled)}
-              />
-            ),
-          },
-          {
-            title: '',
-            align: 'right',
-            render: (_, user) => (
-              <Space>
-                {user.id === currentUser ? <Tag>you</Tag> : null}
-                <Button
+        <Table<User>
+          rowKey="id"
+          size="small"
+          loading={users == null}
+          dataSource={users || []}
+          pagination={false}
+          // Enabled users drag onto a workspace of the tree to join it.
+          onRow={(user) => (user.disabled ? {} : {
+            draggable: true,
+            onDragStart: (e) => {
+              e.dataTransfer.setData(USER_DRAG_TYPE, user.id);
+              e.dataTransfer.effectAllowed = 'copy';
+            },
+            style: { cursor: 'grab' },
+          })}
+          columns={[
+            {
+              key: 'drag',
+              width: 32,
+              render: (_, user) => (user.disabled ? null : (
+                <HolderOutlined title="Drag onto a workspace" style={{ color: '#a1a1b5' }} />
+              )),
+            },
+            { title: 'Username', dataIndex: 'id' },
+            { title: 'Name', dataIndex: 'name', render: (v) => v || '—' },
+            { title: 'Email', dataIndex: 'email', render: (v) => v || '—' },
+            {
+              title: 'Enabled',
+              render: (_, user) => (
+                <Switch
                   size="small"
-                  onClick={() => open(setEditing, user, {
-                    name: user.name || '',
-                    email: user.email || '',
-                  })}
-                >
-                  Edit
-                </Button>
-                <Button size="small" onClick={() => open(setResetting, user)}>
-                  Reset password
-                </Button>
-              </Space>
-            ),
-          },
-        ]}
-      />
+                  checked={!user.disabled}
+                  // A platform admin cannot lock themselves out.
+                  disabled={user.id === currentUser}
+                  onChange={(enabled) => toggle(user, enabled)}
+                />
+              ),
+            },
+            {
+              title: '',
+              align: 'right',
+              render: (_, user) => (
+                <Space>
+                  {user.id === currentUser ? <Tag>you</Tag> : null}
+                  <Button
+                    size="small"
+                    onClick={() => open(setEditing, user, {
+                      name: user.name || '',
+                      email: user.email || '',
+                    })}
+                  >
+                    Edit
+                  </Button>
+                  <Button size="small" onClick={() => open(setResetting, user)}>
+                    Reset password
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
 
-      <Modal
-        title={title}
-        visible={modalOpen}
-        onCancel={close}
-        onOk={() => form.submit()}
-        okText="Save"
-        confirmLoading={saving}
-        destroyOnClose
-      >
-        <Form
-          form={form}
-          layout="vertical"
-          requiredMark={false}
-          onFinish={(values) => {
-            if (creating) {
-              const user = {
-                id: values.id,
-                password: values.password,
-                ...optional({ name: values.name, email: values.email }),
-              };
-              return run(() => api.createUser(user), `User ${values.id} created`);
-            }
-            if (editing) {
-              return run(
-                () => api.updateUser(editing.id, optional({ name: values.name, email: values.email })),
-                `${editing.id} saved`
-              );
-            }
-            return run(
-              () => api.setPassword(resetting!.id, values.password),
-              `New password set for ${resetting!.id}; their sessions ended`
-            );
-          }}
+        <Modal
+          title={title}
+          visible={modalOpen}
+          onCancel={close}
+          onOk={() => form.submit()}
+          okText="Save"
+          confirmLoading={saving}
+          destroyOnClose
         >
-          {creating ? (
-            <Form.Item
-              label="Username"
-              name="id"
-              rules={[{ required: true, message: 'Enter a username' }]}
-            >
-              <Input autoComplete="off" />
-            </Form.Item>
-          ) : null}
-
-          {resetting == null ? (
-            <>
-              <Form.Item label="Name" name="name">
+          <Form
+            form={form}
+            layout="vertical"
+            requiredMark={false}
+            onFinish={(values) => {
+              if (creating) {
+                const user = {
+                  id: values.id,
+                  password: values.password,
+                  ...optional({ name: values.name, email: values.email }),
+                };
+                return run(() => api.createUser(user), `User ${values.id} created`);
+              }
+              if (editing) {
+                return run(
+                  () => api.updateUser(editing.id, optional({ name: values.name, email: values.email })),
+                  `${editing.id} saved`
+                );
+              }
+              return run(
+                () => api.setPassword(resetting!.id, values.password),
+                `New password set for ${resetting!.id}; their sessions ended`
+              );
+            }}
+          >
+            {creating ? (
+              <Form.Item
+                label="Username"
+                name="id"
+                rules={[{ required: true, message: 'Enter a username' }]}
+              >
                 <Input autoComplete="off" />
               </Form.Item>
-              <Form.Item label="Email" name="email">
-                <Input type="email" autoComplete="off" />
+            ) : null}
+
+            {resetting == null ? (
+              <>
+                <Form.Item label="Name" name="name">
+                  <Input autoComplete="off" />
+                </Form.Item>
+                <Form.Item label="Email" name="email">
+                  <Input type="email" autoComplete="off" />
+                </Form.Item>
+              </>
+            ) : null}
+
+            {creating || resetting ? (
+              <Form.Item label="Password" name="password" rules={passwordRules}>
+                <Input.Password autoComplete="new-password" />
               </Form.Item>
-            </>
-          ) : null}
+            ) : null}
 
-          {creating || resetting ? (
-            <Form.Item label="Password" name="password" rules={passwordRules}>
-              <Input.Password autoComplete="new-password" />
-            </Form.Item>
-          ) : null}
-
-          {error ? <Alert type="error" message={error} showIcon /> : null}
-        </Form>
-      </Modal>
-    </>
+            {error ? <Alert type="error" message={error} showIcon /> : null}
+          </Form>
+        </Modal>
+      </Col>
+      <Col xs={24} xl={10}>
+        <Typography.Title level={5}>Workspaces</Typography.Title>
+        <Typography.Paragraph type="secondary">
+          Drag a user onto a workspace to add them as a viewer.
+        </Typography.Paragraph>
+        <MembershipTree api={api} />
+      </Col>
+    </Row>
   );
 }
