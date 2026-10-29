@@ -119,6 +119,41 @@ describe('Playground login', () => {
     expect(getWorkspace()).toBeNull();
   });
 
+  it('applies a workspace without reloading when storage cannot keep it', async () => {
+    vi.resetModules();
+    const auth = await import('../shared/auth');
+    const throwing = {
+      getItem: () => { throw new Error('blocked'); },
+      setItem: () => { throw new Error('blocked'); },
+      removeItem: () => { throw new Error('blocked'); },
+    };
+    vi.spyOn(window, 'sessionStorage', 'get').mockReturnValue(throwing as unknown as Storage);
+    const reload = vi.fn();
+    const changed = vi.fn();
+    auth.onWorkspaceChange(changed);
+    try {
+      auth.chooseWorkspace('ws-1', reload);
+      auth.chooseWorkspace('ws-1', reload);
+
+      expect(reload).not.toHaveBeenCalled();
+      expect(auth.getWorkspace()).toBe('ws-1');
+      expect(auth.workspaceHeaders()).toEqual({ 'X-Cube-Workspace': 'ws-1' });
+      expect(changed).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('reloads once to apply a workspace storage kept', async () => {
+    const auth = await import('../shared/auth');
+    const reload = vi.fn();
+
+    auth.chooseWorkspace('ws-2', reload);
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem('cubePlaygroundWorkspace')).toBe('ws-2');
+  });
+
   it('survives storage that throws', () => {
     const throwing = {
       getItem: () => { throw new Error('blocked'); },
@@ -128,7 +163,8 @@ describe('Playground login', () => {
     vi.spyOn(window, 'sessionStorage', 'get').mockReturnValue(throwing as unknown as Storage);
     try {
       expect(() => setWorkspace('ws-1')).not.toThrow();
-      expect(getWorkspace()).toBeNull();
+      // Kept in memory for this page.
+      expect(getWorkspace()).toBe('ws-1');
       expect(getSession()).toBeNull();
     } finally {
       vi.restoreAllMocks();

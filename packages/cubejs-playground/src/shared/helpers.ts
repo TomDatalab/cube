@@ -1,4 +1,6 @@
-import { authHeaders, onUnauthorized, workspaceHeaders } from './auth';
+import {
+  authHeaders, isSessionToken, onUnauthorized, workspaceHeaders,
+} from './auth';
 
 export function notEmpty<T>(value: T | null | undefined): value is T {
   return value != null;
@@ -84,8 +86,9 @@ export function playgroundFetch(url: string, options: any = {}): Promise<Respons
 }
 
 // A call to the Cube API (REST, GraphQL, pre-aggregations) on this server:
-// scoped to the chosen workspace, and a 401 ends the session. The caller
-// brings its own Authorization (the Playground's token or one typed in).
+// scoped to the chosen workspace. The caller brings its own Authorization;
+// a 401 ends the session only when that is the session's token, not one
+// typed into the API console.
 export function apiFetch(url: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
   let href: string;
   if (typeof url === 'string') {
@@ -102,8 +105,11 @@ export function apiFetch(url: RequestInfo | URL, options: RequestInit = {}): Pro
   const headers = new Headers(options.headers || {});
   Object.entries(workspaceHeaders()).forEach(([name, value]) => headers.set(name, value));
 
+  const sessionToken = isSessionToken(headers.get('Authorization'));
   return fetch(url, { ...options, headers }).then((r) => {
-    onUnauthorized(r);
+    if (sessionToken) {
+      onUnauthorized(r);
+    }
     return r;
   });
 }

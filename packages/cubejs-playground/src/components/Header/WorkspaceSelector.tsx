@@ -1,8 +1,8 @@
 import { Select, Tooltip, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 
-import { useIsMounted } from '../../hooks';
-import { getWorkspace, setWorkspace } from '../../shared/auth';
+import { useIsMounted, useWorkspace } from '../../hooks';
+import { chooseWorkspace } from '../../shared/auth';
 import { sessionFetchJson } from '../../shared/helpers';
 
 // The value of "Todos (admin)": no `X-Cube-Workspace` at all.
@@ -30,16 +30,16 @@ async function loadOptions(basePath: string): Promise<Option[]> {
 }
 
 // Picks the workspace every data request is scoped to. Changing it reloads
-// the page, so the query builder, meta and GraphQL start over in the new one.
+// the page, so the query builder, meta and GraphQL start over in the new one
+// (or, with storage blocked, applies it live: see `chooseWorkspace`).
 export function WorkspaceSelector({ basePath, isAdmin }: Props) {
   const isMounted = useIsMounted();
   const [options, setOptions] = useState<Option[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const current = getWorkspace();
+  const current = useWorkspace();
 
   function choose(id: string | null) {
-    setWorkspace(id);
-    window.location.reload();
+    chooseWorkspace(id);
   }
 
   useEffect(() => {

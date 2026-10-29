@@ -2,6 +2,7 @@ import { Alert, Block, Card, PrismCode, Title } from '@cube-dev/ui-kit';
 import { Query } from '@cubejs-client/core';
 import { useEffect, useMemo, ReactNode } from 'react';
 
+import { useWorkspace } from '../hooks/workspace';
 import { createCubeApi } from '../shared/cube-api';
 import { QueryBuilderContext } from './context';
 import { useLocalStorage } from './hooks';
@@ -37,10 +38,12 @@ export function QueryBuilder(
     disableSidebarResizing,
   } = props;
 
+  // A new client when the workspace changes without a reload.
+  const workspace = useWorkspace();
   const cubeApi = useMemo(() => (apiUrl && apiToken && apiToken !== 'undefined'
     ? createCubeApi(apiToken, apiUrl)
     : undefined),
-  [apiUrl, apiToken]);
+  [apiUrl, apiToken, workspace]);
 
   const [storedTimezones] = useLocalStorage<string[]>('QueryBuilder:timezones', []);
 

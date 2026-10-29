@@ -121,4 +121,19 @@ describe('apiFetch', () => {
     expect(headersOf(fetchMock, 0)).toEqual({ authorization: 't' });
     expect(headersOf(fetchMock, 1)).toEqual({ authorization: 't' });
   });
+
+  it('ends the session for a 401 on its token, not on a token typed in', async () => {
+    sessionStorage.setItem('cubePlaygroundSession', JSON.stringify({
+      token: 'jwt',
+      expiresAt: inAnHour(),
+      user: { id: 'ana', name: 'Ana', platformAdmin: false },
+    }));
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('{}', { status: 401 })));
+
+    await apiFetch('/cube/v1/meta', { headers: { Authorization: 'typed-in' } });
+    expect(sessionStorage.getItem('cubePlaygroundSession')).not.toBeNull();
+
+    await apiFetch('/cube/v1/meta', { headers: { Authorization: 'jwt' } });
+    expect(sessionStorage.getItem('cubePlaygroundSession')).toBeNull();
+  });
 });

@@ -46,6 +46,11 @@ function write(key: string, value: string | null) {
 // Whether this page has seen a session: a 401 after it expired still has
 // to go back to the login.
 let hadSession = false;
+// The last session token this page saw, to tell it from one typed in.
+let lastToken: string | null = null;
+// The workspace when sessionStorage cannot keep it (blocked storage): it
+// lasts as long as the page.
+let memoryWorkspace: string | null = null;
 // One reload is enough, however many requests answer 401 at once.
 let reloading = false;
 
@@ -58,6 +63,7 @@ export function getSession(): Session | null {
     const session: Session = JSON.parse(raw);
     if (session.token && Date.parse(session.expiresAt) > Date.now()) {
       hadSession = true;
+      lastToken = session.token;
       return session;
     }
   } catch {
@@ -70,6 +76,14 @@ export function getSession(): Session | null {
 export function logout() {
   write(STORAGE_KEY, null);
   write(WORKSPACE_KEY, null);
+  memoryWorkspace = null;
+}
+
+// Whether a 401 for this token means the session is gone; a token typed into
+// the API console failing says nothing about the session.
+export function isSessionToken(token: string | null | undefined): boolean {
+  getSession();
+  return Boolean(token) && token === lastToken;
 }
 
 export function authHeaders(): Record<string, string> {
@@ -80,11 +94,48 @@ export function authHeaders(): Record<string, string> {
 // The workspace data requests are scoped to; `null` sends no header, which
 // only platform admins may do ("Todos (admin)").
 export function getWorkspace(): string | null {
-  return read(WORKSPACE_KEY) || null;
+  if (storage() == null) {
+    return memoryWorkspace;
+  }
+  try {
+    return storage()?.getItem(WORKSPACE_KEY) || null;
+  } catch {
+    return memoryWorkspace;
+  }
 }
 
-export function setWorkspace(id: string | null) {
-  write(WORKSPACE_KEY, id || null);
+const workspaceListeners = new Set<() => void>();
+
+export function onWorkspaceChange(listener: () => void): () => void {
+  workspaceListeners.add(listener);
+  return () => {
+    workspaceListeners.delete(listener);
+  };
+}
+
+// Returns whether the choice outlives a reload (sessionStorage took it).
+export function setWorkspace(id: string | null): boolean {
+  memoryWorkspace = id || null;
+  write(WORKSPACE_KEY, memoryWorkspace);
+  workspaceListeners.forEach((listener) => listener());
+  let stored: string | null;
+  try {
+    stored = storage()?.getItem(WORKSPACE_KEY) ?? null;
+  } catch {
+    return false;
+  }
+  return storage() != null && stored === memoryWorkspace;
+}
+
+// Switch workspace. With the choice in sessionStorage the page reloads, so
+// everything starts over in the new workspace; without storage a reload
+// would forget it (and pick again, forever), so the page applies it live:
+// the Cube clients follow `onWorkspaceChange`, and other requests read the
+// workspace when they are sent.
+export function chooseWorkspace(id: string | null, reload = () => window.location.reload()) {
+  if (setWorkspace(id)) {
+    reload();
+  }
 }
 
 export function workspaceHeaders(): Record<string, string> {
@@ -131,7 +182,9 @@ export async function login(
     user: { ...body.user, platformAdmin: Boolean(body.user?.platformAdmin) },
   };
   write(STORAGE_KEY, JSON.stringify(session));
+  lastToken = session.token;
   // A workspace picked by whoever used this tab before.
   write(WORKSPACE_KEY, null);
+  memoryWorkspace = null;
   return session;
 }

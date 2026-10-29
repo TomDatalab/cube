@@ -14,3 +14,4 @@ export * from './server-core-version';
 export * from './setter';
 export * from './toggle';
 export * from './window-size';
+export * from './workspace';
