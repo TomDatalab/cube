@@ -615,7 +615,7 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let db_type = config.data_source.db_type.clone().unwrap_or_default();
     let database = config.data_source.database.clone();
-    let driver = cubedriver::DriverFactory::create(&db_type, config)
+    let driver = cubedriver::DriverFactory::create_with_env(&db_type, config, &env)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     tracing::info!(
@@ -868,10 +868,7 @@ fn check_config(
     set: &[(String, String)],
     remove: &[String],
 ) -> Result<(), ApiError> {
-    let mut vars: BTreeMap<String, String> = env_file_vars(&config_file.with_file_name(".env"));
-    for (key, value) in std::env::vars() {
-        vars.entry(key).or_insert(value);
-    }
+    let mut vars = env_vars_with_file(&config_file.with_file_name(".env"));
     for key in remove {
         vars.remove(key);
     }
@@ -896,7 +893,9 @@ async fn test_variables(variables: &BTreeMap<String, String>) -> Result<(), ApiE
         .db_type
         .clone()
         .ok_or_else(|| ApiError::bad_request("Choose a database type"))?;
-    let driver = cubedriver::DriverFactory::create(&db_type, config)
+    // The form's own values, not the process environment: a connector reads
+    // its specific settings (a Snowflake account, AWS keys) through `env` too.
+    let driver = cubedriver::DriverFactory::create_with_env(&db_type, config, &env)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     run_test(driver).await
 }
@@ -1101,12 +1100,17 @@ fn header(name: &str) -> String {
     format!("# Data source {name}, added from the Playground")
 }
 
-/// The process environment with `.env` laid over it: what the server will
-/// read once it restarts, and so what the page describes.
+/// `.env` with the process environment laid over it, the way `CubeConfig`
+/// resolves a variable: the running server, and the copy a restart re-execs,
+/// read the process value, so a `.env` line it overrides is not current.
 fn env_with_file(path: &Path) -> Env {
-    let mut vars: BTreeMap<String, String> = std::env::vars().collect();
-    vars.extend(env_file_vars(path));
-    vars.into_iter().collect()
+    env_vars_with_file(path).into_iter().collect()
+}
+
+fn env_vars_with_file(path: &Path) -> BTreeMap<String, String> {
+    let mut vars = env_file_vars(path);
+    vars.extend(std::env::vars());
+    vars
 }
 
 /// The variables `.env` sets, unquoted the way the shell would for the
@@ -1322,6 +1326,22 @@ mod tests {
     use super::*;
 
     const CONFIG: &str = "version: 1\n\ndata_sources:\n  default:\n    type: postgres\n\n# Refresh\nscheduled_refresh:\n  enabled: false\n";
+
+    #[test]
+    fn the_process_environment_wins_over_env_file() {
+        let dir = std::env::temp_dir().join(format!("cube-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        std::fs::write(&path, "PATH='/from/the/file'\nCUBEJS_ONLY_IN_FILE_TEST=1\n").unwrap();
+        let vars = env_vars_with_file(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(vars.get("PATH"), std::env::var("PATH").ok().as_ref());
+        assert_eq!(
+            vars.get("CUBEJS_ONLY_IN_FILE_TEST").map(String::as_str),
+            Some("1")
+        );
+    }
 
     #[test]
     fn the_source_goes_at_the_end_of_data_sources() {
