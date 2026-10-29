@@ -1,14 +1,18 @@
 import {
-  Alert, Form, Input, Modal, Select,
+  Alert, Form, Input, Modal,
 } from 'antd';
 import { useEffect, useState } from 'react';
+
+import { RemoteSelect } from './RemoteSelect';
 
 type Choice = {
   field: 'owner' | 'organization';
   label: string;
   message: string;
-  options: { value: string; label: string }[];
+  fetchOptions: (q: string) => Promise<{ value: string; label: string }[]>;
   initial?: string;
+  // The label of `initial`, so the select does not show a bare id.
+  initialLabel?: string;
 };
 
 export type NameValues = { name: string; owner?: string; organization?: string };
@@ -76,7 +80,7 @@ export function NameDialog({
             name={choice.field}
             rules={[{ required: true, message: choice.message }]}
           >
-            <Select showSearch optionFilterProp="label" options={choice.options} />
+            <RemoteSelect fetchOptions={choice.fetchOptions} valueLabel={choice.initialLabel} />
           </Form.Item>
         ) : null}
         {error ? <Alert type="error" message={error} showIcon /> : null}

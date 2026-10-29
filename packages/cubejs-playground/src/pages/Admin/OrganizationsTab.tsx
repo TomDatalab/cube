@@ -1,62 +1,42 @@
 import {
-  Button, Card, message, Popconfirm, Select, Space, Table, Tag, Typography,
+  Alert, Button, Card, Input, message, Popconfirm, Select, Space, Table, Tag, Typography,
 } from 'antd';
 import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, Connection, DataSource, Organization, User, Workspace,
+  AdminApi, Connection, DataSource, Organization, PAGE_SIZE, Workspace,
 } from './api';
 import { NameDialog, NameValues } from './NameDialog';
+import { RemoteSelect, userOptions } from './RemoteSelect';
+import { useSearch } from './useSearch';
 
 type Props = {
   api: AdminApi;
-  users: User[];
   // Opens the Workspaces tab on one organization's workspaces.
   onShowWorkspaces: (org: string) => void;
 };
 
-function userOptions(users: User[]) {
-  return users
-    .filter((u) => !u.disabled)
-    .map((u) => ({ value: u.id, label: u.name ? `${u.id} (${u.name})` : u.id }));
-}
-
-export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
-  const isMounted = useIsMounted();
-  const [organizations, setOrganizations] = useState<Organization[] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+export function OrganizationsTab({ api, onShowWorkspaces }: Props) {
+  const [selected, setSelected] = useState<Organization | null>(null);
   const [dialog, setDialog] = useState<'new' | 'rename' | null>(null);
+  const {
+    q, setQ, page, setPage, result, loading, error, reload,
+  } = useSearch((term, p) => api.searchOrganizations(term, p), [api]);
 
-  async function loadOrganizations() {
-    try {
-      const loaded = await api.organizations();
-      if (isMounted()) {
-        setOrganizations(loaded);
-        if (selected && !loaded.some((o) => o.id === selected)) {
-          setSelected(null);
-        }
-      }
-    } catch (e: any) {
-      message.error(e.message);
-    }
-  }
-
-  useEffect(() => {
-    loadOrganizations();
-  }, []);
-
-  const org = organizations?.find((o) => o.id === selected) || null;
+  // The listing's copy, so a rename shows; the chosen one when it is on
+  // another page.
+  const org = result?.items.find((o) => o.id === selected?.id) || selected;
 
   async function save({ name, owner }: NameValues) {
     if (dialog === 'new') {
       const created = await api.createOrganization(name, owner!);
-      setSelected(created?.id ?? null);
+      setSelected(created ?? null);
     } else {
       await api.renameOrganization(org!.id, name);
     }
     message.success(`${name} saved`);
-    await loadOrganizations();
+    reload();
   }
 
   return (
@@ -67,18 +47,33 @@ export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
         </Button>
       </Space>
 
+      <Input.Search
+        allowClear
+        placeholder="Search organizations by name or id"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+      />
+      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
+
       <Table<Organization>
         rowKey="id"
         size="small"
-        loading={organizations == null}
-        dataSource={organizations || []}
-        pagination={false}
+        loading={loading}
+        dataSource={result?.items || []}
+        pagination={{
+          current: page,
+          pageSize: PAGE_SIZE,
+          total: result?.total ?? 0,
+          onChange: setPage,
+          showSizeChanger: false,
+        }}
         rowSelection={{
           type: 'radio',
-          selectedRowKeys: selected ? [selected] : [],
-          onChange: (keys) => setSelected((keys[0] as string) ?? null),
+          selectedRowKeys: selected ? [selected.id] : [],
+          onChange: (_, rows) => setSelected(rows[0] ?? null),
         }}
-        onRow={(o) => ({ onClick: () => setSelected(o.id), style: { cursor: 'pointer' } })}
+        onRow={(o) => ({ onClick: () => setSelected(o), style: { cursor: 'pointer' } })}
         columns={[
           { title: 'Organization', dataIndex: 'name' },
           { title: 'Created by', dataIndex: 'createdBy', render: (v) => v || '—' },
@@ -91,10 +86,12 @@ export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
           key={org.id}
           api={api}
           org={org}
-          users={users}
           onRename={() => setDialog('rename')}
           onShowWorkspaces={() => onShowWorkspaces(org.id)}
-          onDeleted={loadOrganizations}
+          onDeleted={async () => {
+            setSelected(null);
+            reload();
+          }}
         />
       ) : null}
 
@@ -105,7 +102,7 @@ export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
           field: 'owner',
           label: 'Owner',
           message: 'Pick the first owner',
-          options: userOptions(users),
+          fetchOptions: userOptions(api),
         } : undefined}
         onSubmit={save}
         onClose={() => setDialog(null)}
@@ -117,14 +114,13 @@ export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
 type CardProps = {
   api: AdminApi;
   org: Organization;
-  users: User[];
   onRename: () => void;
   onShowWorkspaces: () => void;
   onDeleted: () => Promise<void>;
 };
 
 function OrganizationCard({
-  api, org, users, onRename, onShowWorkspaces, onDeleted,
+  api, org, onRename, onShowWorkspaces, onDeleted,
 }: CardProps) {
   const isMounted = useIsMounted();
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
@@ -200,14 +196,13 @@ function OrganizationCard({
         </Typography.Text>
       </div>
       <Space style={{ marginTop: 8, marginBottom: 16 }}>
-        <Select
+        <RemoteSelect
           size="small"
-          showSearch
           placeholder="User"
           style={{ width: 200 }}
           value={owner}
           onChange={setOwner}
-          options={userOptions(users)}
+          fetchOptions={userOptions(api)}
         />
         <Button
           size="small"

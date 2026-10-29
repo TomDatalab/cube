@@ -1,11 +1,11 @@
 import {
-  Alert, Layout, message, Tabs, Typography,
+  Alert, Layout, Tabs, Typography,
 } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 
-import { useIsMounted, usePlaygroundContext, useRbac } from '../../hooks';
+import { usePlaygroundContext, useRbac } from '../../hooks';
 import { Content, Header } from '../components/Ui';
-import { adminApi, User } from './api';
+import { adminApi } from './api';
 import { OrganizationsTab } from './OrganizationsTab';
 import { UsersTab } from './UsersTab';
 import { WorkspacesTab } from './WorkspacesTab';
@@ -15,31 +15,12 @@ import { WorkspacesTab } from './WorkspacesTab';
 // when shown, so it sees what the others changed. Platform admins only
 // (`AdminOnly`).
 export function AdminPage() {
-  const isMounted = useIsMounted();
   const { basePath = '' } = usePlaygroundContext() || {};
   const { enabled, session } = useRbac();
   const api = useMemo(() => adminApi(basePath), [basePath]);
-  const [users, setUsers] = useState<User[] | null>(null);
   const [tab, setTab] = useState('organizations');
   // The organization the Workspaces tab shows, `null` for all.
   const [workspacesOf, setWorkspacesOf] = useState<string | null>(null);
-
-  async function loadUsers() {
-    try {
-      const loaded = await api.users();
-      if (isMounted()) {
-        setUsers(loaded);
-      }
-    } catch (e: any) {
-      message.error(e.message);
-    }
-  }
-
-  useEffect(() => {
-    if (enabled) {
-      loadUsers();
-    }
-  }, [enabled, api]);
 
   return (
     <Layout>
@@ -52,7 +33,6 @@ export function AdminPage() {
             <Tabs.TabPane tab="Organizations" key="organizations">
               <OrganizationsTab
                 api={api}
-                users={users || []}
                 onShowWorkspaces={(org) => {
                   setWorkspacesOf(org);
                   setTab('workspaces');
@@ -62,7 +42,6 @@ export function AdminPage() {
             <Tabs.TabPane tab="Workspaces" key="workspaces">
               <WorkspacesTab
                 api={api}
-                users={users || []}
                 organization={workspacesOf}
                 onOrganizationChange={setWorkspacesOf}
               />
@@ -70,9 +49,7 @@ export function AdminPage() {
             <Tabs.TabPane tab="Users" key="users">
               <UsersTab
                 api={api}
-                users={users}
                 currentUser={session?.user.id ?? null}
-                reload={loadUsers}
               />
             </Tabs.TabPane>
           </Tabs>

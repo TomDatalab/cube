@@ -5,20 +5,20 @@ import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, Connection, Member, Role, ROLES, User, Workspace,
+  AdminApi, Connection, Member, Role, ROLES, Workspace,
 } from './api';
+import { RemoteSelect, userOptions } from './RemoteSelect';
 
 type Props = {
   api: AdminApi;
   workspace: Workspace;
-  users: User[];
   connections: Connection[];
   reloadConnections: () => Promise<void>;
 };
 
 // The members of one workspace and the organization connections released to it.
 export function WorkspacePanel({
-  api, workspace, users, connections, reloadConnections,
+  api, workspace, connections, reloadConnections,
 }: Props) {
   const isMounted = useIsMounted();
   const [members, setMembers] = useState<Member[] | null>(null);
@@ -50,7 +50,6 @@ export function WorkspacePanel({
     }
   }
 
-  const memberIds = new Set((members || []).map((m) => m.user));
   const roleOptions = ROLES.map((r) => ({ value: r, label: r }));
 
   return (
@@ -100,16 +99,13 @@ export function WorkspacePanel({
         ]}
       />
       <Space style={{ marginTop: 8 }}>
-        <Select
+        <RemoteSelect
           size="small"
-          showSearch
           placeholder="User"
           style={{ width: 200 }}
           value={newMember}
           onChange={setNewMember}
-          options={users
-            .filter((u) => !u.disabled && !memberIds.has(u.id))
-            .map((u) => ({ value: u.id, label: u.name ? `${u.id} (${u.name})` : u.id }))}
+          fetchOptions={userOptions(api)}
         />
         <Select
           size="small"

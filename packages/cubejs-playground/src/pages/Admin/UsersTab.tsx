@@ -4,14 +4,13 @@ import {
 } from 'antd';
 import { useState } from 'react';
 
-import { AdminApi, User } from './api';
+import { AdminApi, PAGE_SIZE, User } from './api';
 import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
+import { useSearch } from './useSearch';
 
 type Props = {
   api: AdminApi;
-  users: User[] | null;
   currentUser: string | null;
-  reload: () => Promise<void>;
 };
 
 // `MIN_PASSWORD_LENGTH` in `cubeserver/src/rbac/identity.rs`.
@@ -22,7 +21,10 @@ const passwordRules = [
   { min: MIN_PASSWORD, message: `At least ${MIN_PASSWORD} characters` },
 ];
 
-export function UsersTab({ api, users, currentUser, reload }: Props) {
+export function UsersTab({ api, currentUser }: Props) {
+  const {
+    q, setQ, page, setPage, result, loading, error: searchError, reload,
+  } = useSearch((term, p) => api.searchUsers(term, p), [api]);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
   const [resetting, setResetting] = useState<User | null>(null);
@@ -50,7 +52,7 @@ export function UsersTab({ api, users, currentUser, reload }: Props) {
       await action();
       close();
       message.success(done);
-      await reload();
+      reload();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -62,7 +64,7 @@ export function UsersTab({ api, users, currentUser, reload }: Props) {
     try {
       await api.updateUser(user.id, { disabled: !enabled });
       message.success(`${user.id} ${enabled ? 'enabled' : 'disabled'}`);
-      await reload();
+      reload();
     } catch (e: any) {
       message.error(e.message);
     }
@@ -90,12 +92,29 @@ export function UsersTab({ api, users, currentUser, reload }: Props) {
           </Button>
         </Space>
 
+        <Input.Search
+          allowClear
+          placeholder="Search users by username, name or email"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+        />
+        {searchError ? (
+          <Alert type="error" message={searchError} showIcon style={{ marginBottom: 16 }} />
+        ) : null}
+
         <Table<User>
           rowKey="id"
           size="small"
-          loading={users == null}
-          dataSource={users || []}
-          pagination={false}
+          loading={loading}
+          dataSource={result?.items || []}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total: result?.total ?? 0,
+            onChange: setPage,
+            showSizeChanger: false,
+          }}
           // Enabled users drag onto a workspace of the tree to join it.
           onRow={(user) => (user.disabled ? {} : {
             draggable: true,
