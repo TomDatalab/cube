@@ -1,13 +1,15 @@
 import { CaretDownOutlined, CaretRightOutlined, CloseOutlined } from '@ant-design/icons';
 import {
-  Button, Empty, message, Popconfirm, Select, Spin, Typography,
+  Alert, Button, Empty, Input, message, Popconfirm, Select, Space, Spin, Typography,
 } from 'antd';
-import { DragEvent, useEffect, useState } from 'react';
+import { DragEvent, useEffect, useRef, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, Member, Organization, Role, ROLES, Workspace,
+  AdminApi, Member, PAGE_SIZE, Role, ROLES, WorkspaceListing,
 } from './api';
+import { groupByOrganization } from './membershipGroups';
+import { useSearch } from './useSearch';
 
 // The drag payload of a user row: its id. A custom type, so text dragged in
 // from elsewhere is not taken for a user.
@@ -17,51 +19,55 @@ type Props = {
   api: AdminApi;
 };
 
-type Tree = {
-  organizations: Organization[];
-  workspaces: Workspace[];
-  members: Record<string, Member[]>;
-};
-
 const roleOptions = ROLES.map((r) => ({ value: r, label: r }));
 
-// Organization → workspace → members. A user dropped on a workspace joins it
-// as a viewer; roles change and members leave from here.
+// Organization → workspace → members, one searchable page of workspaces at a
+// time; a workspace's members load when it opens or a user is dropped on it.
+// A user dropped on a workspace joins it as a viewer; roles change and
+// members leave from here.
 export function MembershipTree({ api }: Props) {
   const isMounted = useIsMounted();
-  const [tree, setTree] = useState<Tree | null>(null);
+  const {
+    q, setQ, page, setPage, result, loading, error,
+  } = useSearch((term, p) => api.searchWorkspaces({ q: term, page: p }), []);
+  const [members, setMembers] = useState<Record<string, Member[]>>({});
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [target, setTarget] = useState<string | null>(null);
+  const openRef = useRef(open);
+  openRef.current = open;
 
-  async function load() {
+  async function loadMembers(ws: string): Promise<Member[] | null> {
     try {
-      const organizations = await api.organizations();
-      const workspaces = (await Promise.all(organizations.map((o) => api.workspaces(o.id)))).flat();
-      const lists = await Promise.all(workspaces.map((ws) => api.members(ws.id)));
+      const list = await api.members(ws);
       if (isMounted()) {
-        setTree({
-          organizations,
-          workspaces,
-          members: Object.fromEntries(workspaces.map((ws, i) => [ws.id, lists[i]])),
-        });
+        setMembers((m) => ({ ...m, [ws]: list }));
       }
+      return list;
     } catch (e: any) {
       message.error(e.message);
+      return null;
     }
   }
 
+  // Members are kept per workspace until the next search; workspaces that
+  // stay open across it load again.
   useEffect(() => {
-    load();
-  }, []);
+    setMembers({});
+    (result?.items || []).forEach((ws) => {
+      if (openRef.current.has(ws.id)) {
+        loadMembers(ws.id);
+      }
+    });
+  }, [result]);
 
-  async function act(action: () => Promise<unknown>, done: string) {
+  async function act(ws: string, action: () => Promise<unknown>, done: string) {
     try {
       await action();
       message.success(done);
     } catch (e: any) {
       message.error(e.message);
     }
-    await load();
+    await loadMembers(ws);
   }
 
   function toggle(ws: string) {
@@ -70,6 +76,9 @@ export function MembershipTree({ api }: Props) {
       next.delete(ws);
     } else {
       next.add(ws);
+      if (!members[ws]) {
+        loadMembers(ws);
+      }
     }
     setOpen(next);
   }
@@ -82,7 +91,7 @@ export function MembershipTree({ api }: Props) {
     }
   }
 
-  function drop(e: DragEvent, ws: Workspace) {
+  async function drop(e: DragEvent, ws: WorkspaceListing) {
     e.preventDefault();
     setTarget(null);
     const user = e.dataTransfer.getData(USER_DRAG_TYPE);
@@ -90,39 +99,43 @@ export function MembershipTree({ api }: Props) {
       return;
     }
     setOpen(new Set(open).add(ws.id));
-    if (tree?.members[ws.id]?.some((m) => m.user === user)) {
+    const current = members[ws.id] || await loadMembers(ws.id);
+    if (current?.some((m) => m.user === user)) {
       message.info(`${user} is already in ${ws.name}`);
       return;
     }
-    act(() => api.setMember(ws.id, user, 'viewer'), `${user} added to ${ws.name} as viewer`);
+    if (current) {
+      act(ws.id, () => api.setMember(ws.id, user, 'viewer'), `${user} added to ${ws.name} as viewer`);
+    }
   }
 
-  if (tree == null) {
-    return <Spin />;
-  }
-  if (!tree.workspaces.length) {
-    return (
-      <Empty
-        image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="No workspaces yet: create them in the Workspaces tab"
-      />
-    );
-  }
+  const groups = groupByOrganization(result?.items || []);
+  const pages = Math.max(1, Math.ceil((result?.total || 0) / PAGE_SIZE));
 
   return (
     <div>
-      {tree.organizations.map((org) => {
-        const workspaces = tree.workspaces.filter((ws) => ws.organizationId === org.id);
+      <Input.Search
+        allowClear
+        placeholder="Search workspaces, or their organization"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+      />
+      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
+      {result == null ? <Spin /> : null}
+      {result && !groups.length && !loading ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={q ? 'No workspaces match' : 'No workspaces yet: create them in the Workspaces tab'}
+        />
+      ) : null}
+      {groups.map((group) => {
+        const { workspaces } = group;
         return (
-          <div key={org.id} style={{ marginBottom: 16 }}>
-            <Typography.Text strong>{org.name}</Typography.Text>
-            {workspaces.length ? null : (
-              <div style={{ paddingLeft: 16 }}>
-                <Typography.Text type="secondary">No workspaces</Typography.Text>
-              </div>
-            )}
+          <div key={group.organizationId} style={{ marginBottom: 16 }}>
+            <Typography.Text strong>{group.organizationName}</Typography.Text>
             {workspaces.map((ws) => {
-              const members = tree.members[ws.id] || [];
+              const list = members[ws.id];
               const expanded = open.has(ws.id);
               const highlighted = target === ws.id;
               return (
@@ -151,13 +164,15 @@ export function MembershipTree({ api }: Props) {
                     {' '}
                     <Typography.Text>{ws.name}</Typography.Text>
                     {' '}
-                    <Typography.Text type="secondary">
-                      {members.length === 1 ? '(1 member)' : `(${members.length} members)`}
-                    </Typography.Text>
+                    {list ? (
+                      <Typography.Text type="secondary">
+                        {list.length === 1 ? '(1 member)' : `(${list.length} members)`}
+                      </Typography.Text>
+                    ) : null}
                   </div>
                   {expanded ? (
                     <div style={{ paddingLeft: 20 }}>
-                      {members.length ? members.map((m) => (
+                      {list?.length ? list.map((m) => (
                         <div
                           key={m.user}
                           style={{
@@ -171,6 +186,7 @@ export function MembershipTree({ api }: Props) {
                             options={roleOptions}
                             style={{ width: 100 }}
                             onChange={(role: Role) => act(
+                              ws.id,
                               () => api.setMember(ws.id, m.user, role),
                               `${m.user} is now ${role} in ${ws.name}`
                             )}
@@ -178,6 +194,7 @@ export function MembershipTree({ api }: Props) {
                           <Popconfirm
                             title={`Remove ${m.user} from ${ws.name}?`}
                             onConfirm={() => act(
+                              ws.id,
                               () => api.removeMember(ws.id, m.user),
                               `${m.user} removed from ${ws.name}`
                             )}
@@ -191,11 +208,13 @@ export function MembershipTree({ api }: Props) {
                             />
                           </Popconfirm>
                         </div>
-                      )) : (
+                      )) : null}
+                      {list && !list.length ? (
                         <Typography.Text type="secondary">
                           Drag users here
                         </Typography.Text>
-                      )}
+                      ) : null}
+                      {list ? null : <Spin size="small" />}
                     </div>
                   ) : null}
                 </div>
@@ -204,6 +223,17 @@ export function MembershipTree({ api }: Props) {
           </div>
         );
       })}
+      {result && result.total > PAGE_SIZE ? (
+        <Space>
+          <Button size="small" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>
+            Previous
+          </Button>
+          <Typography.Text type="secondary">{`page ${page} of ${pages}`}</Typography.Text>
+          <Button size="small" disabled={page >= pages || loading} onClick={() => setPage(page + 1)}>
+            Next
+          </Button>
+        </Space>
+      ) : null}
     </div>
   );
 }
