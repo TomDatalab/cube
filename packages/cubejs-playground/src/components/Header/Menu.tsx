@@ -14,6 +14,10 @@ export const StyledMenuItem = styled(Menu.Item)`
     font-weight: 500;
     line-height: 48px;
     height: 49px;
+    /* the dark antd sheet draws a second, near-white underline here */
+    &::after {
+      display: none;
+    }
     & > a {
       &,
       &:hover {
