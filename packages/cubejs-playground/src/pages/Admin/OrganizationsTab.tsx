@@ -7,12 +7,13 @@ import { useIsMounted } from '../../hooks';
 import {
   AdminApi, Connection, DataSource, Organization, User, Workspace,
 } from './api';
-import { NameDialog } from './NameDialog';
-import { WorkspacePanel } from './WorkspacePanel';
+import { NameDialog, NameValues } from './NameDialog';
 
 type Props = {
   api: AdminApi;
   users: User[];
+  // Opens the Workspaces tab on one organization's workspaces.
+  onShowWorkspaces: (org: string) => void;
 };
 
 function userOptions(users: User[]) {
@@ -21,7 +22,7 @@ function userOptions(users: User[]) {
     .map((u) => ({ value: u.id, label: u.name ? `${u.id} (${u.name})` : u.id }));
 }
 
-export function OrganizationsTab({ api, users }: Props) {
+export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
   const isMounted = useIsMounted();
   const [organizations, setOrganizations] = useState<Organization[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -47,7 +48,7 @@ export function OrganizationsTab({ api, users }: Props) {
 
   const org = organizations?.find((o) => o.id === selected) || null;
 
-  async function save({ name, owner }: { name: string; owner?: string }) {
+  async function save({ name, owner }: NameValues) {
     if (dialog === 'new') {
       const created = await api.createOrganization(name, owner!);
       setSelected(created?.id ?? null);
@@ -93,6 +94,7 @@ export function OrganizationsTab({ api, users }: Props) {
           organizations={(organizations || []).map((o) => o.id)}
           users={users}
           onRename={() => setDialog('rename')}
+          onShowWorkspaces={() => onShowWorkspaces(org.id)}
           onDeleted={loadOrganizations}
         />
       ) : null}
@@ -100,7 +102,12 @@ export function OrganizationsTab({ api, users }: Props) {
       <NameDialog
         title={dialog && (dialog === 'new' ? 'New organization' : 'Rename organization')}
         initialName={dialog === 'rename' ? org?.name : ''}
-        ownerOptions={dialog === 'new' ? userOptions(users) : undefined}
+        choice={dialog === 'new' ? {
+          field: 'owner',
+          label: 'Owner',
+          message: 'Pick the first owner',
+          options: userOptions(users),
+        } : undefined}
         onSubmit={save}
         onClose={() => setDialog(null)}
       />
@@ -115,11 +122,12 @@ type CardProps = {
   organizations: string[];
   users: User[];
   onRename: () => void;
+  onShowWorkspaces: () => void;
   onDeleted: () => Promise<void>;
 };
 
 function OrganizationCard({
-  api, org, organizations, users, onRename, onDeleted,
+  api, org, organizations, users, onRename, onShowWorkspaces, onDeleted,
 }: CardProps) {
   const isMounted = useIsMounted();
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
@@ -127,8 +135,6 @@ function OrganizationCard({
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [owner, setOwner] = useState<string | undefined>();
   const [dataSource, setDataSource] = useState<string | undefined>();
-  // `true`: a new workspace; a workspace: renaming it.
-  const [editing, setEditing] = useState<Workspace | true | null>(null);
 
   async function loadWorkspaces() {
     try {
@@ -161,16 +167,6 @@ function OrganizationCard({
     loadConnections();
   }, [org.id]);
 
-  async function saveWorkspace({ name }: { name: string }) {
-    if (editing === true) {
-      await api.createWorkspace(org.id, name);
-    } else {
-      await api.renameWorkspace(editing!.id, name);
-    }
-    message.success(`${name} saved`);
-    await loadWorkspaces();
-  }
-
   async function act(action: () => Promise<unknown>, done: string, reload?: () => Promise<void>) {
     try {
       await action();
@@ -181,13 +177,6 @@ function OrganizationCard({
       message.error(e.message);
       return false;
     }
-  }
-
-  let workspaceDialogTitle: string | null = null;
-  if (editing === true) {
-    workspaceDialogTitle = 'New workspace';
-  } else if (editing) {
-    workspaceDialogTitle = 'Rename workspace';
   }
 
   return (
@@ -293,55 +282,21 @@ function OrganizationCard({
         </Popconfirm>
       </Space>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography.Text strong>Workspaces</Typography.Text>
-        <Button size="small" type="primary" onClick={() => setEditing(true)}>New workspace</Button>
+      <Typography.Text strong>Workspaces</Typography.Text>
+      <div style={{ marginTop: 8 }}>
+        {workspaces == null ? (
+          <Typography.Text type="secondary">Loading...</Typography.Text>
+        ) : (
+          <Space>
+            <Typography.Text>
+              {workspaces.length === 1 ? '1 workspace' : `${workspaces.length} workspaces`}
+            </Typography.Text>
+            <Button size="small" type="link" onClick={onShowWorkspaces}>
+              Open in Workspaces
+            </Button>
+          </Space>
+        )}
       </div>
-      <Table<Workspace>
-        rowKey="id"
-        size="small"
-        loading={workspaces == null}
-        dataSource={workspaces || []}
-        pagination={false}
-        style={{ marginTop: 8 }}
-        expandable={{
-          expandedRowRender: (ws) => (
-            <WorkspacePanel
-              api={api}
-              workspace={ws}
-              users={users}
-              connections={connections}
-              reloadConnections={loadConnections}
-            />
-          ),
-        }}
-        columns={[
-          { title: 'Workspace', dataIndex: 'name' },
-          { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
-          {
-            title: '',
-            align: 'right',
-            render: (_, ws) => (
-              <Space>
-                <Button size="small" onClick={() => setEditing(ws)}>Rename</Button>
-                <Popconfirm
-                  title={`Delete ${ws.name}, with its members, objects and connection releases?`}
-                  onConfirm={() => act(() => api.deleteWorkspace(ws.id), `${ws.name} deleted`, loadWorkspaces)}
-                >
-                  <Button size="small" danger>Delete</Button>
-                </Popconfirm>
-              </Space>
-            ),
-          },
-        ]}
-      />
-
-      <NameDialog
-        title={workspaceDialogTitle}
-        initialName={editing && editing !== true ? editing.name : ''}
-        onSubmit={saveWorkspace}
-        onClose={() => setEditing(null)}
-      />
     </Card>
   );
 }
