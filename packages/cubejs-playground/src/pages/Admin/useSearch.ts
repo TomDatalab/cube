@@ -16,6 +16,7 @@ export function useSearch<T>(
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<Page<T> | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
   const latest = useRef(0);
   const fetchRef = useRef(fetch);
@@ -34,19 +35,25 @@ export function useSearch<T>(
   useEffect(() => {
     const request = ++latest.current;
     setLoading(true);
+    setError(null);
     fetchRef.current(debounced, page).then((loaded) => {
       if (request === latest.current) {
         setResult(loaded);
         setLoading(false);
       }
-    }, () => {
+    }, (e: any) => {
       if (request === latest.current) {
+        setError(e?.message || String(e));
         setLoading(false);
       }
     });
+    // Drops the response if the search changes or the component unmounts.
+    return () => {
+      latest.current++;
+    };
   }, [debounced, page, version, ...deps]);
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
 
-  return { q, setQ, page, setPage, result, loading, reload };
+  return { q, setQ, page, setPage, result, loading, error, reload };
 }
