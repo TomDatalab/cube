@@ -3,7 +3,7 @@
 //!
 //! Pure: the caller loads the inputs, this only assembles them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 use uuid::Uuid;
@@ -129,25 +129,34 @@ fn grants_of(resource: &str, order: &[&str], sources: &[Source]) -> Vec<Grant> {
         .collect()
 }
 
+/// Edges, one per (from, to): parallel ones are merged into a single edge
+/// whose label joins theirs with " · ", direct if any of them is.
 #[derive(Default)]
 struct Edges {
     list: Vec<Edge>,
-    seen: HashSet<(String, String, String)>,
+    index: HashMap<(String, String), usize>,
 }
 
 impl Edges {
     fn add(&mut self, from: &str, to: &str, label: &str, kind: &str) {
-        if self
-            .seen
-            .insert((from.to_string(), to.to_string(), label.to_string()))
-        {
-            self.list.push(Edge {
-                from: from.to_string(),
-                to: to.to_string(),
-                label: label.to_string(),
-                kind: kind.to_string(),
-            });
+        let key = (from.to_string(), to.to_string());
+        if let Some(&i) = self.index.get(&key) {
+            let edge = &mut self.list[i];
+            if !edge.label.split(" · ").any(|l| l == label) {
+                edge.label = format!("{} · {label}", edge.label);
+            }
+            if kind == "direct" {
+                edge.kind = kind.to_string();
+            }
+            return;
         }
+        self.index.insert(key, self.list.len());
+        self.list.push(Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            label: label.to_string(),
+            kind: kind.to_string(),
+        });
     }
 }
 
@@ -333,7 +342,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                 .entry(row.name.clone())
                 .or_default()
                 .push(Source {
-                    text: format!("released to {}", ws.name),
+                    text: format!("released to {} (as {})", ws.name, s.text),
                     path,
                     perms: &["query"],
                 });
@@ -586,13 +595,48 @@ mod tests {
         assert!(grant(&g, "connection:db", "manage").is_none());
         let r = &grant(&g, "connection:db", "query").unwrap().reasons;
         // viewer and owner of the organization both query W: one reason each.
-        assert_eq!(r.len(), 2);
-        assert!(r.iter().all(|x| x.text == "released to Operations"));
+        let texts: Vec<_> = r.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "released to Operations (as viewer)",
+                "released to Operations (as owner of Acme)"
+            ]
+        );
         assert_eq!(r[0].path.last().unwrap(), "connection:db");
         let node = g.nodes.iter().find(|n| n.id == "connection:db").unwrap();
         assert_eq!(node.notes, [NOTE_ASSIGNED]);
         let released = g.edges.iter().filter(|e| e.label == "released").count();
         assert_eq!(released, 1);
+    }
+
+    #[test]
+    fn parallel_roles_share_one_edge() {
+        let g = build(&input(vec![
+            rel("organization", O, "owner"),
+            rel("organization", O, "member"),
+        ]));
+        let to_org: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.from == "user:ana" && e.to == format!("organization:{O}"))
+            .collect();
+        assert_eq!(to_org.len(), 1);
+        assert_eq!(to_org[0].label, "owner · member");
+        assert_eq!(to_org[0].kind, "direct");
+    }
+
+    #[test]
+    fn a_merged_edge_is_direct_if_any_part_is() {
+        let mut e = Edges::default();
+        e.add("a", "b", "x", "derived");
+        e.add("a", "b", "y", "direct");
+        e.add("a", "b", "x", "derived");
+        assert_eq!(e.list.len(), 1);
+        assert_eq!(
+            (e.list[0].label.as_str(), e.list[0].kind.as_str()),
+            ("x · y", "direct")
+        );
     }
 
     #[test]
