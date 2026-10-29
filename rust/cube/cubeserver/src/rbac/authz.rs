@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -125,7 +127,35 @@ pub struct HttpAuthz {
     endpoint: String,
     key: String,
     client: reqwest::Client,
+    /// Per attempt of a read-only call (`check`, `lookup_resources`,
+    /// `read`); such a call is retried once on a timeout or connection
+    /// error. Writes are never retried and only bounded by the client's
+    /// total timeout.
+    read_timeout: Duration,
 }
+
+/// How a failed SpiceDB call ended, so read-only calls know whether to retry.
+enum PostError {
+    /// The request never got an answer (connection, timeout, body read):
+    /// a read-only call may be retried.
+    Transport(String),
+    /// SpiceDB answered with an error.
+    Answered(AuthzError),
+}
+
+impl From<PostError> for AuthzError {
+    fn from(e: PostError) -> Self {
+        match e {
+            PostError::Transport(m) => AuthzError::Unavailable(m),
+            PostError::Answered(e) => e,
+        }
+    }
+}
+
+/// Default per-attempt timeout of read-only calls.
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// Total timeout of any call (writes, schema).
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn object_json(o: &ObjectRef) -> Value {
     json!({"objectType": o.kind, "objectId": o.id})
@@ -178,43 +208,82 @@ fn user_subject(user: &str) -> Value {
 
 impl HttpAuthz {
     pub fn new(endpoint: &str, preshared_key: &str) -> Self {
+        Self::with_timeouts(endpoint, preshared_key, READ_TIMEOUT, TOTAL_TIMEOUT)
+    }
+
+    /// [`HttpAuthz::new`] with explicit timeouts (tests use short ones).
+    pub fn with_timeouts(
+        endpoint: &str,
+        preshared_key: &str,
+        read_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Self {
         Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             key: preshared_key.to_string(),
             client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(total_timeout)
+                // A pooled connection SpiceDB (or a proxy) silently dropped
+                // is not reused after this long idle.
+                .pool_idle_timeout(Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
+            read_timeout,
         }
     }
 
     /// POSTs and returns the raw body; maps transport/5xx to `Unavailable`
-    /// and other non-2xx statuses to `Rejected`.
+    /// and other non-2xx statuses to `Rejected`. Never retried.
     async fn post(&self, path: &str, body: Value) -> Result<String, AuthzError> {
+        self.send(path, &body).await.map_err(AuthzError::from)
+    }
+
+    /// [`HttpAuthz::post`] for read-only calls: each attempt is bounded by
+    /// `read_timeout`, and one that timed out or could not reach SpiceDB is
+    /// retried once (a stuck pooled connection then costs one attempt, not
+    /// the whole request).
+    async fn post_read(&self, path: &str, body: Value) -> Result<String, AuthzError> {
+        let mut last = String::new();
+        for attempt in 0..2 {
+            match tokio::time::timeout(self.read_timeout, self.send(path, &body)).await {
+                Ok(Ok(text)) => return Ok(text),
+                Ok(Err(PostError::Answered(e))) => return Err(e),
+                Ok(Err(PostError::Transport(m))) => last = m,
+                Err(_) => last = format!("no answer within {:?}", self.read_timeout),
+            }
+            if attempt == 0 {
+                tracing::warn!("SpiceDB {path} failed ({last}); retrying once");
+            }
+        }
+        Err(AuthzError::Unavailable(last))
+    }
+
+    async fn send(&self, path: &str, body: &Value) -> Result<String, PostError> {
         let resp = self
             .client
             .post(format!("{}{}", self.endpoint, path))
             .bearer_auth(&self.key)
-            .json(&body)
+            .json(body)
             .send()
             .await
-            .map_err(|e| AuthzError::Unavailable(e.to_string()))?;
+            .map_err(|e| PostError::Transport(e.to_string()))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| AuthzError::Unavailable(e.to_string()))?;
+            .map_err(|e| PostError::Transport(e.to_string()))?;
+        let answered = |e| Err(PostError::Answered(e));
         if status.is_success() {
             Ok(text)
         } else if serde_json::from_str::<Value>(&text)
             .is_ok_and(|v| v["code"] == json!(FAILED_PRECONDITION))
         {
-            Err(AuthzError::PreconditionFailed(text))
+            answered(AuthzError::PreconditionFailed(text))
         } else if status.is_server_error() || matches!(status.as_u16(), 401 | 403 | 429) {
-            Err(AuthzError::Unavailable(format!("{status}: {text}")))
+            answered(AuthzError::Unavailable(format!("{status}: {text}")))
         } else {
-            Err(AuthzError::Rejected(format!("{status}: {text}")))
+            answered(AuthzError::Rejected(format!("{status}: {text}")))
         }
     }
 
@@ -262,7 +331,7 @@ impl Authz for HttpAuthz {
             "permission": permission,
             "subject": user_subject(user),
         });
-        let text = self.post("/v1/permissions/check", body).await?;
+        let text = self.post_read("/v1/permissions/check", body).await?;
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| AuthzError::Unavailable(format!("bad response: {e}")))?;
         Ok(v["permissionship"] == "PERMISSIONSHIP_HAS_PERMISSION")
@@ -280,7 +349,7 @@ impl Authz for HttpAuthz {
             "permission": permission,
             "subject": user_subject(user),
         });
-        let text = self.post("/v1/permissions/resources", body).await?;
+        let text = self.post_read("/v1/permissions/resources", body).await?;
         Ok(Self::stream_results(&text)?
             .iter()
             .filter(|r| r["permissionship"] != "LOOKUP_PERMISSIONSHIP_CONDITIONAL_PERMISSION")
@@ -293,7 +362,7 @@ impl Authz for HttpAuthz {
             "consistency": {"fullyConsistent": true},
             "relationshipFilter": filter_json(filter),
         });
-        let text = self.post("/v1/relationships/read", body).await?;
+        let text = self.post_read("/v1/relationships/read", body).await?;
         let mut out = Vec::new();
         for r in Self::stream_results(&text)? {
             let rel = &r["relationship"];
@@ -382,6 +451,108 @@ impl Authz for HttpAuthz {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A fake SpiceDB: the first `stall` connections are accepted and never
+    /// answered; later ones answer every request with a permitted check.
+    /// Returns its URL and the count of accepted connections.
+    async fn mock_spicedb(stall: usize) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    if n < stall {
+                        // Read and hold the connection open without answering.
+                        while socket.read(&mut buf).await.unwrap_or(0) > 0 {}
+                        return;
+                    }
+                    let _ = socket.read(&mut buf).await;
+                    let body = r#"{"permissionship":"PERMISSIONSHIP_HAS_PERMISSION"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, accepted)
+    }
+
+    fn short(url: &str) -> HttpAuthz {
+        HttpAuthz::with_timeouts(
+            url,
+            "key",
+            Duration::from_millis(300),
+            Duration::from_millis(600),
+        )
+    }
+
+    #[tokio::test]
+    async fn read_only_call_retries_a_stuck_attempt_once() {
+        let (url, accepted) = mock_spicedb(1).await;
+        let org = ObjectRef::new("organization", "o");
+        let started = std::time::Instant::now();
+        assert!(short(&url).check(&org, "admin", "u").await.unwrap());
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn read_only_call_gives_up_after_two_attempts() {
+        let (url, accepted) = mock_spicedb(usize::MAX).await;
+        let org = ObjectRef::new("organization", "o");
+        let result = short(&url).check(&org, "admin", "u").await;
+        assert!(
+            matches!(result, Err(AuthzError::Unavailable(_))),
+            "{result:?}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn writes_are_never_retried() {
+        let (url, accepted) = mock_spicedb(usize::MAX).await;
+        let rel = Relationship {
+            resource: ObjectRef::new("organization", "o"),
+            relation: "owner",
+            subject: ObjectRef::new("user", "u"),
+        };
+        let result = short(&url).touch(&[rel]).await;
+        assert!(
+            matches!(result, Err(AuthzError::Unavailable(_))),
+            "{result:?}"
+        );
+        // Give a (wrong) retry the time to connect before counting.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_retried_once_then_unavailable() {
+        // Nothing listens on this port any more.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let org = ObjectRef::new("organization", "o");
+        let result = short(&url).check(&org, "admin", "u").await;
+        assert!(
+            matches!(result, Err(AuthzError::Unavailable(_))),
+            "{result:?}"
+        );
+    }
 
     #[tokio::test]
     #[ignore]

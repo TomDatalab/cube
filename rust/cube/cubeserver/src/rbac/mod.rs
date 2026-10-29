@@ -75,6 +75,14 @@ impl Rbac {
             .ensure_schema(SCHEMA)
             .await
             .map_err(|e| format!("Cannot write the SpiceDB schema (SPICEDB_ENDPOINT): {e}"))?;
+        // Warm-up: the first request does not pay for opening the
+        // connection, and a SpiceDB that cannot answer checks stops the start.
+        authz
+            .check(&platform(), "manage", "startup-check")
+            .await
+            .map_err(|e| {
+                format!("SpiceDB cannot answer permission checks (SPICEDB_ENDPOINT): {e}")
+            })?;
         identity::prepare_dummy_hash();
         let hashing = Arc::new(Semaphore::new(config.max_concurrent_hashes.max(1)));
         let rbac = Self {
