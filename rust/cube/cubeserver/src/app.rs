@@ -58,15 +58,17 @@ impl AppState {
     /// With RBAC on it shows only the cubes and views the request may read
     /// ([`crate::rbac::enforce::RbacMetaService`]).
     pub async fn meta_for(&self, ctx: &RequestContext) -> Result<MetaServiceRef, ApiError> {
-        let meta = match self.runtime_for(ctx).await? {
-            Some(runtime) => runtime.meta.clone(),
-            None => self.meta.clone(),
+        // The meta and the planner of the same runtime, so the cubes shown
+        // are placed with the snapshot their queries are checked and run with.
+        let (meta, query) = match self.runtime_for(ctx).await? {
+            Some(runtime) => (runtime.meta.clone(), runtime.query.clone()),
+            None => (self.meta.clone(), self.query.clone()),
         };
         Ok(match &self.rbac {
             Some(rbac) => Arc::new(crate::rbac::enforce::RbacMetaService::new(
                 meta,
                 rbac.clone(),
-                rbac.model_index(&self.config.schema_path),
+                query.data_sources(),
             )),
             None => meta,
         })
@@ -86,7 +88,6 @@ impl AppState {
             Some(rbac) => Arc::new(crate::rbac::enforce::RbacQueryService::new(
                 query,
                 rbac.clone(),
-                rbac.model_index(&self.config.schema_path),
             )),
             None => query,
         })

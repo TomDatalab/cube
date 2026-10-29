@@ -40,9 +40,6 @@ pub struct Rbac {
     pub config: RbacConfig,
     /// Bounds concurrent argon2 runs (`config.max_concurrent_hashes`).
     hashing: Arc<Semaphore>,
-    /// Which data source each cube reads from, for the data checks; built
-    /// on first use from the server's model path.
-    model: std::sync::OnceLock<Arc<enforce::ModelIndex>>,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -85,7 +82,6 @@ impl Rbac {
             store,
             config,
             hashing,
-            model: std::sync::OnceLock::new(),
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)
@@ -176,19 +172,6 @@ impl Rbac {
     /// hold its permits as an in-flight verification would.
     pub fn hashing_permits(&self) -> Arc<Semaphore> {
         self.hashing.clone()
-    }
-
-    /// The data-source index of the model at `schema_path` (the server has
-    /// one model with RBAC on; the first caller's path is kept).
-    pub fn model_index(&self, schema_path: &str) -> Arc<enforce::ModelIndex> {
-        self.model
-            .get_or_init(|| {
-                Arc::new(enforce::ModelIndex::new(
-                    std::path::PathBuf::from(schema_path),
-                    cubemodel::TemplateContext::default(),
-                ))
-            })
-            .clone()
     }
 
     pub async fn is_platform_admin(&self, user: &str) -> Result<bool, ApiError> {

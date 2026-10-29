@@ -16,12 +16,14 @@
 //! * `/v1/meta` keeps only the cubes and views whose data sources are all
 //!   allowed.
 //!
-//! SpiceDB, the RBAC database or the model failing to answer is a 503.
+//! Members are placed on data sources with the snapshot the request's
+//! planner runs with ([`QueryService::data_sources`]), built with the same
+//! template context and replaced with it on a model reload: what is checked
+//! is what runs. No snapshot, or SpiceDB or the RBAC database failing to
+//! answer, is a 503.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::{Request, State};
@@ -45,102 +47,13 @@ use crate::services::{
 /// The answer without `X-Cube-Workspace` on a data request.
 pub const WORKSPACE_REQUIRED: &str = "X-Cube-Workspace is required";
 
-/// What a file tree looked like: every entry's path, modification time and
-/// size. Any edit, addition, removal or rename changes it.
-type Stamp = Vec<(PathBuf, Option<SystemTime>, u64)>;
-
-fn stamp(root: &Path) -> std::io::Result<Stamp> {
-    fn walk(dir: &Path, out: &mut Stamp) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-            out.push((entry.path(), metadata.modified().ok(), metadata.len()));
-            if metadata.is_dir() {
-                walk(&entry.path(), out)?;
-            }
-        }
-        Ok(())
-    }
-
-    let metadata = std::fs::metadata(root)?;
-    let mut out = vec![(root.to_path_buf(), metadata.modified().ok(), 0)];
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-/// Which data source each cube and member of the model reads from, rebuilt
-/// when a file of the model directory changes, so the checks follow the
-/// model the planner reloads.
-pub struct ModelIndex {
-    schema_path: PathBuf,
-    context: cubemodel::TemplateContext,
-    cached: Mutex<Option<(Stamp, Arc<DataSources>)>>,
-}
-
-impl std::fmt::Debug for ModelIndex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ModelIndex")
-            .field("schema_path", &self.schema_path)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ModelIndex {
-    pub fn new(schema_path: PathBuf, context: cubemodel::TemplateContext) -> Self {
-        Self {
-            schema_path,
-            context,
-            cached: Mutex::new(None),
-        }
-    }
-
-    /// The current index; 503 when the model cannot be read, so nothing is
-    /// allowed against a model nobody can check.
-    fn current(&self) -> Result<Arc<DataSources>, ApiError> {
-        let failed = |e: String| {
-            tracing::error!(
-                "Cannot index the data model at {} for the RBAC checks: {e}",
-                self.schema_path.display()
-            );
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "The data model cannot be read",
-            )
-        };
-        let stamp = stamp(&self.schema_path).map_err(|e| failed(e.to_string()))?;
-        let mut cached = self.cached.lock().map_err(|_| failed("poisoned".into()))?;
-        if let Some((known, sources)) = cached.as_ref() {
-            if *known == stamp {
-                return Ok(sources.clone());
-            }
-        }
-        let sources =
-            Arc::new(DataSources::load(&self.schema_path, &self.context).map_err(failed)?);
-        *cached = Some((stamp, sources.clone()));
-        Ok(sources)
-    }
-
-    /// Every data source `members` read from (`default` by name). 403 naming
-    /// the cube of a member the model cannot place.
-    pub fn data_sources_of(&self, members: &[String]) -> Result<BTreeSet<String>, ApiError> {
-        let sources = self.current()?;
-        if let Some(unknown) = members
-            .iter()
-            .find(|member| sources.data_source_of(member).is_none())
-        {
-            return Err(denied(unknown));
-        }
-        Ok(sources.data_sources_of(members))
-    }
-
-    /// The data sources of a cube, or of every member of a view. Empty when
-    /// the model does not know it or cannot be read.
-    pub fn data_sources_of_cube(&self, cube: &str) -> BTreeSet<String> {
-        self.current()
-            .map(|sources| sources.data_sources_of_cube(cube))
-            .unwrap_or_default()
-    }
+/// 503: no data-source snapshot to check against, so nothing is allowed.
+fn no_snapshot() -> ApiError {
+    tracing::error!("No data-source snapshot for the RBAC checks; refusing");
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The data model is not available",
+    )
 }
 
 /// 403 naming the cube of `member`.
@@ -156,15 +69,6 @@ enum Access {
     /// A platform admin: everything.
     All,
     Only(BTreeSet<String>),
-}
-
-impl Access {
-    fn allows(&self, data_source: &str) -> bool {
-        match self {
-            Access::All => true,
-            Access::Only(allowed) => allowed.contains(data_source),
-        }
-    }
 }
 
 /// The caller's user, or 401.
@@ -204,8 +108,8 @@ async fn query_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiEr
 }
 
 /// What `/v1/meta` may show: with a workspace, as a query; without one, the
-/// connections the user can query through any workspace (or manages) that
-/// are still tracked connections.
+/// connections the user can query through any workspace (or manages) whose
+/// row belongs to an organization the user can view.
 async fn meta_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiError> {
     let user = user_of(ctx)?;
     if ctx.platform_admin {
@@ -223,7 +127,22 @@ async fn meta_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiErr
         tracing::error!("RBAC store failed: {e}");
         unavailable()
     })?;
-    Ok(Access::Only(rows.into_iter().map(|row| row.name).collect()))
+    // As `released_connections` does per workspace: a connection counts only
+    // when its organization is one the user belongs to, so a stale
+    // relationship from another organization grants nothing.
+    let organizations: BTreeSet<String> = rbac
+        .authz
+        .lookup_resources("organization", "view", user)
+        .await
+        .map_err(authz_error)?
+        .into_iter()
+        .collect();
+    Ok(Access::Only(
+        rows.into_iter()
+            .filter(|row| organizations.contains(&row.organization_id.to_string()))
+            .map(|row| row.name)
+            .collect(),
+    ))
 }
 
 /// Every member and cube name a normalized query reads, typed so nothing is
@@ -280,21 +199,31 @@ fn members_of(query: &NormalizedQuery) -> Result<Vec<String>, ApiError> {
 }
 
 /// 403 unless every member of every query reads from an allowed data source.
+/// A view member also needs every data source the view spans, as `/v1/meta`
+/// hides such a view.
 fn check_queries(
-    model: &ModelIndex,
+    sources: &DataSources,
     access: &Access,
     queries: &[NormalizedQuery],
 ) -> Result<(), ApiError> {
-    if matches!(access, Access::All) {
+    let Access::Only(allowed) = access else {
         return Ok(());
-    }
-    let sources = model.current()?;
+    };
     for query in queries {
         for member in members_of(query)? {
-            match sources.data_source_of(&member) {
-                Some(data_source) if access.allows(data_source) => {}
-                // Not released, or not placeable on a data source at all.
-                _ => return Err(denied(&member)),
+            let cube = member.split('.').next().unwrap_or(&member);
+            let of_cube = sources.data_sources_of_cube(cube);
+            let allowed_here = match sources.data_source_of(&member) {
+                Some(data_source) => {
+                    allowed.contains(data_source)
+                        && !of_cube.is_empty()
+                        && of_cube.is_subset(allowed)
+                }
+                // Not placeable on a data source at all.
+                None => false,
+            };
+            if !allowed_here {
+                return Err(denied(&member));
             }
         }
     }
@@ -307,12 +236,11 @@ fn check_queries(
 pub struct RbacQueryService {
     inner: QueryServiceRef,
     rbac: Arc<Rbac>,
-    model: Arc<ModelIndex>,
 }
 
 impl RbacQueryService {
-    pub fn new(inner: QueryServiceRef, rbac: Arc<Rbac>, model: Arc<ModelIndex>) -> Self {
-        Self { inner, rbac, model }
+    pub fn new(inner: QueryServiceRef, rbac: Arc<Rbac>) -> Self {
+        Self { inner, rbac }
     }
 
     async fn authorize(
@@ -321,12 +249,21 @@ impl RbacQueryService {
         request: &NormalizedRequest,
     ) -> Result<(), ApiError> {
         let access = query_access(&self.rbac, ctx).await?;
-        check_queries(&self.model, &access, &request.queries)
+        if matches!(access, Access::All) {
+            return Ok(());
+        }
+        // The planner's own snapshot: checked and run with the same one.
+        let sources = self.inner.data_sources().ok_or_else(no_snapshot)?;
+        check_queries(&sources, &access, &request.queries)
     }
 }
 
 #[async_trait]
 impl QueryService for RbacQueryService {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        self.inner.data_sources()
+    }
+
     async fn load(
         &self,
         ctx: &RequestContext,
@@ -367,12 +304,17 @@ impl QueryService for RbacQueryService {
 pub struct RbacMetaService {
     inner: MetaServiceRef,
     rbac: Arc<Rbac>,
-    model: Arc<ModelIndex>,
+    /// The snapshot of the planner serving the same runtime as `inner`.
+    sources: Option<Arc<DataSources>>,
 }
 
 impl RbacMetaService {
-    pub fn new(inner: MetaServiceRef, rbac: Arc<Rbac>, model: Arc<ModelIndex>) -> Self {
-        Self { inner, rbac, model }
+    pub fn new(inner: MetaServiceRef, rbac: Arc<Rbac>, sources: Option<Arc<DataSources>>) -> Self {
+        Self {
+            inner,
+            rbac,
+            sources,
+        }
     }
 
     /// Drops from `meta.cubes` every cube or view with a data source outside
@@ -387,7 +329,7 @@ impl RbacMetaService {
         if cubes.is_empty() {
             return Ok(meta);
         }
-        let sources = self.model.current()?;
+        let sources = self.sources.as_ref().ok_or_else(no_snapshot)?;
         {
             cubes.retain(|cube| {
                 let Some(name) = cube.get("name").and_then(Value::as_str) else {
@@ -505,34 +447,5 @@ mod tests {
                 "{expected} in {members:?}"
             );
         }
-    }
-
-    #[test]
-    fn a_model_change_is_picked_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("model.yml");
-        let cube = |source: &str| {
-            format!(
-                "cubes:\n  - name: c\n    data_source: {source}\n    sql_table: t\n    measures:\n      - name: count\n        type: count\n"
-            )
-        };
-        std::fs::write(&file, cube("one")).unwrap();
-        let index = ModelIndex::new(dir.path().to_path_buf(), Default::default());
-        assert_eq!(
-            index.data_sources_of(&["c.count".into()]).unwrap(),
-            BTreeSet::from(["one".to_string()])
-        );
-        std::fs::write(&file, cube("second")).unwrap();
-        assert_eq!(
-            index.data_sources_of_cube("c"),
-            BTreeSet::from(["second".to_string()])
-        );
-        assert_eq!(
-            index
-                .data_sources_of(&["nowhere.count".into()])
-                .unwrap_err()
-                .status,
-            StatusCode::FORBIDDEN
-        );
     }
 }

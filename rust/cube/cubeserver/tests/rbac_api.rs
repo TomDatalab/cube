@@ -15,6 +15,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use cubeauth::AuthConfig;
 use cubeserver::auth_adapter::CubeAuthService;
+use cubeserver::planner_adapter::DataSources;
 use cubeserver::rbac::config::{check_rbac_compatible, RbacConfig};
 use cubeserver::rbac::enforce::WORKSPACE_REQUIRED;
 use cubeserver::rbac::identity::{hash_password, verify_password};
@@ -2205,7 +2206,15 @@ cubes:
   - name: a_orders
     data_source: a_sqlite
     sql_table: orders
+    joins:
+      - name: b_orders
+        sql: "{CUBE}.id = {b_orders}.id"
+        relationship: many_to_one
     dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
       - name: status
         sql: status
         type: string
@@ -2217,9 +2226,27 @@ cubes:
     data_source: b_sqlite
     sql_table: orders
     dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
       - name: status
         sql: status
         type: string
+    measures:
+      - name: count
+        type: count
+
+  - name: c_orders
+    data_source: c_sqlite
+    sql_table: orders
+    measures:
+      - name: count
+        type: count
+
+  # No data_source: the `default` one, released like any other.
+  - name: plain_orders
+    sql_table: orders
     measures:
       - name: count
         type: count
@@ -2229,15 +2256,35 @@ views:
     cubes:
       - join_path: b_orders
         includes: [status, count]
+
+  # Spans a_sqlite and b_sqlite.
+  - name: mixed_view
+    cubes:
+      - join_path: a_orders
+        includes: [count]
+      - join_path: a_orders.b_orders
+        prefix: true
+        includes: [status]
 "#;
 
-/// Answers every query with no rows and keeps what it was asked.
-#[derive(Debug, Default)]
+/// Answers every query with no rows and keeps what it was asked. Its
+/// data-source snapshot stands for the planner's.
+#[derive(Debug)]
 struct RecordingQuery {
     seen: std::sync::Mutex<Vec<Value>>,
+    sources: Arc<DataSources>,
 }
 
 impl RecordingQuery {
+    fn new(model: &std::path::Path) -> Self {
+        Self {
+            seen: Default::default(),
+            sources: Arc::new(
+                DataSources::load(model, &cubemodel::TemplateContext::default()).unwrap(),
+            ),
+        }
+    }
+
     fn record(&self, request: &NormalizedRequest) -> Value {
         let queries: Vec<Value> = request
             .queries
@@ -2255,6 +2302,10 @@ impl RecordingQuery {
 
 #[async_trait]
 impl QueryService for RecordingQuery {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        Some(self.sources.clone())
+    }
+
     async fn load(
         &self,
         _: &RequestContext,
@@ -2313,7 +2364,7 @@ async fn data_scenario(store: Store) -> DataScenario {
         ..ServerConfig::default()
     };
 
-    let queries = Arc::new(RecordingQuery::default());
+    let queries = Arc::new(RecordingQuery::new(&model));
     let authz = Arc::new(FakeAuthz::new());
     let rbac = Arc::new(
         Rbac::with_parts(authz.clone(), store, rbac_config(Duration::ZERO))
@@ -2924,7 +2975,7 @@ db_test!(meta_shows_only_released_cubes, |store| {
     );
     assert_eq!(
         meta_cubes(env, &d.s.ana, None).await.1,
-        ["a_orders", "b_orders", "b_view"]
+        ["a_orders", "b_orders", "b_view", "mixed_view"]
     );
     // A workspace the user is not in shows nothing of it.
     let (status, cubes) = meta_cubes(env, &d.s.bia, Some(&d.w2)).await;
@@ -2933,7 +2984,14 @@ db_test!(meta_shows_only_released_cubes, |store| {
     // The platform admin sees everything, with or without a workspace.
     assert_eq!(
         meta_cubes(env, &d.s.admin, None).await.1,
-        ["a_orders", "b_orders", "b_view"]
+        [
+            "a_orders",
+            "b_orders",
+            "b_view",
+            "c_orders",
+            "mixed_view",
+            "plain_orders"
+        ]
     );
     // A user with no workspace sees no cube.
     let (status, body) = create_user_as(env, &d.s.admin, "dan", "dan-password-1").await;
@@ -3169,21 +3227,17 @@ db_test!(spicedb_down_means_503_not_data, |store| {
 // identity there), so this calls the RBAC services directly with an
 // identity in hand: they must fail closed on their own.
 db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
-    use cubeserver::rbac::enforce::{ModelIndex, RbacMetaService, RbacQueryService};
+    use cubeserver::rbac::enforce::{RbacMetaService, RbacQueryService};
     let d = data_scenario(store).await;
     let env = &d.s.env;
-    let model = Arc::new(ModelIndex::new(
-        d._dir.path().join("model"),
-        cubemodel::TemplateContext::default(),
-    ));
-    let query = RbacQueryService::new(d.queries.clone(), env.rbac.clone(), model.clone());
+    let query = RbacQueryService::new(d.queries.clone(), env.rbac.clone());
     let meta = RbacMetaService::new(
         Arc::new(
             cubeserver::meta_adapter::ModelMetaService::load(d._dir.path().join("model"), false)
                 .unwrap(),
         ),
         env.rbac.clone(),
-        model,
+        d.queries.data_sources(),
     );
     let ctx = RequestContext {
         user: Some("bia".into()),
@@ -3281,3 +3335,295 @@ db_test!(
         assert_eq!(d.queries.seen().len(), 1);
     }
 );
+
+/// A connection made directly: its row in `org`, `connection#organization`,
+/// and a release to each of `workspaces`.
+async fn grant_connection(env: &Env, name: &str, org: &str, workspaces: &[&str]) {
+    env.rbac
+        .store
+        .create_connection(name, org.parse().unwrap())
+        .await
+        .unwrap();
+    let mut relationships = vec![Relationship {
+        resource: ObjectRef::new("connection", name.to_string()),
+        relation: "organization",
+        subject: ObjectRef::new("organization", org.to_string()),
+    }];
+    for ws in workspaces {
+        relationships.push(Relationship {
+            resource: ObjectRef::new("connection", name.to_string()),
+            relation: "workspace",
+            subject: ObjectRef::new("workspace", ws.to_string()),
+        });
+    }
+    env.authz.touch(&relationships).await.unwrap();
+}
+
+db_test!(
+    a_view_spanning_an_unreleased_source_is_403_member_by_member,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        // mixed_view.count is an a_orders member (released to W1), but the view
+        // also spans b_sqlite: refused, as /v1/meta hides the view.
+        let (status, body) = load_in(
+            env,
+            &d.s.bia,
+            Some(&d.w1),
+            json!({ "measures": ["mixed_view.count"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("mixed_view"),
+            "{body}"
+        );
+        assert!(d.queries.seen().is_empty());
+        // Released both: the view runs.
+        let w3 = workspace_id(env, &d.s.ana, &d.s.org_a, "W3").await;
+        for name in ["a_sqlite", "b_sqlite"] {
+            assert_eq!(
+                release(env, &d.s.ana, Method::PUT, &w3, name).await,
+                StatusCode::NO_CONTENT
+            );
+        }
+        let (status, body) = load_in(
+        env,
+        &d.s.ana,
+        Some(&w3),
+        json!({ "measures": ["mixed_view.count"], "dimensions": ["mixed_view.b_orders_status"] }),
+    )
+    .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            meta_cubes(env, &d.s.ana, Some(&w3)).await.1,
+            ["a_orders", "b_orders", "b_view", "mixed_view"]
+        );
+    }
+);
+
+db_test!(the_default_data_source_must_be_released_too, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let query = json!({ "measures": ["plain_orders.count"] });
+    let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("plain_orders"),
+        "{body}"
+    );
+    assert!(!meta_cubes(env, &d.s.bia, Some(&d.w1))
+        .await
+        .1
+        .contains(&"plain_orders".to_string()));
+
+    grant_connection(env, "default", &d.s.org_a, &[&d.w1]).await;
+    let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1,
+        ["a_orders", "plain_orders"]
+    );
+});
+
+db_test!(
+    meta_without_a_workspace_ignores_other_orgs_connections,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let (status, body) = create_user_as(env, &d.s.admin, "dan", "dan-password-1").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let dan = login_token(&env.router, "dan", "dan-password-1").await;
+        let org_b = create_org(env, &d.s.admin, "B", "dan").await;
+        // c_sqlite belongs to B, but a stale relationship releases it to A's W1.
+        grant_connection(env, "c_sqlite", &org_b, &[&d.w1]).await;
+
+        assert_eq!(meta_cubes(env, &d.s.bia, None).await.1, ["a_orders"]);
+        assert_eq!(meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1, ["a_orders"]);
+        // B's owner sees it.
+        assert_eq!(meta_cubes(env, &dan, None).await.1, ["c_orders"]);
+    }
+);
+
+/// Serves `/v1/meta?extended` from the model, as a deployment with it would.
+#[derive(Debug)]
+struct ExtendedMeta(cubeserver::meta_adapter::ModelMetaService);
+
+#[async_trait]
+impl MetaService for ExtendedMeta {
+    async fn meta(&self, ctx: &RequestContext, only_views: bool) -> Result<Value, ApiError> {
+        self.0.meta(ctx, only_views).await
+    }
+
+    async fn meta_extended(
+        &self,
+        ctx: &RequestContext,
+        only_views: bool,
+    ) -> Result<Value, ApiError> {
+        let mut meta = self.0.meta(ctx, only_views).await?;
+        meta["extended"] = json!(true);
+        Ok(meta)
+    }
+}
+
+db_test!(meta_extended_is_filtered_too, |store| {
+    use cubeserver::rbac::enforce::RbacMetaService;
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let meta = RbacMetaService::new(
+        Arc::new(ExtendedMeta(
+            cubeserver::meta_adapter::ModelMetaService::load(d._dir.path().join("model"), false)
+                .unwrap(),
+        )),
+        env.rbac.clone(),
+        d.queries.data_sources(),
+    );
+    let ctx = RequestContext {
+        user: Some("bia".into()),
+        workspace: Some(d.w1.clone()),
+        ..RequestContext::default()
+    };
+    let extended = meta.meta_extended(&ctx, false).await.unwrap();
+    assert_eq!(extended["extended"], json!(true));
+    let names: Vec<&str> = extended["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["a_orders"]);
+});
+
+db_test!(a_query_service_without_a_snapshot_is_503, |store| {
+    use cubeserver::rbac::enforce::{RbacMetaService, RbacQueryService};
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let query = RbacQueryService::new(Arc::new(UnimplementedQueryService), env.rbac.clone());
+    let ctx = RequestContext {
+        user: Some("bia".into()),
+        workspace: Some(d.w1.clone()),
+        ..RequestContext::default()
+    };
+    let value = json!({ "measures": ["a_orders.count"] });
+    let (query_type, queries) =
+        cubequery::get_normalized_queries(&value, false, None, &cubequery::QueryConfig::default())
+            .unwrap();
+    let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+    let err = query
+        .sql(
+            &ctx,
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let meta = RbacMetaService::new(
+        Arc::new(
+            cubeserver::meta_adapter::ModelMetaService::load(d._dir.path().join("model"), false)
+                .unwrap(),
+        ),
+        env.rbac.clone(),
+        None,
+    );
+    let err = meta.meta(&ctx, false).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+});
+
+// The real tenant runtime (planner included), so the check reads the
+// planner's snapshot: a model edited on disk changes nothing until the
+// runtime reloads, and then the check and the planner move together.
+db_test!(the_check_follows_the_planner_not_the_files, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir(&model).unwrap();
+    let file = model.join("model.yml");
+    std::fs::write(&file, DATA_MODEL).unwrap();
+    std::fs::write(
+        dir.path().join("cube.yml"),
+        "version: 1\ndata_sources:\n  default:\n    type: postgres\n  a_sqlite:\n    type: sqlite\n  b_sqlite:\n    type: sqlite\n  c_sqlite:\n    type: sqlite\n",
+    )
+    .unwrap();
+    let config = cubeconfig::CubeConfig::load_with_env(
+        dir.path(),
+        &cubeconfig::Env::new().with("CUBEJS_SCHEMA_PATH", model.to_string_lossy()),
+    )
+    .expect("valid cube.yml");
+    let registry = Arc::new(cubeserver::tenants::TenantRegistry::new(
+        Arc::new(config),
+        cubeplanner::Dialect::Postgres,
+        Some("postgres".to_string()),
+        1,
+        false,
+    ));
+    let authz = Arc::new(FakeAuthz::new());
+    let rbac = Arc::new(
+        Rbac::with_parts(authz.clone(), store, rbac_config(Duration::ZERO))
+            .await
+            .expect("rbac starts"),
+    );
+    let mut state = state_with(Some(rbac.clone()), ServerConfig::default());
+    state.tenants = Some(registry.clone());
+    let env = Env {
+        router: build_app(state),
+        rbac,
+        authz,
+    };
+    let s = scenario_from_env(env).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "viewer").await,
+        StatusCode::OK
+    );
+    grant_connection(env, "a_sqlite", &s.org_a, &[&w1]).await;
+    grant_connection(env, "b_sqlite", &s.org_a, &[]).await;
+
+    let sql = |measure: &'static str| {
+        let router = env.router.clone();
+        let token = s.bia.clone();
+        let w1 = w1.clone();
+        async move {
+            let answer = call(
+                &router,
+                Method::POST,
+                "/cube/v1/sql",
+                Some(&token),
+                &[("x-cube-workspace", &w1)],
+                Some(json!({ "query": { "measures": [measure] } })),
+            )
+            .await;
+            (answer.status, answer.json())
+        }
+    };
+    let (status, body) = sql("a_orders.count").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(sql("b_orders.count").await.0, StatusCode::FORBIDDEN);
+
+    // a_orders moves to b_sqlite on disk, and b_orders to a_sqlite. The
+    // runtime has not reloaded: its planner still runs a_orders on a_sqlite,
+    // so the check still says the same.
+    let swapped = DATA_MODEL
+        .replacen("data_source: a_sqlite", "data_source: TMP", 1)
+        .replacen("data_source: b_sqlite", "data_source: a_sqlite", 1)
+        .replacen("data_source: TMP", "data_source: b_sqlite", 1);
+    std::fs::write(&file, swapped).unwrap();
+    let (status, body) = sql("a_orders.count").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(sql("b_orders.count").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(meta_cubes(env, &s.bia, Some(&w1)).await.1, ["a_orders"]);
+
+    // After the reload both move together.
+    assert!(registry.reload_all().await.is_empty());
+    assert_eq!(sql("a_orders.count").await.0, StatusCode::FORBIDDEN);
+    let (status, body) = sql("b_orders.count").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        meta_cubes(env, &s.bia, Some(&w1)).await.1,
+        ["b_orders", "b_view"]
+    );
+});

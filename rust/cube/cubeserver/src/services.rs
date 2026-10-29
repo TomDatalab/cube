@@ -99,6 +99,13 @@ pub struct NormalizedRequest {
 /// same body shape as the Node.js gateway errors.
 #[async_trait]
 pub trait QueryService: Send + Sync + Debug {
+    /// The data-source snapshot this service plans with: which data source
+    /// each cube and member reads from. The RBAC checks read the same one, so
+    /// what is checked is what runs. `None` when the service plans nothing.
+    fn data_sources(&self) -> Option<Arc<crate::planner_adapter::DataSources>> {
+        None
+    }
+
     async fn load(
         &self,
         _ctx: &RequestContext,
