@@ -4665,3 +4665,78 @@ db_test!(access_graph_hides_manage_on_assigned_connections, |store| {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 });
+
+db_test!(listings_and_the_access_graph_need_a_token, |store| {
+    let s = scenario(store).await;
+    for path in [
+        "/cube/v1/workspaces",
+        "/cube/v1/connections",
+        "/cube/v1/users/ana/access",
+    ] {
+        let (status, body) = send(&s.env.router, Method::GET, path, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {body}");
+    }
+});
+
+db_test!(access_graph_queries_only_configured_connections, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // A connection whose data source is gone from cube.yml (removed by hand).
+    env.rbac
+        .store
+        .create_connection("gone", s.org_a.parse().unwrap(), ConnectionOrigin::Created)
+        .await
+        .unwrap();
+    env.authz
+        .touch(&[Relationship {
+            resource: ObjectRef::new("connection", "gone"),
+            relation: "organization",
+            subject: ObjectRef::new("organization", s.org_a.clone()),
+        }])
+        .await
+        .unwrap();
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    for name in ["x", "gone"] {
+        assert_eq!(
+            release(env, &s.ana, Method::PUT, &w1, name).await,
+            StatusCode::NO_CONTENT,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "viewer").await,
+        StatusCode::OK
+    );
+
+    let (status, graph) = access_graph(env, &s.admin, "bia").await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    let (status, list) = workspace_connections(env, &s.bia, &w1).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let listed: std::collections::BTreeMap<&str, &Value> = list["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap(), &c["type"]))
+        .collect();
+
+    // x: released, configured and queryable, as the graph says.
+    assert_eq!(listed.get("x"), Some(&&json!("sqlite")), "{list}");
+    let x = ObjectRef::new("connection", "x");
+    assert!(env.authz.check(&x, "query", "bia").await.unwrap());
+    assert!(has_grant(&graph, "connection:x", "query"), "{graph}");
+
+    // gone: released, but there is no data source to run it on, so the
+    // workspace lists it without a type and the graph gives no query.
+    assert_eq!(listed.get("gone"), Some(&&Value::Null), "{list}");
+    assert!(!has_grant(&graph, "connection:gone", "query"), "{graph}");
+    let node = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "connection:gone")
+        .unwrap_or_else(|| panic!("no connection node: {graph}"));
+    assert_eq!(node["notes"], json!(["data source missing"]), "{node}");
+});
