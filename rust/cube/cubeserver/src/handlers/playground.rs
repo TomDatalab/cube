@@ -18,6 +18,11 @@
 //! send the JSON the routes take. Nor can it rebind a domain of its own to
 //! this server to become the same origin: every route here answers only
 //! under `localhost`, an IP address, or a name in `CUBEJS_PLAYGROUND_HOSTS`.
+//!
+//! With RBAC on it hands out no token: the context says a login is needed
+//! (`authRequired`), `/playground/token` is gone, and every other route wants
+//! a platform admin's verified token ([`require_platform_admin`]). The
+//! Playground is then mounted whatever `NODE_ENV` says.
 
 use std::net::IpAddr;
 use std::sync::OnceLock;
@@ -33,6 +38,7 @@ use serde_json::{json, Map, Value};
 
 use crate::app::AppState;
 use crate::error::ApiError;
+use crate::services::RequestContext;
 
 /// The Cube release whose API this server implements (`lerna.json`).
 pub const CUBE_API_VERSION: &str = "1.7.40";
@@ -56,7 +62,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/playground/generate-schema", post(generate_schema))
         .route(
             "/playground/data-sources",
-            get(super::data_sources::list).post(super::data_sources::create),
+            get(super::data_sources::list).post(super::data_sources::create_unless_tracked),
         )
         .route(
             "/playground/data-sources/test",
@@ -66,14 +72,12 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/playground/data-sources/:name",
             get(super::data_sources::get)
                 .put(super::data_sources::update)
-                .delete(super::data_sources::delete),
+                .delete(super::data_sources::delete_with_its_grants),
         )
         .route_layer(axum::middleware::from_fn(require_key));
 
-    Router::new()
-        .route("/playground/context", get(context))
+    let mut helpers = Router::new()
         .route("/playground/files", get(files))
-        .route("/playground/token", post(token))
         .route("/playground/db-schema", get(db_schema))
         .route("/playground/driver", get(driver))
         .merge(keyed)
@@ -81,7 +85,29 @@ pub fn routes(state: AppState) -> Router<AppState> {
         // than letting the app see an unexplained 404.
         .route("/playground/env", post(not_ported))
         .route("/playground/test-connection", post(not_ported))
-        .route("/playground/schema/pre-aggregation", post(not_ported))
+        .route("/playground/schema/pre-aggregation", post(not_ported));
+    // With RBAC on they read the model and the databases and write files,
+    // so only platform admins reach them. The auth middleware runs first.
+    if state.rbac.is_some() {
+        helpers = helpers
+            .route_layer(axum::middleware::from_fn(require_platform_admin))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::auth::auth_middleware,
+            ));
+    }
+
+    Router::new()
+        .route("/playground/context", get(context))
+        .route(
+            "/playground/token",
+            // A token for any claims would be a login for anyone.
+            match state.rbac {
+                Some(_) => post(token_gone),
+                None => post(token),
+            },
+        )
+        .merge(helpers)
         .route_layer(axum::middleware::from_fn_with_state(state, require_host))
 }
 
@@ -91,11 +117,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
 /// `window.location.origin + basePath + "/v1"` from it, so the value must be
 /// this server's API prefix rather than Node's `/cubejs-api`.
 async fn context(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
-    // `jwt.sign({}, apiSecret, { expiresIn: '1d' })` in `DevServer.ts:52`.
-    let token = state.auth.issue_token(Map::new()).await?;
-
-    Ok(Json(json!({
-        "cubejsToken": token,
+    let mut body = json!({
         "playgroundKey": playground_key(),
         "basePath": state.config.base_path,
         // The wizard writes `.env` and installs npm driver packages, neither
@@ -119,7 +141,19 @@ async fn context(State(state): State<AppState>) -> Result<impl IntoResponse, Api
         "projectFingerprint": Value::Null,
         "isDocker": false,
         "previewFeatures": false,
-    })))
+    });
+
+    if state.rbac.is_some() {
+        // No token: the user logs in. The key goes with the flag saying so,
+        // and opens nothing without an admin's token.
+        body["authRequired"] = json!(true);
+        body["rbac"] = json!(true);
+    } else {
+        // `jwt.sign({}, apiSecret, { expiresIn: '1d' })` in `DevServer.ts:52`.
+        body["cubejsToken"] = json!(state.auth.issue_token(Map::new()).await?);
+    }
+
+    Ok(Json(body))
 }
 
 /// `GET /playground/files` — the data model files on disk.
@@ -197,6 +231,15 @@ async fn token(
     let token = state.auth.issue_token(request.payload).await?;
 
     Ok(Json(json!({ "token": token })))
+}
+
+/// `POST /playground/token` with RBAC on.
+async fn token_gone(request: Request) -> ApiError {
+    ApiError::not_found(format!(
+        "Cannot {} {}",
+        request.method(),
+        request.uri().path()
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -396,6 +439,26 @@ async fn require_key(request: Request, next: Next) -> Response {
              reload the Playground.",
         )
         .into_response();
+    }
+    next.run(request).await
+}
+
+/// With RBAC on: a platform admin's token, verified. Runs after the auth
+/// middleware, which answers 401 for a missing or invalid token; one that
+/// went through unverified (security checks off) is no login either.
+async fn require_platform_admin(request: Request, next: Next) -> Response {
+    let Some(ctx) = request.extensions().get::<RequestContext>() else {
+        return crate::rbac::unauthenticated().into_response();
+    };
+    if !ctx.token_verified || ctx.user.is_none() {
+        return crate::rbac::unauthenticated()
+            .with_request_id(&ctx.request_id)
+            .into_response();
+    }
+    if !ctx.platform_admin {
+        return ApiError::forbidden("Permission denied: the Playground is for platform admins")
+            .with_request_id(&ctx.request_id)
+            .into_response();
     }
     next.run(request).await
 }

@@ -93,18 +93,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let auth_config = AuthConfig::from_env()?;
-    // The Playground bootstraps by fetching a token from an unauthenticated
-    // route, so mounting it where authentication is enforced would hand the
-    // API away to anyone who can reach the port. Node.js has the same
-    // property and only runs its dev server outside production.
-    if config.playground_path.is_some() && auth_config.enforce_security_checks {
-        eprintln!(
-            "⚠️  The Playground is not mounted: NODE_ENV=production enforces \
-             authentication, and the Playground hands out a token without one."
-        );
-        config.playground_path = None;
-    }
-
+    let enforce_security_checks = auth_config.enforce_security_checks;
     let auth = CubeAuthService::new(auth_config);
     auth.prefetch_jwks().await;
 
@@ -117,6 +106,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
+
+    // Without RBAC the Playground bootstraps by fetching a token from an
+    // unauthenticated route, so mounting it where authentication is enforced
+    // would hand the API away to anyone who can reach the port. Node.js has
+    // the same property and only runs its dev server outside production.
+    // With RBAC it hands out no token (users log in), so it is mounted.
+    if config.playground_path.is_some() && enforce_security_checks && rbac.is_none() {
+        eprintln!(
+            "⚠️  The Playground is not mounted: NODE_ENV=production enforces \
+             authentication, and the Playground hands out a token without one."
+        );
+        config.playground_path = None;
+    }
 
     // A model that does not compile must not take the server down silently:
     // the error is reported and `/v1/meta` answers 503 until it is fixed.

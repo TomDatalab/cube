@@ -490,13 +490,12 @@ pub async fn v1_create(
     Extension(ctx): Extension<RequestContext>,
     request: Json<CreateRequest>,
 ) -> Response {
-    let handler = async {
-        if let Some(rbac) = state.rbac.as_deref() {
-            crate::rbac::handlers::connections::refuse_tracked_name(rbac, &request.name).await?;
-        }
-        create(State(state.clone()), request).await
-    };
-    v1(&state, &ctx, handler).await
+    v1(
+        &state,
+        &ctx,
+        create_unless_tracked(State(state.clone()), request),
+    )
+    .await
 }
 
 /// `PUT /v1/data-sources/:name`
@@ -515,18 +514,43 @@ pub async fn v1_delete(
     Extension(ctx): Extension<RequestContext>,
     name: UrlPath<String>,
 ) -> Response {
-    // With RBAC on, the connection's grants and row go too.
-    let handler = async {
-        match state.rbac.as_deref() {
-            Some(rbac) => {
-                crate::rbac::handlers::connections::delete_with_grants(&state, rbac, &name).await
-            }
-            None => delete(State(state.clone()), name)
-                .await
-                .map(IntoResponse::into_response),
+    v1(
+        &state,
+        &ctx,
+        delete_with_its_grants(State(state.clone()), name),
+    )
+    .await
+}
+
+/// `POST /playground/data-sources`, and [`v1_create`]'s work: with RBAC on, a
+/// name an organization still holds a connection row for is refused, so the
+/// new source cannot inherit that row's grants.
+pub async fn create_unless_tracked(
+    State(state): State<AppState>,
+    request: Json<CreateRequest>,
+) -> Result<Response, ApiError> {
+    if let Some(rbac) = state.rbac.as_deref() {
+        crate::rbac::handlers::connections::refuse_tracked_name(rbac, &request.name).await?;
+    }
+    create(State(state.clone()), request)
+        .await
+        .map(IntoResponse::into_response)
+}
+
+/// `DELETE /playground/data-sources/:name`, and [`v1_delete`]'s work: with
+/// RBAC on, the connection's grants and row go too.
+pub async fn delete_with_its_grants(
+    State(state): State<AppState>,
+    name: UrlPath<String>,
+) -> Result<Response, ApiError> {
+    match state.rbac.as_deref() {
+        Some(rbac) => {
+            crate::rbac::handlers::connections::delete_with_grants(&state, rbac, &name).await
         }
-    };
-    v1(&state, &ctx, handler).await
+        None => delete(State(state.clone()), name)
+            .await
+            .map(IntoResponse::into_response),
+    }
 }
 
 /// Where `/v1/execute` runs a statement.

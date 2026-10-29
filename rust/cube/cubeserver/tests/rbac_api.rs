@@ -3627,3 +3627,331 @@ db_test!(the_check_follows_the_planner_not_the_files, |store| {
         ["b_orders", "b_view"]
     );
 });
+
+// ---- the Playground ----
+
+/// A server that mounts the Playground, with a `cube.yml` (the data source
+/// `default`), an `.env` and a model directory in `dir`.
+fn playground_server(dir: &tempfile::TempDir) -> ServerConfig {
+    let assets = dir.path().join("playground");
+    std::fs::create_dir_all(assets.join("assets")).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        r#"<html><div id="playground-root"></div></html>"#,
+    )
+    .unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("orders.yml"), "cubes: []").unwrap();
+    let file = dir.path().join("cube.yml");
+    std::fs::write(
+        &file,
+        "version: 1\ndata_sources:\n  default:\n    type: postgres\n    host: db\n    password: secret\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".env"), "PORT=4000\n").unwrap();
+    ServerConfig {
+        config_file: Some(file),
+        schema_path: model.to_string_lossy().into_owned(),
+        playground_path: Some(assets.to_string_lossy().into_owned()),
+        data_sources: vec![("default".to_string(), "postgres".to_string())],
+        ..ServerConfig::default()
+    }
+}
+
+/// A Playground call as the page makes it: under `localhost`, with the key
+/// `/playground/context` hands out.
+async fn playground(
+    router: &axum::Router,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    use cubeserver::handlers::playground::{playground_key, PLAYGROUND_KEY_HEADER};
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::HOST, "localhost:4000")
+        .header(PLAYGROUND_KEY_HEADER, playground_key());
+    if let Some(token) = token {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let request = match body {
+        Some(body) => request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Every helper route but the context, with a body where it takes one.
+fn playground_helpers() -> Vec<(Method, &'static str, Option<Value>)> {
+    vec![
+        (Method::GET, "/playground/files", None),
+        (Method::GET, "/playground/db-schema", None),
+        (Method::GET, "/playground/driver?driver=postgres", None),
+        (
+            Method::POST,
+            "/playground/generate-schema",
+            Some(json!({ "format": "yaml", "tables": [] })),
+        ),
+        (Method::GET, "/playground/data-sources", None),
+        (
+            Method::POST,
+            "/playground/data-sources",
+            Some(json!({ "name": "y", "variables": { "CUBEJS_DB_TYPE": "sqlite" } })),
+        ),
+        (
+            Method::POST,
+            "/playground/data-sources/test",
+            Some(json!({ "variables": { "CUBEJS_DB_TYPE": "sqlite" } })),
+        ),
+        (Method::GET, "/playground/data-sources/default", None),
+        (
+            Method::PUT,
+            "/playground/data-sources/default",
+            Some(json!({ "variables": {} })),
+        ),
+        (Method::DELETE, "/playground/data-sources/default", None),
+        (Method::POST, "/playground/env", Some(json!({}))),
+        (Method::POST, "/playground/test-connection", Some(json!({}))),
+        (
+            Method::POST,
+            "/playground/schema/pre-aggregation",
+            Some(json!({})),
+        ),
+    ]
+}
+
+db_test!(playground_context_hands_out_no_token_with_rbac, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env_with_server(store, rbac_config(Duration::ZERO), playground_server(&dir)).await;
+    let (status, body) =
+        playground(&env.router, Method::GET, "/playground/context", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("cubejsToken").is_none(), "{body}");
+    assert_eq!(body["authRequired"], json!(true), "{body}");
+    assert_eq!(body["rbac"], json!(true), "{body}");
+    // The key comes only with the flag that says a login is needed: alone
+    // it opens nothing.
+    assert!(body["playgroundKey"].is_string(), "{body}");
+    assert_eq!(body["basePath"], "/cube", "{body}");
+});
+
+db_test!(playground_token_minting_is_gone_with_rbac, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    for token in [None, Some(s.admin.as_str()), Some(s.ana.as_str())] {
+        let (status, body) = playground(
+            &s.env.router,
+            Method::POST,
+            "/playground/token",
+            token,
+            Some(json!({ "payload": { "sub": "admin" } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.get("token").is_none(), "{body}");
+    }
+});
+
+/// Authenticates as the real service does, but reports the token as not
+/// verified: the dev-mode fallthrough that lets a request through anyway.
+#[derive(Debug)]
+struct Unverified(CubeAuthService);
+
+#[async_trait]
+impl cubeserver::services::AuthService for Unverified {
+    async fn authenticate(
+        &self,
+        authorization: Option<&str>,
+    ) -> Result<cubeserver::services::AuthenticatedRequest, ApiError> {
+        let mut authenticated = self.0.authenticate(authorization).await?;
+        authenticated.token_verified = false;
+        Ok(authenticated)
+    }
+
+    async fn api_scopes(&self, security_context: &Value) -> Result<Vec<String>, ApiError> {
+        self.0.api_scopes(security_context).await
+    }
+}
+
+db_test!(playground_helpers_need_a_platform_admin, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    let router = &s.env.router;
+    for (method, path, body) in playground_helpers() {
+        for token in [None, Some("not-a-token")] {
+            let (status, answer) =
+                playground(router, method.clone(), path, token, body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}: {answer}"
+            );
+        }
+        let (status, answer) =
+            playground(router, method.clone(), path, Some(&s.ana), body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {answer}");
+    }
+
+    // A platform admin gets through.
+    let (status, body) = playground(
+        router,
+        Method::GET,
+        "/playground/files",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"][0]["fileName"], "orders.yml", "{body}");
+    let (status, body) = playground(
+        router,
+        Method::GET,
+        "/playground/driver?driver=postgres",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = playground(
+        router,
+        Method::GET,
+        "/playground/data-sources",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Still only with the key, and only under a name that cannot be rebound.
+    let request = |key: bool, host: &str| {
+        let mut request = Request::builder()
+            .uri("/playground/data-sources")
+            .header(header::HOST, host)
+            .header(header::AUTHORIZATION, format!("Bearer {}", s.admin));
+        if key {
+            request = request.header(
+                cubeserver::handlers::playground::PLAYGROUND_KEY_HEADER,
+                cubeserver::handlers::playground::playground_key(),
+            );
+        }
+        request.body(Body::empty()).unwrap()
+    };
+    let status = router
+        .clone()
+        .oneshot(request(false, "localhost"))
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let status = router
+        .clone()
+        .oneshot(request(true, "evil.example"))
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A token the authenticator did not verify is no login, even the
+    // admin's.
+    let mut state = state_with(Some(s.env.rbac.clone()), playground_server(&dir));
+    state.auth = Arc::new(Unverified(CubeAuthService::new(auth_config())));
+    let unverified = build_app(state);
+    let (status, body) = playground(
+        &unverified,
+        Method::GET,
+        "/playground/files",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+});
+
+#[tokio::test]
+async fn playground_unchanged_without_rbac() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = build_app(state_with(None, playground_server(&dir)));
+    let (status, body) = playground(&router, Method::GET, "/playground/context", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["cubejsToken"].is_string(), "{body}");
+    assert!(body.get("authRequired").is_none(), "{body}");
+    assert!(body.get("rbac").is_none(), "{body}");
+    let (status, body) = playground(
+        &router,
+        Method::POST,
+        "/playground/token",
+        None,
+        Some(json!({ "payload": { "tenant": "a" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["token"].is_string(), "{body}");
+    // The helpers take no login, as before.
+    let (status, body) = playground(&router, Method::GET, "/playground/files", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+db_test!(playground_delete_drops_the_connections_grants, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, body) = playground(
+        &env.router,
+        Method::DELETE,
+        "/playground/data-sources/x",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+    assert!(released(env, &w1).await.is_empty());
+});
+
+db_test!(playground_create_refuses_a_tracked_name, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    let env = &s.env;
+    env.rbac
+        .store
+        .create_connection("z", s.org_a.parse().unwrap())
+        .await
+        .unwrap();
+    let (status, body) = playground(
+        &env.router,
+        Method::POST,
+        "/playground/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "z",
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": dir.path().join("z.db").to_string_lossy(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(!yml.contains("  z:"), "{yml}");
+});
