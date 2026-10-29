@@ -4,6 +4,7 @@ import {
 } from 'antd';
 import { useState } from 'react';
 
+import { AccessModal } from './access/AccessModal';
 import { AdminApi, PAGE_SIZE, User } from './api';
 import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
 import { useSearch } from './useSearch';
@@ -28,6 +29,7 @@ export function UsersTab({ api, currentUser }: Props) {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
   const [resetting, setResetting] = useState<User | null>(null);
+  const [accessing, setAccessing] = useState<User | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form] = Form.useForm();
@@ -162,6 +164,9 @@ export function UsersTab({ api, currentUser }: Props) {
                   >
                     Edit
                   </Button>
+                  <Button size="small" onClick={() => setAccessing(user)}>
+                    Access
+                  </Button>
                   <Button size="small" onClick={() => open(setResetting, user)}>
                     Reset password
                   </Button>
@@ -235,6 +240,7 @@ export function UsersTab({ api, currentUser }: Props) {
             {error ? <Alert type="error" message={error} showIcon /> : null}
           </Form>
         </Modal>
+        <AccessModal api={api} user={accessing} onClose={() => setAccessing(null)} />
       </Col>
       <Col xs={24} xl={10}>
         <Typography.Title level={5}>Workspaces</Typography.Title>

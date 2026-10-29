@@ -1,3 +1,4 @@
+import { AccessGraph } from './access/types';
 import { authHeaders, onUnauthorized } from '../../shared/auth';
 
 // The RBAC management API (`/v1/users`, `/v1/organizations`, ...). These
@@ -126,6 +127,7 @@ export function adminApi(basePath: string) {
     updateUser: (user: string, patch: { name?: string; email?: string; disabled?: boolean }) => call(
       'PATCH', `/v1/users/${id(user)}`, patch
     ),
+    access: (user: string): Promise<AccessGraph> => call('GET', `/v1/users/${id(user)}/access`),
     setPassword: (user: string, password: string) => call(
       'PUT', `/v1/users/${id(user)}/password`, { password }
     ),
