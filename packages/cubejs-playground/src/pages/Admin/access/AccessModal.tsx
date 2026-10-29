@@ -1,9 +1,14 @@
-import { Alert, Modal, Spin, Typography } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import {
+  Alert, Button, Modal, Space, Spin, Typography,
+} from 'antd';
+import {
+  PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState,
+} from 'react';
 
 import { AdminApi, User } from '../api';
 import {
-  bounds, edgeGeometry, EdgeGeometry, expandFor, highlight, layout, LaidOutNode, NODE_W, nodeRows,
+  applyPositions, bounds, edgeGeometry, EdgeGeometry, expandFor, fitView, highlight, layout, LaidOutNode,
+  movedBeyond, NODE_W, nodeRows, Point, Positions, View, zoomAt,
 } from './layout';
 import { AccessEdge, AccessGraph, AccessNodeKind, Reason } from './types';
 
@@ -29,6 +34,22 @@ const KIND_COLOR: Record<AccessNodeKind, string> = {
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 const NARROW = '(max-width: 820px)';
+const IDENTITY: View = { x: 0, y: 0, k: 1 };
+const ZOOM_STEP = 1.25;
+
+/** A pointer held down on a node (to move it) or on the background (to pan). */
+type Drag = {
+  pointerId: number;
+  /** The node being moved; none while panning. */
+  node?: string;
+  /** Pressed on the node's fold toggle: a click there flips it. */
+  toggle: boolean;
+  /** Pointer at the start, in SVG viewport coordinates. */
+  start: Point;
+  /** The node's position, or the view's translation, at the start. */
+  origin: Point;
+  moved: boolean;
+};
 
 function useNarrow() {
   const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
@@ -83,11 +104,14 @@ type NodeProps = {
   /** Unique among the nodes, for the clip path id. */
   index: number;
   hl: boolean;
+  grabbing: boolean;
+  /** Keyboard only: a pointer click on the toggle goes through onPointerDown. */
   onToggle: () => void;
+  onPointerDown: (e: ReactPointerEvent<SVGGElement>) => void;
 };
 
 function Node({
-  node, index, hl, onToggle,
+  node, index, hl, grabbing, onToggle, onPointerDown,
 }: NodeProps) {
   const color = KIND_COLOR[node.kind];
   const rows = nodeRows(node);
@@ -95,7 +119,7 @@ function Node({
   const tx = node.x + 16;
   const pill = node.hiddenCount ? `+${node.hiddenCount} workspaces` : 'collapse';
   return (
-    <g>
+    <g onPointerDown={onPointerDown} style={{ cursor: grabbing ? 'grabbing' : 'grab' }}>
       <clipPath id={clip}>
         <rect x={node.x + 8} y={node.y} width={NODE_W - 16} height={node.h} />
       </clipPath>
@@ -139,7 +163,6 @@ function Node({
           role="button"
           tabIndex={0}
           aria-label={node.hiddenCount ? `Show ${pill}` : `Collapse ${node.name}`}
-          onClick={onToggle}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
@@ -171,7 +194,15 @@ export function AccessModal({ api, user, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [active, setActive] = useState<Reason | null>(null);
+  // Where nodes were dragged to, by node id; kept across expand/collapse.
+  const [positions, setPositions] = useState<Positions>({});
+  // Null until the graph is first fitted into the viewport.
+  const [view, setView] = useState<View | null>(null);
+  const [svg, setSvg] = useState<SVGSVGElement | null>(null);
+  const [drag, setDrag] = useState<Drag | null>(null);
+  const viewport = useRef<HTMLDivElement>(null);
   const narrow = useNarrow();
+  const viewHeight = narrow ? 420 : 600;
   const userId = user?.id;
 
   useEffect(() => {
@@ -179,6 +210,8 @@ export function AccessModal({ api, user, onClose }: Props) {
     setError(null);
     setExpanded(new Set());
     setActive(null);
+    setPositions({});
+    setView(null);
     if (!userId) {
       return undefined;
     }
@@ -194,6 +227,122 @@ export function AccessModal({ api, user, onClose }: Props) {
 
   const drawn = useMemo(() => (graph ? layout(graph, expanded) : null), [graph, expanded]);
   const marked = useMemo(() => (active ? highlight(active) : null), [active]);
+  const placed = useMemo(() => {
+    if (!drawn) {
+      return null;
+    }
+    const nodes = applyPositions(drawn.nodes, positions);
+    const geometry = edgeGeometry(nodes, drawn.edges);
+    return { nodes, geometry, box: bounds(nodes, geometry) };
+  }, [drawn, positions]);
+
+  function fit() {
+    const width = viewport.current?.clientWidth || 0;
+    if (placed && width > 0) {
+      setView(fitView(placed.box, width, viewHeight));
+    }
+  }
+
+  // The graph opens fitted (once the viewport has a width).
+  useLayoutEffect(() => {
+    if (view || !placed) {
+      return undefined;
+    }
+    if (viewport.current?.clientWidth) {
+      fit();
+      return undefined;
+    }
+    const frame = requestAnimationFrame(fit);
+    return () => cancelAnimationFrame(frame);
+  });
+
+  // Pointer position in the SVG's own coordinates, whatever CSS does to it.
+  function svgPoint(e: { clientX: number; clientY: number }): Point {
+    const m = svg?.getScreenCTM();
+    if (!m) {
+      return { x: e.clientX, y: e.clientY };
+    }
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
+  }
+  const svgPointRef = useRef(svgPoint);
+  svgPointRef.current = svgPoint;
+
+  // Wheel (and pinch, a wheel with ctrlKey) zooms around the pointer. Not
+  // passive, so the page does not scroll meanwhile.
+  useEffect(() => {
+    if (!svg) {
+      return undefined;
+    }
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const p = svgPointRef.current(e);
+      const delta = e.deltaY * (e.deltaMode === 1 ? 16 : 1);
+      const factor = Math.exp(-delta * (e.ctrlKey ? 0.01 : 0.002));
+      setView((v) => zoomAt(v || IDENTITY, factor, p.x, p.y));
+    };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, [svg]);
+
+  function zoomBy(factor: number) {
+    const width = viewport.current?.clientWidth || 0;
+    setView((v) => zoomAt(v || IDENTITY, factor, width / 2, viewHeight / 2));
+  }
+
+  function startDrag(e: ReactPointerEvent<Element>, node?: LaidOutNode) {
+    if (e.button !== 0 || !svg) {
+      return;
+    }
+    e.stopPropagation();
+    svg.setPointerCapture(e.pointerId);
+    const v = view || IDENTITY;
+    setDrag({
+      pointerId: e.pointerId,
+      node: node?.id,
+      toggle: !!(e.target as Element).closest?.('[data-toggle]'),
+      start: svgPoint(e),
+      origin: node ? { x: node.x, y: node.y } : { x: v.x, y: v.y },
+      moved: false,
+    });
+  }
+
+  function moveDrag(e: ReactPointerEvent<SVGSVGElement>) {
+    if (!drag || e.pointerId !== drag.pointerId) {
+      return;
+    }
+    const p = svgPoint(e);
+    const dx = p.x - drag.start.x;
+    const dy = p.y - drag.start.y;
+    if (!drag.moved && !movedBeyond(dx, dy)) {
+      return;
+    }
+    if (!drag.moved) {
+      setDrag({ ...drag, moved: true });
+    }
+    const { node, origin } = drag;
+    if (node) {
+      // Screen distance over the scale: the node stays under the pointer.
+      const { k } = view || IDENTITY;
+      setPositions((prev) => ({ ...prev, [node]: { x: origin.x + dx / k, y: origin.y + dy / k } }));
+    } else {
+      setView((v) => ({ ...(v || IDENTITY), x: origin.x + dx, y: origin.y + dy }));
+    }
+  }
+
+  function endDrag(e: ReactPointerEvent<SVGSVGElement>) {
+    if (!drag || e.pointerId !== drag.pointerId) {
+      return;
+    }
+    if (svg?.hasPointerCapture(e.pointerId)) {
+      svg.releasePointerCapture(e.pointerId);
+    }
+    // A press that did not move is a click: on the toggle, it flips it.
+    if (!drag.moved && drag.toggle && drag.node && e.type === 'pointerup') {
+      flip(drag.node);
+    }
+    setDrag(null);
+  }
 
   function flip(orgId: string) {
     setExpanded((prev) => {
@@ -230,17 +379,31 @@ export function AccessModal({ api, user, onClose }: Props) {
   }
 
   function renderGraph() {
-    if (!drawn) {
+    if (!placed) {
       return null;
     }
-    const geometry = edgeGeometry(drawn.nodes, drawn.edges);
-    const box = bounds(drawn.nodes, geometry);
+    const { nodes, geometry } = placed;
+    const v = view || IDENTITY;
     const isHl = (e: AccessEdge) => marked?.edges.has(`${e.from}>${e.to}`) ?? false;
     // Highlighted edges last, so they sit above the others.
     const edges = [...geometry].sort((a, b) => Number(isHl(a.edge)) - Number(isHl(b.edge)));
+    const panning = drag != null && drag.node == null;
     return (
-      <div style={{ overflow: 'auto' }}>
-        <svg width={box.maxX + 20} height={box.maxY + 20} role="img" aria-label="Access graph">
+      <div ref={viewport} style={{ overflow: 'hidden' }}>
+        <svg
+          ref={setSvg}
+          width="100%"
+          height={viewHeight}
+          role="img"
+          aria-label="Access graph"
+          style={{
+            display: 'block', touchAction: 'none', userSelect: 'none', cursor: panning ? 'grabbing' : 'grab',
+          }}
+          onPointerDown={(e) => startDrag(e)}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
           <defs>
             {[['', MUTED], ['-hl', ACCENT]].map(([suffix, fill]) => (
               <marker
@@ -257,14 +420,24 @@ export function AccessModal({ api, user, onClose }: Props) {
               </marker>
             ))}
           </defs>
-          <g>
-            {edges.map((g) => (
-              <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
+          <g transform={`translate(${v.x},${v.y}) scale(${v.k})`}>
+            <g>
+              {edges.map((g) => (
+                <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
+              ))}
+            </g>
+            {nodes.map((n, i) => (
+              <Node
+                key={n.id}
+                node={n}
+                index={i}
+                hl={marked?.nodes.has(n.id) ?? false}
+                grabbing={drag?.node === n.id && drag.moved}
+                onToggle={() => flip(n.id)}
+                onPointerDown={(e) => startDrag(e, n)}
+              />
             ))}
           </g>
-          {drawn.nodes.map((n, i) => (
-            <Node key={n.id} node={n} index={i} hl={marked?.nodes.has(n.id) ?? false} onToggle={() => flip(n.id)} />
-          ))}
         </svg>
       </div>
     );
@@ -275,7 +448,10 @@ export function AccessModal({ api, user, onClose }: Props) {
       return null;
     }
     return (
-      <div style={{ padding: 16, minWidth: 0 }}>
+      <div style={{
+        padding: 16, minWidth: 0, maxHeight: narrow ? undefined : viewHeight, overflowY: 'auto',
+      }}
+      >
         <Typography.Text type="secondary" style={{ textTransform: 'uppercase', fontSize: 12, letterSpacing: '.06em' }}>
           What {graph.user.id} can do
         </Typography.Text>
@@ -384,7 +560,19 @@ export function AccessModal({ api, user, onClose }: Props) {
       title={(
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', paddingRight: 24 }}>
           <span>Access of {userId}</span>
-          {summary ? <Typography.Text type="secondary" style={{ fontFamily: MONO, fontSize: 12 }}>{summary}</Typography.Text> : null}
+          <Space size={8} wrap>
+            {summary ? <Typography.Text type="secondary" style={{ fontFamily: MONO, fontSize: 12 }}>{summary}</Typography.Text> : null}
+            {graph ? (
+              <Space size={4}>
+                <Button size="small" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)}>−</Button>
+                <Button size="small" aria-label="Zoom in" onClick={() => zoomBy(ZOOM_STEP)}>+</Button>
+                <Button size="small" onClick={fit}>Fit</Button>
+                <Button size="small" disabled={!Object.keys(positions).length} onClick={() => setPositions({})}>
+                  Reset layout
+                </Button>
+              </Space>
+            ) : null}
+          </Space>
         </div>
       )}
       visible={user != null}
