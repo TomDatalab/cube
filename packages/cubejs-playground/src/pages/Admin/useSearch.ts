@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { PAGE_SIZE } from './api';
 import type { Page } from './api';
 
 const DEBOUNCE_MS = 300;
@@ -40,6 +41,12 @@ export function useSearch<T>(
       if (request === latest.current) {
         setResult(loaded);
         setLoading(false);
+        // Deleting the last row of the last page leaves that page empty:
+        // go to what is now the last page.
+        const last = Math.max(1, Math.ceil(loaded.total / PAGE_SIZE));
+        if (!loaded.items.length && page > last) {
+          setPage(last);
+        }
       }
     }, (e: any) => {
       if (request === latest.current) {

@@ -40,8 +40,14 @@ export function WorkspacesTab({ api, organization, onOrganizationChange }: Props
     }
     api.searchOrganizations(organization, 1).then((found) => {
       const match = found.items.find((o) => o.id === organization);
-      if (isMounted() && match) {
+      if (!isMounted()) {
+        return;
+      }
+      if (match) {
         setOrganizationLabel(match.name);
+      } else {
+        // Deleted (or no longer visible): back to all organizations.
+        onOrganizationChange(null);
       }
     }, () => {});
   }, [api, organization]);

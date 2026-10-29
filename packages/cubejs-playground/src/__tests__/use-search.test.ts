@@ -67,6 +67,27 @@ describe('useSearch', () => {
     expect(hook.result).toEqual({ items: ['new'], total: 1 });
   });
 
+  it('steps back to the last page when its page empties', async () => {
+    // 51 rows until the 51st is deleted: page 2 then comes back empty.
+    let total = 51;
+    const fetch = vi.fn(async (_q: string, page: number) => ({
+      items: page === 1 ? ['a'] : Array(Math.max(0, total - 50)).fill('x'),
+      total,
+    }));
+    mount(fetch);
+    await act(async () => {});
+    act(() => hook.setPage(2));
+    await act(async () => {});
+    expect(hook.result?.items).toHaveLength(1);
+
+    total = 50;
+    act(() => hook.reload());
+    await act(async () => {});
+    await act(async () => {});
+    expect(hook.page).toBe(1);
+    expect(fetch).toHaveBeenLastCalledWith('', 1);
+  });
+
   it('exposes a failed search as error', async () => {
     mount(vi.fn(() => Promise.reject(new Error('forbidden'))));
     await act(async () => {});
