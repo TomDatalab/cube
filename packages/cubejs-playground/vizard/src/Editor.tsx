@@ -4,7 +4,7 @@ import monaco from 'monaco-editor';
 
 import { MONOSPACE_FONT_FAMILY } from './monaco/config';
 import { setupMonaco } from './monaco';
-import { useWindowSize } from './hooks/index';
+import { useTheme, useWindowSize } from './hooks/index';
 
 import type { IRange, ISelection } from 'monaco-editor';
 
@@ -15,6 +15,7 @@ type EditorProps = {
 export function VizardEditor({ content }: EditorProps) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor>();
   const windowSize = useWindowSize();
+  const theme = useTheme();
 
   const editor = editorRef.current;
 
@@ -67,7 +68,7 @@ export function VizardEditor({ content }: EditorProps) {
   return (
     <>
       <MonacoEditor
-        theme="cube"
+        theme={theme === 'dark' ? 'cube-dark' : 'cube'}
         options={options}
         editorWillMount={editorWillMount}
         editorDidMount={(editor) => {

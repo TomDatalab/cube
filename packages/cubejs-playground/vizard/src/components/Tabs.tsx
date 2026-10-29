@@ -21,8 +21,8 @@ const TabsElement = tasty({
     padding: '1x 1x 0 1x',
     shadow: 'inset 0 -1bw 0 #border',
 
-    '--border-color': 'rgb(234,234,238)',
-    '--light-purple-color': 'rgb(243,243,255)',
+    '--border-color': 'var(--vizard-border-color, rgb(234,234,238))',
+    '--light-purple-color': 'var(--vizard-tab-bg-color, rgb(243,243,255))',
   },
 });
 
