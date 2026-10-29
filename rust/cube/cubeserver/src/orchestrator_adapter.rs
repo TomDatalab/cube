@@ -219,6 +219,10 @@ impl OrchestratedQueryService {
 
 #[async_trait]
 impl QueryService for OrchestratedQueryService {
+    fn data_sources(&self) -> Option<Arc<crate::planner_adapter::DataSources>> {
+        Some(self.planner.data_sources())
+    }
+
     async fn load(
         &self,
         ctx: &RequestContext,

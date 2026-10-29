@@ -1,0 +1,504 @@
+//! In-memory `Authz` mirroring `rbac/schema.zed`, for tests.
+
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+
+use super::authz::{
+    Authz, AuthzError, ObjectRef, Precondition, Relationship, RelationshipFilter, Update,
+};
+
+/// One term of a permission expression: a direct relation or `relation->perm`.
+enum Term {
+    Rel(&'static str),
+    Arrow(&'static str, &'static str),
+}
+
+/// Permission definitions, written from `rbac/schema.zed`.
+fn definition(kind: &str, name: &str) -> Option<Vec<Term>> {
+    use Term::*;
+    Some(match (kind, name) {
+        ("platform", "manage") => vec![Rel("admin")],
+        ("organization", "admin") => vec![Rel("owner"), Arrow("platform", "manage")],
+        ("organization", "view") => vec![Rel("admin"), Rel("member")],
+        ("organization", "manage_connections") => vec![Rel("admin")],
+        ("workspace", "manage") => vec![Rel("owner"), Arrow("organization", "admin")],
+        ("workspace", "edit") => vec![Rel("editor"), Rel("manage")],
+        ("workspace", "view") => vec![Rel("viewer"), Rel("edit")],
+        ("workspace", "query") => vec![Rel("view")],
+        ("workspace", "execute") => vec![Rel("manage")],
+        ("connection", "manage") => vec![Arrow("organization", "admin")],
+        ("connection", "query") => vec![Arrow("workspace", "query"), Rel("manage")],
+        ("object", "read") => vec![Arrow("workspace", "view")],
+        ("object", "write") => vec![Arrow("workspace", "edit")],
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Default)]
+pub struct FakeAuthz {
+    relationships: Mutex<Vec<Relationship>>,
+    failing: AtomicBool,
+    failing_writes: AtomicBool,
+}
+
+impl FakeAuthz {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_failing(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
+    }
+
+    /// Fails only touch and delete, so a write can fail after its checks
+    /// passed.
+    pub fn set_failing_writes(&self, failing: bool) {
+        self.failing_writes.store(failing, Ordering::SeqCst);
+    }
+
+    fn write_guard(&self) -> Result<(), AuthzError> {
+        self.guard()?;
+        if self.failing_writes.load(Ordering::SeqCst) {
+            Err(AuthzError::Unavailable(
+                "fake authz set to fail writes".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn guard(&self) -> Result<(), AuthzError> {
+        if self.failing.load(Ordering::SeqCst) {
+            Err(AuthzError::Unavailable("fake authz set to fail".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether `name` on `kind:id` is granted to `user`. A relation or
+    /// permission name is resolved against the relationship store.
+    fn has(&self, rels: &[Relationship], kind: &str, id: &str, name: &str, user: &str) -> bool {
+        self.has_depth(rels, kind, id, name, user, 0)
+    }
+
+    fn has_depth(
+        &self,
+        rels: &[Relationship],
+        kind: &str,
+        id: &str,
+        name: &str,
+        user: &str,
+        depth: usize,
+    ) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        if let Some(terms) = definition(kind, name) {
+            return terms.iter().any(|t| match t {
+                Term::Rel(r) => self.has_depth(rels, kind, id, r, user, depth + 1),
+                Term::Arrow(rel, perm) => rels
+                    .iter()
+                    .filter(|x| {
+                        x.resource.kind == kind && x.resource.id == id && x.relation == *rel
+                    })
+                    .any(|x| {
+                        self.has_depth(rels, x.subject.kind, &x.subject.id, perm, user, depth + 1)
+                    }),
+            });
+        }
+        // A plain relation: direct user subject.
+        rels.iter().any(|x| {
+            x.resource.kind == kind
+                && x.resource.id == id
+                && x.relation == name
+                && x.subject.kind == "user"
+                && x.subject.id == user
+        })
+    }
+}
+
+fn matches(f: &RelationshipFilter, r: &Relationship) -> bool {
+    r.resource.kind == f.kind
+        && f.id.as_ref().is_none_or(|i| *i == r.resource.id)
+        && f.relation.is_none_or(|rel| rel == r.relation)
+        && f.subject.as_ref().is_none_or(|s| *s == r.subject)
+}
+
+#[async_trait]
+impl Authz for FakeAuthz {
+    async fn check(
+        &self,
+        resource: &ObjectRef,
+        permission: &str,
+        user: &str,
+    ) -> Result<bool, AuthzError> {
+        self.guard()?;
+        let rels = self.relationships.lock().unwrap();
+        Ok(self.has(&rels, resource.kind, &resource.id, permission, user))
+    }
+
+    async fn lookup_resources(
+        &self,
+        kind: &'static str,
+        permission: &str,
+        user: &str,
+    ) -> Result<Vec<String>, AuthzError> {
+        self.guard()?;
+        let rels = self.relationships.lock().unwrap();
+        let ids: BTreeSet<&str> = rels
+            .iter()
+            .flat_map(|r| [&r.resource, &r.subject])
+            .filter(|o| o.kind == kind)
+            .map(|o| o.id.as_str())
+            .collect();
+        Ok(ids
+            .into_iter()
+            .filter(|id| self.has(&rels, kind, id, permission, user))
+            .map(String::from)
+            .collect())
+    }
+
+    async fn read(&self, filter: &RelationshipFilter) -> Result<Vec<Relationship>, AuthzError> {
+        self.guard()?;
+        let rels = self.relationships.lock().unwrap();
+        Ok(rels
+            .iter()
+            .filter(|r| matches(filter, r))
+            .cloned()
+            .collect())
+    }
+
+    async fn touch(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {
+        self.write_guard()?;
+        let mut rels = self.relationships.lock().unwrap();
+        for r in relationships {
+            if !rels.contains(r) {
+                rels.push(r.clone());
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {
+        self.write_guard()?;
+        self.relationships
+            .lock()
+            .unwrap()
+            .retain(|r| !relationships.contains(r));
+        Ok(())
+    }
+
+    async fn delete_matching(&self, filter: &RelationshipFilter) -> Result<(), AuthzError> {
+        self.write_guard()?;
+        self.relationships
+            .lock()
+            .unwrap()
+            .retain(|r| !matches(filter, r));
+        Ok(())
+    }
+
+    async fn write(
+        &self,
+        updates: &[Update],
+        preconditions: &[Precondition],
+    ) -> Result<(), AuthzError> {
+        self.write_guard()?;
+        let mut rels = self.relationships.lock().unwrap();
+        for p in preconditions {
+            let (filter, must_match) = match p {
+                Precondition::MustMatch(f) => (f, true),
+                Precondition::MustNotMatch(f) => (f, false),
+            };
+            if rels.iter().any(|r| matches(filter, r)) != must_match {
+                return Err(AuthzError::PreconditionFailed(format!("{p:?}")));
+            }
+        }
+        for u in updates {
+            match u {
+                Update::Touch(r) => {
+                    if !rels.contains(r) {
+                        rels.push(r.clone());
+                    }
+                }
+                Update::Delete(r) => rels.retain(|x| x != r),
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_schema(&self, _schema: &str) -> Result<(), AuthzError> {
+        self.guard()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rel(
+        rk: &'static str,
+        rid: &str,
+        relation: &'static str,
+        sk: &'static str,
+        sid: &str,
+    ) -> Relationship {
+        Relationship {
+            resource: ObjectRef::new(rk, rid),
+            relation,
+            subject: ObjectRef::new(sk, sid),
+        }
+    }
+
+    #[tokio::test]
+    async fn org_owner_can_edit_every_workspace_of_the_org() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "alice"),
+            rel("workspace", "w1", "organization", "organization", "o1"),
+            rel("workspace", "w2", "organization", "organization", "o2"),
+        ])
+        .await
+        .unwrap();
+        assert!(a
+            .check(&ObjectRef::new("workspace", "w1"), "edit", "alice")
+            .await
+            .unwrap());
+        assert!(!a
+            .check(&ObjectRef::new("workspace", "w2"), "edit", "alice")
+            .await
+            .unwrap());
+        assert_eq!(
+            a.lookup_resources("workspace", "edit", "alice")
+                .await
+                .unwrap(),
+            vec!["w1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_reads_objects_but_cannot_write() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("workspace", "w1", "viewer", "user", "bob"),
+            rel("object", "d1", "workspace", "workspace", "w1"),
+        ])
+        .await
+        .unwrap();
+        let obj = ObjectRef::new("object", "d1");
+        assert!(a.check(&obj, "read", "bob").await.unwrap());
+        assert!(!a.check(&obj, "write", "bob").await.unwrap());
+        assert!(!a
+            .check(&ObjectRef::new("workspace", "w1"), "execute", "bob")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn connection_query_follows_release() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "admin"),
+            rel("workspace", "w1", "organization", "organization", "o1"),
+            rel("workspace", "w1", "viewer", "user", "bob"),
+            rel("workspace", "w2", "viewer", "user", "carol"),
+            rel("connection", "c1", "organization", "organization", "o1"),
+            rel("connection", "c1", "workspace", "workspace", "w1"),
+        ])
+        .await
+        .unwrap();
+        let c = ObjectRef::new("connection", "c1");
+        assert!(a.check(&c, "query", "bob").await.unwrap());
+        assert!(a.check(&c, "query", "admin").await.unwrap());
+        assert!(!a.check(&c, "query", "carol").await.unwrap());
+        assert!(!a.check(&c, "manage", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn platform_admin_administers_every_org() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("platform", "main", "admin", "user", "root"),
+            rel("organization", "o1", "platform", "platform", "main"),
+        ])
+        .await
+        .unwrap();
+        let o = ObjectRef::new("organization", "o1");
+        assert!(a.check(&o, "admin", "root").await.unwrap());
+        assert!(a.check(&o, "manage_connections", "root").await.unwrap());
+        assert!(!a.check(&o, "admin", "nobody").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn connection_query_manage_branch_unreleased() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "admin"),
+            rel("workspace", "w1", "organization", "organization", "o1"),
+            rel("workspace", "w1", "viewer", "user", "bob"),
+            rel("connection", "c2", "organization", "organization", "o1"),
+        ])
+        .await
+        .unwrap();
+        let c = ObjectRef::new("connection", "c2");
+        assert!(a.check(&c, "query", "admin").await.unwrap());
+        assert!(!a.check(&c, "query", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn org_view_member_and_manage_connections() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "admin"),
+            rel("organization", "o1", "member", "user", "mem"),
+        ])
+        .await
+        .unwrap();
+        let o = ObjectRef::new("organization", "o1");
+        assert!(a.check(&o, "view", "mem").await.unwrap());
+        assert!(!a.check(&o, "view", "stranger").await.unwrap());
+        assert!(!a.check(&o, "admin", "mem").await.unwrap());
+        assert!(!a.check(&o, "manage_connections", "mem").await.unwrap());
+        assert!(a.check(&o, "manage_connections", "admin").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn editor_writes_objects_and_owner_executes() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("workspace", "w1", "editor", "user", "ed"),
+            rel("workspace", "w1", "owner", "user", "own"),
+            rel("object", "d1", "workspace", "workspace", "w1"),
+        ])
+        .await
+        .unwrap();
+        let obj = ObjectRef::new("object", "d1");
+        let w = ObjectRef::new("workspace", "w1");
+        assert!(a.check(&obj, "write", "ed").await.unwrap());
+        assert!(a.check(&obj, "read", "ed").await.unwrap());
+        assert!(a.check(&w, "execute", "own").await.unwrap());
+        assert!(!a.check(&w, "execute", "ed").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lookup_follows_arrows() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("workspace", "w1", "viewer", "user", "bob"),
+            rel("connection", "c1", "workspace", "workspace", "w1"),
+            rel("connection", "c2", "workspace", "workspace", "w2"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            a.lookup_resources("connection", "query", "bob")
+                .await
+                .unwrap(),
+            vec!["c1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_makes_every_method_unavailable() {
+        let a = FakeAuthz::new();
+        a.set_failing(true);
+        let o = ObjectRef::new("organization", "o");
+        let r = rel("organization", "o", "owner", "user", "u");
+        let f = RelationshipFilter {
+            kind: "organization",
+            id: None,
+            relation: None,
+            subject: None,
+        };
+        let un = |e: Result<(), AuthzError>| assert!(matches!(e, Err(AuthzError::Unavailable(_))));
+        un(a.check(&o, "admin", "u").await.map(|_| ()));
+        un(a.lookup_resources("organization", "admin", "u")
+            .await
+            .map(|_| ()));
+        un(a.read(&f).await.map(|_| ()));
+        un(a.touch(std::slice::from_ref(&r)).await);
+        un(a.delete(std::slice::from_ref(&r)).await);
+        un(a.delete_matching(&f).await);
+        un(a.ensure_schema("").await);
+    }
+
+    #[tokio::test]
+    async fn a_failing_precondition_applies_no_update() {
+        let a = FakeAuthz::new();
+        a.touch(&[
+            rel("organization", "o1", "owner", "user", "ann"),
+            rel("organization", "o1", "owner", "user", "bob"),
+        ])
+        .await
+        .unwrap();
+        let owner = |u: &str| RelationshipFilter {
+            kind: "organization",
+            id: Some("o1".into()),
+            relation: Some("owner"),
+            subject: Some(ObjectRef::new("user", u)),
+        };
+        // `bob` was removed concurrently: removing `ann` on the condition
+        // that `bob` is still an owner must change nothing.
+        a.delete(&[rel("organization", "o1", "owner", "user", "bob")])
+            .await
+            .unwrap();
+        let result = a
+            .write(
+                &[
+                    Update::Delete(rel("organization", "o1", "owner", "user", "ann")),
+                    Update::Touch(rel("organization", "o1", "member", "user", "cid")),
+                ],
+                &[Precondition::MustMatch(owner("bob"))],
+            )
+            .await;
+        assert!(matches!(result, Err(AuthzError::PreconditionFailed(_))));
+        let org = ObjectRef::new("organization", "o1");
+        assert!(a.check(&org, "admin", "ann").await.unwrap());
+        assert!(!a.check(&org, "view", "cid").await.unwrap());
+
+        // MustNotMatch, then a write whose conditions hold.
+        let result = a
+            .write(
+                &[Update::Touch(rel(
+                    "organization",
+                    "o1",
+                    "member",
+                    "user",
+                    "cid",
+                ))],
+                &[Precondition::MustNotMatch(owner("ann"))],
+            )
+            .await;
+        assert!(matches!(result, Err(AuthzError::PreconditionFailed(_))));
+        a.write(
+            &[
+                Update::Delete(rel("organization", "o1", "owner", "user", "ann")),
+                Update::Touch(rel("organization", "o1", "owner", "user", "cid")),
+            ],
+            &[Precondition::MustMatch(owner("ann"))],
+        )
+        .await
+        .unwrap();
+        assert!(!a.check(&org, "admin", "ann").await.unwrap());
+        assert!(a.check(&org, "admin", "cid").await.unwrap());
+
+        // A write fails like any other while the fake is failing.
+        a.set_failing_writes(true);
+        let result = a
+            .write(
+                &[Update::Touch(rel(
+                    "organization",
+                    "o1",
+                    "member",
+                    "user",
+                    "x",
+                ))],
+                &[],
+            )
+            .await;
+        assert!(matches!(result, Err(AuthzError::Unavailable(_))));
+        assert!(!a.check(&org, "view", "x").await.unwrap());
+    }
+}

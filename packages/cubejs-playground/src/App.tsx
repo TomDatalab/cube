@@ -19,16 +19,30 @@ import {
   trackImpl,
 } from './events';
 import { useAppContext } from './hooks';
+import { LoginPage } from './pages/Login/LoginPage';
 import { QUERY_BUILDER_COLOR_TOKENS } from './QueryBuilderV2';
+import { getSession, Session } from './shared/auth';
 import { setPlaygroundKey } from './shared/helpers';
 
 const StyledLayoutContent = styled(Layout.Content)`
   height: 100%;
 `;
 
+// A token saved from the Security Context dialog would win over the login's;
+// it was signed for no user.
+function forgetSecurityContextToken() {
+  try {
+    window.localStorage.removeItem('cubejsToken');
+  } catch {
+    // Storage unavailable: nothing was saved there either.
+  }
+}
+
 type AppState = {
   fatalError: Error | null;
   context: PlaygroundContext | null;
+  // With RBAC on: the context, until the user logs in.
+  loginContext: PlaygroundContext | null;
   showLoader: boolean;
   isAppContextSet: boolean;
 };
@@ -51,6 +65,7 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
     this.state = {
       fatalError: null,
       context: null,
+      loginContext: null,
       showLoader: false,
       isAppContextSet: false,
     };
@@ -81,7 +96,26 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
       dockerVersion: context.dockerVersion,
     });
 
-    this.setState({ context });
+    if (context.authRequired) {
+      forgetSecurityContextToken();
+      const session = getSession();
+      if (session == null) {
+        this.setState({ loginContext: context });
+      } else {
+        this.setState({ context: { ...context, cubejsToken: session.token } });
+      }
+    } else {
+      this.setState({ context });
+    }
+  }
+
+  onLogin(session: Session) {
+    const { loginContext } = this.state;
+    forgetSecurityContextToken();
+    this.setState({
+      context: { ...loginContext!, cubejsToken: session.token },
+      loginContext: null,
+    });
   }
 
   componentDidCatch(error, info) {
@@ -93,7 +127,21 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
 
   render() {
     const { location, children } = this.props;
-    const { context, fatalError, isAppContextSet, showLoader } = this.state;
+    const {
+      context, loginContext, fatalError, isAppContextSet, showLoader,
+    } = this.state;
+
+    if (loginContext != null) {
+      return (
+        <>
+          <GlobalStyles />
+          <LoginPage
+            basePath={loginContext.basePath}
+            onLogin={(session) => this.onLogin(session)}
+          />
+        </>
+      );
+    }
 
     if (context != null && !isAppContextSet) {
       return (

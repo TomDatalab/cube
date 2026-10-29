@@ -1,18 +1,27 @@
 import { useEffect, useLayoutEffect, useState } from 'react';
 import { useHistory } from 'react-router-dom';
 
-import { useIsMounted, usePlaygroundContext } from '../../hooks';
+import { useIsMounted, usePlaygroundContext, useRbac } from '../../hooks';
+import { playgroundFetch } from '../../shared/helpers';
 
 export function IndexPage() {
   const { push } = useHistory();
   const isMounted = useIsMounted();
   const context = usePlaygroundContext();
+  // `playground/files` is for platform admins: anyone else starts in the
+  // query builder.
+  const { isAdmin } = useRbac();
 
   const [files, setFiles] = useState<any[] | null>(null);
 
   useEffect(() => {
+    if (!isAdmin) {
+      push('/build');
+      return;
+    }
+
     async function loadFiles() {
-      const res = await fetch('playground/files');
+      const res = await playgroundFetch('playground/files');
       const result = await res.json();
 
       if (result.error?.includes('Model files not found')) {
@@ -27,7 +36,7 @@ export function IndexPage() {
     }
 
     loadFiles();
-  }, []);
+  }, [isAdmin]);
 
   useLayoutEffect(() => {
     if (context && files != null) {

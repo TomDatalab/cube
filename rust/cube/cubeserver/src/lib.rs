@@ -18,6 +18,7 @@ pub mod meta_adapter;
 pub mod orchestrator_adapter;
 pub mod planner_adapter;
 pub mod playground;
+pub mod rbac;
 pub mod services;
 pub mod sql_api;
 pub mod tenants;

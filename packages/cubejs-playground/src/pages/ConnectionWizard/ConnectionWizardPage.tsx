@@ -4,6 +4,8 @@ import styled from 'styled-components';
 import { usePlaygroundContext } from '../../hooks';
 
 import envVarsDatabaseMap from '../../shared/env-vars-db-map';
+import { onUnauthorized } from '../../shared/auth';
+import { playgroundKeyHeaders } from '../../shared/helpers';
 import { fetchPoll, fetchWithTimeout } from '../../utils';
 import ConnectionTest from './components/ConnectionTest';
 import { DatabaseCard, SelectedDatabaseCard } from './components/DatabaseCard';
@@ -48,6 +50,7 @@ async function testConnection(variables: Record<string, string>) {
       method: 'post',
       headers: {
         'Content-Type': 'application/json',
+        ...playgroundKeyHeaders(),
       },
       body: JSON.stringify({
         variables,
@@ -55,6 +58,7 @@ async function testConnection(variables: Record<string, string>) {
     },
     5 * 1000
   );
+  onUnauthorized(response);
 
   const { error } = await response.json();
   if (error) {
@@ -63,15 +67,17 @@ async function testConnection(variables: Record<string, string>) {
 }
 
 async function saveConnection(variables: Record<string, string>) {
-  await fetch('playground/env', {
+  const response = await fetch('playground/env', {
     method: 'post',
     headers: {
       'Content-Type': 'application/json',
+      ...playgroundKeyHeaders(),
     },
     body: JSON.stringify({
       variables,
     }),
   });
+  onUnauthorized(response);
 }
 
 export type Database = {
@@ -117,6 +123,7 @@ export function ConnectionWizardPage({ history }) {
         `/playground/driver?driver=${db.driver}`,
         1000,
         async ({ response, cancel }) => {
+          onUnauthorized(response);
           const { status, error } = await response.json();
 
           if (response.ok && status === STATUS.INSTALLED) {
@@ -129,7 +136,8 @@ export function ConnectionWizardPage({ history }) {
             setDriverInstallationInProgress(false);
             setInstallationError(error);
           }
-        }
+        },
+        { headers: playgroundKeyHeaders() }
       );
     }
 
@@ -155,8 +163,10 @@ export function ConnectionWizardPage({ history }) {
 
       {
         const response = await fetch(
-          `/playground/driver?driver=${selectedDb.driver || ''}`
+          `/playground/driver?driver=${selectedDb.driver || ''}`,
+          { headers: playgroundKeyHeaders() }
         );
+        onUnauthorized(response);
         const { status, error } = await response.json();
 
         if (response.ok) {
@@ -176,12 +186,14 @@ export function ConnectionWizardPage({ history }) {
           method: 'post',
           headers: {
             'Content-Type': 'application/json',
+            ...playgroundKeyHeaders(),
           },
           body: JSON.stringify({
             driver: selectedDb.driver,
           }),
         });
 
+        onUnauthorized(response);
         const { dependency, error } = await response.json();
 
         if (response.ok) {

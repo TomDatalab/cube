@@ -35,6 +35,9 @@ pub struct AppState {
     /// Per-tenant runtimes. When absent the fields above answer every request,
     /// which is the single-tenant deployment.
     pub tenants: Option<Arc<crate::tenants::TenantRegistry>>,
+    /// RBAC (`CUBE_RBAC=spicedb`). When absent no RBAC route is mounted and
+    /// every request is authorized as before.
+    pub rbac: Option<Arc<crate::rbac::Rbac>>,
 }
 
 impl AppState {
@@ -51,18 +54,42 @@ impl AppState {
     }
 
     /// The data model this request reads.
+    ///
+    /// With RBAC on it shows only the cubes and views the request may read
+    /// ([`crate::rbac::enforce::RbacMetaService`]).
     pub async fn meta_for(&self, ctx: &RequestContext) -> Result<MetaServiceRef, ApiError> {
-        Ok(match self.runtime_for(ctx).await? {
-            Some(runtime) => runtime.meta.clone(),
-            None => self.meta.clone(),
+        // The meta and the planner of the same runtime, so the cubes shown
+        // are placed with the snapshot their queries are checked and run with.
+        let (meta, query) = match self.runtime_for(ctx).await? {
+            Some(runtime) => (runtime.meta.clone(), runtime.query.clone()),
+            None => (self.meta.clone(), self.query.clone()),
+        };
+        Ok(match &self.rbac {
+            Some(rbac) => Arc::new(crate::rbac::enforce::RbacMetaService::new(
+                meta,
+                rbac.clone(),
+                query.data_sources(),
+            )),
+            None => meta,
         })
     }
 
     /// The query service this request runs on.
+    ///
+    /// With RBAC on every query is checked against the request's workspace
+    /// first ([`crate::rbac::enforce::RbacQueryService`]). REST, GraphQL and
+    /// the WebSocket transport all come through here.
     pub async fn query_for(&self, ctx: &RequestContext) -> Result<QueryServiceRef, ApiError> {
-        Ok(match self.runtime_for(ctx).await? {
+        let query = match self.runtime_for(ctx).await? {
             Some(runtime) => runtime.query.clone(),
             None => self.query.clone(),
+        };
+        Ok(match &self.rbac {
+            Some(rbac) => Arc::new(crate::rbac::enforce::RbacQueryService::new(
+                query,
+                rbac.clone(),
+            )),
+            None => query,
         })
     }
 
@@ -71,6 +98,12 @@ impl AppState {
         &self,
         ctx: &RequestContext,
     ) -> Result<Arc<crate::graphql_adapter::GraphQLSchemaCache>, ApiError> {
+        // With RBAC on the schema is built from the request's filtered meta,
+        // which differs between users and workspaces: a shared cache could
+        // hand one request a schema built for another.
+        if self.rbac.is_some() {
+            return Ok(Default::default());
+        }
         Ok(match self.runtime_for(ctx).await? {
             Some(runtime) => runtime.graphql.clone(),
             None => self.graphql.clone(),
@@ -101,6 +134,13 @@ pub fn build_app(state: AppState) -> Router {
     let base = state.config.base_path.trim_end_matches('/').to_string();
     let max_request_size = state.config.max_request_size;
 
+    let rbac_routes = state.rbac.is_some().then(|| {
+        (
+            crate::rbac::handlers::public_routes(&base),
+            crate::rbac::handlers::authenticated_routes(&base),
+        )
+    });
+
     // Managing the connections and running statements on them: behind the
     // auth middleware like the rest of `/v1`, but outside the CORS layer
     // below, so no other site's page can call them from a browser.
@@ -128,7 +168,7 @@ pub fn build_app(state: AppState) -> Router {
             handlers::auth::auth_middleware,
         ));
 
-    let authenticated = Router::new()
+    let mut authenticated = Router::new()
         .route(&format!("{base}/v1/meta"), get(handlers::meta::meta))
         .route(
             &format!("{base}/v1/connectors"),
@@ -156,20 +196,23 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::delete(handlers::query::cancel_running_query),
         )
         .route(
-            &format!("{base}/v1/convert-query"),
-            axum::routing::post(handlers::sql_convert::convert_query),
-        )
-        .route(
-            &format!("{base}/v1/cubesql"),
-            axum::routing::post(handlers::sql_convert::cubesql),
-        )
-        .route(
             &format!("{base}/v1/graphql-to-json"),
             axum::routing::post(handlers::graphql::graphql_to_json),
         )
         .route(
             &format!("{base}/graphql"),
             get(handlers::graphql::graphiql).post(handlers::graphql::graphql),
+        );
+    // With RBAC on these run SQL or build data without the cube checks, so
+    // only platform admins reach them.
+    let admin_only = Router::new()
+        .route(
+            &format!("{base}/v1/convert-query"),
+            axum::routing::post(handlers::sql_convert::convert_query),
+        )
+        .route(
+            &format!("{base}/v1/cubesql"),
+            axum::routing::post(handlers::sql_convert::cubesql),
         )
         .route(
             &format!("{base}/v1/pre-aggregations/can-use"),
@@ -213,26 +256,44 @@ pub fn build_app(state: AppState) -> Router {
             "/cube-system/v1/pre-aggregations/cancel",
             axum::routing::post(handlers::preaggs::cancel),
         )
-        .layer(axum::middleware::from_fn_with_state(
+        .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            handlers::auth::auth_middleware,
+            crate::rbac::enforce::platform_admin_only,
         ));
+    authenticated = authenticated.merge(admin_only);
+    if let Some((_, rbac_authenticated)) = &rbac_routes {
+        authenticated = authenticated.merge(rbac_authenticated.clone());
+    }
+    let authenticated = authenticated.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        handlers::auth::auth_middleware,
+    ));
 
+    let mut methods = vec![
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    // Same list as `@cubejs-backend/server` (`server.ts`).
+    let mut headers = vec![
+        header::AUTHORIZATION,
+        header::CONTENT_TYPE,
+        header::HeaderName::from_static("x-request-id"),
+    ];
+    if rbac_routes.is_some() {
+        // The management routes edit with PATCH, and data requests name
+        // their workspace.
+        methods.push(Method::PATCH);
+        headers.push(header::HeaderName::from_static(
+            handlers::auth::WORKSPACE_HEADER,
+        ));
+    }
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        // Same list as `@cubejs-backend/server` (`server.ts`).
-        .allow_headers([
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            header::HeaderName::from_static("x-request-id"),
-        ]);
+        .allow_methods(methods)
+        .allow_headers(headers);
 
     // The Playground, when its assets are configured. It is served at `/`
     // because the bundle fetches its helper API relatively and derives the
@@ -250,13 +311,18 @@ pub fn build_app(state: AppState) -> Router {
         // The WebSocket transport authenticates with its own `authorization`
         // message, so it is not behind the HTTP auth middleware.
         .route(&format!("{base}/ws"), get(crate::ws::ws_handler))
-        .merge(authenticated)
-        // Cross-origin callers are the API's. The Playground's helper API and
-        // the connection-managing routes, merged below, are not: another
-        // site gets no CORS answer from them, so it can neither read the key
-        // `/playground/context` hands out nor send the JSON the routes take.
-        .layer(cors)
-        .merge(managing);
+        .merge(authenticated);
+    // Login is public: it is how a token is obtained.
+    let router = match rbac_routes {
+        Some((public, _)) => router.merge(public),
+        None => router,
+    };
+    // Cross-origin callers are the API's (RBAC's management routes and login
+    // included). The Playground's helper API and the connection-managing
+    // routes, merged below, are not: another site gets no CORS answer from
+    // them, so it can neither read the key `/playground/context` hands out nor
+    // send the JSON the routes take.
+    let router = router.layer(cors).merge(managing);
 
     let router = match playground {
         Some(assets) => router

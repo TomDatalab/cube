@@ -23,8 +23,12 @@ pub fn parse_message_id(value: &Value) -> Result<String, String> {
 /// A parsed client message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WsMessage {
-    /// `{ "authorization": "<token>" }`
-    Auth { authorization: String },
+    /// `{ "authorization": "<token>" }`; with RBAC on, also
+    /// `"workspace": "<id>"`, the WebSocket's `X-Cube-Workspace`.
+    Auth {
+        authorization: String,
+        workspace: Option<String>,
+    },
     /// `{ "unsubscribe": "<messageId>" }`
     Unsubscribe { message_id: String },
     /// A method call.
@@ -129,13 +133,25 @@ pub fn parse_message(value: &Value) -> Result<WsMessage, MessageError> {
     let object = object_of(value, "message").map_err(MessageError::format)?;
 
     if object.contains_key("authorization") {
-        reject_unknown(object, &["authorization"], "").map_err(MessageError::auth)?;
+        reject_unknown(object, &["authorization", "workspace"], "").map_err(MessageError::auth)?;
         let authorization = object["authorization"]
             .as_str()
             .ok_or_else(|| MessageError::auth("authorization: Invalid input: expected string"))?;
+        let workspace = match object.get("workspace") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(workspace)) => {
+                Some(workspace.trim().to_string()).filter(|w| !w.is_empty())
+            }
+            Some(_) => {
+                return Err(MessageError::auth(
+                    "workspace: Invalid input: expected string",
+                ))
+            }
+        };
 
         return Ok(WsMessage::Auth {
             authorization: authorization.to_string(),
+            workspace,
         });
     }
 
@@ -270,7 +286,8 @@ mod tests {
         assert_eq!(
             parse_message(&json!({ "authorization": "token" })).unwrap(),
             WsMessage::Auth {
-                authorization: "token".to_string()
+                authorization: "token".to_string(),
+                workspace: None,
             }
         );
     }

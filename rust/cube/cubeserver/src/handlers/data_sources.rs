@@ -194,7 +194,7 @@ pub async fn test(
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
-    name: String,
+    pub(crate) name: String,
     variables: BTreeMap<String, String>,
 }
 
@@ -422,6 +422,13 @@ async fn v1<R: IntoResponse>(
     ctx: &RequestContext,
     handler: impl std::future::Future<Output = Result<R, ApiError>>,
 ) -> Response {
+    // With RBAC on, data sources are managed per organization
+    // (`/v1/organizations/{id}/connections`); these routes see them all.
+    if state.rbac.is_some() && !ctx.platform_admin {
+        return ApiError::forbidden("Only platform admins manage /v1/data-sources")
+            .for_context(state, ctx)
+            .into_response();
+    }
     v1_scoped(state, ctx, SCOPE, handler).await
 }
 
@@ -483,7 +490,12 @@ pub async fn v1_create(
     Extension(ctx): Extension<RequestContext>,
     request: Json<CreateRequest>,
 ) -> Response {
-    v1(&state, &ctx, create(State(state.clone()), request)).await
+    v1(
+        &state,
+        &ctx,
+        create_unless_tracked(State(state.clone()), request),
+    )
+    .await
 }
 
 /// `PUT /v1/data-sources/:name`
@@ -502,7 +514,43 @@ pub async fn v1_delete(
     Extension(ctx): Extension<RequestContext>,
     name: UrlPath<String>,
 ) -> Response {
-    v1(&state, &ctx, delete(State(state.clone()), name)).await
+    v1(
+        &state,
+        &ctx,
+        delete_with_its_grants(State(state.clone()), name),
+    )
+    .await
+}
+
+/// `POST /playground/data-sources`, and [`v1_create`]'s work: with RBAC on, a
+/// name an organization still holds a connection row for is refused, so the
+/// new source cannot inherit that row's grants.
+pub async fn create_unless_tracked(
+    State(state): State<AppState>,
+    request: Json<CreateRequest>,
+) -> Result<Response, ApiError> {
+    if let Some(rbac) = state.rbac.as_deref() {
+        crate::rbac::handlers::connections::refuse_tracked_name(rbac, &request.name).await?;
+    }
+    create(State(state.clone()), request)
+        .await
+        .map(IntoResponse::into_response)
+}
+
+/// `DELETE /playground/data-sources/:name`, and [`v1_delete`]'s work: with
+/// RBAC on, the connection's grants and row go too.
+pub async fn delete_with_its_grants(
+    State(state): State<AppState>,
+    name: UrlPath<String>,
+) -> Result<Response, ApiError> {
+    match state.rbac.as_deref() {
+        Some(rbac) => {
+            crate::rbac::handlers::connections::delete_with_grants(&state, rbac, &name).await
+        }
+        None => delete(State(state.clone()), name)
+            .await
+            .map(IntoResponse::into_response),
+    }
 }
 
 /// Where `/v1/execute` runs a statement.
@@ -540,7 +588,16 @@ pub async fn v1_execute(
     Extension(ctx): Extension<RequestContext>,
     Json(request): Json<ExecuteRequest>,
 ) -> Response {
-    v1_scoped(&state, &ctx, EXECUTE_SCOPE, execute(&state, request)).await
+    let handler = async {
+        // With RBAC on: the workspace's owners, on its released connections.
+        let named = match &request.connection {
+            Some(Connection::Name(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        crate::rbac::enforce::authorize_execute(&state, &ctx, named).await?;
+        execute(&state, request).await
+    };
+    v1_scoped(&state, &ctx, EXECUTE_SCOPE, handler).await
 }
 
 async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value>, ApiError> {
@@ -654,6 +711,23 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
         "truncated": row_count > EXECUTE_MAX_ROWS,
         "ms": started.elapsed().as_millis() as u64,
     })))
+}
+
+/// Each data source's type, by name: as `cube.yml` has them now, or as the
+/// server started with when there is no file or it cannot be read.
+pub(crate) fn data_source_types(state: &AppState) -> BTreeMap<String, String> {
+    let from_file = state.config.config_file.as_ref().and_then(|path| {
+        load(path, &env_with_file(&path.with_file_name(".env")))
+            .ok()
+            .map(|config| {
+                config
+                    .data_sources
+                    .values()
+                    .map(|ds| (ds.name.clone(), ds.db_type.clone()))
+                    .collect()
+            })
+    });
+    from_file.unwrap_or_else(|| state.config.data_sources.iter().cloned().collect())
 }
 
 struct Paths {
@@ -942,7 +1016,7 @@ fn clean(variables: &BTreeMap<String, String>) -> Result<BTreeMap<String, String
 
 /// Lower case, digits and `_`, starting with a letter: it becomes part of
 /// `CUBEJS_DS_<NAME>_*` and of `data_source:` in the model.
-fn validate_name(name: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), ApiError> {
     let valid = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         && name
             .chars()

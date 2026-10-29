@@ -1,0 +1,294 @@
+import {
+  Alert, Button, Card, Input, message, Popconfirm, Select, Space, Table, Tag, Typography,
+} from 'antd';
+import { useEffect, useState } from 'react';
+
+import { useIsMounted } from '../../hooks';
+import {
+  AdminApi, Connection, DataSource, Organization, PAGE_SIZE, Workspace,
+} from './api';
+import { NameDialog, NameValues } from './NameDialog';
+import { RemoteSelect, userOptions } from './RemoteSelect';
+import { useSearch } from './useSearch';
+
+type Props = {
+  api: AdminApi;
+  // Opens the Workspaces tab on one organization's workspaces.
+  onShowWorkspaces: (org: string) => void;
+};
+
+export function OrganizationsTab({ api, onShowWorkspaces }: Props) {
+  const [selected, setSelected] = useState<Organization | null>(null);
+  const [dialog, setDialog] = useState<'new' | 'rename' | null>(null);
+  const {
+    q, setQ, page, setPage, result, loading, error, reload,
+  } = useSearch((term, p) => api.searchOrganizations(term, p), [api]);
+
+  // The listing's copy, so a rename shows; the chosen one when it is on
+  // another page.
+  const org = result?.items.find((o) => o.id === selected?.id) || selected;
+
+  async function save({ name, owner }: NameValues) {
+    if (dialog === 'new') {
+      const created = await api.createOrganization(name, owner!);
+      setSelected(created ?? null);
+    } else {
+      await api.renameOrganization(org!.id, name);
+    }
+    message.success(`${name} saved`);
+    reload();
+  }
+
+  return (
+    <>
+      <Space style={{ marginBottom: 16 }}>
+        <Button type="primary" onClick={() => setDialog('new')}>
+          New organization
+        </Button>
+      </Space>
+
+      <Input.Search
+        allowClear
+        placeholder="Search organizations by name or id"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+      />
+      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
+
+      <Table<Organization>
+        rowKey="id"
+        size="small"
+        loading={loading}
+        dataSource={result?.items || []}
+        pagination={{
+          current: page,
+          pageSize: PAGE_SIZE,
+          total: result?.total ?? 0,
+          onChange: setPage,
+          showSizeChanger: false,
+        }}
+        rowSelection={{
+          type: 'radio',
+          selectedRowKeys: selected ? [selected.id] : [],
+          onChange: (_, rows) => setSelected(rows[0] ?? null),
+        }}
+        onRow={(o) => ({ onClick: () => setSelected(o), style: { cursor: 'pointer' } })}
+        columns={[
+          { title: 'Organization', dataIndex: 'name' },
+          { title: 'Created by', dataIndex: 'createdBy', render: (v) => v || '—' },
+          { title: 'Created', dataIndex: 'createdAt', render: (v) => new Date(v).toLocaleString() },
+        ]}
+      />
+
+      {org ? (
+        <OrganizationCard
+          key={org.id}
+          api={api}
+          org={org}
+          onRename={() => setDialog('rename')}
+          onShowWorkspaces={() => onShowWorkspaces(org.id)}
+          onDeleted={async () => {
+            setSelected(null);
+            reload();
+          }}
+        />
+      ) : null}
+
+      <NameDialog
+        title={dialog && (dialog === 'new' ? 'New organization' : 'Rename organization')}
+        initialName={dialog === 'rename' ? org?.name : ''}
+        choice={dialog === 'new' ? {
+          field: 'owner',
+          label: 'Owner',
+          message: 'Pick the first owner',
+          fetchOptions: userOptions(api),
+        } : undefined}
+        onSubmit={save}
+        onClose={() => setDialog(null)}
+      />
+    </>
+  );
+}
+
+type CardProps = {
+  api: AdminApi;
+  org: Organization;
+  onRename: () => void;
+  onShowWorkspaces: () => void;
+  onDeleted: () => Promise<void>;
+};
+
+function OrganizationCard({
+  api, org, onRename, onShowWorkspaces, onDeleted,
+}: CardProps) {
+  const isMounted = useIsMounted();
+  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [owner, setOwner] = useState<string | undefined>();
+  const [dataSource, setDataSource] = useState<string | undefined>();
+
+  async function loadWorkspaces() {
+    try {
+      const loaded = await api.workspaces(org.id);
+      if (isMounted()) {
+        setWorkspaces(loaded);
+      }
+    } catch (e: any) {
+      message.error(e.message);
+    }
+  }
+
+  async function loadConnections() {
+    try {
+      const [loaded, sources] = await Promise.all([
+        api.connections(org.id),
+        api.assignableDataSources(),
+      ]);
+      if (isMounted()) {
+        setConnections(loaded);
+        setDataSources(sources);
+      }
+    } catch (e: any) {
+      message.error(e.message);
+    }
+  }
+
+  useEffect(() => {
+    loadWorkspaces();
+    loadConnections();
+  }, [org.id]);
+
+  async function act(action: () => Promise<unknown>, done: string, reload?: () => Promise<void>) {
+    try {
+      await action();
+      message.success(done);
+      await reload?.();
+      return true;
+    } catch (e: any) {
+      message.error(e.message);
+      return false;
+    }
+  }
+
+  return (
+    <Card
+      size="small"
+      style={{ marginTop: 16 }}
+      title={org.name}
+      extra={(
+        <Space>
+          <Button size="small" onClick={onRename}>Rename</Button>
+          <Popconfirm
+            title={`Delete ${org.name}? It must have no workspaces or connections left.`}
+            onConfirm={() => act(() => api.deleteOrganization(org.id), `${org.name} deleted`, onDeleted)}
+          >
+            <Button size="small" danger>Delete</Button>
+          </Popconfirm>
+        </Space>
+      )}
+    >
+      <Typography.Text strong>Owners</Typography.Text>
+      <div>
+        <Typography.Text type="secondary">
+          Owners administer the organization: its workspaces, members and connections.
+        </Typography.Text>
+      </div>
+      <Space style={{ marginTop: 8, marginBottom: 16 }}>
+        <RemoteSelect
+          size="small"
+          placeholder="User"
+          style={{ width: 200 }}
+          value={owner}
+          onChange={setOwner}
+          fetchOptions={userOptions(api)}
+        />
+        <Button
+          size="small"
+          disabled={!owner}
+          onClick={() => act(() => api.addOwner(org.id, owner!), `${owner} is an owner of ${org.name}`)}
+        >
+          Make owner
+        </Button>
+        <Popconfirm
+          title={`Remove ${owner} as an owner of ${org.name}?`}
+          disabled={!owner}
+          onConfirm={() => act(() => api.removeOwner(org.id, owner!), `${owner} is no longer an owner`)}
+        >
+          <Button size="small" danger disabled={!owner}>Remove owner</Button>
+        </Popconfirm>
+      </Space>
+
+      <Typography.Text strong>Connections</Typography.Text>
+      <div>
+        {connections.length ? connections.map((c) => (
+          <Space key={c.name} style={{ marginRight: 16 }}>
+            <Typography.Text code>{c.name}</Typography.Text>
+            {c.origin === 'assigned' ? (
+              <>
+                <Tag title="Assigned by a platform admin: the organization uses and releases it, only platform admins edit or delete it">
+                  assigned
+                </Tag>
+                <Popconfirm
+                  title={`Unassign ${c.name} from ${org.name}? Its releases to the organization's workspaces are withdrawn; the data source stays.`}
+                  onConfirm={() => act(
+                    () => api.unassignConnection(c.name),
+                    `${c.name} no longer belongs to ${org.name}`,
+                    loadConnections
+                  )}
+                >
+                  <Button size="small" danger>Unassign</Button>
+                </Popconfirm>
+              </>
+            ) : (
+              <Tag title="Created by the organization: its owners edit and delete it">created</Tag>
+            )}
+          </Space>
+        )) : <Typography.Text type="secondary">None yet.</Typography.Text>}
+      </div>
+      <Space style={{ marginTop: 8, marginBottom: 16 }}>
+        <Select
+          size="small"
+          placeholder="Data source"
+          style={{ width: 200 }}
+          value={dataSource}
+          onChange={setDataSource}
+          options={dataSources
+            .map((ds) => ({ value: ds.name, label: ds.type ? `${ds.name} (${ds.type})` : ds.name }))}
+        />
+        <Popconfirm
+          title={`Assign ${dataSource} to ${org.name}? Its owners can release it to their workspaces, but only platform admins edit or delete it.`}
+          disabled={!dataSource}
+          onConfirm={async () => {
+            if (await act(
+              () => api.assignConnection(dataSource!, org.id),
+              `${dataSource} belongs to ${org.name}`,
+              loadConnections
+            )) {
+              setDataSource(undefined);
+            }
+          }}
+        >
+          <Button size="small" disabled={!dataSource}>Add to organization</Button>
+        </Popconfirm>
+      </Space>
+
+      <Typography.Text strong>Workspaces</Typography.Text>
+      <div style={{ marginTop: 8 }}>
+        {workspaces == null ? (
+          <Typography.Text type="secondary">Loading...</Typography.Text>
+        ) : (
+          <Space>
+            <Typography.Text>
+              {workspaces.length === 1 ? '1 workspace' : `${workspaces.length} workspaces`}
+            </Typography.Text>
+            <Button size="small" type="link" onClick={onShowWorkspaces}>
+              Open in Workspaces
+            </Button>
+          </Space>
+        )}
+      </div>
+    </Card>
+  );
+}

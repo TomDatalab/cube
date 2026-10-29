@@ -86,8 +86,12 @@ impl SubscriptionServer {
 
     async fn handle_message(&self, connection_id: &str, message: WsMessage, is_subscription: bool) {
         match message {
-            WsMessage::Auth { authorization } => {
-                self.handle_auth(connection_id, &authorization).await;
+            WsMessage::Auth {
+                authorization,
+                workspace,
+            } => {
+                self.handle_auth(connection_id, &authorization, workspace)
+                    .await;
             }
             WsMessage::Unsubscribe { message_id } => {
                 self.store.unsubscribe(connection_id, &message_id).await;
@@ -99,9 +103,18 @@ impl SubscriptionServer {
         }
     }
 
-    async fn handle_auth(&self, connection_id: &str, authorization: &str) {
-        match self.state.auth.authenticate(Some(authorization)).await {
-            Ok(authenticated) => {
+    async fn handle_auth(
+        &self,
+        connection_id: &str,
+        authorization: &str,
+        workspace: Option<String>,
+    ) {
+        let authenticated = match self.state.auth.authenticate(Some(authorization)).await {
+            Ok(authenticated) => self.resolve_rbac_identity(authenticated).await,
+            Err(err) => Err(err),
+        };
+        match authenticated {
+            Ok((authenticated, user, platform_admin)) => {
                 self.store
                     .set_auth_context(
                         connection_id,
@@ -110,6 +123,10 @@ impl SubscriptionServer {
                             security_context: authenticated.security_context,
                             signed_with_playground_auth_secret: authenticated
                                 .signed_with_playground_auth_secret,
+                            // Only RBAC reads it, as it does the header.
+                            workspace: workspace.filter(|_| self.state.rbac.is_some()),
+                            user,
+                            platform_admin,
                             token_verified: authenticated.token_verified,
                         },
                     )
@@ -129,6 +146,23 @@ impl SubscriptionServer {
         }
     }
 
+    /// With RBAC on, the connection carries the token's user, or is refused
+    /// like an HTTP request would be.
+    async fn resolve_rbac_identity(
+        &self,
+        authenticated: crate::services::AuthenticatedRequest,
+    ) -> Result<(crate::services::AuthenticatedRequest, Option<String>, bool), ApiError> {
+        match &self.state.rbac {
+            Some(rbac) => {
+                let (user, platform_admin) =
+                    crate::rbac::identity::resolve_identity(rbac, &authenticated.security_context)
+                        .await?;
+                Ok((authenticated, Some(user), platform_admin))
+            }
+            None => Ok((authenticated, None, false)),
+        }
+    }
+
     async fn handle_method(
         &self,
         connection_id: &str,
@@ -144,6 +178,52 @@ impl SubscriptionServer {
             )
             .await;
             return;
+        };
+
+        // With RBAC on, the user is checked again before every method and
+        // every subscription re-run: a disabled user, one whose password
+        // changed, or one whose token expired loses the connection at the
+        // next tick.
+        let auth_context = match &self.state.rbac {
+            None => auth_context,
+            Some(rbac) => {
+                let identity =
+                    if crate::rbac::identity::token_expired(&auth_context.security_context) {
+                        Err(ApiError::new(
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Token expired",
+                        ))
+                    } else {
+                        crate::rbac::identity::resolve_identity(
+                            rbac,
+                            &auth_context.security_context,
+                        )
+                        .await
+                    };
+                match identity {
+                    Ok((user, platform_admin)) => RequestContext {
+                        user: Some(user),
+                        platform_admin,
+                        ..auth_context
+                    },
+                    Err(err) => {
+                        // 401: the identity is gone, so are the connection's
+                        // subscriptions and authorization. 503 is transient and
+                        // keeps them for the next tick.
+                        if err.status == axum::http::StatusCode::UNAUTHORIZED {
+                            self.store.disconnect(connection_id).await;
+                        }
+                        self.send_error(
+                            connection_id,
+                            Some(message.message_id.clone()),
+                            err.status.as_u16(),
+                            &err.body.error,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
         };
 
         let subscription_id = message.message_id.clone();

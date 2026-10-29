@@ -101,6 +101,10 @@ pub struct PlannerPool {
     jobs: Sender<Job>,
     workers: usize,
     model_path: PathBuf,
+    /// The data source of every cube and member, shared by the workers: the
+    /// one snapshot that decides where a query runs, and what the RBAC
+    /// checks read ([`Self::data_sources`]).
+    data_sources: Arc<DataSources>,
 }
 
 impl std::fmt::Debug for PlannerPool {
@@ -152,6 +156,8 @@ impl PlannerPool {
         let by_data_source = Arc::new(by_data_source);
         // Fail fast on a broken model instead of inside every worker.
         Model::from_dir_with_context(&model_path, &context)?;
+        let data_sources =
+            Arc::new(DataSources::load(&model_path, &context).map_err(PlannerError::model)?);
 
         let workers = workers.max(1);
         let (jobs, receiver) = mpsc::channel::<Job>();
@@ -162,9 +168,12 @@ impl PlannerPool {
             let path = model_path.clone();
             let context = context.clone();
             let by_data_source = by_data_source.clone();
+            let sources = data_sources.clone();
             thread::Builder::new()
                 .name(format!("cube-planner-{index}"))
-                .spawn(move || Self::worker(receiver, path, dialect, by_data_source, context))
+                .spawn(move || {
+                    Self::worker(receiver, path, dialect, by_data_source, context, sources)
+                })
                 .map_err(|e| {
                     PlannerError::model(format!("Failed to spawn a planner thread: {e}"))
                 })?;
@@ -174,7 +183,13 @@ impl PlannerPool {
             jobs,
             workers,
             model_path,
+            data_sources,
         })
+    }
+
+    /// The data-source snapshot the workers plan with.
+    pub fn data_sources(&self) -> Arc<DataSources> {
+        self.data_sources.clone()
     }
 
     fn worker(
@@ -183,15 +198,12 @@ impl PlannerPool {
         dialect: Dialect,
         by_data_source: Arc<HashMap<String, Dialect>>,
         context: cubemodel::TemplateContext,
+        sources: Arc<DataSources>,
     ) {
-        let compiled = Model::from_dir_with_context(&model_path, &context)
-            .map_err(|err| err.message())
-            .and_then(|model| {
-                let sources = DataSources::load(&model_path, &context)?;
-                Ok((model, sources))
-            });
-        let (model, sources) = match compiled {
-            Ok(compiled) => compiled,
+        let compiled =
+            Model::from_dir_with_context(&model_path, &context).map_err(|err| err.message());
+        let model = match compiled {
+            Ok(model) => model,
             Err(message) => {
                 // The model compiled at start-up, so this is unexpected;
                 // answer every job with the error rather than exiting quietly.
@@ -314,6 +326,11 @@ impl PlannerQueryService {
         })
     }
 
+    /// The data-source snapshot this planner runs queries with.
+    pub fn data_sources(&self) -> Arc<DataSources> {
+        self.pool.data_sources()
+    }
+
     /// A planning failure caused by the request is a client error; anything
     /// else is not, like `ApiGateway.handleError`.
     fn api_error(failure: PlanFailure) -> ApiError {
@@ -403,7 +420,8 @@ impl PlannerQueryService {
 
 /// Which data source each cube and member of a model reads from, as
 /// `CompilerApi.memberToDataSource` answers it.
-struct DataSources {
+#[derive(Debug)]
+pub struct DataSources {
     /// `cube.member` → data source; a view's member maps to the data source
     /// of the cube it was included from.
     members: HashMap<String, String>,
@@ -412,7 +430,7 @@ struct DataSources {
 }
 
 impl DataSources {
-    fn load(model_path: &Path, context: &cubemodel::TemplateContext) -> Result<Self, String> {
+    pub fn load(model_path: &Path, context: &cubemodel::TemplateContext) -> Result<Self, String> {
         let model = cubemodel::ModelLoader::with_context(context.clone())
             .load_dir_with(model_path)
             .map_err(|e| e.to_string())?;
@@ -436,6 +454,47 @@ impl DataSources {
         })
     }
 
+    /// The data source one member (`cube.member`, optionally followed by a
+    /// granularity) or cube name reads from; `None` when the model has no
+    /// such cube or view member. A view's member answers its source cube's.
+    pub fn data_source_of(&self, name: &str) -> Option<&str> {
+        let mut path = name.split('.');
+        let cube = path.next()?;
+        match path.next() {
+            Some(member) => self
+                .members
+                .get(&format!("{cube}.{member}"))
+                .or_else(|| self.cubes.get(cube)),
+            None => self.cubes.get(cube),
+        }
+        .map(String::as_str)
+    }
+
+    /// Every data source `members` read from, `default` included by name.
+    /// Unlike [`Self::of_query`], several are not an error, and a name the
+    /// model does not know is left out.
+    pub fn data_sources_of(&self, members: &[String]) -> BTreeSet<String> {
+        members
+            .iter()
+            .filter_map(|name| self.data_source_of(name))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The data sources of a cube (one) or of a view (those of every member
+    /// it includes). Empty for a name the model does not know.
+    pub fn data_sources_of_cube(&self, cube: &str) -> BTreeSet<String> {
+        if let Some(data_source) = self.cubes.get(cube) {
+            return BTreeSet::from([data_source.clone()]);
+        }
+        let prefix = format!("{cube}.");
+        self.members
+            .iter()
+            .filter(|(member, _)| member.starts_with(&prefix))
+            .map(|(_, data_source)| data_source.clone())
+            .collect()
+    }
+
     /// The one data source `members` read from, `None` for the default one.
     ///
     /// A query spanning two data sources is refused, as the Node.js
@@ -443,18 +502,7 @@ impl DataSources {
     fn of_query(&self, members: &[String]) -> Result<Option<String>, PlanFailure> {
         let found: BTreeSet<&str> = members
             .iter()
-            .filter_map(|name| {
-                let mut path = name.split('.');
-                let cube = path.next()?;
-                match path.next() {
-                    Some(member) => self
-                        .members
-                        .get(&format!("{cube}.{member}"))
-                        .or_else(|| self.cubes.get(cube)),
-                    None => self.cubes.get(cube),
-                }
-            })
-            .map(String::as_str)
+            .filter_map(|name| self.data_source_of(name))
             .collect();
 
         let mut found = found.into_iter();
@@ -548,6 +596,10 @@ fn query_members(query: &Value) -> Vec<String> {
 
 #[async_trait]
 impl QueryService for PlannerQueryService {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        Some(self.pool.data_sources())
+    }
+
     async fn sql(
         &self,
         ctx: &RequestContext,
@@ -653,6 +705,35 @@ views:
     fn a_view_member_runs_where_its_cube_does() {
         let query = json!({ "measures": ["activity.count"], "dimensions": ["activity.kind"] });
         assert_eq!(of(query).unwrap().as_deref(), Some("warehouse"));
+    }
+
+    #[test]
+    fn data_sources_of_names_every_source_and_the_default_one() {
+        let sources = sources();
+        let members = query_members(&json!({
+            "measures": ["orders.count"],
+            "filters": [{ "or": [{ "member": "activity.kind", "operator": "set" }] }],
+        }));
+        assert_eq!(
+            sources.data_sources_of(&members),
+            BTreeSet::from(["default".to_string(), "warehouse".to_string()])
+        );
+        assert_eq!(sources.data_source_of("nowhere.count"), None);
+        assert_eq!(sources.data_source_of("activity"), None);
+    }
+
+    #[test]
+    fn a_view_spans_the_sources_of_its_members() {
+        let sources = sources();
+        assert_eq!(
+            sources.data_sources_of_cube("activity"),
+            BTreeSet::from(["warehouse".to_string()])
+        );
+        assert_eq!(
+            sources.data_sources_of_cube("orders"),
+            BTreeSet::from(["default".to_string()])
+        );
+        assert!(sources.data_sources_of_cube("nowhere").is_empty());
     }
 
     #[test]

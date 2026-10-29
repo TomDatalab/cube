@@ -1,6 +1,7 @@
 import { Meta, Query } from '@cubejs-client/core';
 import * as t from 'graphql/language';
 
+import { apiFetch } from '../../shared/helpers';
 import { unCapitalize } from './uncapitalize';
 import { uniqArray } from './uniq-array';
 
@@ -21,7 +22,7 @@ export async function convertGraphQLToJsonQuery({
     return '{}';
   }
 
-  const r = await fetch(apiUrl + API_SUFFIX, {
+  const r = await apiFetch(apiUrl + API_SUFFIX, {
     method: 'POST',
     headers: {
       Authorization: apiToken || '',

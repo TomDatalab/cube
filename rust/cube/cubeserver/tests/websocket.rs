@@ -127,6 +127,7 @@ fn state(query: Arc<dyn QueryService>) -> AppState {
         graphql: Default::default(),
         ws: Default::default(),
         tenants: None,
+        rbac: None,
     }
 }
 

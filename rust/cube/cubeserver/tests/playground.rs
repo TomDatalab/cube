@@ -111,6 +111,7 @@ fn app(config: ServerConfig, auth: Arc<dyn AuthService>) -> axum::Router {
         graphql: Default::default(),
         ws: Default::default(),
         tenants: None,
+        rbac: None,
     })
 }
 
@@ -228,8 +229,8 @@ async fn the_connector_status_reflects_what_this_build_carries() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "installed");
 
-    // Known to Cube, no Rust driver.
-    let (_, body) = get_json(router(), "/playground/driver?driver=athena").await;
+    // Known to Cube, never ported: it needs a JVM.
+    let (_, body) = get_json(router(), "/playground/driver?driver=jdbc").await;
     assert_eq!(body["status"], "error");
 
     let (status, _) = get_json(router(), "/playground/driver?driver=nonsense").await;

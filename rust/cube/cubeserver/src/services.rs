@@ -20,6 +20,13 @@ pub struct RequestContext {
     pub request_id: String,
     pub security_context: Value,
     pub signed_with_playground_auth_secret: bool,
+    /// RBAC only: the `X-Cube-Workspace` header.
+    pub workspace: Option<String>,
+    /// RBAC only: the user the token speaks for (`sub`, checked against the
+    /// users table on every request).
+    pub user: Option<String>,
+    /// RBAC only: whether `user` is a platform admin.
+    pub platform_admin: bool,
     /// The request carried a token that verified. With security checks off
     /// a request without one is let through too, with the default scopes.
     pub token_verified: bool,
@@ -97,6 +104,13 @@ pub struct NormalizedRequest {
 /// same body shape as the Node.js gateway errors.
 #[async_trait]
 pub trait QueryService: Send + Sync + Debug {
+    /// The data-source snapshot this service plans with: which data source
+    /// each cube and member reads from. The RBAC checks read the same one, so
+    /// what is checked is what runs. `None` when the service plans nothing.
+    fn data_sources(&self) -> Option<Arc<crate::planner_adapter::DataSources>> {
+        None
+    }
+
     async fn load(
         &self,
         _ctx: &RequestContext,

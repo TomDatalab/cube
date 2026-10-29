@@ -12,6 +12,8 @@ use crate::services::RequestContext;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const CUBE_AUTHORIZATION_HEADER: &str = "x-cube-authorization";
+/// RBAC: the workspace a data request runs in.
+pub const WORKSPACE_HEADER: &str = "x-cube-workspace";
 
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -35,24 +37,55 @@ pub async fn auth_middleware(
             value
                 .to_str()
                 .map_err(|_| {
-                    ApiError::forbidden("Invalid token")
-                        .with_request_id_if(state.config.dev_mode, &request_id)
+                    // With RBAC on, any unusable token is 401.
+                    match state.rbac {
+                        Some(_) => crate::rbac::unauthenticated(),
+                        None => ApiError::forbidden("Invalid token"),
+                    }
+                    .with_request_id_if(state.config.dev_mode, &request_id)
                 })?
                 .to_string(),
         ),
         None => None,
     };
 
-    let authenticated = state
-        .auth
-        .authenticate(authorization.as_deref())
-        .await
-        .map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?;
+    let authenticated = state.auth.authenticate(authorization.as_deref()).await;
+
+    // With RBAC on, every request speaks for a user: a missing or invalid
+    // token is 401, and the user is checked against the users table.
+    let (authenticated, user, platform_admin, workspace) = match &state.rbac {
+        None => (
+            authenticated.map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?,
+            None,
+            false,
+            None,
+        ),
+        Some(rbac) => {
+            let authenticated = authenticated.map_err(|_| {
+                crate::rbac::unauthenticated()
+                    .with_request_id_if(state.config.dev_mode, &request_id)
+            })?;
+            let (user, platform_admin) =
+                crate::rbac::identity::resolve_identity(rbac, &authenticated.security_context)
+                    .await
+                    .map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?;
+            let workspace = req
+                .headers()
+                .get(WORKSPACE_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+            (authenticated, Some(user), platform_admin, workspace)
+        }
+    };
 
     req.extensions_mut().insert(RequestContext {
         request_id,
         security_context: authenticated.security_context,
         signed_with_playground_auth_secret: authenticated.signed_with_playground_auth_secret,
+        workspace,
+        user,
+        platform_admin,
         token_verified: authenticated.token_verified,
     });
 
