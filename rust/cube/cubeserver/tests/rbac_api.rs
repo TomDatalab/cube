@@ -556,6 +556,39 @@ db_test!(a_websocket_loses_its_user_at_the_next_message, |store| {
     assert_eq!(recorder.last().await["status"], json!(403));
 });
 
+db_test!(a_websocket_loses_its_user_when_the_token_expires, |store| {
+    let mut config = rbac_config(Duration::ZERO);
+    config.token_ttl = Duration::from_secs(2);
+    let env = env_with(store, config).await;
+    let user = cubeserver::rbac::store::NewUser {
+        id: "ann".into(),
+        name: None,
+        email: None,
+        password_hash: hash_password("ann-password-1").unwrap(),
+    };
+    env.rbac.store.create_user(&user).await.unwrap();
+    let token = login_token(&env.router, "ann", "ann-password-1").await;
+
+    let recorder = Arc::new(Recorder::default());
+    let server =
+        cubeserver::ws::SubscriptionServer::new(state(Some(env.rbac.clone())), recorder.clone());
+    let meta_message = |id: u32| json!({ "method": "meta", "messageId": id }).to_string();
+    server
+        .process_message("c1", &json!({ "authorization": token }).to_string())
+        .await;
+    assert_eq!(recorder.last().await, json!({ "handshake": true }));
+    server.process_message("c1", &meta_message(0)).await;
+    assert_eq!(recorder.last().await, json!({ "messageProcessedId": "0" }));
+
+    // Past `exp`: the next method (as every subscription re-run) is refused
+    // and the connection loses its authorization.
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    server.process_message("c1", &meta_message(1)).await;
+    assert_eq!(recorder.last().await["status"], json!(401));
+    server.process_message("c1", &meta_message(2)).await;
+    assert_eq!(recorder.last().await["status"], json!(403));
+});
+
 // ---- user management (platform admins) ----
 
 async fn admin_token(env: &Env) -> String {
@@ -1248,6 +1281,20 @@ db_test!(the_last_org_owner_cannot_be_removed, |store| {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Not an owner: 404 (and nothing changes), not a silent 204.
+    let (status, body) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("{owners}/caio"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("not an owner"),
+        "{body}"
+    );
 
     // With a second owner, the first can go.
     let (status, _) = send(
@@ -1568,6 +1615,82 @@ db_test!(disabled_users_get_no_roles, |store| {
     assert_eq!(body["error"], "User is disabled");
     let org = ObjectRef::new("organization", s.org_a.clone());
     assert!(!env.authz.check(&org, "view", "caio").await.unwrap());
+});
+
+db_test!(a_failed_delete_leaves_the_org_or_workspace_whole, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        set_role(env, &s.ana, &w1, "bia", "viewer").await,
+        StatusCode::OK
+    );
+    let ws_ref = ObjectRef::new("workspace", w1.clone());
+    let org_ref = ObjectRef::new("organization", s.org_a.clone());
+    let ana = s.ana.as_str();
+    let delete = |path: String| async move {
+        send(&env.router, Method::DELETE, &path, Some(ana), None)
+            .await
+            .0
+    };
+
+    env.authz.set_failing_writes(true);
+    assert_eq!(
+        delete(format!("/cube/v1/workspaces/{w1}")).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    env.authz.set_failing_writes(false);
+    // The row and every relationship are still there.
+    assert!(env
+        .rbac
+        .store
+        .workspace(w1.parse().unwrap())
+        .await
+        .unwrap()
+        .is_some());
+    assert!(env.authz.check(&ws_ref, "view", "bia").await.unwrap());
+    assert!(env.authz.check(&ws_ref, "manage", "ana").await.unwrap());
+
+    assert_eq!(
+        delete(format!("/cube/v1/workspaces/{w1}")).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(env
+        .rbac
+        .store
+        .workspace(w1.parse().unwrap())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!env.authz.check(&ws_ref, "view", "bia").await.unwrap());
+
+    env.authz.set_failing_writes(true);
+    assert_eq!(
+        delete(format!("/cube/v1/organizations/{}", s.org_a)).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    env.authz.set_failing_writes(false);
+    assert!(env
+        .rbac
+        .store
+        .organization(s.org_a.parse().unwrap())
+        .await
+        .unwrap()
+        .is_some());
+    assert!(env.authz.check(&org_ref, "admin", "ana").await.unwrap());
+
+    assert_eq!(
+        delete(format!("/cube/v1/organizations/{}", s.org_a)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(env
+        .rbac
+        .store
+        .organization(s.org_a.parse().unwrap())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!env.authz.check(&org_ref, "admin", "ana").await.unwrap());
 });
 
 // ---- connections ----
@@ -3507,6 +3630,129 @@ db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
     env.authz.set_failing(false);
     assert_eq!(d.queries.seen().len(), 1);
 });
+
+/// A load that runs until told to finish, and records cancels.
+#[derive(Debug)]
+struct BlockingQuery {
+    sources: Arc<DataSources>,
+    started: tokio::sync::Notify,
+    finish: tokio::sync::Notify,
+    cancelled: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl QueryService for BlockingQuery {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        Some(self.sources.clone())
+    }
+
+    async fn load(&self, _: &RequestContext, _: NormalizedRequest) -> Result<Value, ApiError> {
+        self.started.notify_one();
+        self.finish.notified().await;
+        Ok(json!({ "data": [] }))
+    }
+
+    async fn cancel_query(&self, _: &RequestContext, request_id: &str) -> Result<bool, ApiError> {
+        self.cancelled.lock().unwrap().push(request_id.to_string());
+        Ok(true)
+    }
+}
+
+db_test!(
+    only_the_user_who_runs_a_query_or_an_admin_cancels_it,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let inner = Arc::new(BlockingQuery {
+            sources: d.queries.data_sources().unwrap(),
+            started: Default::default(),
+            finish: Default::default(),
+            cancelled: Default::default(),
+        });
+        let service = Arc::new(cubeserver::rbac::enforce::RbacQueryService::new(
+            inner.clone(),
+            env.rbac.clone(),
+        ));
+        let ctx = |user: &str, platform_admin: bool| RequestContext {
+            request_id: "req-1-span-1".into(),
+            user: Some(user.into()),
+            workspace: Some(d.w1.clone()),
+            platform_admin,
+            ..RequestContext::default()
+        };
+        let value = json!({ "measures": ["a_orders.count"] });
+        let (query_type, queries) = cubequery::get_normalized_queries(
+            &value,
+            false,
+            None,
+            &cubequery::QueryConfig::default(),
+        )
+        .unwrap();
+        let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+        let request = NormalizedRequest {
+            query_type,
+            queries,
+            pivot_query,
+        };
+
+        // Nothing runs yet: 404 for everyone.
+        for (user, admin) in [("bia", false), (ADMIN, true)] {
+            let err = service
+                .cancel_query(&ctx(user, admin), "req-1")
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, StatusCode::NOT_FOUND, "{user}");
+        }
+
+        let load = {
+            let service = service.clone();
+            let ctx = ctx("bia", false);
+            tokio::spawn(async move { service.load(&ctx, request).await })
+        };
+        inner.started.notified().await;
+
+        // caio is in the workspace too, but did not start it.
+        let err = service
+            .cancel_query(&ctx("caio", false), "req-1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(service
+            .cancel_query(&ctx("bia", false), "req-1")
+            .await
+            .unwrap());
+        assert!(service
+            .cancel_query(&ctx(ADMIN, true), "req-1-span-7")
+            .await
+            .unwrap());
+        assert_eq!(*inner.cancelled.lock().unwrap(), ["req-1", "req-1-span-7"]);
+
+        // Finished: forgotten.
+        inner.finish.notify_one();
+        load.await.unwrap().unwrap();
+        let err = service
+            .cancel_query(&ctx("bia", false), "req-1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+);
+
+db_test!(
+    a_query_without_members_never_runs_for_a_workspace,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        for query in [json!({}), json!({ "measures": [] }), json!({ "limit": 10 })] {
+            let (status, body) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+            assert!(
+                status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN,
+                "{query}: {status} {body}"
+            );
+        }
+        assert!(d.queries.seen().is_empty(), "{:?}", d.queries.seen());
+    }
+);
 
 db_test!(
     the_websocket_names_its_workspace_when_authenticating,

@@ -184,7 +184,8 @@ pub async fn update(
 }
 
 /// `admin`. Refused (400) while the organization has workspaces or
-/// connections. Its relationships go first, then the row.
+/// connections. The row and its relationships go together: the row delete
+/// is committed only after SpiceDB's.
 pub async fn delete(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -208,6 +209,19 @@ pub async fn delete(
         return Err(in_use());
     }
 
+    // The row goes in a transaction committed only once SpiceDB forgot the
+    // organization: a failure leaves both or neither.
+    let tx = rbac
+        .store
+        .transaction()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    match tx.delete_organization(org.id).await {
+        Ok(_) => {}
+        // A workspace or connection was added meanwhile.
+        Err(StoreError::Conflict(_)) => return Err(in_use()),
+        Err(e) => return Err(store_error(e, "Conflict")),
+    }
     rbac.authz
         .delete_matching(&RelationshipFilter {
             kind: "organization",
@@ -216,14 +230,10 @@ pub async fn delete(
             subject: None,
         })
         .await
+        // Dropping `tx` rolls the row delete back.
         .map_err(authz_error)?;
-    match rbac.store.delete_organization(org.id).await {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
-        // A workspace or connection was added meanwhile: the row stays,
-        // unreachable, rather than dangling references.
-        Err(StoreError::Conflict(_)) => Err(in_use()),
-        Err(e) => Err(store_error(e, "Conflict")),
-    }
+    tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `admin`: makes an existing user an owner.
@@ -242,7 +252,8 @@ pub async fn add_owner(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `admin`. The last owner cannot be removed (400).
+/// `admin`. The last owner cannot be removed (400); a user who is not an
+/// owner answers 404.
 pub async fn remove_owner(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -267,7 +278,9 @@ pub async fn remove_owner(
         .map(|r| r.subject.id.as_str())
         .collect();
     if !owners.contains(&owner.as_str()) {
-        return Ok(StatusCode::NO_CONTENT);
+        return Err(ApiError::not_found(format!(
+            "{owner} is not an owner of this organization"
+        )));
     }
     // Remove only while another owner is still there: two concurrent
     // removals cannot leave the organization without owners.

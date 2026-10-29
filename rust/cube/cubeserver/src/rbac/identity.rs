@@ -142,6 +142,20 @@ pub async fn resolve_identity(
     Ok((user.id, platform_admin))
 }
 
+/// `true` once the token's `exp` (a NumericDate, seconds) has passed. A
+/// long-lived connection (a WebSocket) authenticated once checks it again
+/// before every method. Tokens without `exp` never expire here.
+pub fn token_expired(security_context: &Value) -> bool {
+    let Some(exp) = security_context.get("exp").and_then(Value::as_f64) else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(f64::MAX);
+    exp <= now
+}
+
 /// Milliseconds of a NumericDate. Rounded, not truncated: `x.123` is stored
 /// as a float slightly below or above it.
 fn iat_millis(iat: f64) -> i64 {

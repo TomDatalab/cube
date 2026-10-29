@@ -231,8 +231,9 @@ pub async fn update(
     Ok(Json(view(&ws)))
 }
 
-/// `organization#admin`. Its relationships, its objects' and its connection
-/// releases go first; then the row, which takes the objects with it.
+/// `organization#admin`. The row (which takes the objects with it) and the
+/// relationships of the workspace, its objects and its connection releases
+/// go together: the row delete is committed only after SpiceDB's.
 pub async fn delete(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -244,14 +245,20 @@ pub async fn delete(
         .await?;
 
     let members = read_members(rbac, ws.id).await?;
+    // The row (and its objects) go in a transaction committed only once
+    // SpiceDB forgot the workspace; a SpiceDB failure rolls it back. The
+    // workspace's own relationships go last, so a failure midway leaves it
+    // reachable, and its delete can be retried.
+    let tx = rbac
+        .store
+        .transaction()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    tx.delete_workspace(ws.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
     let subject = Some(workspace_ref(ws.id));
     let filters = [
-        RelationshipFilter {
-            kind: "workspace",
-            id: Some(ws.id.to_string()),
-            relation: None,
-            subject: None,
-        },
         RelationshipFilter {
             kind: "object",
             id: None,
@@ -264,20 +271,26 @@ pub async fn delete(
             relation: Some("workspace"),
             subject,
         },
+        RelationshipFilter {
+            kind: "workspace",
+            id: Some(ws.id.to_string()),
+            relation: None,
+            subject: None,
+        },
     ];
     for filter in &filters {
         rbac.authz
             .delete_matching(filter)
             .await
+            // Dropping `tx` rolls the row delete back.
             .map_err(authz_error)?;
     }
+    tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
+    // Only after the commit: a member's organization membership is dropped
+    // when this workspace gave their last role in it.
     for (member, _) in &members {
         drop_membership_if_roleless(rbac, ws.organization_id, ws.id, member).await?;
     }
-    rbac.store
-        .delete_workspace(ws.id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

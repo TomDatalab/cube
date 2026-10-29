@@ -40,6 +40,8 @@ pub struct Rbac {
     pub config: RbacConfig,
     /// Bounds concurrent argon2 runs (`config.max_concurrent_hashes`).
     hashing: Arc<Semaphore>,
+    /// Who runs each load, so only they (or a platform admin) cancel it.
+    pub running: enforce::RunningRequests,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -90,6 +92,7 @@ impl Rbac {
             store,
             config,
             hashing,
+            running: Default::default(),
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)

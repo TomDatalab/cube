@@ -275,6 +275,16 @@ fn columnar_response(
     }
 }
 
+/// The SQL API's configuration from the environment. Its users are the
+/// `CUBEJS_SQL_USER`/`CUBEJS_SQL_PASSWORD` ones only: no authenticator is
+/// ever set, so no Cube JWT (with RBAC on, a login token) opens the
+/// Postgres-wire API, which RBAC does not check.
+fn sql_api_config(model_path: &str) -> SqlApiConfig {
+    let mut config = SqlApiConfig::from_env(ModelSource::dir(model_path));
+    config.auth_config = SqlAuthConfig::from_env();
+    config
+}
+
 /// Starts the SQL API when a port is configured, mirroring Node's
 /// `CUBEJS_PG_SQL_PORT`.
 pub async fn start(
@@ -284,7 +294,7 @@ pub async fn start(
     planner_threads: usize,
     executor: Arc<dyn QueryExecutor>,
 ) -> Result<Option<SqlApi>, CubeError> {
-    let mut config = SqlApiConfig::from_env(ModelSource::dir(model_path));
+    let mut config = sql_api_config(model_path);
     if config.postgres_bind_address.is_none() {
         return Ok(None);
     }
@@ -297,7 +307,6 @@ pub async fn start(
         by_data_source,
     };
     config.executor = executor;
-    config.auth_config = SqlAuthConfig::from_env();
 
     let api = cubesqlbridge::start_sql_api(config).await?;
     api.spawn_processing_loops().await?;
@@ -355,4 +364,16 @@ impl crate::services::SqlConversionService for SqlApiConversionService {
 /// A statement the user wrote wrongly is a client error.
 fn conversion_error(err: CubeError) -> crate::error::ApiError {
     crate::error::ApiError::bad_request(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_token_ever_authenticates_on_the_sql_api() {
+        // With RBAC on a login JWT must never open the Postgres-wire API:
+        // the SQL API is built without an authenticator.
+        assert!(sql_api_config("model").authenticator.is_none());
+    }
 }

@@ -22,8 +22,9 @@
 //! is what runs. No snapshot, or SpiceDB or the RBAC database failing to
 //! answer, is a 503.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::extract::{Request, State};
@@ -210,7 +211,15 @@ fn check_queries(
         return Ok(());
     };
     for query in queries {
-        for member in members_of(query)? {
+        let members = members_of(query)?;
+        // No member, no data source to check: such a query must never run
+        // on whatever the planner would fall back to (`default`).
+        if members.is_empty() {
+            return Err(ApiError::forbidden(
+                "Permission denied: a query must name at least one member",
+            ));
+        }
+        for member in members {
             let cube = member.split('.').next().unwrap_or(&member);
             let of_cube = sources.data_sources_of_cube(cube);
             let allowed_here = match sources.data_source_of(&member) {
@@ -228,6 +237,89 @@ fn check_queries(
         }
     }
     Ok(())
+}
+
+/// How long a request is remembered as running at most, should its load
+/// never finish.
+const RUNNING_TTL: Duration = Duration::from_secs(3600);
+/// How many running requests are remembered at most; the oldest is
+/// forgotten first.
+const MAX_RUNNING: usize = 10_000;
+
+/// Who started each running load, by request id without its `-span-N`
+/// suffix (as a cancel names it), so only they or a platform admin may
+/// cancel it. An entry lives while a load of the request runs, bounded by
+/// [`RUNNING_TTL`] and [`MAX_RUNNING`].
+#[derive(Debug, Default)]
+pub struct RunningRequests {
+    /// request id → (user, loads running, started)
+    entries: Mutex<HashMap<String, (String, usize, Instant)>>,
+}
+
+fn request_uuid(request_id: &str) -> &str {
+    match request_id.rfind("-span-") {
+        Some(idx) => &request_id[..idx],
+        None => request_id,
+    }
+}
+
+impl RunningRequests {
+    /// Records `user` as running `request_id` until the guard is dropped.
+    /// The first user to run a request id keeps it.
+    pub fn start(&self, request_id: &str, user: &str) -> RunningGuard<'_> {
+        let key = request_uuid(request_id).to_string();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        entries.retain(|_, (_, _, started)| now.duration_since(*started) < RUNNING_TTL);
+        if !entries.contains_key(&key) && entries.len() >= MAX_RUNNING {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, (_, _, started))| *started)
+                .map(|(k, _)| k.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries
+            .entry(key.clone())
+            .and_modify(|(_, running, _)| *running += 1)
+            .or_insert_with(|| (user.to_string(), 1, now));
+        RunningGuard {
+            requests: self,
+            key,
+        }
+    }
+
+    /// The user running `request_id`, if any.
+    pub fn owner(&self, request_id: &str) -> Option<String> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .get(request_uuid(request_id))
+            .filter(|(_, _, started)| started.elapsed() < RUNNING_TTL)
+            .map(|(user, _, _)| user.clone())
+    }
+}
+
+/// Forgets the load when it finishes (or is dropped).
+pub struct RunningGuard<'a> {
+    requests: &'a RunningRequests,
+    key: String,
+}
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        let mut entries = self
+            .requests
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((_, running, _)) = entries.get_mut(&self.key) {
+            *running -= 1;
+            if *running == 0 {
+                entries.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// [`QueryService`] that checks the workspace's access before the inner one
@@ -270,6 +362,7 @@ impl QueryService for RbacQueryService {
         request: NormalizedRequest,
     ) -> Result<Value, ApiError> {
         self.authorize(ctx, &request).await?;
+        let _running = self.rbac.running.start(&ctx.request_id, user_of(ctx)?);
         self.inner.load(ctx, request).await
     }
 
@@ -291,11 +384,17 @@ impl QueryService for RbacQueryService {
         self.inner.dry_run(ctx, request).await
     }
 
-    /// Cancelling reads nothing; the request id is known only to whoever
-    /// started the query.
+    /// Only the user who started the request, or a platform admin, cancels
+    /// it. A request id that is not running here, or is another user's,
+    /// answers 404.
     async fn cancel_query(&self, ctx: &RequestContext, request_id: &str) -> Result<bool, ApiError> {
-        user_of(ctx)?;
-        self.inner.cancel_query(ctx, request_id).await
+        let user = user_of(ctx)?;
+        match self.rbac.running.owner(request_id) {
+            Some(owner) if owner == user || ctx.platform_admin => {
+                self.inner.cancel_query(ctx, request_id).await
+            }
+            _ => Err(ApiError::not_found("No running query with this request id")),
+        }
     }
 }
 
@@ -426,6 +525,55 @@ mod tests {
         )
         .unwrap();
         queries.remove(0)
+    }
+
+    #[test]
+    fn running_requests_remember_the_user_while_a_load_runs() {
+        let running = RunningRequests::default();
+        assert_eq!(running.owner("r1"), None);
+        let first = running.start("r1-span-1", "ann");
+        // Another span of the same request; another user cannot take it.
+        let second = running.start("r1-span-2", "bob");
+        assert_eq!(running.owner("r1").as_deref(), Some("ann"));
+        assert_eq!(running.owner("r1-span-9").as_deref(), Some("ann"));
+        drop(first);
+        assert_eq!(running.owner("r1").as_deref(), Some("ann"));
+        drop(second);
+        assert_eq!(running.owner("r1"), None);
+    }
+
+    #[test]
+    fn running_requests_are_bounded() {
+        let running = RunningRequests::default();
+        let guards: Vec<_> = (0..MAX_RUNNING + 1)
+            .map(|i| running.start(&format!("r{i}"), "ann"))
+            .collect();
+        assert!(running.entries.lock().unwrap().len() <= MAX_RUNNING);
+        assert_eq!(
+            running.owner(&format!("r{MAX_RUNNING}")).as_deref(),
+            Some("ann")
+        );
+        drop(guards);
+        assert!(running.entries.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_query_without_members_is_refused_for_a_workspace() {
+        // Whatever normalization lets through, a query naming no member
+        // never reaches the planner's `default` fallback unchecked.
+        let mut query =
+            serde_json::to_value(normalized(json!({ "measures": ["m.count"] }))).unwrap();
+        query["measures"] = json!([]);
+        let query: NormalizedQuery = serde_json::from_value(query).unwrap();
+        assert!(members_of(&query).unwrap().is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let sources =
+            DataSources::load(dir.path(), &cubemodel::TemplateContext::default()).unwrap();
+        let access = Access::Only(BTreeSet::from(["default".to_string()]));
+        let err = check_queries(&sources, &access, std::slice::from_ref(&query)).unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        // Platform admins are not checked at all.
+        assert!(check_queries(&sources, &Access::All, &[query]).is_ok());
     }
 
     #[test]

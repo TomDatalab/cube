@@ -181,14 +181,26 @@ impl SubscriptionServer {
         };
 
         // With RBAC on, the user is checked again before every method and
-        // every subscription re-run: a disabled user, or one whose password
-        // changed, loses the connection at the next tick.
+        // every subscription re-run: a disabled user, one whose password
+        // changed, or one whose token expired loses the connection at the
+        // next tick.
         let auth_context = match &self.state.rbac {
             None => auth_context,
             Some(rbac) => {
-                match crate::rbac::identity::resolve_identity(rbac, &auth_context.security_context)
-                    .await
-                {
+                let identity =
+                    if crate::rbac::identity::token_expired(&auth_context.security_context) {
+                        Err(ApiError::new(
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Token expired",
+                        ))
+                    } else {
+                        crate::rbac::identity::resolve_identity(
+                            rbac,
+                            &auth_context.security_context,
+                        )
+                        .await
+                    };
+                match identity {
                     Ok((user, platform_admin)) => RequestContext {
                         user: Some(user),
                         platform_admin,
