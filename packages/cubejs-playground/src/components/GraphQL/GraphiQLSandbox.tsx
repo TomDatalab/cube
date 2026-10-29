@@ -6,6 +6,7 @@ import { useMemo } from 'react';
 import 'graphiql/graphiql.min.css';
 
 import { useDeepMemo } from '../../hooks/deep-memo';
+import { apiFetch } from '../../shared/helpers';
 import { metaToTypes } from '../../utils';
 import { CubeGraphQLConverter } from './CubeGraphQLConverter';
 import { useSecurityContext, useToken } from '../../hooks';
@@ -61,6 +62,7 @@ export default function GraphiQLSandbox({
 
   const fetcher = useMemo(() => createGraphiQLFetcher({
     url: apiUrl.replace('/v1', '/graphql'),
+    fetch: apiFetch,
     headers: token
       ? {
         authorization: token,

@@ -1,8 +1,13 @@
 // With RBAC on, `playground/context` hands out no token (`authRequired`):
-// a platform admin logs in, and the token goes on every request after.
-// It lives in sessionStorage, so it ends with the tab.
+// a user logs in, and the token goes on every request after. Platform admins
+// see the whole Playground; anyone else gets the query builder and the
+// Frontend Integrations page, scoped to a workspace they pick.
+// Both live in sessionStorage, so they end with the tab.
 
 const STORAGE_KEY = 'cubePlaygroundSession';
+const WORKSPACE_KEY = 'cubePlaygroundWorkspace';
+
+export const WORKSPACE_HEADER = 'X-Cube-Workspace';
 
 export type Session = {
   token: string;
@@ -18,14 +23,41 @@ function storage(): Storage | null {
   }
 }
 
+function read(key: string): string | null {
+  try {
+    return storage()?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function write(key: string, value: string | null) {
+  try {
+    if (value == null) {
+      storage()?.removeItem(key);
+    } else {
+      storage()?.setItem(key, value);
+    }
+  } catch {
+    // Storage full or blocked: the value lasts until the next reload.
+  }
+}
+
+// Whether this page has seen a session: a 401 after it expired still has
+// to go back to the login.
+let hadSession = false;
+// One reload is enough, however many requests answer 401 at once.
+let reloading = false;
+
 export function getSession(): Session | null {
-  const raw = storage()?.getItem(STORAGE_KEY);
+  const raw = read(STORAGE_KEY);
   if (!raw) {
     return null;
   }
   try {
     const session: Session = JSON.parse(raw);
     if (session.token && Date.parse(session.expiresAt) > Date.now()) {
+      hadSession = true;
       return session;
     }
   } catch {
@@ -36,7 +68,8 @@ export function getSession(): Session | null {
 }
 
 export function logout() {
-  storage()?.removeItem(STORAGE_KEY);
+  write(STORAGE_KEY, null);
+  write(WORKSPACE_KEY, null);
 }
 
 export function authHeaders(): Record<string, string> {
@@ -44,9 +77,29 @@ export function authHeaders(): Record<string, string> {
   return session ? { Authorization: session.token } : {};
 }
 
+// The workspace data requests are scoped to; `null` sends no header, which
+// only platform admins may do ("Todos (admin)").
+export function getWorkspace(): string | null {
+  return read(WORKSPACE_KEY) || null;
+}
+
+export function setWorkspace(id: string | null) {
+  write(WORKSPACE_KEY, id || null);
+}
+
+export function workspaceHeaders(): Record<string, string> {
+  const workspace = getWorkspace();
+  return workspace ? { [WORKSPACE_HEADER]: workspace } : {};
+}
+
 // A request answered 401 while logged in: the token expired or was revoked.
-export function onUnauthorized(response: Response) {
-  if (response.status === 401 && getSession()) {
+// A 403 is a refusal for this user, not a lost session: callers show it.
+export function onUnauthorized(response: { status: number }) {
+  if (response.status !== 401 || reloading) {
+    return;
+  }
+  if (getSession() || hadSession) {
+    reloading = true;
     logout();
     window.location.reload();
   }
@@ -71,15 +124,14 @@ export async function login(
   if (!response.ok) {
     throw new Error(body?.error || `${response.status} ${response.statusText}`);
   }
-  if (!body?.user?.platformAdmin) {
-    throw new Error('The Playground is for platform admins');
-  }
 
   const session: Session = {
     token: body.token,
     expiresAt: body.expiresAt,
-    user: body.user,
+    user: { ...body.user, platformAdmin: Boolean(body.user?.platformAdmin) },
   };
-  storage()?.setItem(STORAGE_KEY, JSON.stringify(session));
+  write(STORAGE_KEY, JSON.stringify(session));
+  // A workspace picked by whoever used this tab before.
+  write(WORKSPACE_KEY, null);
   return session;
 }

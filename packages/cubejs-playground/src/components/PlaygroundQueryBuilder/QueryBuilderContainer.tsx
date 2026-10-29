@@ -7,7 +7,7 @@ import styled from 'styled-components';
 
 import { CubeLoader } from '../../atoms';
 import { useCloud } from '../../cloud';
-import { useAppContext, useCubejsApi, useSecurityContext } from '../../hooks';
+import { useAppContext, useCubejsApi, useRbac, useSecurityContext } from '../../hooks';
 import {
   RollupDesignerContext,
   useRollupDesignerContext,
@@ -132,6 +132,8 @@ function QueryTabsRenderer({
   const { location } = useHistory();
   const { setQuery, toggleModal, isLoading } = useRollupDesignerContext();
   const { isAddRollupButtonVisible } = useCloud();
+  // With RBAC on, the token is the user's: no security context to sign.
+  const { enabled: rbac } = useRbac();
 
   const params = new URLSearchParams(location.search);
   const query = JSON.parse(params.get('query') || 'null');
@@ -141,16 +143,18 @@ function QueryTabsRenderer({
       query={query}
       sidebar={(
         <Space direction="horizontal">
-          <Button
-            data-testid="security-context-btn"
-            isLoading={isLoading}
-            icon={<LockIcon />}
-            size="small"
-            type={securityContextToken ? 'primary' : 'secondary'}
-            onPress={onSecurityContextModalOpen}
-          >
-            {securityContextToken ? 'Edit' : 'Add'} Security Context
-          </Button>
+          {rbac ? null : (
+            <Button
+              data-testid="security-context-btn"
+              isLoading={isLoading}
+              icon={<LockIcon />}
+              size="small"
+              type={securityContextToken ? 'primary' : 'secondary'}
+              onPress={onSecurityContextModalOpen}
+            >
+              {securityContextToken ? 'Edit' : 'Add'} Security Context
+            </Button>
+          )}
 
           {isAddRollupButtonVisible == null || isAddRollupButtonVisible ? (
             <Button
@@ -180,7 +184,9 @@ function QueryTabsRenderer({
             schemaVersion={props.schemaVersion}
             extra={props.extra ?? null}
             RequestStatusComponent={RequestStatusComponent}
-            VizardComponent={Vizard}
+            // Vizard gets the token in its iframe URL and sends no workspace:
+            // not with RBAC on.
+            VizardComponent={rbac ? undefined : Vizard}
             onSchemaChange={props.onSchemaChange}
             onQueryChange={(data) => {
               saveTab(data);

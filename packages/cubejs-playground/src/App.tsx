@@ -28,10 +28,20 @@ const StyledLayoutContent = styled(Layout.Content)`
   height: 100%;
 `;
 
+// A token saved from the Security Context dialog would win over the login's;
+// it was signed for no user.
+function forgetSecurityContextToken() {
+  try {
+    window.localStorage.removeItem('cubejsToken');
+  } catch {
+    // Storage unavailable: nothing was saved there either.
+  }
+}
+
 type AppState = {
   fatalError: Error | null;
   context: PlaygroundContext | null;
-  // With RBAC on: the context, until a platform admin logs in.
+  // With RBAC on: the context, until the user logs in.
   loginContext: PlaygroundContext | null;
   showLoader: boolean;
   isAppContextSet: boolean;
@@ -87,6 +97,7 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
     });
 
     if (context.authRequired) {
+      forgetSecurityContextToken();
       const session = getSession();
       if (session == null) {
         this.setState({ loginContext: context });
@@ -100,13 +111,7 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
 
   onLogin(session: Session) {
     const { loginContext } = this.state;
-    // A token saved from the Security Context dialog would win over the
-    // login's; it was signed for no user.
-    try {
-      window.localStorage.removeItem('cubejsToken');
-    } catch {
-      // Storage unavailable: nothing was saved there either.
-    }
+    forgetSecurityContextToken();
     this.setState({
       context: { ...loginContext!, cubejsToken: session.token },
       loginContext: null,

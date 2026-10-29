@@ -3,6 +3,8 @@ import { SendOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 
 import { usePlaygroundContext, useToken } from '../../hooks';
+import { getWorkspace, WORKSPACE_HEADER } from '../../shared/auth';
+import { apiFetch } from '../../shared/helpers';
 
 const { Text, Paragraph } = Typography;
 
@@ -137,6 +139,8 @@ export function ApiConsole() {
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Sent by `apiFetch` on every request; shown in the curl below.
+  const workspace = getWorkspace();
 
   useEffect(() => {
     if (appToken && !token) {
@@ -149,7 +153,7 @@ export function ApiConsole() {
     if (!appToken) {
       return;
     }
-    fetch(`${basePath}/v1/meta`, { headers: { Authorization: appToken } })
+    apiFetch(`${basePath}/v1/meta`, { headers: { Authorization: appToken } })
       .then((r) => (r.ok ? r.json() : null))
       .then((meta) => {
         const first = meta?.cubes?.find((c) => c.measures?.length)?.measures[0]?.name;
@@ -183,7 +187,7 @@ export function ApiConsole() {
     setSending(true);
     const started = performance.now();
     try {
-      const response = await fetch(`${basePath}${path.startsWith('/') ? path : `/${path}`}`, {
+      const response = await apiFetch(`${basePath}${path.startsWith('/') ? path : `/${path}`}`, {
         method,
         headers: {
           ...(token ? { Authorization: token } : {}),
@@ -214,6 +218,7 @@ export function ApiConsole() {
   const curl = [
     `curl -X ${method}`,
     `  -H "Authorization: ${token ? '<token>' : ''}"`,
+    ...(workspace ? [`  -H "${WORKSPACE_HEADER}: ${workspace}"`] : []),
     ...(method !== 'GET' && body.trim() ? ['  -H "Content-Type: application/json"', `  -d '${body.replace(/\s*\n\s*/g, ' ').replace(/'/g, "'\\''")}'`] : []),
     `  ${apiUrl}${path}`,
   ].join(' \\\n');

@@ -23,8 +23,9 @@ export type PlaygroundContext = {
   coreServerVersion: string;
   isCloud: boolean;
   livePreview?: boolean;
-  // RBAC is on: no `cubejsToken`, a platform admin logs in.
+  // RBAC is on: no `cubejsToken`, the user logs in and their token is used.
   authRequired?: boolean;
+  rbac?: boolean;
 };
 
 export type SystemContext = {

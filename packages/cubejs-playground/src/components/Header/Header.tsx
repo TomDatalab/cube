@@ -4,9 +4,11 @@ import { useMediaQuery } from 'react-responsive';
 import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
-import { getSession, logout } from '../../shared/auth';
+import { usePlaygroundContext, useRbac } from '../../hooks';
+import { logout } from '../../shared/auth';
 import { StyledMenu, StyledMenuButton, StyledMenuItem } from './Menu';
 import { RunOnCubeCloud } from './RunOnCubeCloud';
+import { WorkspaceSelector } from './WorkspaceSelector';
 
 const StyledHeader = styled(Layout.Header)`
   && {
@@ -31,8 +33,16 @@ export default function Header({ selectedKeys }: Props) {
     query: '(max-width: 991px)',
   });
 
-  // With RBAC on, the admin who logged in.
-  const session = getSession();
+  // With RBAC on, who logged in; Data Model and Data Source are for
+  // platform admins only.
+  const { session, isAdmin } = useRbac();
+  const { basePath = '' } = usePlaygroundContext();
+
+  const workspaceSelector = session ? (
+    <div style={{ float: 'right', marginLeft: 8 }}>
+      <WorkspaceSelector basePath={basePath} isAdmin={isAdmin} />
+    </div>
+  ) : null;
 
   function logOut() {
     logout();
@@ -49,19 +59,25 @@ export default function Header({ selectedKeys }: Props) {
         />
       </div>
 
+      {workspaceSelector}
+
       {isDesktopOrLaptop && (
         <StyledMenu theme="light" mode="horizontal" selectedKeys={selectedKeys}>
           <StyledMenuItem key="/build">
             <Link to="/build">Playground</Link>
           </StyledMenuItem>
 
-          <StyledMenuItem key="/schema">
-            <Link to="/schema">Data Model</Link>
-          </StyledMenuItem>
+          {isAdmin ? (
+            <StyledMenuItem key="/schema">
+              <Link to="/schema">Data Model</Link>
+            </StyledMenuItem>
+          ) : null}
 
-          <StyledMenuItem key="/data-sources">
-            <Link to="/data-sources">Data Source</Link>
-          </StyledMenuItem>
+          {isAdmin ? (
+            <StyledMenuItem key="/data-sources">
+              <Link to="/data-sources">Data Source</Link>
+            </StyledMenuItem>
+          ) : null}
 
           <StyledMenuItem key="/frontend-integrations">
             <Link to="/frontend-integrations">Frontend Integrations</Link>
@@ -87,12 +103,20 @@ export default function Header({ selectedKeys }: Props) {
                   <Link to="/build">Playground</Link>
                 </Menu.Item>
 
-                <Menu.Item key="/schema">
-                  <Link to="/schema">Data Model</Link>
-                </Menu.Item>
+                {isAdmin ? (
+                  <Menu.Item key="/schema">
+                    <Link to="/schema">Data Model</Link>
+                  </Menu.Item>
+                ) : null}
 
-                <Menu.Item key="/data-sources">
-                  <Link to="/data-sources">Data Source</Link>
+                {isAdmin ? (
+                  <Menu.Item key="/data-sources">
+                    <Link to="/data-sources">Data Source</Link>
+                  </Menu.Item>
+                ) : null}
+
+                <Menu.Item key="/frontend-integrations">
+                  <Link to="/frontend-integrations">Frontend Integrations</Link>
                 </Menu.Item>
 
                 {session ? (

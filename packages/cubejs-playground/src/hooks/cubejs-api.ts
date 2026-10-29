@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import cubejs from '@cubejs-client/core';
+
+import { createCubeApi } from '../shared/cube-api';
 
 export function useCubejsApi(apiUrl: string | null, token: string | null) {
   return useMemo(() => {
@@ -7,8 +8,6 @@ export function useCubejsApi(apiUrl: string | null, token: string | null) {
       return null;
     }
 
-    return cubejs(token, {
-      apiUrl,
-    });
+    return createCubeApi(token, apiUrl);
   }, [apiUrl, token]);
 }

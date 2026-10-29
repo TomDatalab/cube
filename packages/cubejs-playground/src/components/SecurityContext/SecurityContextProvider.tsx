@@ -84,7 +84,8 @@ export const SecurityContextProvider = memo(({
         setPayload(JSON.stringify(decodedPayload, null, 2));
       } catch {
         setPayload('');
-        console.error('Invalid JWT token', token);
+        // Never the token itself: the console is no place for it.
+        console.error('Invalid JWT token');
       }
     } else {
       setPayload('');

@@ -4,6 +4,7 @@ import { RetryLink } from '@apollo/client/link/retry';
 import { Alert, Block, Button, Grid, LockIcon, tasty, TooltipProvider } from '@cube-dev/ui-kit';
 import { useEffect, useMemo, useState } from 'react';
 
+import { apiFetch } from '../shared/helpers';
 import { useQueryBuilderContext } from './context';
 import { convertJsonQueryToGraphQL } from './utils';
 import { CopyButton } from './components/CopyButton';
@@ -68,6 +69,7 @@ export function QueryBuilderGraphQL() {
   const gqlClient = useMemo(() => {
     const httpLink = new HttpLink({
       uri: apiUrl.replace('/v1', '/graphql'),
+      fetch: apiFetch,
       headers: {
         Authorization: apiToken || '',
       },

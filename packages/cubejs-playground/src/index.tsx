@@ -14,6 +14,7 @@ import {
 } from './pages';
 import { SecurityContextProvider } from './components/SecurityContext/SecurityContextProvider';
 import { AppContextProvider } from './components/AppContext';
+import { AdminOnly } from './components/AdminOnly/AdminOnly';
 
 const history = createHashHistory();
 history.listen((location) => {
@@ -66,16 +67,20 @@ ReactDOM.render(
             </SecurityContextProvider>
           )}
         />
-        <Route key="schema" path="/schema" component={SchemaPage} />
+        <Route
+          key="schema"
+          path="/schema"
+          render={(props) => <AdminOnly><SchemaPage {...props} /></AdminOnly>}
+        />
         <Route
           key="data-sources"
           path="/data-sources"
-          component={DataSourcesPage}
+          render={() => <AdminOnly><DataSourcesPage /></AdminOnly>}
         />
         <Route
           key="connection"
           path="/connection"
-          component={() => <ConnectionWizardPage history={history} />}
+          render={() => <AdminOnly><ConnectionWizardPage history={history} /></AdminOnly>}
         />
         <Route
           key="frontend-integrations"

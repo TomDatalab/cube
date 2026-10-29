@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { authHeaders, getSession, login, logout } from '../shared/auth';
+import {
+  authHeaders, getSession, getWorkspace, login, logout, setWorkspace, workspaceHeaders,
+} from '../shared/auth';
 
 function answer(status: number, body: unknown) {
   return Promise.resolve(new Response(JSON.stringify(body), { status }));
@@ -48,15 +50,18 @@ describe('Playground login', () => {
     expect(getSession()).toBeNull();
   });
 
-  it('refuses a user who is not a platform admin', async () => {
+  it('logs in a user who is not a platform admin', async () => {
     vi.stubGlobal('fetch', vi.fn(() => answer(200, {
       token: 'jwt',
       expiresAt: inAnHour(),
       user: { id: 'ana', name: 'Ana', platformAdmin: false },
     })));
 
-    await expect(login('/cube', 'ana', 'secret')).rejects.toThrow(/platform admins/);
-    expect(getSession()).toBeNull();
+    const session = await login('/cube', 'ana', 'secret');
+
+    expect(session.user.platformAdmin).toBe(false);
+    expect(getSession()?.user.id).toBe('ana');
+    expect(authHeaders()).toEqual({ Authorization: 'jwt' });
   });
 
   it('forgets an expired session', () => {
@@ -82,5 +87,97 @@ describe('Playground login', () => {
 
     expect(getSession()).toBeNull();
     expect(authHeaders()).toEqual({});
+  });
+
+  it('keeps the chosen workspace for the tab', () => {
+    expect(getWorkspace()).toBeNull();
+    expect(workspaceHeaders()).toEqual({});
+
+    setWorkspace('ws-1');
+    expect(getWorkspace()).toBe('ws-1');
+    expect(sessionStorage.getItem('cubePlaygroundWorkspace')).toBe('ws-1');
+    expect(workspaceHeaders()).toEqual({ 'X-Cube-Workspace': 'ws-1' });
+
+    // "Todos (admin)"
+    setWorkspace(null);
+    expect(getWorkspace()).toBeNull();
+    expect(workspaceHeaders()).toEqual({});
+  });
+
+  it('forgets the workspace on log out and on a new login', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => answer(200, {
+      token: 'jwt',
+      expiresAt: inAnHour(),
+      user: { id: 'ana', name: 'Ana', platformAdmin: false },
+    })));
+    setWorkspace('someone-elses');
+    await login('/cube', 'ana', 'secret');
+    expect(getWorkspace()).toBeNull();
+
+    setWorkspace('ws-1');
+    logout();
+    expect(getWorkspace()).toBeNull();
+  });
+
+  it('survives storage that throws', () => {
+    const throwing = {
+      getItem: () => { throw new Error('blocked'); },
+      setItem: () => { throw new Error('blocked'); },
+      removeItem: () => { throw new Error('blocked'); },
+    };
+    vi.spyOn(window, 'sessionStorage', 'get').mockReturnValue(throwing as unknown as Storage);
+    try {
+      expect(() => setWorkspace('ws-1')).not.toThrow();
+      expect(getWorkspace()).toBeNull();
+      expect(getSession()).toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('a 401 from the server', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.resetModules();
+  });
+
+  function saveSession() {
+    sessionStorage.setItem('cubePlaygroundSession', JSON.stringify({
+      token: 'jwt',
+      expiresAt: inAnHour(),
+      user: { id: 'ana', name: 'Ana', platformAdmin: false },
+    }));
+  }
+
+  it('ends the session once, however many requests fail together', async () => {
+    const auth = await import('../shared/auth');
+    saveSession();
+
+    auth.onUnauthorized({ status: 401 });
+    expect(auth.getSession()).toBeNull();
+
+    // The reload is already on its way: a second 401 changes nothing.
+    saveSession();
+    auth.onUnauthorized({ status: 401 });
+    expect(auth.getSession()?.token).toBe('jwt');
+  });
+
+  it('leaves a 403 alone: a refusal, not a lost session', async () => {
+    const auth = await import('../shared/auth');
+    saveSession();
+
+    auth.onUnauthorized({ status: 403 });
+
+    expect(auth.getSession()?.token).toBe('jwt');
+  });
+
+  it('means nothing without a session (a wrong password)', async () => {
+    const auth = await import('../shared/auth');
+    auth.setWorkspace('ws-1');
+
+    auth.onUnauthorized({ status: 401 });
+
+    expect(auth.getWorkspace()).toBe('ws-1');
   });
 });

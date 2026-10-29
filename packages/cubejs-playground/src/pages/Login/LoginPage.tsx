@@ -23,8 +23,8 @@ type Props = {
   onLogin: (session: Session) => void;
 };
 
-// With RBAC on, the Playground is for platform admins, who log in with the
-// username and password RBAC knows them by.
+// With RBAC on, every user logs in with the username and password RBAC knows
+// them by; what they then see depends on their role.
 export function LoginPage({ basePath, onLogin }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -8,6 +8,7 @@ export * from './identifier';
 export * from './is-mounted';
 export * from './live-preview-context';
 export * from './local-storage';
+export * from './rbac';
 export * from './security-context';
 export * from './server-core-version';
 export * from './setter';

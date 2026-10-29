@@ -1,3 +1,5 @@
+import { apiFetch } from './helpers';
+
 type RequestOptions = {
   token?: string;
   body?: Record<string, any>;
@@ -17,7 +19,7 @@ export async function request(
     headers.authorization = token;
   }
 
-  const response = await fetch(endpoint, {
+  const response = await apiFetch(endpoint, {
     method,
     headers: {
       'Content-Type': 'application/json',
