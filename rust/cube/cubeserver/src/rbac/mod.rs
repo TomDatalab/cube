@@ -1,5 +1,6 @@
 //! Authorization (RBAC) backed by SpiceDB.
 
+pub mod access;
 pub mod authz;
 pub mod config;
 pub mod enforce;
