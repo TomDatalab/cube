@@ -1,5 +1,5 @@
 import {
-  Button, Card, message, Popconfirm, Select, Space, Table, Typography,
+  Button, Card, message, Popconfirm, Select, Space, Table, Tag, Typography,
 } from 'antd';
 import { useEffect, useState } from 'react';
 
@@ -90,6 +90,7 @@ export function OrganizationsTab({ api, users }: Props) {
           key={org.id}
           api={api}
           org={org}
+          organizations={(organizations || []).map((o) => o.id)}
           users={users}
           onRename={() => setDialog('rename')}
           onDeleted={loadOrganizations}
@@ -110,13 +111,15 @@ export function OrganizationsTab({ api, users }: Props) {
 type CardProps = {
   api: AdminApi;
   org: Organization;
+  // Every organization's id: a data source one of them holds is not offered.
+  organizations: string[];
   users: User[];
   onRename: () => void;
   onDeleted: () => Promise<void>;
 };
 
 function OrganizationCard({
-  api, org, users, onRename, onDeleted,
+  api, org, organizations, users, onRename, onDeleted,
 }: CardProps) {
   const isMounted = useIsMounted();
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
@@ -140,7 +143,10 @@ function OrganizationCard({
 
   async function loadConnections() {
     try {
-      const [loaded, sources] = await Promise.all([api.connections(org.id), api.dataSources()]);
+      const [loaded, sources] = await Promise.all([
+        api.connections(org.id),
+        api.assignableDataSources(organizations),
+      ]);
       if (isMounted()) {
         setConnections(loaded);
         setDataSources(sources);
@@ -176,8 +182,6 @@ function OrganizationCard({
       return false;
     }
   }
-
-  const own = new Set(connections.map((c) => c.name));
 
   let workspaceDialogTitle: string | null = null;
   if (editing === true) {
@@ -238,7 +242,28 @@ function OrganizationCard({
       <Typography.Text strong>Connections</Typography.Text>
       <div>
         {connections.length ? connections.map((c) => (
-          <Typography.Text key={c.name} code>{c.name}</Typography.Text>
+          <Space key={c.name} style={{ marginRight: 16 }}>
+            <Typography.Text code>{c.name}</Typography.Text>
+            {c.origin === 'assigned' ? (
+              <>
+                <Tag title="Assigned by a platform admin: the organization uses and releases it, only platform admins edit or delete it">
+                  assigned
+                </Tag>
+                <Popconfirm
+                  title={`Unassign ${c.name} from ${org.name}? Its releases to the organization's workspaces are withdrawn; the data source stays.`}
+                  onConfirm={() => act(
+                    () => api.unassignConnection(c.name),
+                    `${c.name} no longer belongs to ${org.name}`,
+                    loadConnections
+                  )}
+                >
+                  <Button size="small" danger>Unassign</Button>
+                </Popconfirm>
+              </>
+            ) : (
+              <Tag title="Created by the organization: its owners edit and delete it">created</Tag>
+            )}
+          </Space>
         )) : <Typography.Text type="secondary">None yet.</Typography.Text>}
       </div>
       <Space style={{ marginTop: 8, marginBottom: 16 }}>
@@ -249,11 +274,10 @@ function OrganizationCard({
           value={dataSource}
           onChange={setDataSource}
           options={dataSources
-            .filter((ds) => !own.has(ds.name))
             .map((ds) => ({ value: ds.name, label: ds.type ? `${ds.name} (${ds.type})` : ds.name }))}
         />
         <Popconfirm
-          title={`Give ${dataSource} to ${org.name}? If another organization has it, its releases there are withdrawn.`}
+          title={`Assign ${dataSource} to ${org.name}? Its owners can release it to their workspaces, but only platform admins edit or delete it.`}
           disabled={!dataSource}
           onConfirm={async () => {
             if (await act(

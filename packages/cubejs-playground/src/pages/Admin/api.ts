@@ -32,9 +32,24 @@ export type Role = typeof ROLES[number];
 export type Member = { user: string; role: Role };
 
 // A connection of an organization, with the workspaces it is released to.
-export type Connection = { name: string; type: string | null; workspaces: string[] };
+// `created` by the organization (its owners edit and delete it) or
+// `assigned` to it by a platform admin (only platform admins edit, delete or
+// unassign it).
+export type Connection = {
+  name: string;
+  type: string | null;
+  origin: 'created' | 'assigned';
+  workspaces: string[];
+};
 
 export type DataSource = { name: string; type: string | null };
+
+// The data sources a platform admin can assign to an organization: never
+// `default`, and none that already belongs to an organization.
+export function assignableDataSources(sources: DataSource[], owned: Iterable<string>): DataSource[] {
+  const taken = new Set(owned);
+  return sources.filter((ds) => ds.name !== 'default' && !taken.has(ds.name));
+}
 
 export function adminApi(basePath: string) {
   const base = basePath.replace(/\/$/, '');
@@ -62,7 +77,7 @@ export function adminApi(basePath: string) {
     return json;
   }
 
-  return {
+  const api = {
     users: async (): Promise<User[]> => (await call('GET', '/v1/users')).users,
     createUser: (user: { id: string; name?: string; email?: string; password: string }) => call(
       'POST', '/v1/users', user
@@ -117,8 +132,21 @@ export function adminApi(basePath: string) {
     dataSources: async (): Promise<DataSource[]> => (
       (await call('GET', '/v1/data-sources')).dataSources || []
     ).map((ds) => ({ name: ds.name, type: ds.type ?? null })),
+    // `dataSources()` without `default` and those any of `orgs` holds.
+    assignableDataSources: async (orgs: string[]): Promise<DataSource[]> => {
+      const [sources, ...held] = await Promise.all([
+        api.dataSources(),
+        ...orgs.map((org) => api.connections(org)),
+      ]);
+      return assignableDataSources(sources as DataSource[], (held as Connection[][]).flat().map((c) => c.name));
+    },
     assignConnection: (name: string, org: string) => call(
       'PUT', `/v1/connections/${id(name)}/organization`, { organizationId: org }
+    ),
+    // Takes the connection away from its organization, with every release
+    // to its workspaces; the data source itself stays.
+    unassignConnection: (name: string) => call(
+      'DELETE', `/v1/connections/${id(name)}/organization`
     ),
     release: (ws: string, name: string) => call(
       'PUT', `/v1/workspaces/${id(ws)}/connections/${id(name)}`
@@ -127,6 +155,7 @@ export function adminApi(basePath: string) {
       'DELETE', `/v1/workspaces/${id(ws)}/connections/${id(name)}`
     ),
   };
+  return api;
 }
 
 export type AdminApi = ReturnType<typeof adminApi>;

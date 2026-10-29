@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { adminApi } from '../pages/Admin/api';
+import { adminApi, assignableDataSources } from '../pages/Admin/api';
 
 function answer(status: number, body: unknown) {
   return Promise.resolve(new Response(body == null ? null : JSON.stringify(body), { status }));
@@ -87,5 +87,62 @@ describe('the Admin page API client', () => {
     await expect(adminApi('/cube').dataSources()).resolves.toEqual([
       { name: 'default', type: 'postgres' },
     ]);
+  });
+
+  it('reports removing a user who is not an owner', async () => {
+    fetchMock.mockReturnValueOnce(answer(404, { error: 'ana is not an owner of this organization' }));
+
+    await expect(adminApi('/cube').removeOwner('org-1', 'ana'))
+      .rejects.toThrow('ana is not an owner of this organization');
+  });
+
+  it('offers only data sources no organization holds, never default', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/cube/v1/data-sources') {
+        return answer(200, {
+          dataSources: [
+            { name: 'default', type: 'postgres' },
+            { name: 'sales', type: 'postgres' },
+            { name: 'mine', type: 'sqlite' },
+            { name: 'theirs', type: 'sqlite' },
+            { name: 'free', type: 'duckdb' },
+          ],
+        });
+      }
+      if (url === '/cube/v1/organizations/org-1/connections') {
+        return answer(200, { connections: [{ name: 'mine', type: 'sqlite', origin: 'created', workspaces: [] }] });
+      }
+      if (url === '/cube/v1/organizations/org-2/connections') {
+        return answer(200, {
+          connections: [
+            { name: 'theirs', type: 'sqlite', origin: 'created', workspaces: [] },
+            { name: 'sales', type: 'postgres', origin: 'assigned', workspaces: ['ws-1'] },
+          ],
+        });
+      }
+      return answer(404, { error: 'unexpected' });
+    });
+
+    await expect(adminApi('/cube').assignableDataSources(['org-1', 'org-2'])).resolves.toEqual([
+      { name: 'free', type: 'duckdb' },
+    ]);
+  });
+
+  it('filters assignable data sources', () => {
+    expect(assignableDataSources(
+      [{ name: 'default', type: null }, { name: 'a', type: null }, { name: 'b', type: null }],
+      ['b']
+    )).toEqual([{ name: 'a', type: null }]);
+  });
+
+  it('unassigns a connection from its organization', async () => {
+    fetchMock.mockReturnValueOnce(answer(204, null));
+
+    await adminApi('/cube').unassignConnection('sales/eu');
+
+    const { url, init } = lastCall();
+    expect(url).toBe('/cube/v1/connections/sales%2Feu/organization');
+    expect(init.method).toBe('DELETE');
+    expect(init.body).toBeUndefined();
   });
 });
