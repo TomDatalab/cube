@@ -596,8 +596,9 @@ async fn connectors_lists_what_this_build_can_connect_to() {
     // Nothing is configured in this fixture.
     assert_eq!(postgres["dataSources"], json!([]));
 
-    let athena = list.iter().find(|c| c["type"] == "athena").expect("athena");
-    assert_eq!(athena["implemented"], json!(false));
+    // Known to Cube, never ported: it needs a JVM.
+    let jdbc = list.iter().find(|c| c["type"] == "jdbc").expect("jdbc");
+    assert_eq!(jdbc["implemented"], json!(false));
 }
 
 #[tokio::test]

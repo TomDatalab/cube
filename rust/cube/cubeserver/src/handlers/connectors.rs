@@ -108,8 +108,8 @@ mod tests {
         let list = connectors(&[]);
         assert_eq!(list.len(), cubedriver::KNOWN_DB_TYPES.len());
         assert!(find(&list, "postgres").implemented);
-        // Known to Cube, no Rust driver yet.
-        assert!(!find(&list, "athena").implemented);
+        // Known to Cube, never ported: it needs a JVM.
+        assert!(!find(&list, "jdbc").implemented);
     }
 
     #[test]
