@@ -89,6 +89,26 @@ Object.assign(VARIABLES, {
   'heading-color': '#e7e7ef',
   'primary-color': '#8f8bff',
   'layout-header-background': '#17171f',
+
+  // dark.less maps the info alert to @primary-1, a saturated purple here
+  'alert-info-bg-color': 'rgba(143, 139, 255, 0.12)',
+  'alert-info-border-color': 'rgba(143, 139, 255, 0.35)',
+
+  // greys dark.less hardcodes, moved onto palette C
+  'table-header-bg': '#272731',
+  'table-row-hover-bg': '#2b2b37',
+  'table-header-sort-bg': '#2b2b37',
+  'table-header-filter-active-bg': '#363644',
+  'table-header-sort-active-bg': '#363644',
+  'table-fixed-header-sort-active-bg': '#363644',
+  'table-expanded-row-bg': '#23232d',
+  'popover-customize-border-color': '#363644',
+  'tooltip-bg': '#2b2b37',
+  'transfer-item-hover-bg': '#2b2b37',
+  'slider-rail-background-color': '#363644',
+  'card-skeleton-bg': '#2b2b37',
+  'picker-basic-cell-disabled-bg': '#2b2b37',
+  'layout-trigger-background': '#23232d',
 });
 
 const LESS_VARIABLES = {};
