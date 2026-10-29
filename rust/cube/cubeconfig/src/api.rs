@@ -15,6 +15,14 @@ pub enum ApiScope {
     Data,
     Sql,
     Jobs,
+    /// New in the Rust server: managing the data sources through
+    /// `/v1/data-sources`. Never a default, since it reads and writes
+    /// connection settings, passwords included.
+    DataSources,
+    /// New in the Rust server: running a statement on a data source
+    /// (`/v1/execute`), to create tables and views. Never
+    /// a default: it writes to the database itself.
+    Execute,
 }
 
 impl ApiScope {
@@ -25,6 +33,8 @@ impl ApiScope {
             ApiScope::Data => "data",
             ApiScope::Sql => "sql",
             ApiScope::Jobs => "jobs",
+            ApiScope::DataSources => "data_sources",
+            ApiScope::Execute => "execute",
         }
     }
 
@@ -35,6 +45,8 @@ impl ApiScope {
             "data" => Some(ApiScope::Data),
             "sql" => Some(ApiScope::Sql),
             "jobs" => Some(ApiScope::Jobs),
+            "data_sources" => Some(ApiScope::DataSources),
+            "execute" => Some(ApiScope::Execute),
             _ => None,
         }
     }

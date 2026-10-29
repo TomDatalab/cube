@@ -9,8 +9,8 @@ import {
   ConnectionWizardPage,
   SchemaPage,
   IndexPage,
-  CubeBiPage,
   FrontendIntegrationsPage,
+  DataSourcesPage,
 } from './pages';
 import { SecurityContextProvider } from './components/SecurityContext/SecurityContextProvider';
 import { AppContextProvider } from './components/AppContext';
@@ -68,14 +68,14 @@ ReactDOM.render(
         />
         <Route key="schema" path="/schema" component={SchemaPage} />
         <Route
+          key="data-sources"
+          path="/data-sources"
+          component={DataSourcesPage}
+        />
+        <Route
           key="connection"
           path="/connection"
           component={() => <ConnectionWizardPage history={history} />}
-        />
-        <Route
-          key="cube-bi"
-          path="/cube-bi"
-          component={CubeBiPage}
         />
         <Route
           key="frontend-integrations"

@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::config::DriverConfig;
+use crate::config::{DriverConfig, EnvSource, ProcessEnv};
 use crate::driver::Driver;
 use crate::error::{DriverError, Result};
 use crate::escape::format_mysql;
@@ -94,10 +94,15 @@ impl FireboltConfig {
 
     /// Reads the `CUBEJS_FIREBOLT_*` variables into an existing configuration.
     pub fn apply_env(&mut self) {
-        self.account = env_var("CUBEJS_FIREBOLT_ACCOUNT");
-        self.engine_name = env_var("CUBEJS_FIREBOLT_ENGINE_NAME");
-        self.engine_endpoint = env_var("CUBEJS_FIREBOLT_ENGINE_ENDPOINT");
-        if let Some(endpoint) = env_var("CUBEJS_FIREBOLT_API_ENDPOINT") {
+        self.apply_env_source(&ProcessEnv);
+    }
+
+    /// [`FireboltConfig::apply_env`] against an arbitrary [`EnvSource`].
+    pub fn apply_env_source(&mut self, env: &dyn EnvSource) {
+        self.account = env_var(env, "CUBEJS_FIREBOLT_ACCOUNT");
+        self.engine_name = env_var(env, "CUBEJS_FIREBOLT_ENGINE_NAME");
+        self.engine_endpoint = env_var(env, "CUBEJS_FIREBOLT_ENGINE_ENDPOINT");
+        if let Some(endpoint) = env_var(env, "CUBEJS_FIREBOLT_API_ENDPOINT") {
             self.api_endpoint = endpoint;
         }
     }
@@ -108,8 +113,8 @@ impl FireboltConfig {
     }
 }
 
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+fn env_var(env: &dyn EnvSource, key: &str) -> Option<String> {
+    env.get(key).filter(|v| !v.is_empty())
 }
 
 /// `POST /oauth/token` and `POST /auth/v1/login` share this response shape.

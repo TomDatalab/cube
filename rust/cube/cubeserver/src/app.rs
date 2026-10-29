@@ -101,6 +101,33 @@ pub fn build_app(state: AppState) -> Router {
     let base = state.config.base_path.trim_end_matches('/').to_string();
     let max_request_size = state.config.max_request_size;
 
+    // Managing the connections and running statements on them: behind the
+    // auth middleware like the rest of `/v1`, but outside the CORS layer
+    // below, so no other site's page can call them from a browser.
+    let managing = Router::new()
+        .route(
+            &format!("{base}/v1/data-sources"),
+            get(handlers::data_sources::v1_list).post(handlers::data_sources::v1_create),
+        )
+        .route(
+            &format!("{base}/v1/data-sources/test"),
+            axum::routing::post(handlers::data_sources::v1_test),
+        )
+        .route(
+            &format!("{base}/v1/data-sources/:name"),
+            get(handlers::data_sources::v1_get)
+                .put(handlers::data_sources::v1_update)
+                .delete(handlers::data_sources::v1_delete),
+        )
+        .route(
+            &format!("{base}/v1/execute"),
+            axum::routing::post(handlers::data_sources::v1_execute),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            handlers::auth::auth_middleware,
+        ));
+
     let authenticated = Router::new()
         .route(&format!("{base}/v1/meta"), get(handlers::meta::meta))
         .route(
@@ -193,7 +220,13 @@ pub fn build_app(state: AppState) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         // Same list as `@cubejs-backend/server` (`server.ts`).
         .allow_headers([
             header::AUTHORIZATION,
@@ -217,11 +250,17 @@ pub fn build_app(state: AppState) -> Router {
         // The WebSocket transport authenticates with its own `authorization`
         // message, so it is not behind the HTTP auth middleware.
         .route(&format!("{base}/ws"), get(crate::ws::ws_handler))
-        .merge(authenticated);
+        .merge(authenticated)
+        // Cross-origin callers are the API's. The Playground's helper API and
+        // the connection-managing routes, merged below, are not: another
+        // site gets no CORS answer from them, so it can neither read the key
+        // `/playground/context` hands out nor send the JSON the routes take.
+        .layer(cors)
+        .merge(managing);
 
     let router = match playground {
         Some(assets) => router
-            .merge(handlers::playground::routes())
+            .merge(handlers::playground::routes(state.clone()))
             .route_service("/", get_service(assets.index()))
             // Assets live at the root too (`/assets/...`, `/antd.min.css`).
             // A path with no file behind it must still get the API's JSON
@@ -247,7 +286,6 @@ pub fn build_app(state: AppState) -> Router {
 
     router
         .layer(RequestBodyLimitLayer::new(max_request_size))
-        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

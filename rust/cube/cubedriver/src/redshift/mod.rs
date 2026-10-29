@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::config::DriverConfig;
+use crate::config::{DriverConfig, EnvSource, ProcessEnv};
 use crate::driver::{information_columns_to_structure, Driver};
 use crate::error::{DriverError, Result};
 use crate::postgres::{PostgresConfig, PostgresDriver};
@@ -83,8 +83,13 @@ impl RedshiftConfig {
 
     /// Reads the Redshift specific variables into an existing configuration.
     pub fn apply_env(&mut self) {
-        self.export_bucket = env_var("CUBEJS_DB_EXPORT_BUCKET");
-        self.cluster_identifier = env_var("CUBEJS_DB_REDSHIFT_CLUSTER_IDENTIFIER");
+        self.apply_env_source(&ProcessEnv);
+    }
+
+    /// [`RedshiftConfig::apply_env`] against an arbitrary [`EnvSource`].
+    pub fn apply_env_source(&mut self, env: &dyn EnvSource) {
+        self.export_bucket = env_var(env, "CUBEJS_DB_EXPORT_BUCKET");
+        self.cluster_identifier = env_var(env, "CUBEJS_DB_REDSHIFT_CLUSTER_IDENTIFIER");
     }
 
     /// Reads the configuration from a connection URL, for tests and tooling.
@@ -109,8 +114,8 @@ impl RedshiftConfig {
     }
 }
 
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+fn env_var(env: &dyn EnvSource, key: &str) -> Option<String> {
+    env.get(key).filter(|v| !v.is_empty())
 }
 
 /// Redshift driver.

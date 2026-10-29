@@ -30,6 +30,9 @@ pub struct AuthResult {
     /// `req.signedWithPlaygroundAuthSecret`: the token was accepted through
     /// the playground secret *and* carries the `dev-token` scope.
     pub signed_with_playground_auth_secret: bool,
+    /// A token was presented and verified. False when security checks are
+    /// off and the request had no token, or one that did not verify.
+    pub verified: bool,
 }
 
 impl AuthResult {
@@ -37,6 +40,7 @@ impl AuthResult {
         Self {
             security_context: Value::Null,
             signed_with_playground_auth_secret: false,
+            verified: false,
         }
     }
 }
@@ -410,6 +414,7 @@ impl Authenticator {
                 Ok(AuthResult {
                     security_context,
                     signed_with_playground_auth_secret,
+                    verified: true,
                 })
             }
             Err(e) if enforce => Err(AuthError::InvalidToken(e)),

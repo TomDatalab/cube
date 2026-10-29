@@ -241,6 +241,7 @@ async fn security_checks_not_enforced() {
     let empty = AuthResult {
         security_context: Value::Null,
         signed_with_playground_auth_secret: false,
+        verified: false,
     };
     assert_eq!(auth.authenticate(None).await.unwrap(), empty);
     let bad = generate_auth_token(json!({ "uid": 5 }), "bad");

@@ -1,5 +1,5 @@
 import React, { Component } from 'react';
-import { Layout, Modal, Empty, Typography } from 'antd';
+import { Layout, Modal, Empty, Typography, message } from 'antd';
 import { RouterProps } from 'react-router-dom';
 
 import PrismCode from '../../PrismCode';
@@ -82,6 +82,10 @@ export class SchemaPage extends Component<SchemaPageProps, any> {
       this.setState({
         tablesSchema: result.tablesSchema,
       });
+      // The data sources that could not be read, so their tables are missing.
+      if (result.errors?.length) {
+        message.warning(`Some tables are missing: ${result.errors.join('; ')}`, 10);
+      }
     } catch (e: any) {
       this.setState({ schemaLoadingError: e });
     } finally {

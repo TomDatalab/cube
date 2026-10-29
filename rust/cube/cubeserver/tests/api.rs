@@ -26,20 +26,24 @@ impl AuthService for FakeAuth {
             Some("Bearer meta-only") => Ok(AuthenticatedRequest {
                 security_context: json!({ "scopes": ["meta"] }),
                 signed_with_playground_auth_secret: false,
+                token_verified: true,
             }),
             Some("Bearer playground") => Ok(AuthenticatedRequest {
                 security_context: json!({}),
                 signed_with_playground_auth_secret: true,
+                token_verified: true,
             }),
             Some("Bearer valid") => Ok(AuthenticatedRequest {
                 security_context: json!({ "uid": 5 }),
                 signed_with_playground_auth_secret: false,
+                token_verified: true,
             }),
             // `/v1/convert-query` is behind the `sql` scope, which the
             // default set does not carry.
             Some("Bearer sql-scope") => Ok(AuthenticatedRequest {
                 security_context: json!({ "scopes": ["sql", "data"] }),
                 signed_with_playground_auth_secret: false,
+                token_verified: true,
             }),
             Some(_) => Err(ApiError::forbidden("Invalid token")),
         }

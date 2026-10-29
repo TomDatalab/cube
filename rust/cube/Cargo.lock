@@ -2331,6 +2331,7 @@ dependencies = [
  "jsonwebtoken",
  "serde",
  "serde_json",
+ "serde_yaml",
  "temp-env",
  "tempfile",
  "thiserror 1.0.69",

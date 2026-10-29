@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
-use crate::config::DriverConfig;
+use crate::config::{DriverConfig, EnvSource, ProcessEnv};
 use crate::driver::Driver;
 use crate::error::{DriverError, Result};
 use crate::types::{
@@ -117,22 +117,28 @@ impl SnowflakeConfig {
 
     /// Reads the `CUBEJS_DB_SNOWFLAKE_*` variables into an existing configuration.
     pub fn apply_env(&mut self) -> Result<()> {
+        self.apply_env_source(&ProcessEnv)
+    }
+
+    /// [`SnowflakeConfig::apply_env`] against an arbitrary [`EnvSource`].
+    pub fn apply_env_source(&mut self, env: &dyn EnvSource) -> Result<()> {
         let config = self;
-        config.account = env_var("CUBEJS_DB_SNOWFLAKE_ACCOUNT");
-        config.region = env_var("CUBEJS_DB_SNOWFLAKE_REGION");
-        config.host = env_var("CUBEJS_DB_SNOWFLAKE_HOST");
-        config.warehouse = env_var("CUBEJS_DB_SNOWFLAKE_WAREHOUSE");
-        config.role = env_var("CUBEJS_DB_SNOWFLAKE_ROLE");
-        config.authenticator = env_var("CUBEJS_DB_SNOWFLAKE_AUTHENTICATOR");
-        config.oauth_token = env_var("CUBEJS_DB_SNOWFLAKE_OAUTH_TOKEN");
-        config.oauth_token_path = env_var("CUBEJS_DB_SNOWFLAKE_OAUTH_TOKEN_PATH");
-        config.private_key = env_var("CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY");
-        config.private_key_path = env_var("CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY_PATH");
-        config.private_key_pass = env_var("CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY_PASS");
+        config.account = env_var(env, "CUBEJS_DB_SNOWFLAKE_ACCOUNT");
+        config.region = env_var(env, "CUBEJS_DB_SNOWFLAKE_REGION");
+        config.host = env_var(env, "CUBEJS_DB_SNOWFLAKE_HOST");
+        config.warehouse = env_var(env, "CUBEJS_DB_SNOWFLAKE_WAREHOUSE");
+        config.role = env_var(env, "CUBEJS_DB_SNOWFLAKE_ROLE");
+        config.authenticator = env_var(env, "CUBEJS_DB_SNOWFLAKE_AUTHENTICATOR");
+        config.oauth_token = env_var(env, "CUBEJS_DB_SNOWFLAKE_OAUTH_TOKEN");
+        config.oauth_token_path = env_var(env, "CUBEJS_DB_SNOWFLAKE_OAUTH_TOKEN_PATH");
+        config.private_key = env_var(env, "CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY");
+        config.private_key_path = env_var(env, "CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY_PATH");
+        config.private_key_pass = env_var(env, "CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY_PASS");
         config.client_session_keep_alive =
-            env_bool("CUBEJS_DB_SNOWFLAKE_CLIENT_SESSION_KEEP_ALIVE")?;
-        config.ident_ignore_case = env_bool("CUBEJS_DB_SNOWFLAKE_QUOTED_IDENTIFIERS_IGNORE_CASE")?;
-        config.export_bucket = env_var("CUBEJS_DB_EXPORT_BUCKET");
+            env_bool(env, "CUBEJS_DB_SNOWFLAKE_CLIENT_SESSION_KEEP_ALIVE")?;
+        config.ident_ignore_case =
+            env_bool(env, "CUBEJS_DB_SNOWFLAKE_QUOTED_IDENTIFIERS_IGNORE_CASE")?;
+        config.export_bucket = env_var(env, "CUBEJS_DB_EXPORT_BUCKET");
         Ok(())
     }
 
@@ -239,12 +245,12 @@ impl SnowflakeConfig {
     }
 }
 
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+fn env_var(env: &dyn EnvSource, key: &str) -> Option<String> {
+    env.get(key).filter(|v| !v.is_empty())
 }
 
-fn env_bool(key: &str) -> Result<bool> {
-    match env_var(key) {
+fn env_bool(env: &dyn EnvSource, key: &str) -> Result<bool> {
+    match env_var(env, key) {
         Some(v) => match v.to_ascii_lowercase().as_str() {
             "true" => Ok(true),
             "false" => Ok(false),
@@ -817,6 +823,22 @@ mod tests {
         empty.account = None;
         let err = empty.base_url().unwrap_err();
         assert!(err.to_string().contains("CUBEJS_DB_SNOWFLAKE_ACCOUNT"));
+    }
+
+    #[test]
+    fn settings_are_read_from_the_given_env() {
+        let mut config = SnowflakeConfig::from_driver_config(DriverConfig::default());
+        config
+            .apply_env_source(&[
+                ("CUBEJS_DB_SNOWFLAKE_ACCOUNT", "acme-test"),
+                ("CUBEJS_DB_SNOWFLAKE_WAREHOUSE", "wh"),
+                ("CUBEJS_DB_SNOWFLAKE_CLIENT_SESSION_KEEP_ALIVE", "true"),
+            ])
+            .unwrap();
+        assert_eq!(config.account.as_deref(), Some("acme-test"));
+        assert_eq!(config.warehouse.as_deref(), Some("wh"));
+        assert!(config.client_session_keep_alive);
+        assert_eq!(config.role, None);
     }
 
     #[test]

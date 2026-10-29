@@ -110,6 +110,7 @@ impl SubscriptionServer {
                             security_context: authenticated.security_context,
                             signed_with_playground_auth_secret: authenticated
                                 .signed_with_playground_auth_secret,
+                            token_verified: authenticated.token_verified,
                         },
                     )
                     .await;

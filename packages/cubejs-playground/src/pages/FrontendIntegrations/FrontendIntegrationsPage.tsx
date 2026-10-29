@@ -2,6 +2,7 @@ import { Card, Layout, Space, Tabs, Typography, Table, Col, Row } from 'antd';
 import { CodeSnippet } from '../../atoms';
 import { Content, Header } from '../components/Ui';
 import { CopiableInput } from '../../components/CopiableInput';
+import { ApiConsole } from './ApiConsole';
 
 const { Paragraph, Link, Title } = Typography;
 
@@ -246,6 +247,11 @@ const cubeApi = cube(
             </Tabs>
           </Col>
         </Row>
+
+        <Title level={2} style={{ marginTop: 48 }}>
+          API endpoints
+        </Title>
+        <ApiConsole />
       </Content>
     </Layout>
   );

@@ -79,9 +79,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     cubeserver::orchestrator_adapter::declare_data_sources(&cube_config);
 
     // The environment wins over the file, so it is applied last.
-    let config = ServerConfig::default()
+    let mut config = ServerConfig::default()
         .with_cube_config(&cube_config)
         .overlay_env()?;
+    // A data source added from the Playground takes effect on a restart.
+    config.restart_on_config_change = true;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -95,7 +97,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // route, so mounting it where authentication is enforced would hand the
     // API away to anyone who can reach the port. Node.js has the same
     // property and only runs its dev server outside production.
-    let mut config = config;
     if config.playground_path.is_some() && auth_config.enforce_security_checks {
         eprintln!(
             "⚠️  The Playground is not mounted: NODE_ENV=production enforces \

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::bigquery::{BigQueryConfig, BigQueryDriver};
 use crate::clickhouse::{ClickHouseConfig, ClickHouseDriver};
-use crate::config::DriverConfig;
+use crate::config::{DriverConfig, EnvSource, ProcessEnv};
 use crate::cubestore::{CubeStoreConfig, CubeStoreDriver};
 use crate::driver::Driver;
 use crate::druid::{DruidConfig, DruidDriver};
@@ -125,6 +125,17 @@ impl DriverFactory {
     /// Returns [`DriverError::UnsupportedDriver`] for known-but-unported
     /// types and [`DriverError::UnknownDriver`] for anything else.
     pub fn create(db_type: &str, config: DriverConfig) -> Result<Arc<dyn Driver>> {
+        Self::create_with_env(db_type, config, &ProcessEnv)
+    }
+
+    /// [`DriverFactory::create`], with the connector-specific settings
+    /// (`CUBEJS_DB_SNOWFLAKE_ACCOUNT`, `CUBEJS_AWS_KEY`, ...) read from `env`
+    /// rather than the process environment.
+    pub fn create_with_env(
+        db_type: &str,
+        config: DriverConfig,
+        env: &dyn EnvSource,
+    ) -> Result<Arc<dyn Driver>> {
         match db_type {
             "postgres" => {
                 let driver = PostgresDriver::new(PostgresConfig::from_driver_config(config))?;
@@ -140,22 +151,22 @@ impl DriverFactory {
             }
             "bigquery" => {
                 let mut bigquery = BigQueryConfig::from_driver_config(config);
-                bigquery.apply_env()?;
+                bigquery.apply_env_source(env)?;
                 Ok(Arc::new(BigQueryDriver::new(bigquery)?))
             }
             "snowflake" => {
                 let mut snowflake = SnowflakeConfig::from_driver_config(config);
-                snowflake.apply_env()?;
+                snowflake.apply_env_source(env)?;
                 Ok(Arc::new(SnowflakeDriver::new(snowflake)?))
             }
             "mssql" => {
                 let mut mssql = MsSqlConfig::from_driver_config(config);
-                mssql.apply_env();
+                mssql.apply_env_source(env);
                 Ok(Arc::new(MsSqlDriver::new(mssql)?))
             }
             "redshift" => {
                 let mut redshift = RedshiftConfig::from_driver_config(config);
-                redshift.apply_env();
+                redshift.apply_env_source(env);
                 Ok(Arc::new(RedshiftDriver::new(redshift)?))
             }
             "druid" => {
@@ -164,7 +175,7 @@ impl DriverFactory {
             }
             "firebolt" => {
                 let mut firebolt = FireboltConfig::from_driver_config(config);
-                firebolt.apply_env();
+                firebolt.apply_env_source(env);
                 Ok(Arc::new(FireboltDriver::new(firebolt)?))
             }
             // Cube Store is configured through CUBEJS_CUBESTORE_*, not
@@ -184,7 +195,7 @@ impl DriverFactory {
             "materialize" => {
                 let mut materialize =
                     crate::materialize::MaterializeConfig::from_driver_config(config);
-                materialize.apply_env();
+                materialize.apply_env_source(env);
                 Ok(Arc::new(crate::materialize::MaterializeDriver::new(
                     materialize,
                 )?))
@@ -207,25 +218,25 @@ impl DriverFactory {
                     config,
                     crate::prestodb::Engine::Presto,
                 );
-                presto.apply_env()?;
+                presto.apply_env_source(env)?;
                 Ok(Arc::new(crate::prestodb::PrestoDriver::new(presto)?))
             }
             #[cfg(feature = "trino")]
             "trino" => {
                 let mut trino = crate::trino::trino_config_from_driver_config(config);
-                trino.apply_env()?;
+                trino.apply_env_source(env)?;
                 Ok(Arc::new(crate::trino::TrinoDriver::new(trino)?))
             }
             #[cfg(feature = "pinot")]
             "pinot" => {
                 let mut pinot = crate::pinot::PinotConfig::from_driver_config(config);
-                pinot.apply_env()?;
+                pinot.apply_env_source(env)?;
                 Ok(Arc::new(crate::pinot::PinotDriver::new(pinot)?))
             }
             #[cfg(feature = "athena")]
             "athena" => {
                 let mut athena = crate::athena::AthenaConfig::from_driver_config(config);
-                athena.apply_env()?;
+                athena.apply_env_source(env)?;
                 Ok(Arc::new(crate::athena::AthenaDriver::new(athena)?))
             }
             #[cfg(feature = "mysqlauroraserverless")]
@@ -234,26 +245,26 @@ impl DriverFactory {
                     AuroraServerlessMySqlConfig, AuroraServerlessMySqlDriver,
                 };
                 let mut aurora = AuroraServerlessMySqlConfig::from_driver_config(config);
-                aurora.apply_env()?;
+                aurora.apply_env_source(env)?;
                 Ok(Arc::new(AuroraServerlessMySqlDriver::new(aurora)?))
             }
             #[cfg(feature = "dremio")]
             "dremio" => {
                 let mut dremio = crate::dremio::DremioConfig::from_driver_config(config);
-                dremio.apply_env()?;
+                dremio.apply_env_source(env)?;
                 Ok(Arc::new(crate::dremio::DremioDriver::new(dremio)?))
             }
             #[cfg(feature = "ksql")]
             "ksql" => {
                 let mut ksql = crate::ksql::KsqlConfig::from_driver_config(config);
-                ksql.apply_env()?;
+                ksql.apply_env_source(env)?;
                 Ok(Arc::new(crate::ksql::KsqlDriver::new(ksql)?))
             }
             #[cfg(feature = "databricks")]
             "databricks-jdbc" => {
                 let mut databricks =
                     crate::databricks::DatabricksConfig::from_driver_config(config);
-                databricks.apply_env()?;
+                databricks.apply_env_source(env)?;
                 Ok(Arc::new(crate::databricks::DatabricksDriver::new(
                     databricks,
                 )?))
@@ -261,7 +272,7 @@ impl DriverFactory {
             #[cfg(feature = "hive")]
             "hive" => {
                 let mut hive = crate::hive::HiveConfig::from_driver_config(config);
-                hive.apply_env()?;
+                hive.apply_env_source(env)?;
                 Ok(Arc::new(crate::hive::HiveDriver::new(hive)?))
             }
             #[cfg(feature = "oracle")]
@@ -275,7 +286,7 @@ impl DriverFactory {
             #[cfg(feature = "duckdb")]
             "duckdb" => {
                 let mut duckdb = crate::duckdb::DuckDbConfig::from_driver_config(config);
-                duckdb.apply_env()?;
+                duckdb.apply_env_source(env)?;
                 Ok(Arc::new(crate::duckdb::DuckDbDriver::new(duckdb)?))
             }
             "jdbc" => Err(DriverError::DroppedDriver {
