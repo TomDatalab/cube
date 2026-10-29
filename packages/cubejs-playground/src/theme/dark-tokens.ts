@@ -326,7 +326,9 @@ const COMPAT_LIGHT_FIELDS = ['has-warning', 'has-error'].flatMap((status) => [
 
 // The ui-kit Root re-declares its tokens (and the query builder ones) on its
 // own element with a doubled class, (0,2,0), and variables.ts declares its own
-// on body, (0,0,1): the dark values go on both, with a higher specificity
+// on body, (0,0,1): the dark values go on both, with a higher specificity.
+// The query builder panel (data-qa="QueryBuilder") re-declares the member
+// colors on its own element, (0,2,0), so it gets them again at (0,3,0)
 export const DARK_CSS = `${DARK} {
   color-scheme: dark;
 ${declarations(PG_DARK)}
@@ -341,6 +343,10 @@ ${declarations(QUERY_BUILDER_DARK)}
 
 ${DARK} body {
 ${declarations(PLAYGROUND_DARK)}
+}
+
+${DARK} [data-qa="QueryBuilder"] {
+${declarations(QUERY_BUILDER_DARK)}
 }
 
 ${DARK} body {

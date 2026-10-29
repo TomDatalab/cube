@@ -8,6 +8,7 @@ import { Root } from '@cube-dev/ui-kit';
 import { describe, expect, it } from 'vitest';
 
 import { QUERY_BUILDER_COLOR_TOKENS } from '../QueryBuilderV2/color-tokens';
+import { QueryBuilderPanel } from '../QueryBuilderV2/QueryBuilderInternals';
 import {
   DARK_CSS,
   LIGHT_CSS,
@@ -190,4 +191,65 @@ describe('dark tokens', () => {
     act(() => root.unmount());
     container.remove();
   });
+
+  it('beats every element that re-declares the query builder tokens', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    document.documentElement.dataset.theme = 'dark';
+
+    const dark = document.createElement('style');
+    dark.textContent = DARK_CSS;
+    document.head.appendChild(dark);
+
+    act(() => root.render(createElement(
+      Root,
+      { styles: QUERY_BUILDER_COLOR_TOKENS },
+      createElement(QueryBuilderPanel)
+    )));
+
+    expect(document.querySelector('[data-qa="QueryBuilder"]')).not.toBeNull();
+
+    const styleRules = (styles: Element[]) => styles
+      .flatMap((style) => [...((style as HTMLStyleElement).sheet?.cssRules ?? [])])
+      .filter((rule): rule is CSSStyleRule => 'selectorText' in rule)
+      .filter((rule) => rule.style.getPropertyValue('--measure-active-color') !== '');
+    const darkSelectors = styleRules([dark]).flatMap((rule) => rule.selectorText.split(/,\s*/));
+    const kitRules = styleRules([...document.querySelectorAll('style')].filter((s) => s !== dark));
+
+    expect(kitRules.length).toBeGreaterThan(1);
+
+    for (const rule of kitRules) {
+      const elements = [...document.querySelectorAll(rule.selectorText)];
+
+      expect(elements.length, rule.selectorText).toBeGreaterThan(0);
+
+      for (const element of elements) {
+        const winners = darkSelectors.filter((selector) => element.matches(selector)
+          && compareSpecificity(specificity(selector), specificity(rule.selectorText)) > 0);
+
+        expect(winners, `${rule.selectorText} on ${element.outerHTML.slice(0, 60)}`).not.toHaveLength(0);
+      }
+    }
+
+    act(() => root.unmount());
+    container.remove();
+    dark.remove();
+    delete document.documentElement.dataset.theme;
+  });
 });
+
+// (ids, classes + attributes + pseudo-classes, types) of a compound selector
+// chain without commas, enough for the selectors tasty and DARK_CSS emit
+function specificity(selector: string): number[] {
+  const rest = selector.replace(/\[[^\]]*\]/g, () => ' .attr').replace(/::[\w-]+/g, ' x');
+  const ids = (rest.match(/#[\w-]+/g) ?? []).length;
+  const classes = (rest.match(/[.:][\w-]+/g) ?? []).length;
+  const types = (rest.replace(/[#.:][\w-]+/g, ' ').match(/[a-z][\w-]*/gi) ?? []).length;
+
+  return [ids, classes, types];
+}
+
+function compareSpecificity(a: number[], b: number[]): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
