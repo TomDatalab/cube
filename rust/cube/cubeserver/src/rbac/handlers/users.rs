@@ -3,12 +3,14 @@
 //! Responses carry `{id, name, email, disabled, createdAt}`, never the
 //! password hash.
 
-use axum::extract::rejection::JsonRejection;
 use std::collections::BTreeSet;
+
+use axum::extract::rejection::JsonRejection;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
+use futures::future::try_join_all;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -250,16 +252,14 @@ pub(crate) async fn access(
         .collect();
 
     // Every workspace of an organization the user owns, whatever its roles.
-    for org in owned {
-        for ws in rbac
-            .store
-            .workspaces_of_organization(org)
-            .await
-            .map_err(|e| store_error(e, "Conflict"))?
-        {
-            workspace_ids.push(ws.id);
-        }
-    }
+    let owned_workspaces = try_join_all(
+        owned
+            .iter()
+            .map(|org| rbac.store.workspaces_of_organization(*org)),
+    )
+    .await
+    .map_err(|e| store_error(e, "Conflict"))?;
+    workspace_ids.extend(owned_workspaces.into_iter().flatten().map(|ws| ws.id));
     workspace_ids.sort();
     workspace_ids.dedup();
     let workspaces = rbac
@@ -276,31 +276,34 @@ pub(crate) async fn access(
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
 
-    let mut connections = Vec::new();
-    for org in &organizations {
-        connections.extend(
-            rbac.store
-                .connections_of_organization(org.id)
-                .await
-                .map_err(|e| store_error(e, "Conflict"))?,
-        );
-    }
-    let mut releases = Vec::new();
-    for ws in &workspaces {
-        for rel in rbac
-            .authz
-            .read(&RelationshipFilter {
-                kind: "connection",
-                id: None,
-                relation: Some("workspace"),
-                subject: Some(workspace_ref(ws.id)),
-            })
+    // One read per organization and per workspace, all at once.
+    let connections: Vec<_> = try_join_all(
+        organizations
+            .iter()
+            .map(|org| rbac.store.connections_of_organization(org.id)),
+    )
+    .await
+    .map_err(|e| store_error(e, "Conflict"))?
+    .into_iter()
+    .flatten()
+    .collect();
+    let release_filters: Vec<RelationshipFilter> = workspaces
+        .iter()
+        .map(|ws| RelationshipFilter {
+            kind: "connection",
+            id: None,
+            relation: Some("workspace"),
+            subject: Some(workspace_ref(ws.id)),
+        })
+        .collect();
+    let releases: Vec<(String, Uuid)> =
+        try_join_all(release_filters.iter().map(|f| rbac.authz.read(f)))
             .await
             .map_err(authz_error)?
-        {
-            releases.push((rel.resource.id, ws.id));
-        }
-    }
+            .into_iter()
+            .zip(&workspaces)
+            .flat_map(|(rels, ws)| rels.into_iter().map(move |r| (r.resource.id, ws.id)))
+            .collect();
 
     input.direct = direct;
     input.organizations = organizations;
