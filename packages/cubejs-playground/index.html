@@ -2,11 +2,43 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <script>
+      // keeps in sync with src/shared/theme.ts, an inline script runs before any CSS and cannot import
+      (function () {
+        var theme = 'light';
+        try {
+          var pref = null;
+          try {
+            pref = window.localStorage.getItem('cube-playground-theme');
+          } catch (e) {}
+          theme =
+            pref === 'light' || pref === 'dark'
+              ? pref
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+        } catch (e) {}
+        try {
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) {}
+      })();
+    </script>
+    <link id="antd-light" rel="stylesheet" href="/antd.min.css">
+    <link id="antd-dark" rel="stylesheet" href="/antd.dark.min.css" disabled>
+    <script>
+      // the links above exist now, switch the sheets for the theme chosen before them
+      (function () {
+        try {
+          var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+          document.getElementById('antd-light').disabled = dark;
+          document.getElementById('antd-dark').disabled = !dark;
+        } catch (e) {}
+      })();
+    </script>
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
     <link rel="icon" type="image/png" href="/favicon-32x32.png" sizes="32x32">
     <link rel="icon" type="image/png" href="/favicon-16x16.png" sizes="16x16">
     <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5">
-    <link rel="stylesheet" href="/antd.min.css">
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, shrink-to-fit=no"
@@ -19,7 +51,7 @@
       }
 
       #playground-root .ant-menu-item:not(.ant-menu-item-selected) a {
-          color: #a9a9b6;
+          color: var(--playground-muted, #a9a9b6);
       }
     </style>
     <title>Cube Playground</title>
