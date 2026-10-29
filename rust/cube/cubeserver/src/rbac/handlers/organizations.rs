@@ -4,14 +4,14 @@
 //! exist; one they can see but not administer answers 403.
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::{body, caller, existing_user, resource_id, resource_name, store_error};
+use super::{body, caller, existing_user, resource_id, resource_name, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
@@ -130,27 +130,39 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(view(&org))))
 }
 
-/// → `{organizations: [...]}`: those the caller can view.
-pub async fn list(
+/// → `{organizations: [...]}`: those the caller can view, plus `total` when
+/// `q`, `limit` or `offset` came.
+pub(crate) async fn list(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
+    Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
-    let ids: Vec<Uuid> = rbac
-        .authz
-        .lookup_resources("organization", "view", user)
-        .await
-        .map_err(authz_error)?
-        .iter()
-        .filter_map(|id| id.parse().ok())
-        .collect();
-    let orgs = rbac
+    let search = params.search()?;
+    let visible = if ctx.platform_admin {
+        None
+    } else {
+        let ids: Vec<Uuid> = rbac
+            .authz
+            .lookup_resources("organization", "view", user)
+            .await
+            .map_err(authz_error)?
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        Some(ids)
+    };
+    let page = rbac
         .store
-        .organizations_by_ids(&ids)
+        .search_organizations(visible.as_deref(), &search)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let orgs: Vec<Value> = orgs.iter().map(view).collect();
-    Ok(Json(json!({ "organizations": orgs })))
+    let orgs: Vec<Value> = page.items.iter().map(view).collect();
+    if params.has_paging() {
+        Ok(Json(json!({ "organizations": orgs, "total": page.total })))
+    } else {
+        Ok(Json(json!({ "organizations": orgs })))
+    }
 }
 
 /// `view`.

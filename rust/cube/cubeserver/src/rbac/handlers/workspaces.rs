@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Deserialize;
@@ -16,11 +16,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::organizations::{organization_ref, user_ref, visible_organization};
-use super::{body, caller, existing_user, resource_id, resource_name, store_error};
+use super::{body, caller, existing_user, resource_id, resource_name, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
-use crate::rbac::store::Workspace;
+use crate::rbac::store::{Workspace, WorkspaceListing};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
 
@@ -31,6 +31,12 @@ pub const ROLES: [&str; 3] = ["owner", "editor", "viewer"];
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceName {
     name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationFilter {
+    organization_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +57,13 @@ fn view(ws: &Workspace) -> Value {
         "createdAt": ws.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "createdBy": ws.created_by,
     })
+}
+
+/// `view` plus the name of the organization.
+fn listing_view(listing: &WorkspaceListing) -> Value {
+    let mut view = view(&listing.workspace);
+    view["organizationName"] = json!(listing.organization_name);
+    view
 }
 
 fn not_found() -> ApiError {
@@ -194,6 +207,49 @@ pub async fn list(
         .map(view)
         .collect();
     Ok(Json(json!({ "workspaces": workspaces })))
+}
+
+/// `?q&organizationId&limit&offset` → `{workspaces: [...], total}`: the
+/// workspaces of every organization the caller can view, each with its
+/// `organizationName`. Platform admins see all of them.
+pub(crate) async fn list_all(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Query(params): Query<SearchParams>,
+    Query(filter): Query<OrganizationFilter>,
+) -> Result<Json<Value>, ApiError> {
+    let (rbac, user) = caller(&state, &ctx)?;
+    let search = params.search()?;
+    let organization = filter
+        .organization_id
+        .as_deref()
+        .map(|id| {
+            id.parse::<Uuid>()
+                .map_err(|_| ApiError::bad_request("organizationId must be a UUID"))
+        })
+        .transpose()?;
+    let visible = if ctx.platform_admin {
+        None
+    } else {
+        let ids: Vec<Uuid> = rbac
+            .authz
+            .lookup_resources("workspace", "view", user)
+            .await
+            .map_err(authz_error)?
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        Some(ids)
+    };
+    let page = rbac
+        .store
+        .search_workspaces(visible.as_deref(), organization, &search)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let workspaces: Vec<Value> = page.items.iter().map(listing_view).collect();
+    Ok(Json(
+        json!({ "workspaces": workspaces, "total": page.total }),
+    ))
 }
 
 /// `view`.

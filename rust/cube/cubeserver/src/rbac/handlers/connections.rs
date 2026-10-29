@@ -213,6 +213,36 @@ pub async fn list(
     Ok(Json(json!({ "connections": connections })))
 }
 
+/// → `{connections: [{name, organizationId, origin}]}`: every connection
+/// that belongs to an organization. Platform admins only.
+pub async fn list_all(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Result<Json<Value>, ApiError> {
+    let (rbac, _) = caller(&state, &ctx)?;
+    if !ctx.platform_admin {
+        return Err(ApiError::forbidden(
+            "Only platform admins list every connection",
+        ));
+    }
+    let rows = rbac
+        .store
+        .all_connections()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let connections: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "name": row.name,
+                "organizationId": row.organization_id,
+                "origin": row.origin.as_str(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "connections": connections })))
+}
+
 /// The body of `POST /v1/data-sources` → 201: `manage_connections` on the
 /// organization. The row and `connection#organization` are written first,
 /// so the data source never exists without its organization; both are

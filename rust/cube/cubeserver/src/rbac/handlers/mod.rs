@@ -12,12 +12,13 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 use axum::Json;
 use axum::Router;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
-use crate::rbac::store::{StoreError, User};
+use crate::rbac::store::{Search, StoreError, User};
 use crate::rbac::{unauthenticated, Rbac};
 use crate::services::RequestContext;
 
@@ -64,6 +65,7 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             &format!("{base}/v1/organizations/:id/workspaces"),
             get(workspaces::list).post(workspaces::create),
         )
+        .route(&format!("{base}/v1/workspaces"), get(workspaces::list_all))
         .route(
             &format!("{base}/v1/workspaces/:id"),
             get(workspaces::get)
@@ -81,6 +83,10 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/organizations/:id/connections"),
             get(connections::list).post(connections::create),
+        )
+        .route(
+            &format!("{base}/v1/connections"),
+            get(connections::list_all),
         )
         .route(
             &format!("{base}/v1/connections/:name"),
@@ -108,6 +114,49 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
                 .put(objects::update)
                 .delete(objects::delete),
         )
+}
+
+/// The largest page a listing hands out.
+const MAX_LIMIT: i64 = 200;
+
+/// `?q&limit&offset` of the management listings.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchParams {
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+impl SearchParams {
+    /// The search to run, or 400 for a `limit` above 200 or a negative
+    /// `limit` or `offset`. A blank `q` is no search.
+    pub(crate) fn search(&self) -> Result<Search, ApiError> {
+        if self.limit.is_some_and(|l| !(0..=MAX_LIMIT).contains(&l)) {
+            return Err(ApiError::bad_request(format!(
+                "limit must be between 0 and {MAX_LIMIT}"
+            )));
+        }
+        if self.offset.is_some_and(|o| o < 0) {
+            return Err(ApiError::bad_request("offset cannot be negative"));
+        }
+        Ok(Search {
+            q: self
+                .q
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty())
+                .map(str::to_string),
+            limit: self.limit,
+            offset: self.offset.unwrap_or(0),
+        })
+    }
+
+    /// Whether any of `q`, `limit` and `offset` came, i.e. the answer
+    /// carries a `total`.
+    pub(crate) fn has_paging(&self) -> bool {
+        self.q.is_some() || self.limit.is_some() || self.offset.is_some()
+    }
 }
 
 /// The JSON body of a request, or 400.

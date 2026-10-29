@@ -4,13 +4,13 @@
 //! password hash.
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{body, rbac_of, store_error};
+use super::{body, rbac_of, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::{hash_password, user_token_claims, validate_user_id};
@@ -88,19 +88,25 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(view(&user))))
 }
 
-/// → `{users: [...]}`.
-pub async fn list(
+/// → `{users: [...]}`, plus `total` when `q`, `limit` or `offset` came.
+pub(crate) async fn list(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
+    Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    let users = rbac
+    let search = params.search()?;
+    let page = rbac
         .store
-        .users()
+        .search_users(&search)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let users: Vec<Value> = users.iter().map(view).collect();
-    Ok(Json(json!({ "users": users })))
+    let users: Vec<Value> = page.items.iter().map(view).collect();
+    if params.has_paging() {
+        Ok(Json(json!({ "users": users, "total": page.total })))
+    } else {
+        Ok(Json(json!({ "users": users })))
+    }
 }
 
 /// `{name?, email?, disabled?}`: disabling locks the user out at once.

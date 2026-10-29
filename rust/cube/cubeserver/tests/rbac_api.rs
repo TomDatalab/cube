@@ -4418,3 +4418,137 @@ db_test!(playground_create_refuses_a_tracked_name, |store| {
     let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
     assert!(!yml.contains("  z:"), "{yml}");
 });
+
+db_test!(listing_users_without_paging_is_unchanged, |store| {
+    let s = scenario(store).await;
+    let (status, list) = send(
+        &s.env.router,
+        Method::GET,
+        "/cube/v1/users",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(list.get("total").is_none(), "{list}");
+    assert_eq!(list["users"].as_array().unwrap().len(), 4);
+});
+
+db_test!(users_search_and_paging, |store| {
+    let s = scenario(store).await;
+    let (status, list) = send(
+        &s.env.router,
+        Method::GET,
+        "/cube/v1/users?q=bi",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let ids: Vec<&str> = list["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["bia"]);
+    assert_eq!(list["total"], 1);
+
+    let (status, list) = send(
+        &s.env.router,
+        Method::GET,
+        "/cube/v1/users?limit=2&offset=0",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["users"].as_array().unwrap().len(), 2);
+    assert_eq!(list["total"], 4);
+});
+
+db_test!(a_limit_above_200_is_400, |store| {
+    let s = scenario(store).await;
+    for path in [
+        "/cube/v1/users?limit=201",
+        "/cube/v1/users?limit=-1",
+        "/cube/v1/organizations?offset=-1",
+    ] {
+        let (status, body) = send(&s.env.router, Method::GET, path, Some(&s.admin), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+});
+
+db_test!(
+    workspaces_listing_spans_organizations_and_respects_visibility,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let alpha = create_org(env, &s.admin, "Alpha", "ana").await;
+        let beta = create_org(env, &s.admin, "Beta", "ana").await;
+        workspace_id(env, &s.admin, &alpha, "ops").await;
+        let fin = workspace_id(env, &s.admin, &beta, "fin").await;
+        assert_eq!(
+            set_role(env, &s.admin, &fin, "bia", "viewer").await,
+            StatusCode::OK
+        );
+
+        let get = |path: String, token: String| async move {
+            send(&env.router, Method::GET, &path, Some(&token), None).await
+        };
+        let (status, list) = get("/cube/v1/workspaces".into(), s.admin.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(names(&list, "workspaces"), ["ops", "fin"]);
+        assert_eq!(list["total"], 2);
+        let orgs: Vec<&str> = list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["organizationName"].as_str().unwrap())
+            .collect();
+        assert_eq!(orgs, ["Alpha", "Beta"]);
+
+        let (_, list) = get("/cube/v1/workspaces".into(), s.bia.clone()).await;
+        assert_eq!(names(&list, "workspaces"), ["fin"]);
+
+        let (_, list) = get(
+            format!("/cube/v1/workspaces?organizationId={alpha}"),
+            s.admin.clone(),
+        )
+        .await;
+        assert_eq!(names(&list, "workspaces"), ["ops"]);
+
+        let (_, list) = get("/cube/v1/workspaces?q=alp".into(), s.admin.clone()).await;
+        assert_eq!(names(&list, "workspaces"), ["ops"]);
+
+        let (status, _) = get(
+            "/cube/v1/workspaces?organizationId=nope".into(),
+            s.admin.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+);
+
+db_test!(connections_listing_is_for_platform_admins, |store| {
+    let s = scenario(store).await;
+    let (status, _) = send(
+        &s.env.router,
+        Method::GET,
+        "/cube/v1/connections",
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = send(
+        &s.env.router,
+        Method::GET,
+        "/cube/v1/connections",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["connections"].is_array(), "{body}");
+});
