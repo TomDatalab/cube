@@ -28,7 +28,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
-use crate::config::DriverConfig;
+use crate::config::{DriverConfig, EnvSource, ProcessEnv};
 use crate::driver::Driver;
 use crate::error::{DriverError, Result};
 use crate::types::{
@@ -110,9 +110,12 @@ impl MsSqlConfig {
 
     /// Reads the MS SQL specific variables into an existing configuration.
     pub fn apply_env(&mut self) {
-        self.domain = std::env::var("CUBEJS_DB_DOMAIN")
-            .ok()
-            .filter(|v| !v.is_empty());
+        self.apply_env_source(&ProcessEnv);
+    }
+
+    /// [`MsSqlConfig::apply_env`] against an arbitrary [`EnvSource`].
+    pub fn apply_env_source(&mut self, env: &dyn EnvSource) {
+        self.domain = env.get("CUBEJS_DB_DOMAIN").filter(|v| !v.is_empty());
     }
 
     /// Reads the configuration from a `mssql://user:pass@host:port/db` URL,

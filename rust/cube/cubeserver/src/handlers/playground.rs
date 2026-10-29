@@ -335,21 +335,28 @@ async fn db_schema(
 }
 
 async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
-    let driver = crate::orchestrator_adapter::driver_factory()(data_source.to_string())
-        .await
-        .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))?;
+    // A database that never answers, while connecting or once connected,
+    // would otherwise hold up every other source's tables.
+    let no_answer = || {
+        ApiError::bad_request(format!(
+            "{data_source}: no answer in {}s",
+            SCHEMA_TIMEOUT.as_secs()
+        ))
+    };
+    let driver = tokio::time::timeout(
+        SCHEMA_TIMEOUT,
+        crate::orchestrator_adapter::driver_factory()(data_source.to_string()),
+    )
+    .await
+    .map_err(|_| no_answer())?
+    .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))?;
 
-    // A database that accepts the connection and then never answers would
-    // otherwise hold up every other source's tables.
     let result = tokio::time::timeout(SCHEMA_TIMEOUT, driver.tables_schema()).await;
     let _ = driver.release().await;
     match result {
         Ok(Ok(structure)) => Ok(structure),
         Ok(Err(e)) => Err(ApiError::bad_request(format!("{data_source}: {e}"))),
-        Err(_) => Err(ApiError::bad_request(format!(
-            "{data_source}: no answer in {}s",
-            SCHEMA_TIMEOUT.as_secs()
-        ))),
+        Err(_) => Err(no_answer()),
     }
 }
 

@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::config::DriverConfig;
+use crate::config::{DriverConfig, EnvSource, ProcessEnv};
 use crate::driver::{information_columns_to_structure, Driver};
 use crate::error::{DriverError, Result};
 use crate::types::{
@@ -89,14 +89,19 @@ impl BigQueryConfig {
 
     /// Reads the `CUBEJS_DB_BQ_*` variables into an existing configuration.
     pub fn apply_env(&mut self) -> Result<()> {
+        self.apply_env_source(&ProcessEnv)
+    }
+
+    /// [`BigQueryConfig::apply_env`] against an arbitrary [`EnvSource`].
+    pub fn apply_env_source(&mut self, env: &dyn EnvSource) -> Result<()> {
         let config = self;
-        config.project_id = env_var("CUBEJS_DB_BQ_PROJECT_ID");
-        config.location = env_var("CUBEJS_DB_BQ_LOCATION");
-        config.export_bucket =
-            env_var("CUBEJS_DB_EXPORT_BUCKET").or_else(|| env_var("CUBEJS_DB_BQ_EXPORT_BUCKET"));
-        config.credentials = match env_var("CUBEJS_DB_BQ_CREDENTIALS") {
+        config.project_id = env_var(env, "CUBEJS_DB_BQ_PROJECT_ID");
+        config.location = env_var(env, "CUBEJS_DB_BQ_LOCATION");
+        config.export_bucket = env_var(env, "CUBEJS_DB_EXPORT_BUCKET")
+            .or_else(|| env_var(env, "CUBEJS_DB_BQ_EXPORT_BUCKET"));
+        config.credentials = match env_var(env, "CUBEJS_DB_BQ_CREDENTIALS") {
             Some(encoded) => Some(ServiceAccount::from_base64(&encoded)?),
-            None => match env_var("CUBEJS_DB_BQ_KEY_FILE") {
+            None => match env_var(env, "CUBEJS_DB_BQ_KEY_FILE") {
                 Some(path) => Some(ServiceAccount::from_key_file(&path)?),
                 None => None,
             },
@@ -112,8 +117,8 @@ impl BigQueryConfig {
     }
 }
 
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+fn env_var(env: &dyn EnvSource, key: &str) -> Option<String> {
+    env.get(key).filter(|v| !v.is_empty())
 }
 
 /// BigQuery driver.

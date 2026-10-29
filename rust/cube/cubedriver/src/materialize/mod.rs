@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 
-use crate::config::{DriverConfig, SslConfig};
+use crate::config::{DriverConfig, EnvSource, ProcessEnv, SslConfig};
 use crate::driver::{information_columns_to_structure, Driver};
 use crate::error::{DriverError, Result};
 use crate::postgres::{
@@ -91,11 +91,14 @@ impl MaterializeConfig {
     /// Reads the Materialize specific variables. Like the Node driver, these
     /// are read from `process.env` directly, not per data source.
     pub fn apply_env(&mut self) {
+        self.apply_env_source(&ProcessEnv);
+    }
+
+    /// [`MaterializeConfig::apply_env`] against an arbitrary [`EnvSource`].
+    pub fn apply_env_source(&mut self, env: &dyn EnvSource) {
         self.apply_env_values(
-            std::env::var("CUBEJS_DB_SSL").ok().as_deref(),
-            std::env::var("CUBEJS_DB_MATERIALIZE_CLUSTER")
-                .ok()
-                .as_deref(),
+            env.get("CUBEJS_DB_SSL").as_deref(),
+            env.get("CUBEJS_DB_MATERIALIZE_CLUSTER").as_deref(),
         );
     }
 
