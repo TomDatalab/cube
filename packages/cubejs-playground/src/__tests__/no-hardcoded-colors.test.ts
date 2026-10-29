@@ -20,8 +20,11 @@ const EXCEPTIONS: [string, string][] = [
   // recharts default pie fill, replaced by each Cell
   ['QueryBuilderV2/components/ChartRenderer.tsx', 'fill="#8884d8"'],
   // the header bar is dark in both themes
-  ['components/Header/Header.tsx', ''],
-  ['components/Header/Menu.tsx', ''],
+  ['components/Header/Header.tsx', 'color: white;'],
+  ['components/Header/Menu.tsx', 'color: white;'],
+  ['components/Header/Menu.tsx', 'border-bottom: 2px solid white;'],
+  ['components/Header/Menu.tsx', 'border-color: white;'],
+  ['components/Header/Menu.tsx', 'border: 1px solid rgba(255, 255, 255, 0.35);'],
   ['components/Header/WorkspaceSelector.tsx', "color: '#ff7875'"],
   // text on the accent color (selected items, primary buttons)
   ['components/Tree.tsx', 'color: white;'],
