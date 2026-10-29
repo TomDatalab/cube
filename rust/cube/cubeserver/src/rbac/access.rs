@@ -311,6 +311,10 @@ pub fn build(input: &AccessInput) -> AccessGraph {
         ) else {
             continue;
         };
+        // The server keeps a release only inside the workspace's organization.
+        if row.organization_id != ws.organization_id {
+            continue;
+        }
         let query_paths: Vec<&Source> = via.iter().filter(|s| s.perms.contains(&"query")).collect();
         if query_paths.is_empty() {
             continue;
@@ -555,6 +559,12 @@ mod tests {
             .reasons;
         let texts: Vec<_> = r.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(texts, ["editor", "owner of Acme"]);
+        let w = format!("workspace:{W}");
+        assert_eq!(r[0].path, ["user:ana".to_string(), w.clone()]);
+        assert_eq!(
+            r[1].path,
+            ["user:ana".to_string(), format!("organization:{O}"), w]
+        );
     }
 
     fn with_release(origin: ConnectionOrigin, configured: bool) -> AccessGraph {
@@ -609,10 +619,31 @@ mod tests {
 
     #[test]
     fn a_release_to_a_missing_data_source_grants_nothing() {
-        let g = with_release(ConnectionOrigin::Created, false);
+        // Only a viewer of W: the node can come from the release alone.
+        let mut i = input(vec![rel("workspace", W, "viewer")]);
+        i.connections = vec![conn("db", ConnectionOrigin::Created)];
+        i.releases = vec![("db".into(), W)];
+        let g = build(&i);
         let node = g.nodes.iter().find(|n| n.id == "connection:db").unwrap();
         assert!(node.notes.contains(&NOTE_MISSING.to_string()));
         assert!(grant(&g, "connection:db", "query").is_none());
+        assert!(g.edges.iter().all(|e| e.label != "released"));
+    }
+
+    #[test]
+    fn a_release_across_organizations_grants_nothing() {
+        let mut i = input(vec![rel("workspace", W, "viewer")]);
+        i.connections = vec![ConnectionRow {
+            name: "db".into(),
+            organization_id: Uuid::from_u128(9),
+            origin: ConnectionOrigin::Created,
+        }];
+        i.releases = vec![("db".into(), W)];
+        i.configured.insert("db".into());
+        let g = build(&i);
+        assert!(grant(&g, "connection:db", "query").is_none());
+        assert!(g.edges.iter().all(|e| e.label != "released"));
+        assert!(g.nodes.iter().all(|n| n.id != "connection:db"));
     }
 
     #[test]
