@@ -51,6 +51,12 @@ export function WorkspacePanel({
   }
 
   const roleOptions = ROLES.map((r) => ({ value: r, label: r }));
+  // Only users not in the workspace yet: adding sets the role, so picking an
+  // existing member here would change theirs.
+  const memberIds = new Set((members || []).map((m) => m.user));
+  const newMemberOptions = async (q: string) => (
+    (await userOptions(api)(q)).filter((o) => !memberIds.has(o.value))
+  );
 
   return (
     <div style={{ padding: '8px 0' }}>
@@ -100,12 +106,14 @@ export function WorkspacePanel({
       />
       <Space style={{ marginTop: 8 }}>
         <RemoteSelect
+          // Loads its options again whenever the members change.
+          key={[...memberIds].join(',')}
           size="small"
           placeholder="User"
           style={{ width: 200 }}
           value={newMember}
           onChange={setNewMember}
-          fetchOptions={userOptions(api)}
+          fetchOptions={newMemberOptions}
         />
         <Select
           size="small"

@@ -122,7 +122,7 @@ export function MembershipTree({ api }: Props) {
         style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
       />
       {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
-      {result == null ? <Spin /> : null}
+      {result == null && !error ? <Spin /> : null}
       {result && !groups.length && !loading ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
