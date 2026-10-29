@@ -8,6 +8,7 @@ import { usePlaygroundContext, useRbac } from '../../hooks';
 import { logout } from '../../shared/auth';
 import { StyledMenu, StyledMenuButton, StyledMenuItem } from './Menu';
 import { RunOnCubeCloud } from './RunOnCubeCloud';
+import { ThemeSwitcher } from '../ThemeSwitcher';
 import { WorkspaceSelector } from './WorkspaceSelector';
 
 const StyledHeader = styled(Layout.Header)`
@@ -44,6 +45,13 @@ export default function Header({ selectedKeys }: Props) {
     </div>
   ) : null;
 
+  // floats right, so it comes first in the markup to sit left of the selector
+  const themeSwitcher = (
+    <div style={{ float: 'right', marginLeft: 8 }}>
+      <ThemeSwitcher />
+    </div>
+  );
+
   function logOut() {
     logout();
     window.location.reload();
@@ -60,6 +68,7 @@ export default function Header({ selectedKeys }: Props) {
       </div>
 
       {workspaceSelector}
+      {themeSwitcher}
 
       {isDesktopOrLaptop && (
         <StyledMenu theme="light" mode="horizontal" selectedKeys={selectedKeys}>
