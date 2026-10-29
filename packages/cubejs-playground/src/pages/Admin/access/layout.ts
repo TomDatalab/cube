@@ -12,12 +12,9 @@ export const NOTE_CHARS = 30;
 
 const GAP = 22;
 const PAD = 20;
-const COLUMN_X: Record<AccessNodeKind, number> = {
-  user: 20,
-  organization: 400,
-  workspace: 780,
-  connection: 1160,
-};
+const COLUMNS: AccessNodeKind[] = ['user', 'organization', 'workspace', 'connection'];
+// NODE_W plus a 160 px gutter for the edge labels.
+const COLUMN_STEP = 380;
 
 const PLATFORM_ADMIN = 'platform admin: full access';
 
@@ -125,6 +122,10 @@ export function layout(
     workspace: PAD,
     connection: PAD,
   };
+  // Columns left to right; one with no node (all workspaces hidden, say)
+  // takes no room.
+  const shownKinds = new Set(graph.nodes.filter((n) => !hidden.has(n.id)).map((n) => n.kind));
+  const columnX = new Map(COLUMNS.filter((k) => shownKinds.has(k)).map((k, i) => [k, PAD + i * COLUMN_STEP]));
   const nodes: LaidOutNode[] = [];
   graph.nodes.forEach((n) => {
     if (hidden.has(n.id)) {
@@ -143,7 +144,7 @@ export function layout(
     const laid: LaidOutNode = {
       ...n,
       ...rows,
-      x: COLUMN_X[n.kind],
+      x: columnX.get(n.kind) ?? PAD,
       y: nextY[n.kind],
       h,
       label: shorten(n.name, NAME_CHARS),

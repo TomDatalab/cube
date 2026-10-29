@@ -107,6 +107,8 @@ describe('access layout', () => {
     expect(org.foldable).toBe(true);
     expect(nodeRows(org).pillY).not.toBeNull();
     expect(collapsed.nodes.some((n) => n.id === 'connection:c')).toBe(true);
+    // The empty workspace column takes no room.
+    expect(collapsed.nodes.find((n) => n.id === 'connection:c')!.x).toBe(780);
     expect(collapsed.edges.every((e) => !e.to.startsWith('workspace:') && !e.from.startsWith('workspace:'))).toBe(true);
     const open = layout(g, new Set([OID]));
     expect(open.nodes.filter((n) => n.kind === 'workspace')).toHaveLength(9);
