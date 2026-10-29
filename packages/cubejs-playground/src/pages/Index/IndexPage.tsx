@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useState } from 'react';
 import { useHistory } from 'react-router-dom';
 
 import { useIsMounted, usePlaygroundContext } from '../../hooks';
+import { playgroundFetch } from '../../shared/helpers';
 
 export function IndexPage() {
   const { push } = useHistory();
@@ -12,7 +13,7 @@ export function IndexPage() {
 
   useEffect(() => {
     async function loadFiles() {
-      const res = await fetch('playground/files');
+      const res = await playgroundFetch('playground/files');
       const result = await res.json();
 
       if (result.error?.includes('Model files not found')) {

@@ -1,3 +1,5 @@
+import { authHeaders, onUnauthorized } from './auth';
+
 export function notEmpty<T>(value: T | null | undefined): value is T {
   return value != null;
 }
@@ -14,8 +16,12 @@ export function setPlaygroundKey(key?: string | null) {
   playgroundKey = key || '';
 }
 
+// With RBAC on, every Playground route also wants the admin's login token.
 export function playgroundKeyHeaders(): Record<string, string> {
-  return playgroundKey ? { 'X-Playground-Key': playgroundKey } : {};
+  return {
+    ...authHeaders(),
+    ...(playgroundKey ? { 'X-Playground-Key': playgroundKey } : {}),
+  };
 }
 
 export function playgroundFetch(url, options: any = {}) {
@@ -26,6 +32,7 @@ export function playgroundFetch(url, options: any = {}) {
     headers: { ...(restOptions.headers || {}), ...playgroundKeyHeaders() },
   })
     .then(async (r) => {
+      onUnauthorized(r);
       if (r.status === 500) {
         let errorText = await r.text();
         try {

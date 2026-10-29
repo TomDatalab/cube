@@ -1,10 +1,11 @@
-import { MenuOutlined } from '@ant-design/icons';
+import { LogoutOutlined, MenuOutlined } from '@ant-design/icons';
 import { Dropdown, Layout, Menu } from 'antd';
 import { useMediaQuery } from 'react-responsive';
 import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
-import { StyledMenu, StyledMenuItem } from './Menu';
+import { getSession, logout } from '../../shared/auth';
+import { StyledMenu, StyledMenuButton, StyledMenuItem } from './Menu';
 import { RunOnCubeCloud } from './RunOnCubeCloud';
 
 const StyledHeader = styled(Layout.Header)`
@@ -29,6 +30,14 @@ export default function Header({ selectedKeys }: Props) {
   const isMobileOrTable = useMediaQuery({
     query: '(max-width: 991px)',
   });
+
+  // With RBAC on, the admin who logged in.
+  const session = getSession();
+
+  function logOut() {
+    logout();
+    window.location.reload();
+  }
 
   return (
     <StyledHeader>
@@ -59,6 +68,13 @@ export default function Header({ selectedKeys }: Props) {
           </StyledMenuItem>
 
           <RunOnCubeCloud />
+
+          {session ? (
+            <StyledMenuButton onClick={logOut}>
+              <LogoutOutlined />
+              Log out {session.user.name || session.user.id}
+            </StyledMenuButton>
+          ) : null}
         </StyledMenu>
       )}
 
@@ -78,6 +94,12 @@ export default function Header({ selectedKeys }: Props) {
                 <Menu.Item key="/data-sources">
                   <Link to="/data-sources">Data Source</Link>
                 </Menu.Item>
+
+                {session ? (
+                  <Menu.Item key="logout" onClick={logOut}>
+                    Log out
+                  </Menu.Item>
+                ) : null}
               </Menu>
             )}
           >

@@ -26,6 +26,7 @@ import {
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { onUnauthorized } from '../../shared/auth';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
@@ -83,6 +84,7 @@ async function request(url: string, options: RequestInit = {}) {
       ...(options.headers || {}),
     },
   });
+  onUnauthorized(response);
   let body: any = null;
   try {
     body = await response.json();
