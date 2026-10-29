@@ -4552,3 +4552,116 @@ db_test!(connections_listing_is_for_platform_admins, |store| {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["connections"].is_array(), "{body}");
 });
+
+// ---- access graph ----
+
+async fn access_graph(env: &Env, token: &str, user: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/users/{user}/access"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+fn has_grant(graph: &Value, resource: &str, permission: &str) -> bool {
+    graph["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["resource"] == resource && g["permission"] == permission)
+}
+
+db_test!(access_graph_is_for_platform_admins, |store| {
+    let s = scenario(store).await;
+    let (status, _) = access_graph(&s.env, &s.ana, "ana").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = access_graph(&s.env, &s.admin, "nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = access_graph(&s.env, &s.admin, "ana").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["id"], "ana");
+    assert_eq!(body["platformAdmin"], false);
+});
+
+db_test!(access_graph_agrees_with_check, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let ops = workspace_id(env, &s.ana, &s.org_a, "ops").await;
+    let fin = workspace_id(env, &s.ana, &s.org_a, "fin").await;
+    assert_eq!(
+        set_role(env, &s.ana, &ops, "bia", "editor").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        set_role(env, &s.ana, &fin, "caio", "viewer").await,
+        StatusCode::OK
+    );
+    for user in ["ana", "bia", "caio"] {
+        let (status, graph) = access_graph(env, &s.admin, user).await;
+        assert_eq!(status, StatusCode::OK, "{graph}");
+        let org = ObjectRef::new("organization", s.org_a.clone());
+        for permission in ["admin", "view", "manage_connections"] {
+            assert_eq!(
+                has_grant(&graph, &format!("organization:{}", s.org_a), permission),
+                env.authz.check(&org, permission, user).await.unwrap(),
+                "{user} {permission} on the organization: {graph}"
+            );
+        }
+        for ws in [&ops, &fin] {
+            let resource = ObjectRef::new("workspace", ws.clone());
+            for permission in ["manage", "edit", "view", "query", "execute"] {
+                assert_eq!(
+                    has_grant(&graph, &format!("workspace:{ws}"), permission),
+                    env.authz.check(&resource, permission, user).await.unwrap(),
+                    "{user} {permission} on {ws}: {graph}"
+                );
+            }
+        }
+    }
+});
+
+db_test!(access_graph_hides_manage_on_assigned_connections, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(
+        assign(env, &s.admin, "shared", &s.org_a).await,
+        StatusCode::NO_CONTENT
+    );
+    let ops = workspace_id(env, &s.ana, &s.org_a, "ops").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &ops, "shared").await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, graph) = access_graph(env, &s.admin, "ana").await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert!(has_grant(&graph, "connection:shared", "query"), "{graph}");
+    assert!(!has_grant(&graph, "connection:shared", "manage"), "{graph}");
+    let node = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "connection:shared")
+        .unwrap_or_else(|| panic!("no connection node: {graph}"));
+    assert!(
+        node["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("assigned")),
+        "{node}"
+    );
+    // The API agrees: the owner of the organization cannot edit it.
+    let (status, body) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/connections/shared",
+        Some(&s.ana),
+        Some(json!({ "variables": { "CUBEJS_DB_HOST": "elsewhere" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+});

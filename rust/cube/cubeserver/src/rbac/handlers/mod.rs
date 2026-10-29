@@ -43,6 +43,7 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             &format!("{base}/v1/users/:id/password"),
             put(users::set_password),
         )
+        .route(&format!("{base}/v1/users/:id/access"), get(users::access))
         .route(
             &format!("{base}/v1/users/:id/tokens"),
             post(users::issue_token),

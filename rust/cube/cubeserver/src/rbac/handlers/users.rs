@@ -4,18 +4,25 @@
 //! password hash.
 
 use axum::extract::rejection::JsonRejection;
+use std::collections::BTreeSet;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
+use super::organizations::user_ref;
+use super::workspaces::workspace_ref;
 use super::{body, rbac_of, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
+use crate::handlers::data_sources::data_source_types;
+use crate::rbac::access::{self, AccessInput};
 use crate::rbac::identity::{hash_password, user_token_claims, validate_user_id};
 use crate::rbac::store::{NewUser, StoreError, User};
-use crate::rbac::{unauthenticated, Rbac};
+use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
 use crate::services::RequestContext;
 
 #[derive(Deserialize)]
@@ -182,6 +189,126 @@ pub async fn issue_token(
         "token": token,
         "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     })))
+}
+
+/// → the user's access graph (`rbac::access::build`). Platform admins only.
+pub(crate) async fn access(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+) -> Result<Json<access::AccessGraph>, ApiError> {
+    let rbac = require_admin(&state, &ctx)?;
+    validate_user_id(&id)?;
+    let user = rbac
+        .store
+        .user(&id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .ok_or_else(user_not_found)?;
+    let platform_admin = rbac.is_platform_admin(&id).await?;
+    let mut input = AccessInput {
+        user,
+        platform_admin,
+        direct: vec![],
+        organizations: vec![],
+        workspaces: vec![],
+        connections: vec![],
+        releases: vec![],
+        configured: BTreeSet::new(),
+    };
+    if platform_admin {
+        return Ok(Json(access::build(&input)));
+    }
+
+    let mut direct = Vec::new();
+    for kind in ["organization", "workspace"] {
+        direct.extend(
+            rbac.authz
+                .read(&RelationshipFilter {
+                    kind,
+                    id: None,
+                    relation: None,
+                    subject: Some(user_ref(&id)),
+                })
+                .await
+                .map_err(authz_error)?,
+        );
+    }
+    let ids_of = |kind: &str| -> Vec<Uuid> {
+        direct
+            .iter()
+            .filter(|r| r.resource.kind == kind)
+            .filter_map(|r| r.resource.id.parse().ok())
+            .collect()
+    };
+    let mut workspace_ids = ids_of("workspace");
+    let mut organization_ids = ids_of("organization");
+    let owned: Vec<Uuid> = direct
+        .iter()
+        .filter(|r| r.resource.kind == "organization" && r.relation == "owner")
+        .filter_map(|r| r.resource.id.parse().ok())
+        .collect();
+
+    // Every workspace of an organization the user owns, whatever its roles.
+    for org in owned {
+        for ws in rbac
+            .store
+            .workspaces_of_organization(org)
+            .await
+            .map_err(|e| store_error(e, "Conflict"))?
+        {
+            workspace_ids.push(ws.id);
+        }
+    }
+    workspace_ids.sort();
+    workspace_ids.dedup();
+    let workspaces = rbac
+        .store
+        .workspaces_by_ids(&workspace_ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    organization_ids.extend(workspaces.iter().map(|w| w.organization_id));
+    organization_ids.sort();
+    organization_ids.dedup();
+    let organizations = rbac
+        .store
+        .organizations_by_ids(&organization_ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+
+    let mut connections = Vec::new();
+    for org in &organizations {
+        connections.extend(
+            rbac.store
+                .connections_of_organization(org.id)
+                .await
+                .map_err(|e| store_error(e, "Conflict"))?,
+        );
+    }
+    let mut releases = Vec::new();
+    for ws in &workspaces {
+        for rel in rbac
+            .authz
+            .read(&RelationshipFilter {
+                kind: "connection",
+                id: None,
+                relation: Some("workspace"),
+                subject: Some(workspace_ref(ws.id)),
+            })
+            .await
+            .map_err(authz_error)?
+        {
+            releases.push((rel.resource.id, ws.id));
+        }
+    }
+
+    input.direct = direct;
+    input.organizations = organizations;
+    input.workspaces = workspaces;
+    input.connections = connections;
+    input.releases = releases;
+    input.configured = data_source_types(&state).into_keys().collect();
+    Ok(Json(access::build(&input)))
 }
 
 fn user_not_found() -> ApiError {
