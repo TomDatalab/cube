@@ -61,10 +61,12 @@ impl AuthService for TokenAuth {
             Some("good") => Ok(AuthenticatedRequest {
                 security_context: json!({ "uid": 1 }),
                 signed_with_playground_auth_secret: false,
+                token_verified: true,
             }),
             Some("meta-only") => Ok(AuthenticatedRequest {
                 security_context: json!({ "scopes": ["meta"] }),
                 signed_with_playground_auth_secret: false,
+                token_verified: true,
             }),
             _ => Err(ApiError::forbidden("Invalid token")),
         }

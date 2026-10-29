@@ -60,7 +60,7 @@ pub fn generate(
     }
 
     let existing = existing_cubes(model_dir);
-    let mut taken: BTreeSet<String> = existing.keys().cloned().collect();
+    let mut planned: BTreeSet<String> = BTreeSet::new();
 
     // Everything is decided before anything is written, so one bad table
     // leaves the model as it was.
@@ -73,14 +73,37 @@ pub fn generate(
             .ok_or_else(|| ApiError::bad_request(format!("Unknown table {schema}.{table}")))?;
 
         let (data_source, db_schema) = split_schema(schema, data_sources);
-        let name = if data_source == "default" {
-            snake(table)
+        let (name, qualified) = if data_source == "default" {
+            (
+                snake(table),
+                format!("{}_{}", snake(db_schema), snake(table)),
+            )
         } else {
-            format!("{}_{}", snake(db_schema), snake(table))
+            (
+                format!("{}_{}", snake(db_schema), snake(table)),
+                format!(
+                    "{}_{}_{}",
+                    snake(data_source),
+                    snake(db_schema),
+                    snake(table)
+                ),
+            )
         };
+        // Two picked tables that make the same name (`orders` in two
+        // schemas): the second one's name says where it comes from too.
+        let name = if planned.contains(&name) {
+            qualified
+        } else {
+            name
+        };
+        if planned.contains(&name) {
+            return Err(ApiError::bad_request(format!(
+                "{schema}.{table} and another selected table both make a cube named {name}"
+            )));
+        }
 
         let plan = match existing.get(&name) {
-            Some(owner) if owner.generated => Plan::Adopt {
+            Some(owner) if owner.generated && owner.reads(data_source, table) => Plan::Adopt {
                 name: name.clone(),
                 from: owner.path.clone(),
             },
@@ -92,11 +115,6 @@ pub fn generate(
                         .strip_prefix(model_dir)
                         .unwrap_or(&owner.path)
                         .display()
-                )))
-            }
-            None if taken.contains(&name) => {
-                return Err(ApiError::bad_request(format!(
-                    "{schema}.{table} and another selected table both make a cube named {name}"
                 )))
             }
             None => {
@@ -111,7 +129,7 @@ pub fn generate(
                 }
             }
         };
-        taken.insert(name.clone());
+        planned.insert(name.clone());
 
         let target = model_dir.join(format!("{}.yml", plan.name()));
         if target.exists() && !matches!(&plan, Plan::Adopt { from, .. } if *from == target) {
@@ -124,28 +142,45 @@ pub fn generate(
     }
 
     std::fs::create_dir_all(model_dir).map_err(io_error)?;
-    let mut files = Vec::new();
-    for (plan, target) in plans {
-        let content = match &plan {
-            Plan::Write { content, .. } => content.clone(),
-            Plan::Adopt { from, .. } => {
-                strip_header(&std::fs::read_to_string(from).map_err(io_error)?)
-            }
-        };
 
-        // Written under a name the loader skips, then moved into place, so
-        // the model is never read with a half-written file.
+    // Every file is first written under a name the loader skips, so the
+    // model is never read with a half-written file, and a failure here
+    // leaves it as it was.
+    let mut staged: Vec<(PathBuf, String)> = Vec::new();
+    let discard = |staged: &[(PathBuf, String)]| {
+        for (tmp, _) in staged {
+            let _ = std::fs::remove_file(tmp);
+        }
+    };
+    for (plan, target) in &plans {
         let tmp = target.with_extension("yml.tmp");
-        std::fs::write(&tmp, &content).map_err(io_error)?;
-        if let Plan::Adopt { from, .. } = &plan {
-            if *from != target {
+        let written = match plan {
+            Plan::Write { content, .. } => Ok(content.clone()),
+            Plan::Adopt { from, .. } => std::fs::read_to_string(from).map(|t| strip_header(&t)),
+        }
+        .and_then(|content| std::fs::write(&tmp, &content).map(|_| content));
+        match written {
+            Ok(content) => staged.push((tmp, content)),
+            Err(e) => {
+                discard(&staged);
+                return Err(io_error(e));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    for ((plan, target), (tmp, content)) in plans.iter().zip(staged) {
+        std::fs::rename(&tmp, target).map_err(io_error)?;
+        // The generator's file goes only once its copy is in place, so a
+        // failure cannot lose the cube.
+        if let Plan::Adopt { from, .. } = plan {
+            if from != target {
                 std::fs::remove_file(from).map_err(io_error)?;
             }
         }
-        std::fs::rename(&tmp, &target).map_err(io_error)?;
 
         files.push(json!({
-            "fileName": target.strip_prefix(model_dir).unwrap_or(&target).to_string_lossy(),
+            "fileName": target.strip_prefix(model_dir).unwrap_or(target.as_path()).to_string_lossy(),
             "content": content,
         }));
     }
@@ -170,6 +205,39 @@ struct Owner {
     path: PathBuf,
     /// The file is a generator's, and holds this cube alone.
     generated: bool,
+    /// The cube's `data_source`, if it names one.
+    data_source: Option<String>,
+    /// The table it reads; see [`table_of`].
+    table: Option<String>,
+}
+
+impl Owner {
+    /// Whether this cube is plausibly the one for `table` of `data_source`,
+    /// rather than another table's that maps to the same name.
+    fn reads(&self, data_source: &str, table: &str) -> bool {
+        self.data_source.as_deref().is_none_or(|d| d == data_source)
+            && self
+                .table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(table))
+    }
+}
+
+/// The table a cube reads, unquoted: the last part of its `sql_table`
+/// (`dfos.fiberCable`), or of the name after `FROM` in its `sql`
+/// (`SELECT * FROM dfos.fibersegment FINAL`).
+fn table_of(sql_table: Option<&str>, sql: Option<&str>) -> Option<String> {
+    let reference = match sql_table {
+        Some(table) => table.trim().to_string(),
+        None => {
+            let mut words = sql?.split_whitespace();
+            words.find(|w| w.eq_ignore_ascii_case("from"))?;
+            words.next()?.to_string()
+        }
+    };
+    let last = reference.rsplit('.').next()?;
+    let unquoted = last.trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'));
+    (!unquoted.is_empty()).then(|| unquoted.to_string())
 }
 
 /// Every cube and view name defined under `dir`, with the file defining it.
@@ -202,24 +270,25 @@ fn walk(dir: &Path, out: &mut BTreeMap<String, Owner>) {
             continue;
         };
 
-        let mut names = Vec::new();
+        let mut items = Vec::new();
         for kind in ["cubes", "views"] {
-            if let Some(items) = doc.get(kind).and_then(Yaml::as_sequence) {
-                names.extend(
-                    items
-                        .iter()
-                        .filter_map(|item| item.get("name").and_then(Yaml::as_str))
-                        .map(str::to_string),
+            if let Some(list) = doc.get(kind).and_then(Yaml::as_sequence) {
+                items.extend(
+                    list.iter()
+                        .filter_map(|item| Some((item.get("name")?.as_str()?, item))),
                 );
             }
         }
-        let generated = text.starts_with(GENERATED_MARKER) && names.len() == 1;
-        for name in names {
+        let generated = text.starts_with(GENERATED_MARKER) && items.len() == 1;
+        for (name, item) in items {
+            let text = |key: &str| item.get(key).and_then(Yaml::as_str).map(str::to_string);
             out.insert(
-                name,
+                name.to_string(),
                 Owner {
                     path: path.clone(),
                     generated,
+                    data_source: text("data_source"),
+                    table: table_of(text("sql_table").as_deref(), text("sql").as_deref()),
                 },
             );
         }
@@ -227,14 +296,22 @@ fn walk(dir: &Path, out: &mut BTreeMap<String, Owner>) {
 }
 
 /// `sofiadb.dfos` → `("sofiadb", "dfos")` when `sofiadb` is a configured
-/// source other than `default`; anything else is a `default` schema.
+/// source other than `default`; `default.x` → `("default", "x")`, which is
+/// how `/playground/db-schema` names a `default` schema that would otherwise
+/// read as another source's; anything else is a `default` schema.
 fn split_schema<'a>(schema: &'a str, data_sources: &'a [(String, String)]) -> (&'a str, &'a str) {
     if let Some((source, rest)) = schema.split_once('.') {
-        if source != "default" && data_sources.iter().any(|(n, _)| n == source) {
+        if source == "default" || data_sources.iter().any(|(n, _)| n == source) {
             return (source, rest);
         }
     }
     ("default", schema)
+}
+
+/// Whether a `default` schema needs `default.` in front to be read back as
+/// one by [`split_schema`].
+pub(crate) fn is_prefixed(schema: &str, data_sources: &[(String, String)]) -> bool {
+    split_schema(schema, data_sources) != ("default", schema)
 }
 
 fn cube_yaml(
@@ -353,22 +430,16 @@ fn cube_type(raw: &str) -> Option<&'static str> {
     Some("string")
 }
 
-/// Leaves a plain identifier bare, quotes anything else the way the
-/// database expects.
+/// Quotes an identifier the way its database expects. Always: the name is
+/// exactly as the database reported it, and left bare it could be a reserved
+/// word (`order`) or fold to another case (Snowflake, Oracle).
 fn quote(db_type: &str, ident: &str) -> String {
-    let plain = ident
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-        && ident
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if plain {
-        return ident.to_string();
-    }
     match db_type {
-        "clickhouse" | "mysql" | "databricks-jdbc" | "bigquery" => {
-            format!("`{}`", ident.replace('`', "\\`"))
+        // A backtick inside is doubled...
+        "mysql" | "databricks-jdbc" => format!("`{}`", ident.replace('`', "``")),
+        // ...or escaped with a backslash.
+        "clickhouse" | "bigquery" => {
+            format!("`{}`", ident.replace('\\', "\\\\").replace('`', "\\`"))
         }
         _ => format!("\"{}\"", ident.replace('"', "\"\"")),
     }
@@ -440,6 +511,30 @@ mod tests {
     }
 
     #[test]
+    fn the_table_a_cube_reads_is_its_last_identifier() {
+        assert_eq!(
+            table_of(Some("dfos.`fiberCable`"), None).as_deref(),
+            Some("fiberCable")
+        );
+        assert_eq!(
+            table_of(None, Some("SELECT * FROM dfos.fibersegment FINAL")).as_deref(),
+            Some("fibersegment")
+        );
+        assert_eq!(
+            table_of(Some("\"public\".\"orders\""), None).as_deref(),
+            Some("orders")
+        );
+        // A table whose name only contains the picked one is another table.
+        let owner = Owner {
+            path: PathBuf::new(),
+            generated: true,
+            data_source: None,
+            table: table_of(Some("dfos.orders_archive"), None),
+        };
+        assert!(!owner.reads("default", "orders"));
+    }
+
+    #[test]
     fn names_are_snake_case() {
         assert_eq!(snake("fiberCableId"), "fiber_cable_id");
         assert_eq!(snake("Line Items"), "line_items");
@@ -447,10 +542,12 @@ mod tests {
     }
 
     #[test]
-    fn only_odd_identifiers_are_quoted() {
-        assert_eq!(quote("postgres", "orders"), "orders");
-        assert_eq!(quote("postgres", "Orders"), "\"Orders\"");
+    fn identifiers_are_quoted_and_cannot_close_the_quote() {
+        assert_eq!(quote("postgres", "order"), "\"order\"");
+        assert_eq!(quote("postgres", "a\"b"), "\"a\"\"b\"");
         assert_eq!(quote("clickhouse", "Fiber Cable"), "`Fiber Cable`");
+        assert_eq!(quote("mysql", "a`b"), "`a``b`");
+        assert_eq!(quote("clickhouse", "a`b\\"), "`a\\`b\\\\`");
     }
 
     #[test]
@@ -464,6 +561,13 @@ mod tests {
         assert_eq!(
             split_schema("my.schema", &sources),
             ("default", "my.schema")
+        );
+        // A `default` schema that looks like another source's.
+        assert!(is_prefixed("sofiadb.dfos", &sources));
+        assert!(!is_prefixed("my.schema", &sources));
+        assert_eq!(
+            split_schema("default.sofiadb.dfos", &sources),
+            ("default", "sofiadb.dfos")
         );
     }
 }

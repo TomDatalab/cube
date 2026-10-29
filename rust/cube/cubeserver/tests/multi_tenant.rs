@@ -69,6 +69,7 @@ impl AuthService for TenantAuth {
         Ok(AuthenticatedRequest {
             security_context: json!({ "tenant_id": tenant }),
             signed_with_playground_auth_secret: false,
+            token_verified: true,
         })
     }
 

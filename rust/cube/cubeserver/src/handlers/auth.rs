@@ -86,6 +86,7 @@ pub async fn auth_middleware(
         workspace,
         user,
         platform_admin,
+        token_verified: authenticated.token_verified,
     });
 
     Ok(next.run(req).await.into_response())

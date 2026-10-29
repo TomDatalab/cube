@@ -58,6 +58,7 @@ impl AuthService for AllowAll {
         Ok(AuthenticatedRequest {
             security_context: json!({}),
             signed_with_playground_auth_secret: self.playground,
+            token_verified: true,
         })
     }
 

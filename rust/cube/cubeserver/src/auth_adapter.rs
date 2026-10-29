@@ -79,6 +79,7 @@ impl AuthService for CubeAuthService {
                 .authenticator
                 .extract_security_context(&result.security_context),
             signed_with_playground_auth_secret: result.signed_with_playground_auth_secret,
+            token_verified: result.verified,
         })
     }
 

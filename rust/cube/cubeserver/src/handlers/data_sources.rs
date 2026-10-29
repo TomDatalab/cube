@@ -66,9 +66,13 @@ const FIELDS: &[(&str, &str)] = &[
     ("CUBEJS_DB_SSL", "ssl"),
 ];
 
+/// The unprefixed variables, besides the `cube.yml` fields, that hold the
+/// `default` source's driver-specific settings.
+const DEFAULT_DRIVER_PREFIXES: &[&str] = &["CUBEJS_DB_", "CUBEJS_AWS_", "CUBEJS_FIREBOLT_"];
+
 /// One change to the configuration at a time: each one reads the files,
-/// checks the result and writes it back.
-static WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// checks the result and writes it back. Generating cubes takes it too.
+pub(crate) static WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// `GET /playground/data-sources`
 pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -87,7 +91,10 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
                 json!({
                     "name": ds.name,
                     "type": ds.db_type,
-                    "host": ds.host.as_deref().or(ds.url.as_deref()),
+                    "host": ds
+                        .host
+                        .clone()
+                        .or_else(|| ds.url.as_deref().map(|url| without_password(url).0)),
                     "port": ds.port,
                     "database": ds.database,
                     "user": ds.user,
@@ -121,7 +128,8 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
 }
 
 /// `GET /playground/data-sources/:name` — the settings the edit form starts
-/// from. The password is never sent back, only whether there is one.
+/// from. A secret (a password, a key, a URL carrying a password) is never
+/// sent back, only its name, in `secrets`.
 pub async fn get(
     State(state): State<AppState>,
     UrlPath(name): UrlPath<String>,
@@ -130,16 +138,20 @@ pub async fn get(
     let env = env_with_file(&paths.env);
     let config = load(&paths.config, &env)?;
     let mut variables = current_variables(&config, &name, &env)?;
-    let has_password = variables
-        .remove("CUBEJS_DB_PASS")
-        .is_some_and(|p| !p.is_empty());
     let db_type = variables.remove("CUBEJS_DB_TYPE").unwrap_or_default();
+    let secrets: Vec<String> = variables
+        .keys()
+        .filter(|var| kept_if_empty(var, &variables))
+        .cloned()
+        .collect();
+    variables.retain(|var, _| !secrets.contains(var));
 
     Ok(Json(json!({
         "name": name,
         "type": db_type,
         "variables": variables,
-        "hasPassword": has_password,
+        "hasPassword": secrets.iter().any(|s| s == "CUBEJS_DB_PASS"),
+        "secrets": secrets,
     })))
 }
 
@@ -171,7 +183,7 @@ pub async fn test(
             let env = env_with_file(&paths.env);
             let config = load(&paths.config, &env)?;
             let current = current_variables(&config, &name, &env)?;
-            let (set, cleared) = split_changes(&request.variables)?;
+            let (set, cleared) = split_changes(&request.variables, &current)?;
             test_variables(&edited(&current, &set, &cleared)).await?;
         }
         (None, _) => test_variables(&clean(&request.variables)?).await?,
@@ -231,8 +243,15 @@ pub async fn create(
     let updated = add_to_config(&current, &name, &db_type);
     check_config(&paths.config, &updated, &set, &[])?;
 
+    // `.env` first: stopped halfway, it holds settings nothing reads, rather
+    // than `cube.yml` naming a source without them. A failed `cube.yml`
+    // puts `.env` back.
+    let env_before = std::fs::read_to_string(&paths.env).ok();
     update_env(&paths.env, &set, &[], &header(&name), false)?;
-    write_atomically(&paths.config, &updated)?;
+    if let Err(e) = write_atomically(&paths.config, &updated) {
+        restore(&paths.env, env_before.as_deref());
+        return Err(e);
+    }
     tracing::info!(data_source = %name, db_type = %db_type, "data source added from the Playground");
 
     Ok(Json(json!({
@@ -260,17 +279,31 @@ pub async fn update(
     let env = env_with_file(&paths.env);
     let config = load(&paths.config, &env)?;
     let current = current_variables(&config, &name, &env)?;
-    let (set, cleared) = split_changes(&request.variables)?;
-    if set.contains_key("CUBEJS_DB_TYPE") && set.get("CUBEJS_DB_TYPE") != current.get("CUBEJS_DB_TYPE") {
+    let (set, cleared) = split_changes(&request.variables, &current)?;
+    if set.contains_key("CUBEJS_DB_TYPE")
+        && set.get("CUBEJS_DB_TYPE") != current.get("CUBEJS_DB_TYPE")
+    {
         return Err(ApiError::bad_request(
             "The database type cannot change; add a new data source instead",
         ));
     }
 
-    test_variables(&edited(&current, &set, &cleared)).await?;
-
     let spec = read_spec(&paths.config)?;
     let spec = spec.data_sources.get(&name);
+    // A value written in `cube.yml` itself comes back whatever `.env` says,
+    // so emptying its field could not clear it.
+    for var in cleared.iter().filter(|var| current.contains_key(*var)) {
+        if let Some((_, field)) = FIELDS.iter().find(|(v, _)| v == var) {
+            if let Some(ConfigValue::Literal(_)) = spec.and_then(|s| spec_field(s, field)) {
+                return Err(ApiError::bad_request(format!(
+                    "{field} is written in cube.yml (data_sources.{name}.{field}); remove it there to clear it"
+                )));
+            }
+        }
+    }
+
+    test_variables(&edited(&current, &set, &cleared)).await?;
+
     let mut to_set = Vec::new();
     for (var, value) in &set {
         if var == "CUBEJS_DB_TYPE" || current.get(var) == Some(value) {
@@ -317,8 +350,27 @@ pub async fn delete(
         return Err(ApiError::not_found(format!("No data source named {name}")));
     }
 
-    // A cube pointing at a missing data source fails the whole model.
-    let users = cubes_using(Path::new(&state.config.schema_path), &name);
+    // A cube pointing at a missing data source fails the whole model: the
+    // deployment's, or a tenant's that has a directory of its own (one that
+    // differs per claim value cannot be listed).
+    let mut model_dirs = vec![PathBuf::from(&state.config.schema_path)];
+    if let Some(tenants) = config.tenants() {
+        model_dirs.extend(
+            tenants
+                .rules
+                .iter()
+                .chain(&tenants.default)
+                .filter_map(|rule| rule.model_path.as_deref())
+                .filter(|path| !path.contains('{'))
+                .map(PathBuf::from),
+        );
+    }
+    model_dirs.sort();
+    model_dirs.dedup();
+    let users: Vec<String> = model_dirs
+        .iter()
+        .flat_map(|dir| cubes_using(dir, &name))
+        .collect();
     if !users.is_empty() {
         let shown: Vec<&str> = users.iter().take(5).map(String::as_str).collect();
         let more = users.len().saturating_sub(shown.len());
@@ -331,20 +383,32 @@ pub async fn delete(
     }
 
     let text = std::fs::read_to_string(&paths.config).map_err(io_error)?;
-    let updated = remove_from_config(&text, &name)
-        .ok_or_else(|| ApiError::bad_request(format!("Cannot find {name} in cube.yml")))?;
+    let updated = remove_from_config(&text, &name).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "{name} is not declared in cube.yml but elsewhere (CUBEJS_DATASOURCES, say); remove it there"
+        ))
+    })?;
 
     // Only the variables that exist for this source alone go; one that a
-    // `{ env: ... }` field names may be read by something else too.
-    let prefix = key_by_data_source("CUBEJS_", &name);
-    let to_remove: Vec<String> = env_keys(&paths.env)
+    // `{ env: ... }` field names may be read by something else too. Those
+    // of the running process go as well, or the restart would keep them.
+    let sources: Vec<&str> = config.data_sources.keys().map(String::as_str).collect();
+    let mut to_remove: Vec<String> = env_keys(&paths.env)
         .into_iter()
-        .filter(|key| key.starts_with(&prefix))
+        .chain(std::env::vars().map(|(key, _)| key))
+        .filter(|key| own_setting(key, &name, &sources).is_some())
         .collect();
+    to_remove.sort();
+    to_remove.dedup();
 
     check_config(&paths.config, &updated, &[], &to_remove)?;
-    update_env(&paths.env, &[], &to_remove, &header(&name), true)?;
+    // `cube.yml` first: stopped halfway, `.env` holds settings nothing
+    // reads, rather than `cube.yml` naming a source without them.
     write_atomically(&paths.config, &updated)?;
+    if let Err(e) = update_env(&paths.env, &[], &to_remove, &header(&name), true) {
+        let _ = write_atomically(&paths.config, &text);
+        return Err(e);
+    }
     tracing::info!(data_source = %name, "data source deleted from the Playground");
 
     Ok(Json(json!({
@@ -374,6 +438,17 @@ async fn v1_scoped<R: IntoResponse>(
     scope: &str,
     handler: impl std::future::Future<Output = Result<R, ApiError>>,
 ) -> Response {
+    // With security checks off, a request without a token (or with one that
+    // did not verify) is let through with the default scopes. Those may list
+    // these scopes, but changing the connections or running statements on
+    // them always takes a real token.
+    if !ctx.token_verified {
+        return ApiError::forbidden(format!(
+            "The {scope} scope needs a verified token, whatever the default scopes grant"
+        ))
+        .with_request_id(&ctx.request_id)
+        .into_response();
+    }
     if let Err(e) = assert_api_scope(state, ctx, scope).await {
         return e.into_response();
     }
@@ -531,7 +606,11 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
                     Value::Number(n) => n.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Null => continue,
-                    _ => return Err(ApiError::bad_request(format!("{key} must be a single value"))),
+                    _ => {
+                        return Err(ApiError::bad_request(format!(
+                            "{key} must be a single value"
+                        )))
+                    }
                 };
                 text.insert(key, value);
             }
@@ -550,9 +629,16 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
         }
     };
     let name = name.as_str();
-    if let Some(database) = request.database.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+    if let Some(database) = request
+        .database
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
         if database.contains(['\n', '\r', '\0']) {
-            return Err(ApiError::bad_request("The database name cannot span several lines"));
+            return Err(ApiError::bad_request(
+                "The database name cannot span several lines",
+            ));
         }
         variables.insert("CUBEJS_DB_NAME".to_string(), database.to_string());
     }
@@ -674,30 +760,109 @@ fn current_variables(
     put("CUBEJS_DB_PASS", ds.password.clone());
     put("CUBEJS_DB_SSL", ds.ssl.then(|| "true".to_string()));
 
-    if name != "default" {
-        let prefix = key_by_data_source("CUBEJS_", name);
-        for key in env.names() {
-            let value = env.get(key).unwrap_or_default();
-            if let Some(rest) = key.strip_prefix(&prefix) {
-                let var = format!("CUBEJS_{rest}");
-                if !out.contains_key(&var) && !value.is_empty() {
-                    out.insert(var, value.to_string());
-                }
+    let sources: Vec<&str> = config.data_sources.keys().map(String::as_str).collect();
+    for key in env.names() {
+        let var = if name == "default" {
+            DEFAULT_DRIVER_PREFIXES
+                .iter()
+                .any(|p| key.starts_with(p))
+                .then(|| key.to_string())
+        } else {
+            own_setting(key, name, &sources).map(|rest| format!("CUBEJS_{rest}"))
+        };
+        let value = env.get(key).unwrap_or_default();
+        if let Some(var) = var {
+            if !out.contains_key(&var) && !value.is_empty() {
+                out.insert(var, value.to_string());
             }
         }
     }
     Ok(out)
 }
 
+/// What follows `CUBEJS_DS_<NAME>_` in one of `name`'s own variables. A
+/// source whose name starts the same (`sales_eu` for `sales`) has variables
+/// with that prefix too, and they are not `name`'s.
+fn own_setting<'a>(key: &'a str, name: &str, sources: &[&str]) -> Option<&'a str> {
+    let rest = key.strip_prefix(&key_by_data_source("CUBEJS_", name))?;
+    let another = sources.iter().any(|other| {
+        other.len() > name.len()
+            && *other != "default"
+            && key.starts_with(&key_by_data_source("CUBEJS_", other))
+    });
+    (!another).then_some(rest)
+}
+
+/// A setting the edit form is not sent, so an empty field keeps it: one
+/// whose name says it is a password, key, token or credentials, or a URL
+/// (`CUBEJS_DB_URL`, `CUBEJS_DB_DATABRICKS_URL`, ...) carrying one.
+fn kept_if_empty(var: &str, current: &BTreeMap<String, String>) -> bool {
+    is_secret(var)
+        || (var.ends_with("_URL") && current.get(var).is_some_and(|url| without_password(url).1))
+}
+
+fn is_secret(var: &str) -> bool {
+    let var = var.to_ascii_uppercase();
+    [
+        "PASS",
+        "PWD",
+        "SECRET",
+        "TOKEN",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+    ]
+    .iter()
+    .any(|word| var.contains(word))
+        || var.ends_with("KEY")
+}
+
+/// `url` without the secrets it may carry, and whether it had any: the
+/// password of `postgres://u:p@h/db` (→ `postgres://u@h/db`), and the value
+/// of a parameter such as `?password=`, `&token=` or JDBC's `;PWD=` (→ `***`).
+fn without_password(url: &str) -> (String, bool) {
+    let mut hidden = false;
+    let mut out = url.to_string();
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let end = rest.find(['/', '?', '#', ';']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(end);
+        if let Some((userinfo, host)) = authority.rsplit_once('@') {
+            if userinfo.contains(':') {
+                let user = userinfo.split(':').next().unwrap_or_default();
+                out = format!("{scheme}://{user}@{host}{tail}");
+                hidden = true;
+            }
+        }
+    }
+
+    let mut redacted = String::with_capacity(out.len());
+    for piece in out.split_inclusive(['?', '&', ';']) {
+        let (param, separator) = match piece.char_indices().last() {
+            Some((i, '?' | '&' | ';')) => piece.split_at(i),
+            _ => (piece, ""),
+        };
+        match param.split_once('=') {
+            Some((key, value)) if !value.is_empty() && is_secret(key) && !key.contains('/') => {
+                redacted.push_str(key);
+                redacted.push_str("=***");
+                hidden = true;
+            }
+            _ => redacted.push_str(param),
+        }
+        redacted.push_str(separator);
+    }
+    (redacted, hidden)
+}
+
 /// The form's fields, split into the ones to set and the ones emptied. An
-/// empty password means "keep it", not "clear it".
+/// empty secret (a password, say) means "keep it", not "clear it".
 fn split_changes(
     variables: &BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
 ) -> Result<(BTreeMap<String, String>, BTreeSet<String>), ApiError> {
     let set = clean(variables)?;
     let cleared = variables
         .iter()
-        .filter(|(key, value)| value.trim().is_empty() && key.as_str() != "CUBEJS_DB_PASS")
+        .filter(|(key, value)| value.trim().is_empty() && !kept_if_empty(key, current))
         .map(|(key, _)| key.clone())
         .collect();
     Ok((set, cleared))
@@ -855,7 +1020,10 @@ fn cubes_using(model_dir: &Path, name: &str) -> Vec<String> {
                 walk(root, &path, name, out);
                 continue;
             }
-            if !matches!(path.extension().and_then(|e| e.to_str()), Some("yml") | Some("yaml")) {
+            if !matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yml") | Some("yaml")
+            ) {
                 continue;
             }
             let Some(doc) = std::fs::read_to_string(&path)
@@ -1000,7 +1168,10 @@ fn env_file_vars(path: &Path) -> BTreeMap<String, String> {
         let Some(key) = env_line_key(line) else {
             continue;
         };
-        let raw = line.split_once('=').map(|(_, v)| v.trim()).unwrap_or_default();
+        let raw = line
+            .split_once('=')
+            .map(|(_, v)| v.trim())
+            .unwrap_or_default();
         let value = if let Some(inner) = raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
             inner.replace(r"'\''", "'")
         } else if let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
@@ -1086,15 +1257,24 @@ fn update_env(
     }
 
     use std::os::unix::fs::PermissionsExt;
-    // It holds passwords: readable by the owner alone unless it already
-    // had other permissions.
+    // It holds passwords: readable by the owner alone, whatever it allowed
+    // before.
     let mode = std::fs::metadata(path)
-        .map(|m| m.permissions().mode())
-        .unwrap_or(0o600);
+        .map(|m| m.permissions().mode() & 0o700)
+        .unwrap_or(0)
+        | 0o600;
     let tmp = path.with_file_name(".env.tmp");
     std::fs::write(&tmp, lines.join("\n") + "\n").map_err(io_error)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(io_error)?;
     std::fs::rename(&tmp, path).map_err(io_error)
+}
+
+/// Puts a file back as it was: `content`, or no file.
+fn restore(path: &Path, content: Option<&str>) {
+    let _ = match content {
+        Some(content) => std::fs::write(path, content),
+        None => std::fs::remove_file(path),
+    };
 }
 
 fn write_atomically(path: &Path, content: &str) -> Result<(), ApiError> {
@@ -1110,12 +1290,54 @@ fn restart_if_enabled(state: &AppState, set: Vec<(String, String)>, remove: Vec<
     state.config.restart_on_config_change
 }
 
+/// The environment changes waiting for the restart.
+#[derive(Debug, Default, PartialEq)]
+struct Pending {
+    set: Vec<(String, String)>,
+    remove: Vec<String>,
+}
+
+impl Pending {
+    /// Adds one change's variables; a later change to a variable wins.
+    fn merge(&mut self, set: Vec<(String, String)>, remove: Vec<String>) {
+        for (key, value) in set {
+            self.remove.retain(|r| *r != key);
+            self.set.retain(|(k, _)| *k != key);
+            self.set.push((key, value));
+        }
+        for key in remove {
+            self.set.retain(|(k, _)| *k != key);
+            if !self.remove.contains(&key) {
+                self.remove.push(key);
+            }
+        }
+    }
+}
+
+/// Changes made within one restart's delay all reach the new process.
+static PENDING: std::sync::Mutex<Option<Pending>> = std::sync::Mutex::new(None);
+
 /// Replaces this process with a fresh copy of itself once the response has
 /// gone out, with `set` added to its environment and `remove` taken out.
 fn restart_soon(set: Vec<(String, String)>, remove: Vec<String>) {
+    {
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let scheduled = pending.is_some();
+        pending
+            .get_or_insert_with(Pending::default)
+            .merge(set, remove);
+        if scheduled {
+            return;
+        }
+    }
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         tracing::info!("restarting to load the changed data sources");
+        let Pending { set, remove } = PENDING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or_default();
 
         use std::os::unix::process::CommandExt;
         let mut args = std::env::args_os();
@@ -1185,11 +1407,21 @@ mod tests {
     #[test]
     fn a_setting_is_written_where_cube_yml_reads_it() {
         let spec: DataSourceSpec =
-            serde_yaml::from_str("type: clickhouse\nhost: { env: SOFIADB_HOST }\nport: \"8201\"\n").unwrap();
-        assert_eq!(target_var(Some(&spec), "sofiadb", "CUBEJS_DB_HOST"), "SOFIADB_HOST");
+            serde_yaml::from_str("type: clickhouse\nhost: { env: SOFIADB_HOST }\nport: \"8201\"\n")
+                .unwrap();
+        assert_eq!(
+            target_var(Some(&spec), "sofiadb", "CUBEJS_DB_HOST"),
+            "SOFIADB_HOST"
+        );
         // A literal in the file: the per-source variable wins over it.
-        assert_eq!(target_var(Some(&spec), "sofiadb", "CUBEJS_DB_PORT"), "CUBEJS_DS_SOFIADB_DB_PORT");
-        assert_eq!(target_var(Some(&spec), "default", "CUBEJS_DB_USER"), "CUBEJS_DB_USER");
+        assert_eq!(
+            target_var(Some(&spec), "sofiadb", "CUBEJS_DB_PORT"),
+            "CUBEJS_DS_SOFIADB_DB_PORT"
+        );
+        assert_eq!(
+            target_var(Some(&spec), "default", "CUBEJS_DB_USER"),
+            "CUBEJS_DB_USER"
+        );
     }
 
     #[test]
@@ -1198,14 +1430,159 @@ mod tests {
         let path = dir.path().join(".env");
         std::fs::write(&path, "PORT=4000\nSOFIADB_HOST=127.0.0.1\n\n# Data source x, added from the Playground\nCUBEJS_DS_X_DB_HOST='a'\n").unwrap();
 
-        update_env(&path, &[("SOFIADB_HOST".into(), "10.0.0.1".into())], &[], "# h", false).unwrap();
+        update_env(
+            &path,
+            &[("SOFIADB_HOST".into(), "10.0.0.1".into())],
+            &[],
+            "# h",
+            false,
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "PORT=4000\nSOFIADB_HOST='10.0.0.1'\n\n# Data source x, added from the Playground\nCUBEJS_DS_X_DB_HOST='a'\n"
         );
 
-        update_env(&path, &[], &["CUBEJS_DS_X_DB_HOST".into()], &header("x"), true).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "PORT=4000\nSOFIADB_HOST='10.0.0.1'\n");
+        update_env(
+            &path,
+            &[],
+            &["CUBEJS_DS_X_DB_HOST".into()],
+            &header("x"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "PORT=4000\nSOFIADB_HOST='10.0.0.1'\n"
+        );
+    }
+
+    #[test]
+    fn env_is_left_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "PORT=4000\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        update_env(
+            &path,
+            &[("CUBEJS_DS_X_DB_PASS".into(), "p".into())],
+            &[],
+            "# h",
+            false,
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_url_is_shown_without_its_password() {
+        assert_eq!(
+            without_password("postgres://u:p@db:5432/x?sslmode=require"),
+            ("postgres://u@db:5432/x?sslmode=require".to_string(), true)
+        );
+        assert_eq!(
+            without_password("postgres://db/x?user=u&password=p&sslmode=require"),
+            (
+                "postgres://db/x?user=u&password=***&sslmode=require".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            without_password("jdbc:databricks://h:443/default;AuthMech=3;UID=token;PWD=dapi123"),
+            (
+                "jdbc:databricks://h:443/default;AuthMech=3;UID=token;PWD=***".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            without_password("clickhouse://db:8123/x"),
+            ("clickhouse://db:8123/x".to_string(), false)
+        );
+        assert_eq!(without_password("db"), ("db".to_string(), false));
+    }
+
+    #[test]
+    fn secrets_are_known_by_their_names() {
+        for var in [
+            "CUBEJS_DB_PASS",
+            "CUBEJS_DB_SSL_KEY",
+            "CUBEJS_DB_SSL_PASSPHRASE",
+            "CUBEJS_DB_EXPORT_BUCKET_AZURE_KEY",
+            "CUBEJS_DB_PINOT_APIKEY_KEY",
+            "CUBEJS_AWS_SECRET",
+            "CUBEJS_DB_BQ_CREDENTIALS",
+            "CUBEJS_DB_DATABRICKS_TOKEN",
+            "CUBEJS_DB_SNOWFLAKE_PRIVATE_KEY_PATH",
+        ] {
+            assert!(is_secret(var), "{var}");
+        }
+        for var in [
+            "CUBEJS_DB_HOST",
+            "CUBEJS_DB_BQ_KEY_FILE",
+            "CUBEJS_DB_SSL_CERT",
+            "CUBEJS_DB_NAME",
+        ] {
+            assert!(!is_secret(var), "{var}");
+        }
+    }
+
+    #[test]
+    fn a_sources_settings_are_not_a_longer_named_ones() {
+        let sources = ["default", "sales", "sales_eu"];
+        assert_eq!(
+            own_setting("CUBEJS_DS_SALES_DB_HOST", "sales", &sources),
+            Some("DB_HOST")
+        );
+        assert_eq!(
+            own_setting("CUBEJS_DS_SALES_EU_DB_HOST", "sales", &sources),
+            None
+        );
+        assert_eq!(
+            own_setting("CUBEJS_DS_SALES_EU_DB_HOST", "sales_eu", &sources),
+            Some("DB_HOST")
+        );
+    }
+
+    #[test]
+    fn an_empty_secret_is_kept_and_any_other_empty_field_cleared() {
+        let current = BTreeMap::from([
+            (
+                "CUBEJS_DB_URL".to_string(),
+                "postgres://u:p@db/x".to_string(),
+            ),
+            ("CUBEJS_DB_HOST".to_string(), "db".to_string()),
+        ]);
+        let form = BTreeMap::from([
+            ("CUBEJS_DB_URL".to_string(), "".to_string()),
+            ("CUBEJS_DB_HOST".to_string(), "".to_string()),
+            ("CUBEJS_DB_PASS".to_string(), "".to_string()),
+            ("CUBEJS_AWS_SECRET".to_string(), "".to_string()),
+        ]);
+        let (set, cleared) = split_changes(&form, &current).unwrap();
+        assert!(set.is_empty());
+        let databricks = BTreeMap::from([(
+            "CUBEJS_DB_DATABRICKS_URL".to_string(),
+            "jdbc:databricks://h:443/default;UID=token;PWD=dapi123".to_string(),
+        )]);
+        assert!(kept_if_empty("CUBEJS_DB_DATABRICKS_URL", &databricks));
+        assert_eq!(cleared, BTreeSet::from(["CUBEJS_DB_HOST".to_string()]));
+    }
+
+    #[test]
+    fn changes_waiting_for_one_restart_are_all_applied() {
+        let mut pending = Pending::default();
+        pending.merge(vec![("A".into(), "1".into())], vec!["B".into()]);
+        pending.merge(vec![("B".into(), "2".into())], vec!["A".into(), "C".into()]);
+        assert_eq!(
+            pending,
+            Pending {
+                set: vec![("B".into(), "2".into())],
+                remove: vec!["A".into(), "C".into()],
+            }
+        );
     }
 
     #[test]

@@ -11,9 +11,21 @@
 //! These routes are not behind the auth middleware, because the app fetches
 //! `/playground/context` to *obtain* its token. That is why the server mounts
 //! the Playground only when authentication is not enforced; see `main.rs`.
+//! The routes that write the model or the data sources, or connect to a
+//! database, also want the key `/playground/context` hands the page
+//! ([`playground_key`]). The server sends these routes no CORS headers (see
+//! `app.rs`), so another site the developer visits cannot read the key, nor
+//! send the JSON the routes take. Nor can it rebind a domain of its own to
+//! this server to become the same origin: every route here answers only
+//! under `localhost`, an IP address, or a name in `CUBEJS_PLAYGROUND_HOSTS`.
 
-use axum::extract::{Query, State};
-use axum::response::IntoResponse;
+use std::net::IpAddr;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use axum::extract::{Query, Request, State};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -25,30 +37,52 @@ use crate::error::ApiError;
 /// The Cube release whose API this server implements (`lerna.json`).
 pub const CUBE_API_VERSION: &str = "1.7.40";
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/playground/context", get(context))
-        .route("/playground/files", get(files))
-        .route("/playground/token", post(token))
-        .route("/playground/db-schema", get(db_schema))
-        .route("/playground/driver", get(driver))
+/// The header the page sends [`playground_key`] in.
+pub const PLAYGROUND_KEY_HEADER: &str = "x-playground-key";
+
+/// How long one data source may take to describe its tables.
+const SCHEMA_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A secret made when the process starts, which `/playground/context` hands
+/// the page. A restart makes a new one; the Data Source page fetches it
+/// again once the server is back.
+pub fn playground_key() -> &'static str {
+    static KEY: OnceLock<String> = OnceLock::new();
+    KEY.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+pub fn routes(state: AppState) -> Router<AppState> {
+    let keyed = Router::new()
         .route("/playground/generate-schema", post(generate_schema))
         .route(
             "/playground/data-sources",
             get(super::data_sources::list).post(super::data_sources::create),
         )
-        .route("/playground/data-sources/test", post(super::data_sources::test))
+        .route(
+            "/playground/data-sources/test",
+            post(super::data_sources::test),
+        )
         .route(
             "/playground/data-sources/:name",
             get(super::data_sources::get)
                 .put(super::data_sources::update)
                 .delete(super::data_sources::delete),
         )
+        .route_layer(axum::middleware::from_fn(require_key));
+
+    Router::new()
+        .route("/playground/context", get(context))
+        .route("/playground/files", get(files))
+        .route("/playground/token", post(token))
+        .route("/playground/db-schema", get(db_schema))
+        .route("/playground/driver", get(driver))
+        .merge(keyed)
         // Not ported. Named individually so the message says why, rather
         // than letting the app see an unexplained 404.
         .route("/playground/env", post(not_ported))
         .route("/playground/test-connection", post(not_ported))
         .route("/playground/schema/pre-aggregation", post(not_ported))
+        .route_layer(axum::middleware::from_fn_with_state(state, require_host))
 }
 
 /// `GET /playground/context` — the only call the app must have to boot.
@@ -62,6 +96,7 @@ async fn context(State(state): State<AppState>) -> Result<impl IntoResponse, Api
 
     Ok(Json(json!({
         "cubejsToken": token,
+        "playgroundKey": playground_key(),
         "basePath": state.config.base_path,
         // The wizard writes `.env` and installs npm driver packages, neither
         // of which exists here, so the app must not be sent to it.
@@ -202,8 +237,10 @@ async fn driver(Query(query): Query<DriverQuery>) -> Result<impl IntoResponse, A
 /// Without it, Node.js describes only `default`, and the app never sends the
 /// parameter: a second source's tables would never show. So every configured
 /// source is listed, the schemas of all but `default` named
-/// `<data source>.<schema>` so two sources' schemas cannot collide. A source
-/// that cannot be read is logged and left out rather than hiding the others.
+/// `<data source>.<schema>` so two sources' schemas cannot collide (and a
+/// `default` schema that would read as one of those, `default.<schema>`). A
+/// source that cannot be read is left out rather than hiding the others, and
+/// named in `errors`.
 async fn db_schema(
     State(state): State<AppState>,
     Query(query): Query<DataSourceQuery>,
@@ -231,10 +268,12 @@ async fn db_schema(
         match result {
             Ok(structure) => {
                 for (schema, tables) in structure {
-                    let key = if name == "default" {
-                        schema
-                    } else {
+                    let key = if name != "default" {
                         format!("{name}.{schema}")
+                    } else if super::scaffold::is_prefixed(&schema, &state.config.data_sources) {
+                        format!("default.{schema}")
+                    } else {
+                        schema
                     };
                     merged.entry(key).or_default().extend(tables);
                 }
@@ -249,7 +288,7 @@ async fn db_schema(
     if merged.is_empty() && !errors.is_empty() {
         return Err(ApiError::bad_request(errors.join("; ")));
     }
-    Ok(Json(json!({ "tablesSchema": merged })))
+    Ok(Json(json!({ "tablesSchema": merged, "errors": errors })))
 }
 
 async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
@@ -257,10 +296,18 @@ async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStr
         .await
         .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))?;
 
-    driver
-        .tables_schema()
-        .await
-        .map_err(|e| ApiError::bad_request(format!("{data_source}: {e}")))
+    // A database that accepts the connection and then never answers would
+    // otherwise hold up every other source's tables.
+    let result = tokio::time::timeout(SCHEMA_TIMEOUT, driver.tables_schema()).await;
+    let _ = driver.release().await;
+    match result {
+        Ok(Ok(structure)) => Ok(structure),
+        Ok(Err(e)) => Err(ApiError::bad_request(format!("{data_source}: {e}"))),
+        Err(_) => Err(ApiError::bad_request(format!(
+            "{data_source}: no answer in {}s",
+            SCHEMA_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +322,9 @@ async fn generate_schema(
     State(state): State<AppState>,
     Json(request): Json<super::scaffold::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Not while a data source is being deleted: the delete checks no cube
+    // uses it, and a cube written meanwhile would.
+    let _guard = super::data_sources::WRITE.lock().await;
     let files = super::scaffold::generate(
         std::path::Path::new(&state.config.schema_path),
         &state.config.data_sources,
@@ -282,6 +332,72 @@ async fn generate_schema(
     )?;
 
     Ok(Json(json!({ "files": files })))
+}
+
+/// Refuses a request whose host is a name the deployment did not list, or
+/// that names none. A DNS-rebinding page points a domain of its own at this
+/// server, which makes it the same origin as the Playground; an IP address
+/// or `localhost` cannot be rebound like that. The host is the `Host`
+/// header, or over HTTP/2 the URI's authority.
+async fn require_host(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| request.uri().authority().map(|a| a.to_string()));
+    match host {
+        Some(host) if host_allowed(&host, &state.config.playground_hosts) => {
+            next.run(request).await
+        }
+        Some(host) => ApiError::forbidden(format!(
+            "The Playground answers only under localhost, an IP address or a name \
+             in CUBEJS_PLAYGROUND_HOSTS, not {host}"
+        ))
+        .into_response(),
+        None => ApiError::forbidden("The Playground needs to know the host it is called under")
+            .into_response(),
+    }
+}
+
+fn host_allowed(host: &str, listed: &[String]) -> bool {
+    // `name:port`, `[v6]:port`, or either without the port.
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) && !name.ends_with(':') => {
+            name
+        }
+        _ => host,
+    };
+    let name = name.to_ascii_lowercase();
+    let bare = name.trim_start_matches('[').trim_end_matches(']');
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || bare.parse::<IpAddr>().is_ok()
+        || listed.contains(&name)
+}
+
+/// Compares in time that does not depend on where the two first differ.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+async fn require_key(request: Request, next: Next) -> Response {
+    let key = request
+        .headers()
+        .get(PLAYGROUND_KEY_HEADER)
+        .and_then(|v| v.to_str().ok());
+    if !key.is_some_and(|key| same_secret(key, playground_key())) {
+        return ApiError::forbidden(
+            "This Playground action needs the key the page gets from /playground/context; \
+             reload the Playground.",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 async fn not_ported() -> ApiError {
@@ -292,4 +408,41 @@ async fn not_ported() -> ApiError {
          does not have. Edit the YAML model files directly; the server \
          reloads them while it runs.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_names_that_cannot_be_rebound_or_are_listed_pass() {
+        let listed = vec!["cube.lan".to_string()];
+        for host in [
+            "localhost",
+            "localhost:4000",
+            "app.localhost:4000",
+            "127.0.0.1:4000",
+            "10.0.0.5",
+            "[::1]:4000",
+            "::1",
+            "CUBE.LAN:4000",
+        ] {
+            assert!(host_allowed(host, &listed), "{host}");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:4000",
+            "localhost.evil.example",
+            "127.0.0.1.nip.io",
+        ] {
+            assert!(!host_allowed(host, &listed), "{host}");
+        }
+    }
+
+    #[test]
+    fn the_key_comparison_is_exact() {
+        assert!(same_secret("abc", "abc"));
+        assert!(!same_secret("abc", "abd"));
+        assert!(!same_secret("abc", "ab"));
+    }
 }

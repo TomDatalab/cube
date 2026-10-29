@@ -869,8 +869,12 @@ mod tests {
         let d = driver();
         let q = d.information_schema_query();
         assert!(q.contains("FROM system.columns"));
-        assert!(q.contains("WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')"));
+        assert!(q.contains(
+            "WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')"
+        ));
+        // Not narrowed to one database in any form.
         assert!(!q.contains("'test'"));
+        assert!(!q.to_lowercase().contains("currentdatabase"));
         assert!(q.contains("SELECT name as column_name"));
 
         let q = d.get_tables_for_specific_schemas_query("?, ?");

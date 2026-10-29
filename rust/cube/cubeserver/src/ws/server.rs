@@ -127,6 +127,7 @@ impl SubscriptionServer {
                             workspace: workspace.filter(|_| self.state.rbac.is_some()),
                             user,
                             platform_admin,
+                            token_verified: authenticated.token_verified,
                         },
                     )
                     .await;

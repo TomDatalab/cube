@@ -27,6 +27,9 @@ pub struct RequestContext {
     pub user: Option<String>,
     /// RBAC only: whether `user` is a platform admin.
     pub platform_admin: bool,
+    /// The request carried a token that verified. With security checks off
+    /// a request without one is let through too, with the default scopes.
+    pub token_verified: bool,
 }
 
 #[async_trait]
@@ -57,6 +60,8 @@ pub trait AuthService: Send + Sync + Debug {
 pub struct AuthenticatedRequest {
     pub security_context: Value,
     pub signed_with_playground_auth_secret: bool,
+    /// See [`RequestContext::token_verified`].
+    pub token_verified: bool,
 }
 
 /// `GET /v1/meta` provider (`ApiGateway.meta` / `metaExtended`).
