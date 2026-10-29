@@ -575,7 +575,7 @@ impl Store {
              AND ($3::uuid IS NULL OR w.organization_id = $3)";
         let sql = format!(
             "SELECT w.id, w.organization_id, w.name, w.created_at, w.created_by, o.name {FROM} \
-             ORDER BY o.name, w.name, w.id LIMIT $4 OFFSET $5"
+             ORDER BY o.name, o.id, w.name, w.id LIMIT $4 OFFSET $5"
         );
         let items = c
             .query(

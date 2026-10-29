@@ -489,6 +489,35 @@ db_test!(
 );
 
 db_test!(
+    search_workspaces_keeps_same_named_organizations_apart,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let one = store.create_organization("Same", "ann").await.unwrap();
+        let two = store.create_organization("Same", "ann").await.unwrap();
+        for org in [&one, &two] {
+            for name in ["a", "z"] {
+                store.create_workspace(org.id, name, "ann").await.unwrap();
+            }
+        }
+        let page = store
+            .search_workspaces(None, None, &search(None, None, 0))
+            .await
+            .unwrap();
+        let orgs: Vec<_> = page
+            .items
+            .iter()
+            .map(|w| w.workspace.organization_id)
+            .collect();
+        let (first, second) = if one.id < two.id {
+            (one.id, two.id)
+        } else {
+            (two.id, one.id)
+        };
+        assert_eq!(orgs, [first, first, second, second]);
+    }
+);
+
+db_test!(
     all_connections_lists_every_tracked_connection,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
