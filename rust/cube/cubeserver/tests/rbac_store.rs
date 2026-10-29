@@ -4,7 +4,7 @@
 
 mod support;
 
-use cubeserver::rbac::store::{ConnectionOrigin, NewObject, NewUser, StoreError};
+use cubeserver::rbac::store::{ConnectionOrigin, NewObject, NewUser, Search, StoreError};
 use support::{connect, with_db, TestDb};
 use uuid::Uuid;
 
@@ -333,5 +333,179 @@ db_test!(
         assert!(tx.delete_organization(o.id).await.unwrap());
         tx.commit().await.unwrap();
         assert!(store.organization(o.id).await.unwrap().is_none());
+    }
+);
+
+fn search(q: Option<&str>, limit: Option<i64>, offset: i64) -> Search {
+    Search {
+        q: q.map(str::to_string),
+        limit,
+        offset,
+    }
+}
+
+fn user_with(id: &str, name: Option<&str>, email: Option<&str>) -> NewUser {
+    NewUser {
+        id: id.into(),
+        name: name.map(str::to_string),
+        email: email.map(str::to_string),
+        password_hash: "h".into(),
+    }
+}
+
+db_test!(
+    search_users_matches_id_name_and_email_case_insensitively,
+    |store, _url| {
+        store
+            .create_user(&user_with("ana", Some("Ana Souza"), None))
+            .await
+            .unwrap();
+        store
+            .create_user(&user_with("bia", None, Some("ANA@x.com")))
+            .await
+            .unwrap();
+        store
+            .create_user(&user_with("caio", Some("Caio"), None))
+            .await
+            .unwrap();
+        let page = store
+            .search_users(&search(Some("ana"), None, 0))
+            .await
+            .unwrap();
+        let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, ["ana", "bia"]);
+        assert_eq!(page.total, 2);
+    }
+);
+
+db_test!(search_treats_like_wildcards_literally, |store, _url| {
+    store.create_user(&user("a_b")).await.unwrap();
+    store.create_user(&user("axb")).await.unwrap();
+    let page = store
+        .search_users(&search(Some("a_b"), None, 0))
+        .await
+        .unwrap();
+    let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+    assert_eq!(ids, ["a_b"]);
+    let page = store
+        .search_users(&search(Some("%"), None, 0))
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.total, 0);
+});
+
+db_test!(search_pages_report_the_full_total, |store, _url| {
+    for i in 1..=5 {
+        store.create_user(&user(&format!("u{i}"))).await.unwrap();
+    }
+    let page = store.search_users(&search(None, Some(2), 2)).await.unwrap();
+    let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+    assert_eq!(ids, ["u3", "u4"]);
+    assert_eq!(page.total, 5);
+    let page = store
+        .search_users(&search(None, Some(2), 10))
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.total, 5);
+});
+
+db_test!(search_organizations_by_name_or_id_prefix, |store, _url| {
+    store.create_user(&user("ann")).await.unwrap();
+    let a = store.create_organization("Alpha", "ann").await.unwrap();
+    store.create_organization("Beta", "ann").await.unwrap();
+    let prefix = a.id.to_string()[..8].to_uppercase();
+    let page = store
+        .search_organizations(None, &search(Some(&prefix), None, 0))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, a.id);
+    let page = store
+        .search_organizations(None, &search(Some("alp"), None, 0))
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+    let page = store
+        .search_organizations(Some(&[]), &search(None, None, 0))
+        .await
+        .unwrap();
+    assert_eq!(page.total, 0);
+    assert!(page.items.is_empty());
+    let page = store
+        .search_organizations(Some(&[a.id]), &search(None, None, 0))
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+});
+
+db_test!(
+    search_workspaces_matches_the_organization_name,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let on = store.create_organization("ON", "ann").await.unwrap();
+        let digital = store.create_organization("Digital", "ann").await.unwrap();
+        store
+            .create_workspace(on.id, "Vendas", "ann")
+            .await
+            .unwrap();
+        store
+            .create_workspace(on.id, "Operations", "ann")
+            .await
+            .unwrap();
+        store
+            .create_workspace(digital.id, "Finance", "ann")
+            .await
+            .unwrap();
+        let page = store
+            .search_workspaces(None, None, &search(Some("on"), None, 0))
+            .await
+            .unwrap();
+        let names: Vec<_> = page
+            .items
+            .iter()
+            .map(|w| w.workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["Operations", "Vendas"]);
+        assert!(page.items.iter().all(|w| w.organization_name == "ON"));
+        assert_eq!(page.total, 2);
+        let page = store
+            .search_workspaces(None, Some(digital.id), &search(None, None, 0))
+            .await
+            .unwrap();
+        let names: Vec<_> = page
+            .items
+            .iter()
+            .map(|w| w.workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["Finance"]);
+        let page = store
+            .search_workspaces(Some(&[]), None, &search(None, None, 0))
+            .await
+            .unwrap();
+        assert_eq!(page.total, 0);
+    }
+);
+
+db_test!(
+    all_connections_lists_every_tracked_connection,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let o1 = store.create_organization("o1", "ann").await.unwrap();
+        let o2 = store.create_organization("o2", "ann").await.unwrap();
+        store
+            .create_connection("c2", o2.id, ConnectionOrigin::Assigned)
+            .await
+            .unwrap();
+        store
+            .create_connection("c1", o1.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
+        let all = store.all_connections().await.unwrap();
+        let names: Vec<_> = all.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["c1", "c2"]);
+        assert_eq!(all[0].organization_id, o1.id);
+        assert_eq!(all[1].origin, ConnectionOrigin::Assigned);
     }
 );

@@ -84,6 +84,51 @@ pub struct Workspace {
     pub created_by: String,
 }
 
+/// Substring search plus paging. `limit: None` means no limit.
+#[derive(Debug, Clone, Default)]
+pub struct Search {
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: i64,
+}
+
+impl Search {
+    /// The term with `\`, `%` and `_` escaped so `LIKE ... ESCAPE '\'` reads
+    /// them literally.
+    fn escaped(&self) -> Option<String> {
+        self.q.as_deref().map(|q| {
+            let mut out = String::with_capacity(q.len());
+            for ch in q.chars() {
+                if matches!(ch, '\\' | '%' | '_') {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+            out
+        })
+    }
+
+    fn limit(&self) -> Option<i64> {
+        self.limit.map(|l| l.max(0))
+    }
+
+    fn offset(&self) -> i64 {
+        self.offset.max(0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceListing {
+    pub workspace: Workspace,
+    pub organization_name: String,
+}
+
 /// How a connection came to its organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionOrigin {
@@ -457,6 +502,111 @@ impl Store {
         let c = self.conn().await?;
         let sql = format!("SELECT {USER_COLS} FROM users ORDER BY id");
         Ok(c.query(&sql, &[]).await?.iter().map(user_from).collect())
+    }
+
+    pub async fn search_users(&self, s: &Search) -> Result<Page<User>, StoreError> {
+        let c = self.conn().await?;
+        let q = s.escaped();
+        const WHERE: &str = "($1::text IS NULL OR id ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR email ILIKE '%' || $1 || '%' ESCAPE '\\')";
+        let sql =
+            format!("SELECT {USER_COLS} FROM users WHERE {WHERE} ORDER BY id LIMIT $2 OFFSET $3");
+        let items = c
+            .query(&sql, &[&q, &s.limit(), &s.offset()])
+            .await?
+            .iter()
+            .map(user_from)
+            .collect();
+        let total = c
+            .query_one(&format!("SELECT count(*) FROM users WHERE {WHERE}"), &[&q])
+            .await?
+            .get(0);
+        Ok(Page { items, total })
+    }
+
+    /// `visible: None` lists every organization.
+    pub async fn search_organizations(
+        &self,
+        visible: Option<&[Uuid]>,
+        s: &Search,
+    ) -> Result<Page<Organization>, StoreError> {
+        let c = self.conn().await?;
+        let q = s.escaped();
+        let visible = visible.map(<[Uuid]>::to_vec);
+        const WHERE: &str = "($1::text IS NULL OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR id::text LIKE lower($1) || '%' ESCAPE '\\') \
+             AND ($2::uuid[] IS NULL OR id = ANY($2))";
+        let sql = format!(
+            "SELECT id, name, created_at, created_by FROM organizations WHERE {WHERE} \
+             ORDER BY name, id LIMIT $3 OFFSET $4"
+        );
+        let items = c
+            .query(&sql, &[&q, &visible, &s.limit(), &s.offset()])
+            .await?
+            .iter()
+            .map(org_from)
+            .collect();
+        let total = c
+            .query_one(
+                &format!("SELECT count(*) FROM organizations WHERE {WHERE}"),
+                &[&q, &visible],
+            )
+            .await?
+            .get(0);
+        Ok(Page { items, total })
+    }
+
+    /// `visible: None` lists every workspace; `organization` narrows to one.
+    pub async fn search_workspaces(
+        &self,
+        visible: Option<&[Uuid]>,
+        organization: Option<Uuid>,
+        s: &Search,
+    ) -> Result<Page<WorkspaceListing>, StoreError> {
+        let c = self.conn().await?;
+        let q = s.escaped();
+        let visible = visible.map(<[Uuid]>::to_vec);
+        const FROM: &str = "FROM workspaces w JOIN organizations o ON o.id = w.organization_id \
+             WHERE ($1::text IS NULL OR w.name ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR w.id::text LIKE lower($1) || '%' ESCAPE '\\' \
+             OR o.name ILIKE '%' || $1 || '%' ESCAPE '\\') \
+             AND ($2::uuid[] IS NULL OR w.id = ANY($2)) \
+             AND ($3::uuid IS NULL OR w.organization_id = $3)";
+        let sql = format!(
+            "SELECT w.id, w.organization_id, w.name, w.created_at, w.created_by, o.name {FROM} \
+             ORDER BY o.name, w.name, w.id LIMIT $4 OFFSET $5"
+        );
+        let items = c
+            .query(
+                &sql,
+                &[&q, &visible, &organization, &s.limit(), &s.offset()],
+            )
+            .await?
+            .iter()
+            .map(|r| WorkspaceListing {
+                workspace: workspace_from(r),
+                organization_name: r.get(5),
+            })
+            .collect();
+        let total = c
+            .query_one(
+                &format!("SELECT count(*) {FROM}"),
+                &[&q, &visible, &organization],
+            )
+            .await?
+            .get(0);
+        Ok(Page { items, total })
+    }
+
+    pub async fn all_connections(&self) -> Result<Vec<ConnectionRow>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {CONNECTION_COLS} FROM connections ORDER BY name");
+        Ok(c.query(&sql, &[])
+            .await?
+            .iter()
+            .map(connection_from)
+            .collect())
     }
 
     /// `None` fields are left unchanged. `Ok(None)` when the user is unknown.
