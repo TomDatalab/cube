@@ -5,21 +5,28 @@ import { describe, expect, it } from 'vitest';
 const SRC = join(__dirname, '..');
 
 // files that define the theme itself
-const SKIPPED = ['__tests__', 'theme', 'QueryBuilderV2/color-tokens.ts', 'theme.ts'];
+const SKIPPED = ['__tests__', 'theme', 'QueryBuilderV2/color-tokens.ts'];
 
-// justified literals, as `path:text found on the line`
-const EXCEPTIONS: string[] = [
+// justified literals: [path, text found on the line]; an empty text exempts the file
+const EXCEPTIONS: [string, string][] = [
   // the light values the antd less variables are defined with
-  'variables.ts ',
+  ['variables.ts', ''],
   // brand logo, not used in the UI chrome
-  'shared/icons/CubejsIcon.tsx ',
+  ['shared/icons/CubejsIcon.tsx', ''],
   // chart series palettes, they read well on both backgrounds
-  'QueryBuilderV2/utils/chart-colors.ts ',
+  ['QueryBuilderV2/utils/chart-colors.ts', ''],
+  // terminal (ANSI) palette of the error output
+  ['components/Error/utils.ts', ''],
   // recharts default pie fill, replaced by each Cell
-  'QueryBuilderV2/components/ChartRenderer.tsx fill="#8884d8"',
+  ['QueryBuilderV2/components/ChartRenderer.tsx', 'fill="#8884d8"'],
   // the header bar is dark in both themes
-  'components/Header/Menu.tsx border: 1px solid rgba(255, 255, 255, 0.35)',
-  "components/Header/WorkspaceSelector.tsx color: '#ff7875'",
+  ['components/Header/Header.tsx', ''],
+  ['components/Header/Menu.tsx', ''],
+  ['components/Header/WorkspaceSelector.tsx', "color: '#ff7875'"],
+  // text on the accent color (selected items, primary buttons)
+  ['components/Tree.tsx', 'color: white;'],
+  ['components/GlobalStyles.tsx', 'color: white;'],
+  ['atoms/Button.tsx', 'color: white;'],
 ];
 
 function files(dir: string): string[] {
@@ -39,7 +46,13 @@ function files(dir: string): string[] {
 // the fallback of var(--x, <literal>) is allowed
 const FALLBACK = /var\(\s*--[\w-]+\s*,\s*(?:rgba?\([^)]*\)|[^()]*)\)/g;
 // rgba(var(--x-rgb), .5) takes its color from a token
-const COLOR = /#[0-9a-fA-F]{3,8}\b|\brgba?\((?!\s*var\()/g;
+const NAMED = 'white|black|gray|grey|silver|whitesmoke|lightgray|lightgrey|darkgray|darkgrey';
+// named colors, not part of an identifier, a tasty token (#white), a property
+// name (gray:) or a hyphenated word (white-space)
+const COLOR = new RegExp(
+  `#[0-9a-fA-F]{3,8}\\b|\\brgba?\\((?!\\s*var\\()|\\bhsla?\\(|(?<![\\w#.$-])(?:${NAMED})(?![\\w-]|\\s*:)`,
+  'g'
+);
 
 function literals(line: string) {
   if (/^\s*(\/\/|\*|\/\*)/.test(line)) {
@@ -58,7 +71,7 @@ describe('hardcoded colors', () => {
         .forEach((line, i) => {
           for (const literal of literals(line)) {
             const where = `${relative(SRC, file)}:${i + 1}`;
-            if (!EXCEPTIONS.some((e) => where.startsWith(e.split(' ')[0]) && line.includes(e.split(' ').slice(1).join(' ')))) {
+            if (!EXCEPTIONS.some(([path, text]) => relative(SRC, file) === path && line.includes(text))) {
               found.push(`${where} ${literal}`);
             }
           }

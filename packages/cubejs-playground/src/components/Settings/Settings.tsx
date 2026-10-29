@@ -93,7 +93,7 @@ export default function Settings({
           <div
             style={{
               padding: '8px',
-              background: 'white',
+              background: 'var(--pg-surface, white)',
             }}
           >
             <InputNumber

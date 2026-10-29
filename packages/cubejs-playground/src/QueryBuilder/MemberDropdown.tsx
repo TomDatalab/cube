@@ -26,7 +26,7 @@ const SearchMenuItem = styled.li`
   // this isn't the best solution ever, but according to the situation other solutions are worse
   // antd uses double class pattern (.disabled.active.active) to override the value of background color. actually the
   // easiest way to override it is to use smtn with higher specificity
-  background: white !important;
+  background: var(--pg-surface, white) !important;
   padding-top: 8px;
   padding-bottom: 8px;
   margin-bottom: 8px;

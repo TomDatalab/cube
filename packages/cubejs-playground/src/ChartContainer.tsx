@@ -43,7 +43,7 @@ const StyledCard: any = styled(Card)`
     position: sticky;
     top: 0;
     z-index: 1;
-    background: white;
+    background: var(--pg-surface, white);
   }
 
   .ant-card-body {

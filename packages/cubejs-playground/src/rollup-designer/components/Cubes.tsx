@@ -22,7 +22,7 @@ const StyledMenu = styled(Menu)`
   }
 
   .ant-menu-sub.ant-menu-inline {
-    background: white;
+    background: var(--pg-surface, white);
   }
 
   & li > div.ant-menu-submenu-title {
