@@ -12,7 +12,7 @@ import { WorkspaceSelector } from './WorkspaceSelector';
 
 const StyledHeader = styled(Layout.Header)`
   && {
-    background-color: var(--dark-02-color);
+    background-color: var(--pg-bar);
     color: white;
     padding: 0 16px;
     line-height: 44px;
