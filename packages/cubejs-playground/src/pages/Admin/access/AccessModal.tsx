@@ -2,7 +2,9 @@ import { Alert, Modal, Spin, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 
 import { AdminApi, User } from '../api';
-import { COLLAPSE_AT, highlight, layout, LaidOutNode, NODE_H, NODE_W } from './layout';
+import {
+  bounds, edgeGeometry, EdgeGeometry, expandFor, highlight, layout, LaidOutNode, NODE_W, nodeRows,
+} from './layout';
 import { AccessEdge, AccessGraph, AccessNodeKind, Reason } from './types';
 
 type Props = {
@@ -39,93 +41,124 @@ function useNarrow() {
   return narrow;
 }
 
-function Edge({ edge, from, to, hl }: { edge: AccessEdge; from: LaidOutNode; to: LaidOutNode; hl: boolean }) {
-  const x1 = from.x + NODE_W;
-  const y1 = from.y + NODE_H / 2;
-  const x2 = to.x;
-  const y2 = to.y + NODE_H / 2;
-  const dx = (x2 - x1) * 0.5;
+function Edge({ geometry, hl }: { geometry: EdgeGeometry; hl: boolean }) {
+  const { edge, d, label } = geometry;
   const derived = edge.kind === 'derived';
   let stroke = derived ? DERIVED : FG;
   if (hl) {
     stroke = ACCENT;
   }
-  const mx = (x1 + x2) / 2;
-  const my = (y1 + y2) / 2;
-  const w = edge.label.length * 6.4 + 12;
   return (
     <g>
       <path
-        d={`M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`}
+        d={d}
         fill="none"
         stroke={stroke}
         strokeWidth={hl ? 2.5 : 1.5}
         strokeDasharray={derived ? '5 4' : undefined}
         markerEnd={`url(#access-arrow${hl ? '-hl' : ''})`}
       />
-      <rect
-        x={mx - w / 2}
-        y={my - 10}
-        width={w}
-        height={18}
-        rx={9}
-        fill={hl ? ACCENT_BG : '#f6f6fb'}
-        stroke={hl ? ACCENT : LINE}
-      />
-      <text x={mx} y={my + 3.5} fontSize={10.5} textAnchor="middle" fill={hl ? ACCENT : MUTED} fontFamily={MONO}>
-        {edge.label}
-      </text>
+      {label ? (
+        <g>
+          <rect
+            x={label.x - label.w / 2}
+            y={label.y - 9}
+            width={label.w}
+            height={18}
+            rx={9}
+            fill={hl ? ACCENT_BG : '#f6f6fb'}
+            stroke={hl ? ACCENT : LINE}
+          />
+          <text x={label.x} y={label.y + 3.5} fontSize={10.5} textAnchor="middle" fill={hl ? ACCENT : MUTED} fontFamily={MONO}>
+            {edge.label}
+          </text>
+        </g>
+      ) : null}
     </g>
   );
 }
 
-type Toggle = { label: string; onClick: () => void };
+type NodeProps = {
+  node: LaidOutNode;
+  /** Unique among the nodes, for the clip path id. */
+  index: number;
+  hl: boolean;
+  onToggle: () => void;
+};
 
-function Node({ node, hl, toggle }: { node: LaidOutNode; hl: boolean; toggle?: Toggle }) {
+function Node({
+  node, index, hl, onToggle,
+}: NodeProps) {
   const color = KIND_COLOR[node.kind];
+  const rows = nodeRows(node);
+  const clip = `access-clip-${index}`;
+  const tx = node.x + 16;
+  const pill = node.hiddenCount ? `+${node.hiddenCount} workspaces` : 'collapse';
   return (
     <g>
+      <clipPath id={clip}>
+        <rect x={node.x + 8} y={node.y} width={NODE_W - 16} height={node.h} />
+      </clipPath>
       <rect
         x={node.x}
         y={node.y}
         width={NODE_W}
-        height={NODE_H}
+        height={node.h}
         rx={8}
         fill="#fff"
         stroke={hl ? ACCENT : LINE}
         strokeWidth={hl ? 2 : 1}
       />
-      <rect x={node.x} y={node.y + 10} width={4} height={NODE_H - 20} rx={2} fill={color} />
-      <text x={node.x + 16} y={node.y + 24} fontSize={14} fontWeight={600} fill={FG}>
-        {node.name.length > 14 ? `${node.name.slice(0, 13)}…` : node.name}
-        <title>{node.name}</title>
-      </text>
-      <text x={node.x + NODE_W - 12} y={node.y + 24} fontSize={10.5} textAnchor="end" fill={color} fontFamily={MONO}>
-        {node.kind}
-      </text>
-      <text x={node.x + 16} y={node.y + 44} fontSize={11.5} fill={MUTED} fontFamily={MONO}>
-        {node.perms}
-      </text>
-      {toggle ? (
-        <g onClick={toggle.onClick} style={{ cursor: 'pointer' }}>
+      <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} fill={color} />
+      <g clipPath={`url(#${clip})`}>
+        <text x={tx} y={node.y + rows.kindY} fontSize={10.5} fill={color} fontFamily={MONO}>
+          {node.kind}
+        </text>
+        <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} fill={FG}>
+          {node.label}
+          <title>{node.name}</title>
+        </text>
+        {node.permLines.length ? (
+          <text fontSize={11.5} fill={MUTED} fontFamily={MONO}>
+            {node.permLines.map((line, i) => ({ line, y: node.y + rows.permY[i] })).map(({ line, y }) => (
+              <tspan key={y} x={tx} y={y}>{line}</tspan>
+            ))}
+          </text>
+        ) : null}
+        {node.noteLines.length ? (
+          <text fontSize={10.5} fill={MUTED} fontStyle="italic">
+            {node.noteLines.map((line, i) => ({ line, y: node.y + rows.noteY[i] })).map(({ line, y }) => (
+              <tspan key={y} x={tx} y={y}>{line}</tspan>
+            ))}
+          </text>
+        ) : null}
+      </g>
+      {rows.pillY != null ? (
+        <g
+          data-toggle
+          role="button"
+          tabIndex={0}
+          aria-label={node.hiddenCount ? `Show ${pill}` : `Collapse ${node.name}`}
+          onClick={onToggle}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onToggle();
+            }
+          }}
+          style={{ cursor: 'pointer' }}
+        >
           <rect
-            x={node.x + NODE_W - 96}
-            y={node.y + NODE_H - 8}
-            width={84}
-            height={16}
-            rx={8}
+            x={tx}
+            y={node.y + rows.pillY}
+            width={pill.length * 6.4 + 16}
+            height={18}
+            rx={9}
             fill={ACCENT_BG}
             stroke={ACCENT}
           />
-          <text
-            x={node.x + NODE_W - 54}
-            y={node.y + NODE_H + 3.5}
-            fontSize={10.5}
-            textAnchor="middle"
-            fill={ACCENT}
-            fontFamily={MONO}
-          >
-            {toggle.label}
+          <text x={tx + 8} y={node.y + rows.pillY + 12.5} fontSize={10.5} fill={ACCENT} fontFamily={MONO}>
+            {pill}
           </text>
         </g>
       ) : null}
@@ -162,18 +195,6 @@ export function AccessModal({ api, user, onClose }: Props) {
   const drawn = useMemo(() => (graph ? layout(graph, expanded) : null), [graph, expanded]);
   const marked = useMemo(() => (active ? highlight(active) : null), [active]);
 
-  // Organizations that can fold: those with more workspaces than COLLAPSE_AT.
-  const foldable = useMemo(() => {
-    const count = new Map<string, number>();
-    graph?.nodes.forEach((n) => {
-      if (n.kind === 'workspace' && n.organizationId) {
-        const key = `organization:${n.organizationId}`;
-        count.set(key, (count.get(key) || 0) + 1);
-      }
-    });
-    return new Set([...count].filter(([, c]) => c > COLLAPSE_AT).map(([k]) => k));
-  }, [graph]);
-
   function flip(orgId: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -195,17 +216,31 @@ export function AccessModal({ api, user, onClose }: Props) {
 
   const summary = graph ? `${new Set(graph.grants.map((g) => g.resource)).size} resources · ${graph.grants.length} permissions` : null;
 
+  function choose(r: Reason) {
+    if (active === r) {
+      setActive(null);
+      return;
+    }
+    // A reason through a collapsed organization opens it, so its path shows.
+    if (graph && drawn) {
+      const { nodes } = drawn;
+      setExpanded((prev) => expandFor(graph, nodes, r.path, prev));
+    }
+    setActive(r);
+  }
+
   function renderGraph() {
     if (!drawn) {
       return null;
     }
-    const byId = new Map(drawn.nodes.map((n) => [n.id, n]));
+    const geometry = edgeGeometry(drawn.nodes, drawn.edges);
+    const box = bounds(drawn.nodes, geometry);
     const isHl = (e: AccessEdge) => marked?.edges.has(`${e.from}>${e.to}`) ?? false;
     // Highlighted edges last, so they sit above the others.
-    const edges = [...drawn.edges].sort((a, b) => Number(isHl(a)) - Number(isHl(b)));
+    const edges = [...geometry].sort((a, b) => Number(isHl(a.edge)) - Number(isHl(b.edge)));
     return (
       <div style={{ overflow: 'auto' }}>
-        <svg width={drawn.width} height={drawn.height} role="img" aria-label="Access graph">
+        <svg width={box.maxX + 20} height={box.maxY + 20} role="img" aria-label="Access graph">
           <defs>
             {[['', MUTED], ['-hl', ACCENT]].map(([suffix, fill]) => (
               <marker
@@ -223,21 +258,13 @@ export function AccessModal({ api, user, onClose }: Props) {
             ))}
           </defs>
           <g>
-            {edges.map((e) => {
-              const from = byId.get(e.from);
-              const to = byId.get(e.to);
-              return from && to ? <Edge key={`${e.from}>${e.to}`} edge={e} from={from} to={to} hl={isHl(e)} /> : null;
-            })}
+            {edges.map((g) => (
+              <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
+            ))}
           </g>
-          {drawn.nodes.map((n) => {
-            let toggle;
-            if (n.hiddenCount) {
-              toggle = { label: `+${n.hiddenCount} workspaces`, onClick: () => flip(n.id) };
-            } else if (foldable.has(n.id)) {
-              toggle = { label: 'collapse', onClick: () => flip(n.id) };
-            }
-            return <Node key={n.id} node={n} hl={marked?.nodes.has(n.id) ?? false} toggle={toggle} />;
-          })}
+          {drawn.nodes.map((n, i) => (
+            <Node key={n.id} node={n} index={i} hl={marked?.nodes.has(n.id) ?? false} onToggle={() => flip(n.id)} />
+          ))}
         </svg>
       </div>
     );
@@ -272,14 +299,14 @@ export function AccessModal({ api, user, onClose }: Props) {
                   const on = active === r;
                   return (
                     <div
-                      key={r.text}
+                      key={r.path.join('>')}
                       role="button"
                       tabIndex={0}
-                      onClick={() => setActive(on ? null : r)}
+                      onClick={() => choose(r)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
-                          setActive(on ? null : r);
+                          choose(r);
                         }
                       }}
                       style={{
