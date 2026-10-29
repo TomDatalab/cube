@@ -16,7 +16,7 @@ const Menu = styled(AntdMenu)`
   padding-top: 0;
 
   li.ant-dropdown-menu-item-active {
-    background: #f3f3fb;
+    background: var(--pg-hover, #f3f3fb);
   }
 `;
 
@@ -43,8 +43,8 @@ const SearchMenuItem = styled.li`
     height: 20px;
     background: linear-gradient(
       to bottom,
-      rgba(255, 255, 255, 1),
-      rgba(255, 255, 255, 0)
+      var(--pg-surface, #fff),
+      transparent
     ) !important;
   }
 `;
@@ -210,7 +210,7 @@ export default function MemberMenu({
                             {cube.public === false ? <LockOutlined /> : null}{' '}
                             <Tag
                               color={
-                                cube.type === 'view' ? '#D26E0B' : '#7A77FF'
+                                cube.type === 'view' ? 'var(--pg-orange, #D26E0B)' : 'var(--pg-accent, #7A77FF)'
                               }
                               style={{
                                 padding: '0 4px',

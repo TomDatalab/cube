@@ -433,7 +433,7 @@ function TitleWithTooltip({ title, children }: TitleWithTooltipProps) {
     >
       <Typography.Paragraph strong>{title}</Typography.Paragraph>
       <Tooltip title={children}>
-        <QuestionCircleFilled style={{ color: '#1414464D' }} />
+        <QuestionCircleFilled style={{ color: 'rgba(var(--dark-color-rgb), 0.302)' }} />
       </Tooltip>
     </Space>
   );

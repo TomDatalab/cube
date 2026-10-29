@@ -149,8 +149,8 @@ export function MembershipTree({ api }: Props) {
                     margin: '4px 0 4px 16px',
                     padding: '4px 8px',
                     borderRadius: 4,
-                    border: `1px dashed ${highlighted ? '#7a77ff' : 'transparent'}`,
-                    background: highlighted ? 'rgba(122, 119, 255, 0.08)' : undefined,
+                    border: `1px dashed ${highlighted ? 'var(--pg-accent, #7a77ff)' : 'transparent'}`,
+                    background: highlighted ? 'rgba(var(--purple-color-rgb), 0.08)' : undefined,
                   }}
                 >
                   <div

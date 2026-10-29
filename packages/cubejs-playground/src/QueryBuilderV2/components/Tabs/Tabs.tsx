@@ -80,8 +80,8 @@ const TabsElement = tasty({
       placeSelf: 'center',
     },
 
-    '--border-color': 'rgb(234,234,238)',
-    '--light-purple-color': 'rgb(243,243,255)',
+    '--border-color': 'var(--pg-tab-line, rgb(234,234,238))',
+    '--light-purple-color': 'var(--pg-tab-bg, rgb(243,243,255))',
   },
 });
 

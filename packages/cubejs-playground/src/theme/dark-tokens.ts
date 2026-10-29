@@ -208,6 +208,44 @@ export const PG_LIGHT: Record<string, string> = {
   '--pg-accent-soft': 'rgba(122, 119, 255, 0.1)', // @primary-bg
   '--pg-success': '#41b56f', // variables.ts green
   '--playground-muted': '#a9a9b6', // index.html menu links
+  // surfaces and lines the components used to hardcode
+  '--pg-hover': '#f3f3fb', // active dropdown item
+  '--pg-code-bg': '#f2f4f5', // inline code
+  '--pg-menu-text': '#5b5c7d',
+  '--pg-subtle': '#f8f8f9', // database cards
+  '--pg-hairline': 'rgba(0, 0, 0, 0.06)',
+  '--pg-line-soft': '#d7d7f488', // card headers
+  '--pg-tab-line': 'rgb(234, 234, 238)',
+  '--pg-tab-bg': 'rgb(243, 243, 255)',
+  '--pg-orange': '#D26E0B', // view tag
+  '--pg-positive': '#52c41a',
+  '--pg-negative': '#c2371b',
+  // charts
+  '--pg-grid': '#f5f5f5',
+  '--pg-axis': '#666666', // recharts default tick color
+  '--pg-chart-border': '#cccccc', // recharts default tooltip border
+  // access graph
+  '--pg-graph-accent-bg': '#e8e7ff',
+  '--pg-graph-line': '#d9d8e8',
+  '--pg-graph-muted': '#6b6a85',
+  '--pg-graph-fg': '#1f1d3a',
+  '--pg-graph-derived': '#9c9ab8',
+  '--pg-graph-panel': '#f6f6fb',
+  '--pg-graph-node': '#ffffff',
+  '--pg-graph-user': '#1f1d3a',
+  '--pg-graph-organization': '#2f7d6d',
+  '--pg-graph-workspace': '#6a66f0',
+  '--pg-graph-connection': '#b8641e',
+  // atoms/Alert
+  '--pg-alert-error-border': '#FFCCC7',
+  '--pg-alert-error-bg': 'rgb(255, 100, 109, 0.05)',
+  '--pg-alert-error-text': '#EF404A',
+  '--pg-alert-warning-border': '#FFE58F',
+  '--pg-alert-warning-bg': '#FFFBE6',
+  '--pg-alert-info-border': '#91D5FF',
+  '--pg-alert-info-bg': '#E6F7FF',
+  '--pg-alert-success-border': '#B7EB8F',
+  '--pg-alert-success-bg': '#F6FFED',
 };
 
 // palette C
@@ -223,6 +261,40 @@ export const PG_DARK: Record<string, string> = {
   '--pg-accent-soft': 'rgba(143, 139, 255, 0.17)',
   '--pg-success': '#3fbf7f',
   '--playground-muted': '#9a9aaf',
+  '--pg-hover': '#2b2b37',
+  '--pg-code-bg': '#2b2b37',
+  '--pg-menu-text': '#c8c8d6',
+  '--pg-subtle': '#272731',
+  '--pg-hairline': 'rgba(255, 255, 255, 0.08)',
+  '--pg-line-soft': '#36364488',
+  '--pg-tab-line': '#363644',
+  '--pg-tab-bg': '#2b2b40',
+  '--pg-orange': '#f0993f',
+  '--pg-positive': '#3fbf7f',
+  '--pg-negative': '#ff7a65',
+  '--pg-grid': '#2c2c38',
+  '--pg-axis': '#9a9aaf',
+  '--pg-chart-border': '#363644',
+  '--pg-graph-accent-bg': '#34336b',
+  '--pg-graph-line': '#3d3d52',
+  '--pg-graph-muted': '#a8a8c0',
+  '--pg-graph-fg': '#e7e7ef',
+  '--pg-graph-derived': '#6e6e88',
+  '--pg-graph-panel': '#262631',
+  '--pg-graph-node': '#2b2b37',
+  '--pg-graph-user': '#e7e7ef',
+  '--pg-graph-organization': '#4fc3a8',
+  '--pg-graph-workspace': '#8f8bff',
+  '--pg-graph-connection': '#f0993f',
+  '--pg-alert-error-border': 'rgba(255, 100, 109, 0.45)',
+  '--pg-alert-error-bg': 'rgba(255, 100, 109, 0.12)',
+  '--pg-alert-error-text': '#ff8a93',
+  '--pg-alert-warning-border': 'rgba(251, 188, 5, 0.45)',
+  '--pg-alert-warning-bg': 'rgba(251, 188, 5, 0.12)',
+  '--pg-alert-info-border': 'rgba(64, 169, 255, 0.45)',
+  '--pg-alert-info-bg': 'rgba(64, 169, 255, 0.12)',
+  '--pg-alert-success-border': 'rgba(63, 191, 127, 0.45)',
+  '--pg-alert-success-bg': 'rgba(63, 191, 127, 0.12)',
 };
 
 function declarations(map: Record<string, string>) {
@@ -282,5 +354,46 @@ ${DARK} kbd {
 
 ${COMPAT_LIGHT_FIELDS.map((selector) => `${DARK} ${selector}`).join(',\n')} {
   background-color: var(--pg-surface);
+}
+
+${DARK} .token.comment,
+${DARK} .token.prolog,
+${DARK} .token.doctype,
+${DARK} .token.cdata,
+${DARK} .token.punctuation {
+  color: var(--pg-muted);
+}
+
+${DARK} .token.property,
+${DARK} .token.tag,
+${DARK} .token.boolean,
+${DARK} .token.number,
+${DARK} .token.constant,
+${DARK} .token.symbol,
+${DARK} .token.deleted,
+${DARK} .token.function,
+${DARK} .token.class-name,
+${DARK} .token.regex,
+${DARK} .token.important,
+${DARK} .token.variable {
+  color: rgb(var(--pink-color-rgb));
+}
+
+${DARK} .token.selector,
+${DARK} .token.attr-name,
+${DARK} .token.string,
+${DARK} .token.char,
+${DARK} .token.builtin,
+${DARK} .token.inserted {
+  color: var(--pg-accent);
+}
+
+${DARK} .token.operator,
+${DARK} .token.entity,
+${DARK} .token.url,
+${DARK} .token.atrule,
+${DARK} .token.attr-value,
+${DARK} .token.keyword {
+  color: var(--pg-text);
 }
 `;

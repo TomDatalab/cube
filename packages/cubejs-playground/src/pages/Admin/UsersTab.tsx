@@ -131,7 +131,7 @@ export function UsersTab({ api, currentUser }: Props) {
               key: 'drag',
               width: 32,
               render: (_, user) => (user.disabled ? null : (
-                <HolderOutlined title="Drag onto a workspace" style={{ color: '#a1a1b5' }} />
+                <HolderOutlined title="Drag onto a workspace" style={{ color: 'var(--pg-muted, #a1a1b5)' }} />
               )),
             },
             { title: 'Username', dataIndex: 'id' },

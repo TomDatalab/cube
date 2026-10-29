@@ -10,7 +10,7 @@ const Wrapper = styled.div`
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background-color: var(--pg-bar, #141446);
+  background-color: var(--pg-bar, #43436b);
 `;
 
 const StyledCard = styled(Card)`

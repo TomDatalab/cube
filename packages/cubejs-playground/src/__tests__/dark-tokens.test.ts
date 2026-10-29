@@ -102,10 +102,11 @@ describe('dark tokens', () => {
     const light = block(LIGHT_CSS, ':root');
     const dark = block(DARK_CSS, ':root[data-theme="dark"]');
 
-    expect(Object.keys(PG_LIGHT).sort()).toEqual([...names].sort());
-    expect(Object.keys(PG_DARK).sort()).toEqual([...names].sort());
+    // components add roles of their own (Task 4); both themes define the same set
+    expect(Object.keys(PG_DARK).sort()).toEqual(Object.keys(PG_LIGHT).sort());
+    expect(Object.keys(PG_LIGHT)).toEqual(expect.arrayContaining(names));
 
-    for (const name of names) {
+    for (const name of Object.keys(PG_LIGHT)) {
       expect(light).toContain(`${name}: ${PG_LIGHT[name]};`);
       expect(dark).toContain(`${name}: ${PG_DARK[name]};`);
     }

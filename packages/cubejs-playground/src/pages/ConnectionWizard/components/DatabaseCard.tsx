@@ -20,7 +20,7 @@ export function DatabaseCard({ db }) {
 }
 
 const Wrapper = styled.div`
-  background-color: #f8f8f9;
+  background-color: var(--pg-subtle, #f8f8f9);
   padding: 15px 20px;
   border-radius: 4px;
 `;

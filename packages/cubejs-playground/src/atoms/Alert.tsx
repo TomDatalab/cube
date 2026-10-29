@@ -3,21 +3,21 @@ import { Alert as AntdAlert } from 'antd';
 
 export const TYPES: any = {
   error: {
-    border: '#FFCCC7',
-    background: 'rgb(255, 100, 109, 0.05)',
-    color: '#EF404A',
+    border: 'var(--pg-alert-error-border, #FFCCC7)',
+    background: 'var(--pg-alert-error-bg, rgb(255, 100, 109, 0.05))',
+    color: 'var(--pg-alert-error-text, #EF404A)',
   },
   warning: {
-    border: '#FFE58F',
-    background: '#FFFBE6',
+    border: 'var(--pg-alert-warning-border, #FFE58F)',
+    background: 'var(--pg-alert-warning-bg, #FFFBE6)',
   },
   info: {
-    border: '#91D5FF',
-    background: '#E6F7FF',
+    border: 'var(--pg-alert-info-border, #91D5FF)',
+    background: 'var(--pg-alert-info-bg, #E6F7FF)',
   },
   success: {
-    border: '#B7EB8F',
-    background: '#F6FFED',
+    border: 'var(--pg-alert-success-border, #B7EB8F)',
+    background: 'var(--pg-alert-success-bg, #F6FFED)',
   },
 };
 

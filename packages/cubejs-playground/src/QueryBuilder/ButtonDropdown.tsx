@@ -15,8 +15,8 @@ const TooltipContent = styled.div`
   z-index: 9999;
   left: 0;
   overflow: hidden;
-  box-shadow: 0 3px 6px -4px rgba(0, 0, 0, 0.12),
-    0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 9px 28px 8px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 3px 6px -4px rgba(var(--black-color-rgb), 0.12),
+    0 6px 16px 0 rgba(var(--black-color-rgb), 0.08), 0 9px 28px 8px rgba(var(--black-color-rgb), 0.05);
 `;
 
 function TooltipTrigger({ children, shown, onClose, ...overlayStyles }) {

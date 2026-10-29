@@ -7,7 +7,7 @@ import { MemberTag } from './MemberTag';
 export const MemberType = styled(Typography.Paragraph)`
   font-size: 10px;
   text-transform: uppercase;
-  color: rgba(20, 20, 70, 0.5);
+  color: rgba(var(--dark-color-rgb), 0.5);
 `;
 
 type MembersProps = {
