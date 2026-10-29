@@ -26,6 +26,17 @@ export type Workspace = {
   createdBy: string | null;
 };
 
+export const PAGE_SIZE = 50;
+
+// One page of a search, with the total of matches across all pages.
+export type Page<T> = { items: T[]; total: number };
+
+export type WorkspaceListing = Workspace & { organizationName: string };
+
+// A connection and the organization that holds it, as the platform admin sees
+// every one of them.
+export type TrackedConnection = { name: string; organizationId: string; origin: 'created' | 'assigned' };
+
 export const ROLES = ['owner', 'editor', 'viewer'] as const;
 export type Role = typeof ROLES[number];
 
@@ -77,7 +88,37 @@ export function adminApi(basePath: string) {
     return json;
   }
 
+  // `/v1/<resource>?q&...&limit&offset`; an empty `q` is not sent. `page`
+  // starts at 1.
+  async function search(resource: string, key: string, params: {
+    q: string;
+    page: number;
+    organizationId?: string | null;
+  }): Promise<Page<any>> {
+    const query = new URLSearchParams();
+    if (params.q) {
+      query.set('q', params.q);
+    }
+    query.set('limit', String(PAGE_SIZE));
+    query.set('offset', String((params.page - 1) * PAGE_SIZE));
+    if (params.organizationId) {
+      query.set('organizationId', params.organizationId);
+    }
+    const json = await call('GET', `/v1/${resource}?${query}`);
+    return { items: json[key], total: json.total };
+  }
+
   const api = {
+    searchUsers: (q: string, page: number): Promise<Page<User>> => search('users', 'users', { q, page }),
+    searchOrganizations: (q: string, page: number): Promise<Page<Organization>> => search(
+      'organizations', 'organizations', { q, page }
+    ),
+    searchWorkspaces: (opts: {
+      q: string;
+      organizationId?: string | null;
+      page: number;
+    }): Promise<Page<WorkspaceListing>> => search('workspaces', 'workspaces', opts),
+
     users: async (): Promise<User[]> => (await call('GET', '/v1/users')).users,
     createUser: (user: { id: string; name?: string; email?: string; password: string }) => call(
       'POST', '/v1/users', user
@@ -132,13 +173,14 @@ export function adminApi(basePath: string) {
     dataSources: async (): Promise<DataSource[]> => (
       (await call('GET', '/v1/data-sources')).dataSources || []
     ).map((ds) => ({ name: ds.name, type: ds.type ?? null })),
-    // `dataSources()` without `default` and those any of `orgs` holds.
-    assignableDataSources: async (orgs: string[]): Promise<DataSource[]> => {
-      const [sources, ...held] = await Promise.all([
-        api.dataSources(),
-        ...orgs.map((org) => api.connections(org)),
-      ]);
-      return assignableDataSources(sources as DataSource[], (held as Connection[][]).flat().map((c) => c.name));
+    // Every connection that belongs to an organization.
+    trackedConnections: async (): Promise<TrackedConnection[]> => (
+      await call('GET', '/v1/connections')
+    ).connections,
+    // `dataSources()` without `default` and those an organization holds.
+    assignableDataSources: async (): Promise<DataSource[]> => {
+      const [sources, tracked] = await Promise.all([api.dataSources(), api.trackedConnections()]);
+      return assignableDataSources(sources, tracked.map((c) => c.name));
     },
     assignConnection: (name: string, org: string) => call(
       'PUT', `/v1/connections/${id(name)}/organization`, { organizationId: org }

@@ -91,7 +91,6 @@ export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
           key={org.id}
           api={api}
           org={org}
-          organizations={(organizations || []).map((o) => o.id)}
           users={users}
           onRename={() => setDialog('rename')}
           onShowWorkspaces={() => onShowWorkspaces(org.id)}
@@ -118,8 +117,6 @@ export function OrganizationsTab({ api, users, onShowWorkspaces }: Props) {
 type CardProps = {
   api: AdminApi;
   org: Organization;
-  // Every organization's id: a data source one of them holds is not offered.
-  organizations: string[];
   users: User[];
   onRename: () => void;
   onShowWorkspaces: () => void;
@@ -127,7 +124,7 @@ type CardProps = {
 };
 
 function OrganizationCard({
-  api, org, organizations, users, onRename, onShowWorkspaces, onDeleted,
+  api, org, users, onRename, onShowWorkspaces, onDeleted,
 }: CardProps) {
   const isMounted = useIsMounted();
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
@@ -151,7 +148,7 @@ function OrganizationCard({
     try {
       const [loaded, sources] = await Promise.all([
         api.connections(org.id),
-        api.assignableDataSources(organizations),
+        api.assignableDataSources(),
       ]);
       if (isMounted()) {
         setConnections(loaded);

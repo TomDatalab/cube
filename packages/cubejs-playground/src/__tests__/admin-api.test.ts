@@ -104,28 +104,62 @@ describe('the Admin page API client', () => {
             { name: 'default', type: 'postgres' },
             { name: 'sales', type: 'postgres' },
             { name: 'mine', type: 'sqlite' },
-            { name: 'theirs', type: 'sqlite' },
             { name: 'free', type: 'duckdb' },
           ],
         });
       }
-      if (url === '/cube/v1/organizations/org-1/connections') {
-        return answer(200, { connections: [{ name: 'mine', type: 'sqlite', origin: 'created', workspaces: [] }] });
-      }
-      if (url === '/cube/v1/organizations/org-2/connections') {
+      if (url === '/cube/v1/connections') {
         return answer(200, {
           connections: [
-            { name: 'theirs', type: 'sqlite', origin: 'created', workspaces: [] },
-            { name: 'sales', type: 'postgres', origin: 'assigned', workspaces: ['ws-1'] },
+            { name: 'mine', organizationId: 'org-1', origin: 'created' },
+            { name: 'sales', organizationId: 'org-2', origin: 'assigned' },
           ],
         });
       }
       return answer(404, { error: 'unexpected' });
     });
 
-    await expect(adminApi('/cube').assignableDataSources(['org-1', 'org-2'])).resolves.toEqual([
+    await expect(adminApi('/cube').assignableDataSources()).resolves.toEqual([
       { name: 'free', type: 'duckdb' },
     ]);
+  });
+
+  it('searches users a page at a time', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, { users: [{ id: 'ana' }], total: 61 }));
+
+    const page = await adminApi('/cube').searchUsers('ana', 2);
+
+    expect(page).toEqual({ items: [{ id: 'ana' }], total: 61 });
+    expect(lastCall().url).toBe('/cube/v1/users?q=ana&limit=50&offset=50');
+  });
+
+  it('searches organizations', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, { organizations: [{ id: 'o1' }], total: 1 }));
+
+    const page = await adminApi('/cube').searchOrganizations('a b', 1);
+
+    expect(page).toEqual({ items: [{ id: 'o1' }], total: 1 });
+    expect(lastCall().url).toBe('/cube/v1/organizations?q=a+b&limit=50&offset=0');
+  });
+
+  it('searches workspaces of an organization without sending an empty q', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, { workspaces: [{ id: 'w1' }], total: 1 }));
+
+    const page = await adminApi('/cube').searchWorkspaces({ q: '', organizationId: 'o1', page: 1 });
+
+    expect(page).toEqual({ items: [{ id: 'w1' }], total: 1 });
+    expect(lastCall().url).toBe('/cube/v1/workspaces?limit=50&offset=0&organizationId=o1');
+  });
+
+  it('lists the tracked connections', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, {
+      connections: [{ name: 'mine', organizationId: 'o1', origin: 'created' }],
+    }));
+
+    await expect(adminApi('/cube').trackedConnections()).resolves.toEqual([
+      { name: 'mine', organizationId: 'o1', origin: 'created' },
+    ]);
+    expect(lastCall().url).toBe('/cube/v1/connections');
   });
 
   it('filters assignable data sources', () => {
