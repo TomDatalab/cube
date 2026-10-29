@@ -11,12 +11,12 @@ function inlineScripts(): string[] {
   return [...head.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 }
 
-function runBootstrap({ stored, throws = false, systemDark = false }: {
+function runBootstrap({ stored, throws = false, systemDark = false, matchMediaThrows = false }: {
   stored?: string;
   throws?: boolean;
   systemDark?: boolean;
+  matchMediaThrows?: boolean;
 }) {
-  document.documentElement.innerHTML = '<head><link id="antd-light" rel="stylesheet" href="/a.css"><link id="antd-dark" rel="stylesheet" href="/b.css" disabled></head><body></body>';
   delete document.documentElement.dataset.theme;
 
   vi.stubGlobal('localStorage', {
@@ -27,21 +27,33 @@ function runBootstrap({ stored, throws = false, systemDark = false }: {
       return stored ?? null;
     },
   });
-  window.matchMedia = ((query: string) => ({
-    matches: systemDark && query.includes('dark'),
-  })) as any;
+  window.matchMedia = ((query: string) => {
+    if (matchMediaThrows) {
+      throw new Error('boom');
+    }
+    return { matches: systemDark && query.includes('dark') };
+  }) as any;
 
-  // scripts that come before the links run first, the ones after run once the links exist
-  inlineScripts().forEach((code) => {
-    // jsdom does not run injected scripts, so evaluate the inline source directly
-    // oxlint-disable-next-line no-eval
-    window.eval(code);
+  let written = '';
+
+  vi.spyOn(document, 'write').mockImplementation((...chunks: string[]) => {
+    written += chunks.join('');
   });
+
+  // jsdom does not run injected scripts, so evaluate the inline source directly
+  // oxlint-disable-next-line no-eval
+  window.eval(inlineScripts()[0]);
+
+  const light = written.match(/<link id="antd-light"[^>]*>/)?.[0] ?? '';
+  const dark = written.match(/<link id="antd-dark"[^>]*>/)?.[0] ?? '';
 
   return {
     theme: document.documentElement.dataset.theme,
-    light: document.getElementById('antd-light') as HTMLLinkElement,
-    dark: document.getElementById('antd-dark') as HTMLLinkElement,
+    written,
+    light,
+    dark,
+    // the render-blocking link is the first one written
+    first: written.match(/<link id="(antd-[a-z]+)"/)?.[1],
   };
 }
 
@@ -50,41 +62,53 @@ describe('index.html', () => {
     vi.unstubAllGlobals();
   });
 
-  it('runs the bootstrap script before any stylesheet', () => {
+  it('has one inline script before any stylesheet markup', () => {
+    expect(inlineScripts()).toHaveLength(1);
     expect(head.indexOf('<script')).toBeGreaterThan(-1);
-    expect(head.indexOf('<script')).toBeLessThan(head.indexOf('rel="stylesheet"'));
+    expect(head.indexOf('<script')).toBeLessThan(head.search(/rel="stylesheet"/));
+    expect(head.indexOf('<script')).toBeLessThan(head.indexOf('<style'));
+  });
+
+  it('has no static antd links, the script writes them', () => {
+    const outside = head.replace(/<script>[\s\S]*?<\/script>/g, '');
+
+    expect(outside).not.toMatch(/antd(\.dark)?\.min\.css/);
+    expect(outside).not.toMatch(/rel="stylesheet"/);
   });
 
   it('uses the same storage key as the theme module', () => {
     expect(inlineScripts()[0]).toContain(`'${THEME_STORAGE_KEY}'`);
   });
 
-  it('declares both antd sheets, the dark one starting disabled', () => {
-    expect(head).toMatch(/<link id="antd-light"/);
-    expect(head).toMatch(/<link id="antd-dark"[^>]*\sdisabled/);
-  });
+  it.each([
+    ['stored dark', { stored: 'dark' }],
+    ['storage throws with a dark system', { throws: true, systemDark: true }],
+  ])('writes the dark sheet enabled when %s', (_name, opts) => {
+    const r = runBootstrap(opts);
 
-  it('applies the stored dark preference', () => {
-    const { theme, light, dark } = runBootstrap({ stored: 'dark' });
-
-    expect(theme).toBe('dark');
-    expect(dark.disabled).toBe(false);
-    expect(light.disabled).toBe(true);
-  });
-
-  it('falls back to the system theme when storage throws', () => {
-    const { theme, light, dark } = runBootstrap({ throws: true, systemDark: true });
-
-    expect(theme).toBe('dark');
-    expect(dark.disabled).toBe(false);
-    expect(light.disabled).toBe(true);
+    expect(r.theme).toBe('dark');
+    expect(r.first).toBe('antd-dark');
+    expect(r.dark).toContain('href="/antd.dark.min.css"');
+    expect(r.dark).not.toContain('disabled');
+    expect(r.light).toContain('href="/antd.min.css"');
+    expect(r.light).toContain('disabled');
+    expect(r.written).toContain('html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}');
   });
 
   it('keeps the light sheet for a light preference over a dark system', () => {
-    const { theme, light, dark } = runBootstrap({ stored: 'light', systemDark: true });
+    const r = runBootstrap({ stored: 'light', systemDark: true });
 
-    expect(theme).toBe('light');
-    expect(light.disabled).toBe(false);
-    expect(dark.disabled).toBe(true);
+    expect(r.theme).toBe('light');
+    expect(r.first).toBe('antd-light');
+    expect(r.light).not.toContain('disabled');
+    expect(r.dark).toContain('disabled');
+  });
+
+  it('falls back to an enabled light sheet when resolution throws', () => {
+    const r = runBootstrap({ throws: true, matchMediaThrows: true });
+
+    expect(r.theme).toBe('light');
+    expect(r.light).not.toContain('disabled');
+    expect(r.dark).toContain('disabled');
   });
 });
