@@ -11,6 +11,7 @@ import {
   IndexPage,
   FrontendIntegrationsPage,
   DataSourcesPage,
+  AdminPage,
 } from './pages';
 import { SecurityContextProvider } from './components/SecurityContext/SecurityContextProvider';
 import { AppContextProvider } from './components/AppContext';
@@ -81,6 +82,11 @@ ReactDOM.render(
           key="connection"
           path="/connection"
           render={() => <AdminOnly><ConnectionWizardPage history={history} /></AdminOnly>}
+        />
+        <Route
+          key="admin"
+          path="/admin"
+          render={() => <AdminOnly><AdminPage /></AdminOnly>}
         />
         <Route
           key="frontend-integrations"

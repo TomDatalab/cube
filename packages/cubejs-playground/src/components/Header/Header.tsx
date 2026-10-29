@@ -83,6 +83,12 @@ export default function Header({ selectedKeys }: Props) {
             <Link to="/frontend-integrations">Frontend Integrations</Link>
           </StyledMenuItem>
 
+          {session && isAdmin ? (
+            <StyledMenuItem key="/admin">
+              <Link to="/admin">Admin</Link>
+            </StyledMenuItem>
+          ) : null}
+
           <RunOnCubeCloud />
 
           {session ? (
@@ -118,6 +124,12 @@ export default function Header({ selectedKeys }: Props) {
                 <Menu.Item key="/frontend-integrations">
                   <Link to="/frontend-integrations">Frontend Integrations</Link>
                 </Menu.Item>
+
+                {session && isAdmin ? (
+                  <Menu.Item key="/admin">
+                    <Link to="/admin">Admin</Link>
+                  </Menu.Item>
+                ) : null}
 
                 {session ? (
                   <Menu.Item key="logout" onClick={logOut}>
