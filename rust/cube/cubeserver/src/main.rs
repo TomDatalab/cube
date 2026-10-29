@@ -104,7 +104,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         config.playground_path = None;
     }
-    let config = config;
 
     let auth = CubeAuthService::new(auth_config);
     auth.prefetch_jwks().await;
