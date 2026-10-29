@@ -31,9 +31,28 @@
         var links =
           theme === 'dark' ? dark + '>' + light + ' disabled>' : light + '>' + dark + ' disabled>';
 
-        document.write(
-          '<style>html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}</style>' + links
-        );
+        try {
+          document.write(
+            '<style>html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}</style>' + links
+          );
+        } catch (e) {
+          // never leave the page unstyled: both sheets, the light one on
+          var add = function (id, href, disabled) {
+            var link = document.createElement('link');
+            link.id = id;
+            link.rel = 'stylesheet';
+            link.href = href;
+            if (disabled) {
+              link.setAttribute('disabled', '');
+            }
+            document.head.appendChild(link);
+          };
+          add('antd-light', '/antd.min.css', false);
+          add('antd-dark', '/antd.dark.min.css', true);
+          try {
+            document.documentElement.setAttribute('data-theme', 'light');
+          } catch (e2) {}
+        }
       })();
     </script>
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">

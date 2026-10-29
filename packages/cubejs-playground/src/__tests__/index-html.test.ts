@@ -11,13 +11,17 @@ function inlineScripts(): string[] {
   return [...head.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 }
 
-function runBootstrap({ stored, throws = false, systemDark = false, matchMediaThrows = false }: {
+function runBootstrap({
+  stored, throws = false, systemDark = false, matchMediaThrows = false, writeThrows = false,
+}: {
   stored?: string;
   throws?: boolean;
   systemDark?: boolean;
   matchMediaThrows?: boolean;
+  writeThrows?: boolean;
 }) {
   delete document.documentElement.dataset.theme;
+  document.querySelectorAll('#antd-light, #antd-dark').forEach((link) => link.remove());
 
   vi.stubGlobal('localStorage', {
     getItem: () => {
@@ -37,6 +41,9 @@ function runBootstrap({ stored, throws = false, systemDark = false, matchMediaTh
   let written = '';
 
   vi.spyOn(document, 'write').mockImplementation((...chunks: string[]) => {
+    if (writeThrows) {
+      throw new Error('document.write blocked');
+    }
     written += chunks.join('');
   });
 
@@ -110,5 +117,22 @@ describe('index.html', () => {
     expect(r.theme).toBe('light');
     expect(r.light).not.toContain('disabled');
     expect(r.dark).toContain('disabled');
+  });
+
+  it('appends both sheets, light enabled, when document.write throws', () => {
+    expect(() => runBootstrap({ stored: 'dark', writeThrows: true })).not.toThrow();
+
+    const light = document.getElementById('antd-light') as HTMLLinkElement | null;
+    const dark = document.getElementById('antd-dark') as HTMLLinkElement | null;
+
+    expect(light?.parentNode).toBe(document.head);
+    expect(light?.getAttribute('href')).toBe('/antd.min.css');
+    expect(light?.rel).toBe('stylesheet');
+    expect(light?.hasAttribute('disabled')).toBe(false);
+    expect(dark?.getAttribute('href')).toBe('/antd.dark.min.css');
+    expect(dark?.rel).toBe('stylesheet');
+    expect(dark?.hasAttribute('disabled')).toBe(true);
+    // the tokens follow the sheet that is on
+    expect(document.documentElement.dataset.theme).toBe('light');
   });
 });
