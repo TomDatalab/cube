@@ -8,6 +8,11 @@
 //! it to the organization's workspaces (`connection#workspace`). A data
 //! source without an organization is for platform admins only.
 //!
+//! A connection the organization created (`origin: created`) is edited and
+//! deleted by the organization's owners; a data source a platform admin
+//! assigned to it (`origin: assigned`) is only used and released by them:
+//! editing or deleting it is for platform admins, who can also unassign it.
+//!
 //! A connection the caller can neither query nor manage answers 404.
 
 use std::collections::BTreeSet;
@@ -27,7 +32,7 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::{self, data_source_types, CreateRequest, UpdateRequest};
-use crate::rbac::store::{ConnectionRow, StoreError, Workspace};
+use crate::rbac::store::{ConnectionOrigin, ConnectionRow, StoreError, Workspace};
 use crate::rbac::{
     authz_error, unavailable, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter,
     Update,
@@ -137,10 +142,12 @@ async fn releases_of(rbac: &Rbac, name: &str) -> Result<Vec<Relationship>, ApiEr
         .map_err(authz_error)
 }
 
-/// The connection in the path, for `connection#manage`: 404 when the caller
-/// can neither query nor manage it, 403 when they can only query it.
-/// Platform admins pass for any name; the row is `None` for a data source
-/// without an organization (or none at all).
+/// The connection in the path, for editing or deleting it: 404 when the
+/// caller can neither query nor manage it, 403 when they can only query it
+/// or when it was assigned by a platform admin (its settings are the
+/// platform's, not the organization's). Platform admins pass for any name;
+/// the row is `None` for a data source without an organization (or none at
+/// all).
 async fn managed_connection(
     rbac: &Rbac,
     ctx: &RequestContext,
@@ -157,14 +164,24 @@ async fn managed_connection(
         .connection(name)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    if row.is_none() && !ctx.platform_admin {
-        return Err(not_found());
+    if !ctx.platform_admin {
+        match &row {
+            None => return Err(not_found()),
+            Some(r) if r.origin != ConnectionOrigin::Created => {
+                return Err(ApiError::forbidden(
+                    "This connection was assigned by a platform admin; only platform admins \
+                     edit or delete it",
+                ));
+            }
+            Some(_) => {}
+        }
     }
     Ok(row)
 }
 
-/// → `{connections: [{name, type, workspaces}]}`: `admin` on the
-/// organization. `workspaces` are the ids it is released to.
+/// → `{connections: [{name, type, origin, workspaces}]}`: `admin` on the
+/// organization. `origin` is `created` or `assigned`; `workspaces` are the
+/// ids it is released to.
 pub async fn list(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -189,6 +206,7 @@ pub async fn list(
         connections.push(json!({
             "name": row.name,
             "type": types.get(&row.name),
+            "origin": row.origin.as_str(),
             "workspaces": workspaces,
         }));
     }
@@ -223,7 +241,7 @@ pub async fn create(
         .transaction()
         .await
         .map_err(|e| store_error(e, conflict))?;
-    tx.create_connection(&name, org.id)
+    tx.create_connection(&name, org.id, ConnectionOrigin::Created)
         .await
         .map_err(|e| store_error(e, conflict))?;
     let relationship = organization_relationship(&name, org.id);
@@ -253,7 +271,8 @@ pub async fn create(
     Ok((StatusCode::CREATED, response).into_response())
 }
 
-/// The body of `PUT /v1/data-sources/{name}`: `connection#manage`.
+/// The body of `PUT /v1/data-sources/{name}`: `connection#manage` on a
+/// connection the organization created; platform admins for the rest.
 pub async fn update(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -268,7 +287,8 @@ pub async fn update(
         .map(IntoResponse::into_response)
 }
 
-/// `connection#manage`: [`delete_with_grants`].
+/// `connection#manage` on a connection the organization created; platform
+/// admins for the rest: [`delete_with_grants`].
 pub async fn delete(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -343,8 +363,9 @@ pub(crate) async fn refuse_tracked_name(rbac: &Rbac, name: &str) -> Result<(), A
 }
 
 /// `{organizationId}`: platform admins. Assigns a data source of
-/// `cube.yml` (`default`, say) to an organization. Moving it to another
-/// organization withdraws its releases to the old one's workspaces.
+/// `cube.yml` to an organization (`origin: assigned`). `default` is never
+/// assigned (400); one that already belongs to another organization must be
+/// unassigned first (409). Assigning it again to its organization is a no-op.
 pub async fn assign_organization(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -352,13 +373,14 @@ pub async fn assign_organization(
     request: Result<Json<AssignOrganization>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let (rbac, _) = caller(&state, &ctx)?;
-    if !ctx.platform_admin {
-        return Err(ApiError::forbidden(
-            "Only platform admins assign connections to organizations",
-        ));
-    }
+    require_platform_admin(&ctx, "assign connections to organizations")?;
     connection_name(&name)?;
     let request = body(request)?;
+    if name == "default" {
+        return Err(ApiError::bad_request(
+            "The default data source cannot be assigned to an organization",
+        ));
+    }
     let org_id = resource_id(&request.organization_id, "organization")?;
     let org = rbac
         .store
@@ -375,45 +397,92 @@ pub async fn assign_organization(
         .connection(&name)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let mut updates = Vec::new();
-    if let Some(row) = row.as_ref().filter(|r| r.organization_id != org.id) {
-        updates.push(Update::Delete(organization_relationship(
-            &name,
-            row.organization_id,
-        )));
-        updates.extend(
-            releases_of(rbac, &name)
-                .await?
-                .into_iter()
-                .map(Update::Delete),
-        );
-    }
-    updates.push(Update::Touch(organization_relationship(&name, org.id)));
-
+    let relationship = organization_relationship(&name, org.id);
     let conflict = "The connection changed concurrently; try again";
     match row {
+        Some(row) if row.organization_id != org.id => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "The connection belongs to another organization; unassign it first",
+        )),
+        Some(_) => {
+            // Already this organization's: repair the relationship only.
+            rbac.authz
+                .touch(std::slice::from_ref(&relationship))
+                .await
+                .map_err(authz_error)?;
+            Ok(StatusCode::NO_CONTENT)
+        }
         None => {
             let tx = rbac
                 .store
                 .transaction()
                 .await
                 .map_err(|e| store_error(e, conflict))?;
-            tx.create_connection(&name, org.id)
+            tx.create_connection(&name, org.id, ConnectionOrigin::Assigned)
                 .await
                 .map_err(|e| store_error(e, conflict))?;
-            rbac.authz.write(&updates, &[]).await.map_err(authz_error)?;
-            tx.commit().await.map_err(|e| store_error(e, conflict))?;
-        }
-        Some(_) => {
-            rbac.authz.write(&updates, &[]).await.map_err(authz_error)?;
-            rbac.store
-                .update_connection(&name, org.id)
+            rbac.authz
+                .touch(std::slice::from_ref(&relationship))
                 .await
-                .map_err(|e| store_error(e, conflict))?
-                .ok_or_else(not_found)?;
+                // Dropping `tx` rolls the row back.
+                .map_err(authz_error)?;
+            if let Err(e) = tx.commit().await {
+                if let Err(err) = rbac.authz.delete(std::slice::from_ref(&relationship)).await {
+                    tracing::error!(connection = %name, "Cannot undo connection#organization: {err}");
+                }
+                return Err(store_error(e, conflict));
+            }
+            Ok(StatusCode::NO_CONTENT)
         }
     }
+}
+
+/// Platform admins: takes the connection away from its organization. All
+/// its relationships (the organization and the releases to workspaces) go
+/// in one SpiceDB call, and the `connections` row with them; the data source
+/// stays in `cube.yml`, for platform admins only. 404 for a data source
+/// without an organization.
+pub async fn unassign_organization(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let (rbac, _) = caller(&state, &ctx)?;
+    require_platform_admin(&ctx, "unassign connections from organizations")?;
+    connection_name(&name)?;
+    let conflict = "The connection changed concurrently; try again";
+    let tx = rbac
+        .store
+        .transaction()
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+    if !tx
+        .delete_connection(&name)
+        .await
+        .map_err(|e| store_error(e, conflict))?
+    {
+        return Err(not_found());
+    }
+    rbac.authz
+        .delete_matching(&RelationshipFilter {
+            kind: "connection",
+            id: Some(name.clone()),
+            relation: None,
+            subject: None,
+        })
+        .await
+        // Dropping `tx` rolls the row delete back.
+        .map_err(authz_error)?;
+    tx.commit().await.map_err(|e| store_error(e, conflict))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn require_platform_admin(ctx: &RequestContext, what: &str) -> Result<(), ApiError> {
+    if ctx.platform_admin {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(format!("Only platform admins {what}")))
+    }
 }
 
 /// The workspace and the connection of a release, after the checks:

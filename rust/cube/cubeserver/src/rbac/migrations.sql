@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS connections (
     organization_id uuid NOT NULL REFERENCES organizations (id)
 );
 
+-- How the connection came to its organization: `created` by the
+-- organization (its owners may edit and delete it) or `assigned` by a
+-- platform admin (only platform admins may edit and delete it). Rows from
+-- before the column existed were all assigned or are treated as such.
+ALTER TABLE connections ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'assigned';
+
 CREATE TABLE IF NOT EXISTS objects (
     id uuid PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,

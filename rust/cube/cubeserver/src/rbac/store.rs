@@ -84,10 +84,51 @@ pub struct Workspace {
     pub created_by: String,
 }
 
+/// How a connection came to its organization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionOrigin {
+    /// Created by the organization (`POST /v1/organizations/{id}/connections`):
+    /// its owners may edit and delete it.
+    Created,
+    /// A `cube.yml` data source a platform admin assigned to the organization
+    /// (`PUT /v1/connections/{name}/organization`): only platform admins may
+    /// edit or delete it.
+    Assigned,
+}
+
+impl ConnectionOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnectionOrigin::Created => "created",
+            ConnectionOrigin::Assigned => "assigned",
+        }
+    }
+
+    /// Anything but `created` is `assigned`: the stricter reading.
+    fn parse(s: &str) -> Self {
+        if s == "created" {
+            ConnectionOrigin::Created
+        } else {
+            ConnectionOrigin::Assigned
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectionRow {
     pub name: String,
     pub organization_id: Uuid,
+    pub origin: ConnectionOrigin,
+}
+
+const CONNECTION_COLS: &str = "name, organization_id, origin";
+
+fn connection_from(r: &Row) -> ConnectionRow {
+    ConnectionRow {
+        name: r.get(0),
+        organization_id: r.get(1),
+        origin: ConnectionOrigin::parse(r.get(2)),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -217,16 +258,54 @@ mod q {
         c: &tokio_postgres::Client,
         name: &str,
         organization_id: Uuid,
+        origin: ConnectionOrigin,
     ) -> Result<ConnectionRow, StoreError> {
         c.execute(
-            "INSERT INTO connections (name, organization_id) VALUES ($1, $2)",
-            &[&name, &organization_id],
+            "INSERT INTO connections (name, organization_id, origin) VALUES ($1, $2, $3)",
+            &[&name, &organization_id, &origin.as_str()],
         )
         .await?;
         Ok(ConnectionRow {
             name: name.to_string(),
             organization_id,
+            origin,
         })
+    }
+
+    pub async fn delete_organization(
+        c: &tokio_postgres::Client,
+        id: Uuid,
+    ) -> Result<bool, StoreError> {
+        match c
+            .execute("DELETE FROM organizations WHERE id = $1", &[&id])
+            .await
+        {
+            Ok(n) => Ok(n > 0),
+            Err(e) if e.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) => Err(
+                StoreError::Conflict("organization still has workspaces or connections".into()),
+            ),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub async fn delete_workspace(
+        c: &tokio_postgres::Client,
+        id: Uuid,
+    ) -> Result<bool, StoreError> {
+        Ok(c.execute("DELETE FROM workspaces WHERE id = $1", &[&id])
+            .await?
+            > 0)
+    }
+
+    pub async fn delete_connection(
+        c: &tokio_postgres::Client,
+        name: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(
+            c.execute("DELETE FROM connections WHERE name = $1", &[&name])
+                .await?
+                > 0,
+        )
     }
 
     pub async fn create_object(
@@ -288,10 +367,29 @@ macro_rules! shared_creates {
             &self,
             name: &str,
             organization_id: Uuid,
+            origin: ConnectionOrigin,
         ) -> Result<ConnectionRow, StoreError> {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
-            q::create_connection(c, name, organization_id).await
+            q::create_connection(c, name, organization_id, origin).await
+        }
+        /// `true` when a row was deleted. Fails with `Conflict` while
+        /// workspaces or connections still reference the organization.
+        pub async fn delete_organization(&self, id: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_organization(c, id).await
+        }
+        /// Cascades to the workspace's objects. `true` when a row was deleted.
+        pub async fn delete_workspace(&self, id: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_workspace(c, id).await
+        }
+        pub async fn delete_connection(&self, name: &str) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_connection(c, name).await
         }
         pub async fn create_object(&self, o: &NewObject) -> Result<StoredObject, StoreError> {
             let guard = $conn(self).await?;
@@ -438,22 +536,6 @@ impl Store {
         Ok(row.as_ref().map(org_from))
     }
 
-    /// `true` when a row was deleted. Fails with `Conflict` while workspaces
-    /// or connections still reference the organization.
-    pub async fn delete_organization(&self, id: Uuid) -> Result<bool, StoreError> {
-        let c = self.conn().await?;
-        match c
-            .execute("DELETE FROM organizations WHERE id = $1", &[&id])
-            .await
-        {
-            Ok(n) => Ok(n > 0),
-            Err(e) if e.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) => Err(
-                StoreError::Conflict("organization still has workspaces or connections".into()),
-            ),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     // workspaces
     pub async fn workspace(&self, id: Uuid) -> Result<Option<Workspace>, StoreError> {
         let c = self.conn().await?;
@@ -510,27 +592,12 @@ impl Store {
         Ok(row.as_ref().map(workspace_from))
     }
 
-    /// Cascades to the workspace's objects. `true` when a row was deleted.
-    pub async fn delete_workspace(&self, id: Uuid) -> Result<bool, StoreError> {
-        let c = self.conn().await?;
-        Ok(c.execute("DELETE FROM workspaces WHERE id = $1", &[&id])
-            .await?
-            > 0)
-    }
-
     // connections
     pub async fn connection(&self, name: &str) -> Result<Option<ConnectionRow>, StoreError> {
         let c = self.conn().await?;
-        let row = c
-            .query_opt(
-                "SELECT name, organization_id FROM connections WHERE name = $1",
-                &[&name],
-            )
-            .await?;
-        Ok(row.map(|r| ConnectionRow {
-            name: r.get(0),
-            organization_id: r.get(1),
-        }))
+        let sql = format!("SELECT {CONNECTION_COLS} FROM connections WHERE name = $1");
+        let row = c.query_opt(&sql, &[&name]).await?;
+        Ok(row.as_ref().map(connection_from))
     }
 
     pub async fn connections_by_names(
@@ -538,19 +605,10 @@ impl Store {
         names: &[String],
     ) -> Result<Vec<ConnectionRow>, StoreError> {
         let c = self.conn().await?;
-        let rows = c
-            .query(
-                "SELECT name, organization_id FROM connections WHERE name = ANY($1) ORDER BY name",
-                &[&names],
-            )
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|r| ConnectionRow {
-                name: r.get(0),
-                organization_id: r.get(1),
-            })
-            .collect())
+        let sql =
+            format!("SELECT {CONNECTION_COLS} FROM connections WHERE name = ANY($1) ORDER BY name");
+        let rows = c.query(&sql, &[&names]).await?;
+        Ok(rows.iter().map(connection_from).collect())
     }
 
     pub async fn connections_of_organization(
@@ -558,48 +616,11 @@ impl Store {
         organization_id: Uuid,
     ) -> Result<Vec<ConnectionRow>, StoreError> {
         let c = self.conn().await?;
-        let rows = c
-            .query(
-                "SELECT name, organization_id FROM connections \
-                 WHERE organization_id = $1 ORDER BY name",
-                &[&organization_id],
-            )
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|r| ConnectionRow {
-                name: r.get(0),
-                organization_id: r.get(1),
-            })
-            .collect())
-    }
-
-    /// Reassigns a connection to another organization.
-    pub async fn update_connection(
-        &self,
-        name: &str,
-        organization_id: Uuid,
-    ) -> Result<Option<ConnectionRow>, StoreError> {
-        let c = self.conn().await?;
-        let n = c
-            .execute(
-                "UPDATE connections SET organization_id = $2 WHERE name = $1",
-                &[&name, &organization_id],
-            )
-            .await?;
-        Ok((n > 0).then(|| ConnectionRow {
-            name: name.to_string(),
-            organization_id,
-        }))
-    }
-
-    pub async fn delete_connection(&self, name: &str) -> Result<bool, StoreError> {
-        let c = self.conn().await?;
-        Ok(
-            c.execute("DELETE FROM connections WHERE name = $1", &[&name])
-                .await?
-                > 0,
-        )
+        let sql = format!(
+            "SELECT {CONNECTION_COLS} FROM connections WHERE organization_id = $1 ORDER BY name"
+        );
+        let rows = c.query(&sql, &[&organization_id]).await?;
+        Ok(rows.iter().map(connection_from).collect())
     }
 
     // objects
@@ -704,7 +725,7 @@ impl Store {
     }
 }
 
-/// A transaction exposing the `create_*` operations. Dropping it without
+/// A transaction exposing the `create_*` and `delete_*` operations. Dropping it without
 /// `commit` discards the connection, which rolls the transaction back.
 pub struct StoreTx<'a> {
     conn: Option<Object>,

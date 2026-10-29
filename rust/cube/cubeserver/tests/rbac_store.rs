@@ -4,7 +4,7 @@
 
 mod support;
 
-use cubeserver::rbac::store::{NewObject, NewUser, StoreError};
+use cubeserver::rbac::store::{ConnectionOrigin, NewObject, NewUser, StoreError};
 use support::{connect, with_db, TestDb};
 use uuid::Uuid;
 
@@ -89,9 +89,14 @@ db_test!(
         let other = store.create_workspace(o2.id, "w", "ann").await.unwrap();
         assert_eq!(store.workspaces_by_ids(&[other.id]).await.unwrap().len(), 1);
 
-        store.create_connection("c1", o1.id).await.unwrap();
+        store
+            .create_connection("c1", o1.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
         assert!(matches!(
-            store.create_connection("c1", o2.id).await,
+            store
+                .create_connection("c1", o2.id, ConnectionOrigin::Assigned)
+                .await,
             Err(StoreError::Conflict(_))
         ));
         assert_eq!(
@@ -251,5 +256,82 @@ db_test!(
                 .name,
             "c"
         );
+    }
+);
+
+db_test!(
+    connection_origin_migrates_old_rows_as_assigned,
+    |store, url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let o = store.create_organization("o", "ann").await.unwrap();
+        store
+            .create_connection("made", o.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
+        // A row from before the column: drop it and add the row back the old way.
+        let raw = connect(&url).await;
+        raw.batch_execute("ALTER TABLE connections DROP COLUMN origin")
+            .await
+            .unwrap();
+        raw.execute(
+            "INSERT INTO connections (name, organization_id) VALUES ('old', $1)",
+            &[&o.id],
+        )
+        .await
+        .unwrap();
+        // Starting again applies the migration to the existing rows.
+        let again = cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1)
+            .await
+            .unwrap();
+        let rows = again.connections_of_organization(o.id).await.unwrap();
+        let origins: Vec<(&str, ConnectionOrigin)> =
+            rows.iter().map(|r| (r.name.as_str(), r.origin)).collect();
+        assert_eq!(
+            origins,
+            [
+                ("made", ConnectionOrigin::Assigned),
+                ("old", ConnectionOrigin::Assigned)
+            ]
+        );
+        // And once more: idempotent.
+        drop(again);
+        cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1)
+            .await
+            .unwrap();
+    }
+);
+
+db_test!(
+    a_delete_in_a_rolled_back_transaction_is_undone,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let o = store.create_organization("o", "ann").await.unwrap();
+        let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
+        store
+            .create_connection("c", o.id, ConnectionOrigin::Assigned)
+            .await
+            .unwrap();
+
+        let tx = store.transaction().await.unwrap();
+        assert!(tx.delete_workspace(w.id).await.unwrap());
+        assert!(tx.delete_connection("c").await.unwrap());
+        drop(tx);
+        assert!(store.workspace(w.id).await.unwrap().is_some());
+        assert!(store.connection("c").await.unwrap().is_some());
+
+        // A conflicting delete inside a transaction reports the conflict.
+        let tx = store.transaction().await.unwrap();
+        assert!(matches!(
+            tx.delete_organization(o.id).await,
+            Err(StoreError::Conflict(_))
+        ));
+        drop(tx);
+
+        let tx = store.transaction().await.unwrap();
+        assert!(tx.delete_workspace(w.id).await.unwrap());
+        assert!(tx.delete_connection("c").await.unwrap());
+        assert!(tx.delete_organization(o.id).await.unwrap());
+        tx.commit().await.unwrap();
+        assert!(store.organization(o.id).await.unwrap().is_none());
     }
 );

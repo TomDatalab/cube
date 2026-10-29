@@ -88,7 +88,7 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         )
         .route(
             &format!("{base}/v1/connections/:name/organization"),
-            put(connections::assign_organization),
+            put(connections::assign_organization).delete(connections::unassign_organization),
         )
         .route(
             &format!("{base}/v1/workspaces/:id/connections"),

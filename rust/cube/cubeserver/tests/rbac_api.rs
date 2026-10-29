@@ -19,7 +19,7 @@ use cubeserver::planner_adapter::DataSources;
 use cubeserver::rbac::config::{check_rbac_compatible, RbacConfig};
 use cubeserver::rbac::enforce::WORKSPACE_REQUIRED;
 use cubeserver::rbac::identity::{hash_password, verify_password};
-use cubeserver::rbac::store::Store;
+use cubeserver::rbac::store::{ConnectionOrigin, Store};
 use cubeserver::rbac::testing::FakeAuthz;
 use cubeserver::rbac::{Authz, ObjectRef, Rbac, Relationship, RelationshipFilter};
 use cubeserver::services::{
@@ -1572,13 +1572,14 @@ db_test!(disabled_users_get_no_roles, |store| {
 
 // ---- connections ----
 
-/// A scenario whose server reads a `cube.yml` (with the data source
-/// `default`) and an `.env` from `dir`.
+/// A scenario whose server reads a `cube.yml` (with the data sources
+/// `default` and `shared`, a platform one to assign) and an `.env` from `dir`.
 async fn connections_scenario(store: Store, dir: &tempfile::TempDir) -> Scenario {
     let file = dir.path().join("cube.yml");
     std::fs::write(
         &file,
-        "version: 1\ndata_sources:\n  default:\n    type: postgres\n    host: db\n    password: secret\n",
+        "version: 1\ndata_sources:\n  default:\n    type: postgres\n    host: db\n    password: secret\n  \
+         shared:\n    type: postgres\n    host: db2\n    password: secret2\n",
     )
     .unwrap();
     std::fs::write(dir.path().join(".env"), "PORT=4000\n").unwrap();
@@ -1708,7 +1709,7 @@ db_test!(org_owner_adds_a_connection_and_releases_it, |store| {
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(
         list,
-        json!({ "connections": [{ "name": "x", "type": "sqlite", "workspaces": [w1] }] })
+        json!({ "connections": [{ "name": "x", "type": "sqlite", "origin": "created", "workspaces": [w1] }] })
     );
 
     // Withdrawn, released again, then the connection is deleted.
@@ -1808,49 +1809,78 @@ db_test!(workspace_members_cannot_manage_connections, |store| {
     assert_eq!(released(env, &w1).await, ["x"]);
 });
 
+async fn assign(env: &Env, token: &str, name: &str, org: &str) -> StatusCode {
+    send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/connections/{name}/organization"),
+        Some(token),
+        Some(json!({ "organizationId": org })),
+    )
+    .await
+    .0
+}
+
+async fn unassign(env: &Env, token: &str, name: &str) -> StatusCode {
+    send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/connections/{name}/organization"),
+        Some(token),
+        None,
+    )
+    .await
+    .0
+}
+
 db_test!(assigning_an_existing_data_source_to_an_org, |store| {
     let dir = tempfile::tempdir().unwrap();
     let s = connections_scenario(store, &dir).await;
     let env = &s.env;
-    let assign = |token: String, name: &'static str, org: String| {
-        let router = env.router.clone();
-        async move {
-            send(
-                &router,
-                Method::PUT,
-                &format!("/cube/v1/connections/{name}/organization"),
-                Some(&token),
-                Some(json!({ "organizationId": org })),
-            )
-            .await
-            .0
-        }
-    };
     // Platform admins only.
     assert_eq!(
-        assign(s.ana.clone(), "default", s.org_a.clone()).await,
+        assign(env, &s.ana, "shared", &s.org_a).await,
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        assign(s.admin.clone(), "nope", s.org_a.clone()).await,
+        assign(env, &s.admin, "nope", &s.org_a).await,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
         assign(
-            s.admin.clone(),
-            "default",
-            "00000000-0000-0000-0000-000000000000".into()
+            env,
+            &s.admin,
+            "shared",
+            "00000000-0000-0000-0000-000000000000"
         )
         .await,
         StatusCode::NOT_FOUND
     );
+    // `default` is the platform's: never assigned.
     assert_eq!(
-        assign(s.admin.clone(), "default", s.org_a.clone()).await,
+        assign(env, &s.admin, "default", &s.org_a).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(env
+        .rbac
+        .store
+        .connection("default")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        assign(env, &s.admin, "shared", &s.org_a).await,
+        StatusCode::NO_CONTENT
+    );
+    // Again: a no-op.
+    assert_eq!(
+        assign(env, &s.admin, "shared", &s.org_a).await,
         StatusCode::NO_CONTENT
     );
 
-    let row = env.rbac.store.connection("default").await.unwrap().unwrap();
+    let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
     assert_eq!(row.organization_id.to_string(), s.org_a);
+    assert_eq!(row.origin, ConnectionOrigin::Assigned);
     let (status, list) = send(
         &env.router,
         Method::GET,
@@ -1862,26 +1892,213 @@ db_test!(assigning_an_existing_data_source_to_an_org, |store| {
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(
         list,
-        json!({ "connections": [{ "name": "default", "type": "postgres", "workspaces": [] }] })
+        json!({ "connections": [{
+            "name": "shared", "type": "postgres", "origin": "assigned", "workspaces": []
+        }] })
     );
     let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
     assert_eq!(
-        release(env, &s.ana, Method::PUT, &w1, "default").await,
+        release(env, &s.ana, Method::PUT, &w1, "shared").await,
         StatusCode::NO_CONTENT
     );
 
-    // Moving it to another organization withdraws the old releases.
+    // Owned by A: another organization gets it only after an unassign.
     let org_b = create_org(env, &s.admin, "B", "bia").await;
     assert_eq!(
-        assign(s.admin.clone(), "default", org_b.clone()).await,
+        assign(env, &s.admin, "shared", &org_b).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(released(env, &w1).await, ["shared"]);
+    let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), s.org_a);
+    assert_eq!(
+        unassign(env, &s.admin, "shared").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        assign(env, &s.admin, "shared", &org_b).await,
         StatusCode::NO_CONTENT
     );
     assert!(released(env, &w1).await.is_empty());
-    let connection = ObjectRef::new("connection", "default");
+    let connection = ObjectRef::new("connection", "shared");
     assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
     assert!(env.authz.check(&connection, "manage", "bia").await.unwrap());
-    let row = env.rbac.store.connection("default").await.unwrap().unwrap();
+    let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
     assert_eq!(row.organization_id.to_string(), org_b);
+});
+
+db_test!(
+    org_owners_cannot_edit_or_delete_an_assigned_connection,
+    |store| {
+        let dir = tempfile::tempdir().unwrap();
+        let s = connections_scenario(store, &dir).await;
+        let env = &s.env;
+        assert_eq!(
+            assign(env, &s.admin, "shared", &s.org_a).await,
+            StatusCode::NO_CONTENT
+        );
+        let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+
+        // `ana` administers A and could manage the connection in SpiceDB, but
+        // its settings are the platform's.
+        let connection = ObjectRef::new("connection", "shared");
+        assert!(env.authz.check(&connection, "manage", "ana").await.unwrap());
+        let (status, body) = send(
+            &env.router,
+            Method::PUT,
+            "/cube/v1/connections/shared",
+            Some(&s.ana),
+            Some(json!({ "variables": { "CUBEJS_DB_HOST": "attacker.example" } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, body) = send(
+            &env.router,
+            Method::DELETE,
+            "/cube/v1/connections/shared",
+            Some(&s.ana),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cube.yml")).unwrap(),
+            yml
+        );
+        assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
+
+        // She still releases and withdraws it.
+        let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+        for method in [Method::PUT, Method::DELETE] {
+            assert_eq!(
+                release(env, &s.ana, method.clone(), &w1, "shared").await,
+                StatusCode::NO_CONTENT,
+                "{method}"
+            );
+        }
+
+        // A connection A created stays hers to delete; platform admins delete
+        // the assigned one.
+        let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            env.rbac
+                .store
+                .connection("x")
+                .await
+                .unwrap()
+                .unwrap()
+                .origin,
+            ConnectionOrigin::Created
+        );
+        for (token, name) in [(&s.ana, "x"), (&s.admin, "shared")] {
+            let (status, body) = send(
+                &env.router,
+                Method::DELETE,
+                &format!("/cube/v1/connections/{name}"),
+                Some(token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{name}: {body}");
+            assert!(env.rbac.store.connection(name).await.unwrap().is_none());
+        }
+    }
+);
+
+db_test!(unassigning_frees_the_connection_and_the_org, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let org_b = create_org(env, &s.admin, "B", "bia").await;
+    let bia = login_token(&env.router, "bia", "bia-password-1").await;
+    assert_eq!(
+        assign(env, &s.admin, "shared", &org_b).await,
+        StatusCode::NO_CONTENT
+    );
+    let wb = workspace_id(env, &bia, &org_b, "WB").await;
+    assert_eq!(
+        release(env, &bia, Method::PUT, &wb, "shared").await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Platform admins only; a data source without an organization is 404.
+    assert_eq!(unassign(env, &bia, "shared").await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        unassign(env, &s.admin, "default").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(unassign(env, &s.admin, "nope").await, StatusCode::NOT_FOUND);
+
+    let delete_org = || async {
+        send(
+            &env.router,
+            Method::DELETE,
+            &format!("/cube/v1/organizations/{org_b}"),
+            Some(&bia),
+            None,
+        )
+        .await
+        .0
+    };
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{wb}"),
+        Some(&bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // The connection still holds B.
+    assert_eq!(delete_org().await, StatusCode::BAD_REQUEST);
+
+    let wb2 = workspace_id(env, &bia, &org_b, "WB2").await;
+    assert_eq!(
+        release(env, &bia, Method::PUT, &wb2, "shared").await,
+        StatusCode::NO_CONTENT
+    );
+    // A failing SpiceDB write keeps the row: nothing changed.
+    env.authz.set_failing_writes(true);
+    assert_eq!(
+        unassign(env, &s.admin, "shared").await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    env.authz.set_failing_writes(false);
+    assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
+    assert_eq!(released(env, &wb2).await, ["shared"]);
+
+    assert_eq!(
+        unassign(env, &s.admin, "shared").await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(env.rbac.store.connection("shared").await.unwrap().is_none());
+    assert!(released(env, &wb2).await.is_empty());
+    let all = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "connection",
+            id: Some("shared".into()),
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(all.is_empty(), "{all:?}");
+    // The data source stays in cube.yml.
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(yml.contains("  shared:"), "{yml}");
+
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{wb2}"),
+        Some(&bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(delete_org().await, StatusCode::NO_CONTENT);
 });
 
 db_test!(data_sources_routes_are_admin_only_with_rbac, |store| {
@@ -2104,7 +2321,7 @@ db_test!(a_data_source_never_adopts_a_stale_row, |store| {
     // A row left behind (its data source removed by hand, say).
     env.rbac
         .store
-        .create_connection("z", s.org_a.parse().unwrap())
+        .create_connection("z", s.org_a.parse().unwrap(), ConnectionOrigin::Assigned)
         .await
         .unwrap();
     let (status, body) = send(
@@ -2135,7 +2352,7 @@ db_test!(another_orgs_release_is_never_listed, |store| {
     let (status, _) = send(
         &env.router,
         Method::PUT,
-        "/cube/v1/connections/default/organization",
+        "/cube/v1/connections/shared/organization",
         Some(&s.admin),
         Some(json!({ "organizationId": org_b })),
     )
@@ -2145,7 +2362,7 @@ db_test!(another_orgs_release_is_never_listed, |store| {
     // A's workspace.
     env.authz
         .touch(&[Relationship {
-            resource: ObjectRef::new("connection", "default"),
+            resource: ObjectRef::new("connection", "shared"),
             relation: "workspace",
             subject: ObjectRef::new("workspace", w1.clone()),
         }])
@@ -3341,7 +3558,7 @@ db_test!(
 async fn grant_connection(env: &Env, name: &str, org: &str, workspaces: &[&str]) {
     env.rbac
         .store
-        .create_connection(name, org.parse().unwrap())
+        .create_connection(name, org.parse().unwrap(), ConnectionOrigin::Assigned)
         .await
         .unwrap();
     let mut relationships = vec![Relationship {
@@ -3934,7 +4151,7 @@ db_test!(playground_create_refuses_a_tracked_name, |store| {
     let env = &s.env;
     env.rbac
         .store
-        .create_connection("z", s.org_a.parse().unwrap())
+        .create_connection("z", s.org_a.parse().unwrap(), ConnectionOrigin::Assigned)
         .await
         .unwrap();
     let (status, body) = playground(
