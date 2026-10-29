@@ -38,12 +38,38 @@ describe('theme', () => {
     expect(() => writePreference('dark', blocked)).not.toThrow();
   });
 
+  const link = (id: string) => document.getElementById(id) as HTMLLinkElement;
+
   it('applies the theme to the document and the antd links', () => {
-    document.head.innerHTML = '<link id="antd-light"><link id="antd-dark">';
+    document.head.innerHTML = '<link id="antd-light"><link id="antd-dark" disabled>';
     applyTheme('dark');
     expect(document.documentElement.dataset.theme).toBe('dark');
-    expect((document.getElementById('antd-dark') as HTMLLinkElement).disabled).toBe(false);
-    expect((document.getElementById('antd-light') as HTMLLinkElement).disabled).toBe(true);
+    expect(link('antd-dark').disabled).toBe(false);
+    // the old sheet stays on until the new one has loaded, never unstyled
+    // (jsdom has no disabled property on links: unset counts as on)
+    expect(link('antd-light').disabled).not.toBe(true);
+
+    link('antd-dark').dispatchEvent(new Event('load'));
+    expect(link('antd-light').disabled).toBe(true);
+  });
+
+  it('switches the links at once when the new sheet is already loaded', () => {
+    document.head.innerHTML = '<link id="antd-light"><link id="antd-dark" disabled>';
+    Object.defineProperty(link('antd-dark'), 'sheet', { value: {} });
+    applyTheme('dark');
+    expect(link('antd-dark').disabled).toBe(false);
+    expect(link('antd-light').disabled).toBe(true);
+  });
+
+  it('ignores a late load once the theme has switched back', () => {
+    document.head.innerHTML = '<link id="antd-light"><link id="antd-dark" disabled>';
+    Object.defineProperty(link('antd-light'), 'sheet', { value: {} });
+    applyTheme('dark');
+    applyTheme('light');
+    link('antd-dark').dispatchEvent(new Event('load'));
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(link('antd-light').disabled).toBe(false);
+    expect(link('antd-dark').disabled).toBe(true);
   });
 
   it('tolerates missing links', () => {
