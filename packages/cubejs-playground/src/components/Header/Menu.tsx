@@ -36,11 +36,17 @@ export const StyledMenuItem = styled(Menu.Item)`
       }
     }
 
+    /* hover in the purple accent; the selected tab stays white */
     &:not(.ant-menu-item-selected) {
       &.ant-menu-item-active,
       &:hover {
-        color: white;
-        border-bottom: 2px solid white;
+        color: var(--pg-accent);
+        border-bottom: 2px solid var(--pg-accent);
+
+        a {
+          opacity: 1;
+          color: var(--pg-accent);
+        }
       }
     }
   }
