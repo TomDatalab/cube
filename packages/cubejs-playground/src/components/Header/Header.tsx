@@ -8,11 +8,12 @@ import { usePlaygroundContext, useRbac } from '../../hooks';
 import { logout } from '../../shared/auth';
 import { StyledMenu, StyledMenuButton, StyledMenuItem } from './Menu';
 import { RunOnCubeCloud } from './RunOnCubeCloud';
+import { ThemeSwitcher } from '../ThemeSwitcher';
 import { WorkspaceSelector } from './WorkspaceSelector';
 
 const StyledHeader = styled(Layout.Header)`
   && {
-    background-color: var(--dark-02-color);
+    background-color: var(--pg-bar);
     color: white;
     padding: 0 16px;
     line-height: 44px;
@@ -44,6 +45,13 @@ export default function Header({ selectedKeys }: Props) {
     </div>
   ) : null;
 
+  // floats right, so it comes first in the markup to sit left of the selector
+  const themeSwitcher = (
+    <div style={{ float: 'right', marginLeft: 8 }}>
+      <ThemeSwitcher />
+    </div>
+  );
+
   function logOut() {
     logout();
     window.location.reload();
@@ -60,6 +68,22 @@ export default function Header({ selectedKeys }: Props) {
       </div>
 
       {workspaceSelector}
+      {themeSwitcher}
+
+      {/* outside the menu: rc-menu 9 makes it a flex row, where the buttons'
+          float has no effect; the buttons float right in markup order */}
+      {isDesktopOrLaptop && (
+        <div style={{ float: 'right' }}>
+          <RunOnCubeCloud />
+
+          {session ? (
+            <StyledMenuButton onClick={logOut}>
+              <LogoutOutlined />
+              Log out {session.user.name || session.user.id}
+            </StyledMenuButton>
+          ) : null}
+        </div>
+      )}
 
       {isDesktopOrLaptop && (
         <StyledMenu theme="light" mode="horizontal" selectedKeys={selectedKeys}>
@@ -89,14 +113,6 @@ export default function Header({ selectedKeys }: Props) {
             </StyledMenuItem>
           ) : null}
 
-          <RunOnCubeCloud />
-
-          {session ? (
-            <StyledMenuButton onClick={logOut}>
-              <LogoutOutlined />
-              Log out {session.user.name || session.user.id}
-            </StyledMenuButton>
-          ) : null}
         </StyledMenu>
       )}
 

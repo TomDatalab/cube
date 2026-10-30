@@ -28,7 +28,7 @@ export const StyledTabs = styled(Tabs)`
     padding: 0;
     margin: 0;
     overflow: hidden;
-    background-color: white;
+    background-color: var(--pg-surface, white);
   }
 
   & .ant-tabs-nav-wrap {

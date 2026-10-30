@@ -323,7 +323,7 @@ export function ApiConsole() {
             ) : null}
 
             <Text type="secondary">Equivalent command</Text>
-            <pre style={{ background: '#f6f6f8', padding: 12, margin: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}>
+            <pre style={{ background: 'var(--pg-bg, #f6f6f8)', padding: 12, margin: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}>
               {curl}
             </pre>
           </Space>

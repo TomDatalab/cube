@@ -4,6 +4,7 @@ import { Root, Grid } from '@cube-dev/ui-kit';
 
 import { useAppFiles } from './app-files';
 import { useAppName } from './app-name';
+import { useTheme } from './hooks/index';
 import { CodeViewer } from './CodeViewer';
 import { Tabs } from './components/Tabs';
 import { Preview } from './Preview';
@@ -54,6 +55,8 @@ export function Vizard() {
   }
 
   const { apiUrl, apiToken, query, pivotConfig } = params;
+
+  useTheme();
 
   const [section, setSection] = useState<Section>('code');
   const [genParams, setGenParams] = useState<AllParams>(DEFAULT_VALUES);

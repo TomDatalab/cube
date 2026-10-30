@@ -26,6 +26,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+
+import { useThemeColor } from '../../shared/useThemeColor';
 import styled from 'styled-components';
 
 import {
@@ -55,6 +57,12 @@ const StyledStatistic = styled(Statistic)`
     font-size: 40px;
   }
 `;
+
+// recharts draws the tooltip with inline styles, where var() works
+const TOOLTIP_CONTENT_STYLE = {
+  backgroundColor: 'var(--pg-raised, #fff)',
+  border: '1px solid var(--pg-chart-border, #ccc)',
+};
 
 const LegendTextElement = tasty({
   as: 'span',
@@ -148,6 +156,9 @@ function CartesianChart({
     });
   }, [resultSet, pivotConfig, dataTransformer, formatDate]);
 
+  const gridColor = useThemeColor('--pg-grid');
+  const axisColor = useThemeColor('--pg-axis');
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <ChartComponent margin={{ left: -10, top: 10 }} data={chartPivot} syncId={syncId}>
@@ -155,6 +166,7 @@ function CartesianChart({
           axisLine={false}
           tickLine={false}
           tickFormatter={dateFormatter}
+          tick={{ fill: axisColor }}
           dataKey="x"
           minTickGap={20}
         />
@@ -165,17 +177,19 @@ function CartesianChart({
           tickLine={false}
           tickCount={domain ? 5 : undefined}
           tickFormatter={yAxisFormatter}
+          tick={{ fill: axisColor }}
           scale={domain ? 'linear' : undefined}
           width={80}
         />
         <CartesianGrid
           vertical={grid === 'vertical' || grid === 'both'}
           horizontal={grid === 'horizontal' || grid === 'both'}
-          stroke="#f5f5f5"
+          stroke={gridColor}
         />
         {children}
         <Legend formatter={legendFormatter} iconType="square" iconSize={10} />
         <Tooltip
+          contentStyle={TOOLTIP_CONTENT_STYLE}
           labelStyle={{
             fontSize: 'var(--h6-font-size)',
             lineHeight: 'var(--h6-line-height)',
@@ -390,7 +404,7 @@ const TypeToChartComponent = {
             })}
           </Pie>
           <Legend />
-          <Tooltip />
+          <Tooltip contentStyle={TOOLTIP_CONTENT_STYLE} />
         </PieChart>
       </ResponsiveContainer>
     );

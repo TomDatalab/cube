@@ -2,6 +2,31 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // keeps in sync with src/shared/theme.ts of the Playground, an inline script runs before any CSS and cannot import.
+      (function () {
+        var theme = 'light';
+        try {
+          var pref = null;
+          try {
+            pref = window.localStorage.getItem('cube-playground-theme');
+          } catch (e) {}
+          theme =
+            pref === 'light' || pref === 'dark'
+              ? pref
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+        } catch (e) {
+          theme = 'light';
+        }
+        try {
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) {}
+
+        document.write('<style>html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}</style>');
+      })();
+    </script>
     <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vizard</title>

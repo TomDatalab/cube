@@ -85,7 +85,7 @@ const RemoveButtonGroup = styled(UnstyledRemoveButtonGroup)`
     }
 
     .remove-btn {
-      background-color: white !important;
+      background-color: var(--pg-surface, white) !important;
       color: var(--${color}-color);
 
       &:hover {

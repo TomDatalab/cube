@@ -32,7 +32,7 @@ const Layout = styled.div`
   max-width: 960px;
   padding: 48px 24px;
   margin: 0 auto;
-  background-color: #fff;
+  background-color: var(--pg-surface, #fff);
 `;
 
 const databases: Database[] = envVarsDatabaseMap.reduce<any>(

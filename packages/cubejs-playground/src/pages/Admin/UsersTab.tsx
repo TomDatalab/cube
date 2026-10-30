@@ -108,6 +108,8 @@ export function UsersTab({ api, currentUser }: Props) {
         <Table<User>
           rowKey="id"
           size="small"
+          // the tag and action buttons can outgrow the column; scroll inside it
+          scroll={{ x: 'max-content' }}
           loading={loading}
           dataSource={result?.items || []}
           pagination={{
@@ -131,7 +133,7 @@ export function UsersTab({ api, currentUser }: Props) {
               key: 'drag',
               width: 32,
               render: (_, user) => (user.disabled ? null : (
-                <HolderOutlined title="Drag onto a workspace" style={{ color: '#a1a1b5' }} />
+                <HolderOutlined title="Drag onto a workspace" style={{ color: 'var(--pg-muted, #a1a1b5)' }} />
               )),
             },
             { title: 'Username', dataIndex: 'id' },

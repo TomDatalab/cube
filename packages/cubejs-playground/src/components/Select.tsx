@@ -6,7 +6,7 @@ const StyledSelect: any = styled(AntdSelect)`
     &.ant-select-disabled {
       .ant-select-selector {
         border-color: var(--disabled-color);
-        background-color: white;
+        background-color: var(--pg-surface, white);
       }
 
       .ant-select-selector {

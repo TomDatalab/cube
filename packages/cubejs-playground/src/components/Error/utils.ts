@@ -1,18 +1,20 @@
 import Anser from 'anser';
 import { encode } from 'html-entities';
 
+// the colors unreadable on the dark error Alert come from theme tokens, whose
+// light value is the named color
 const colors = {
   reset: 'orange',
-  black: 'black',
-  red: 'red',
-  green: 'green',
+  black: 'var(--pg-ansi-black, black)',
+  red: 'var(--pg-ansi-red, red)',
+  green: 'var(--pg-ansi-green, green)',
   yellow: 'orange',
-  blue: 'blue',
+  blue: 'var(--pg-ansi-blue, blue)',
   magenta: 'magenta',
   cyan: 'cyan',
-  gray: 'gray',
+  gray: 'var(--pg-ansi-gray, gray)',
   lightgrey: 'lightgrey',
-  darkgrey: 'darkgrey',
+  darkgrey: 'var(--pg-ansi-darkgrey, darkgrey)',
 };
 
 const anserMap = {

@@ -35,7 +35,7 @@ const Wrapper = styled.div`
 
     .CodeMirror-scroll,
     .CodeMirror-lines {
-      background: white;
+      background: var(--pg-surface, white);
     }
 
     .doc-explorer-title-bar {

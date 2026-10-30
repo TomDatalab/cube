@@ -9,7 +9,7 @@ import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
 import styled from 'styled-components';
 
 const PivotPopover = styled.div`
-  background: #fff;
+  background: var(--pg-surface, #fff);
   width: 450px;
 `;
 
@@ -68,7 +68,7 @@ export default function Settings({
               padding: '8px',
               paddingBottom: 1,
               width: 400,
-              backgroundColor: '#fff',
+              backgroundColor: 'var(--pg-surface, #fff)',
             }}
           >
             <OrderGroup
@@ -93,7 +93,7 @@ export default function Settings({
           <div
             style={{
               padding: '8px',
-              background: 'white',
+              background: 'var(--pg-surface, white)',
             }}
           >
             <InputNumber

@@ -18,18 +18,23 @@ type Props = {
   onClose: () => void;
 };
 
-const ACCENT = '#7a77ff';
-const ACCENT_BG = '#e8e7ff';
-const LINE = '#d9d8e8';
-const MUTED = '#6b6a85';
-const FG = '#1f1d3a';
-const DERIVED = '#9c9ab8';
+// theme tokens (src/theme/dark-tokens.ts) with today's color as the fallback;
+// applied through `style`, since `var()` in a presentation attribute is not
+// reliable across browsers
+const ACCENT = 'var(--pg-accent, #7a77ff)';
+const ACCENT_BG = 'var(--pg-graph-accent-bg, #e8e7ff)';
+const LINE = 'var(--pg-graph-line, #d9d8e8)';
+const MUTED = 'var(--pg-graph-muted, #6b6a85)';
+const FG = 'var(--pg-graph-fg, #1f1d3a)';
+const DERIVED = 'var(--pg-graph-derived, #9c9ab8)';
+const PANEL = 'var(--pg-graph-panel, #f6f6fb)';
+const NODE_BG = 'var(--pg-graph-node, #fff)';
 
 const KIND_COLOR: Record<AccessNodeKind, string> = {
-  user: '#1f1d3a',
-  organization: '#2f7d6d',
-  workspace: '#6a66f0',
-  connection: '#b8641e',
+  user: 'var(--pg-graph-user, #1f1d3a)',
+  organization: 'var(--pg-graph-organization, #2f7d6d)',
+  workspace: 'var(--pg-graph-workspace, #6a66f0)',
+  connection: 'var(--pg-graph-connection, #b8641e)',
 };
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -74,7 +79,7 @@ function Edge({ geometry, hl }: { geometry: EdgeGeometry; hl: boolean }) {
       <path
         d={d}
         fill="none"
-        stroke={stroke}
+        style={{ stroke }}
         strokeWidth={hl ? 2.5 : 1.5}
         strokeDasharray={derived ? '5 4' : undefined}
         markerEnd={`url(#access-arrow${hl ? '-hl' : ''})`}
@@ -87,10 +92,9 @@ function Edge({ geometry, hl }: { geometry: EdgeGeometry; hl: boolean }) {
             width={label.w}
             height={18}
             rx={9}
-            fill={hl ? ACCENT_BG : '#f6f6fb'}
-            stroke={hl ? ACCENT : LINE}
+            style={{ fill: hl ? ACCENT_BG : PANEL, stroke: hl ? ACCENT : LINE }}
           />
-          <text x={label.x} y={label.y + 3.5} fontSize={10.5} textAnchor="middle" fill={hl ? ACCENT : MUTED} fontFamily={MONO}>
+          <text x={label.x} y={label.y + 3.5} fontSize={10.5} textAnchor="middle" style={{ fill: hl ? ACCENT : MUTED }} fontFamily={MONO}>
             {edge.label}
           </text>
         </g>
@@ -129,28 +133,27 @@ function Node({
         width={NODE_W}
         height={node.h}
         rx={8}
-        fill="#fff"
-        stroke={hl ? ACCENT : LINE}
+        style={{ fill: NODE_BG, stroke: hl ? ACCENT : LINE }}
         strokeWidth={hl ? 2 : 1}
       />
-      <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} fill={color} />
+      <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} style={{ fill: color }} />
       <g clipPath={`url(#${clip})`}>
-        <text x={tx} y={node.y + rows.kindY} fontSize={10.5} fill={color} fontFamily={MONO}>
+        <text x={tx} y={node.y + rows.kindY} fontSize={10.5} style={{ fill: color }} fontFamily={MONO}>
           {node.kind}
         </text>
-        <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} fill={FG}>
+        <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} style={{ fill: FG }}>
           {node.label}
           <title>{node.name}</title>
         </text>
         {node.permLines.length ? (
-          <text fontSize={11.5} fill={MUTED} fontFamily={MONO}>
+          <text fontSize={11.5} style={{ fill: MUTED }} fontFamily={MONO}>
             {node.permLines.map((line, i) => ({ line, y: node.y + rows.permY[i] })).map(({ line, y }) => (
               <tspan key={y} x={tx} y={y}>{line}</tspan>
             ))}
           </text>
         ) : null}
         {node.noteLines.length ? (
-          <text fontSize={10.5} fill={MUTED} fontStyle="italic">
+          <text fontSize={10.5} style={{ fill: MUTED }} fontStyle="italic">
             {node.noteLines.map((line, i) => ({ line, y: node.y + rows.noteY[i] })).map(({ line, y }) => (
               <tspan key={y} x={tx} y={y}>{line}</tspan>
             ))}
@@ -177,10 +180,9 @@ function Node({
             width={pill.length * 6.4 + 16}
             height={18}
             rx={9}
-            fill={ACCENT_BG}
-            stroke={ACCENT}
+            style={{ fill: ACCENT_BG, stroke: ACCENT }}
           />
-          <text x={tx + 8} y={node.y + rows.pillY + 12.5} fontSize={10.5} fill={ACCENT} fontFamily={MONO}>
+          <text x={tx + 8} y={node.y + rows.pillY + 12.5} fontSize={10.5} style={{ fill: ACCENT }} fontFamily={MONO}>
             {pill}
           </text>
         </g>
@@ -416,7 +418,7 @@ export function AccessModal({ api, user, onClose }: Props) {
                 markerHeight={7}
                 orient="auto-start-reverse"
               >
-                <path d="M0,0 L10,5 L0,10 z" fill={fill} />
+                <path d="M0,0 L10,5 L0,10 z" style={{ fill }} />
               </marker>
             ))}
           </defs>
@@ -542,7 +544,7 @@ export function AccessModal({ api, user, onClose }: Props) {
           <div
             style={{
               minWidth: 0,
-              background: '#f6f6fb',
+              background: PANEL,
               borderRight: narrow ? 0 : `1px solid ${LINE}`,
               borderBottom: narrow ? `1px solid ${LINE}` : 0,
             }}

@@ -22,7 +22,7 @@ const StyledMenu = styled(Menu)`
   }
 
   .ant-menu-sub.ant-menu-inline {
-    background: white;
+    background: var(--pg-surface, white);
   }
 
   & li > div.ant-menu-submenu-title {
@@ -67,7 +67,7 @@ const StyledMenu = styled(Menu)`
 
 const SearchInputWrapper = styled.div`
   position: relative;
-  border-right: 1px solid rgba(0, 0, 0, 0.06);
+  border-right: 1px solid var(--pg-hairline, rgba(0, 0, 0, 0.06));
   padding: 16px 12px 10px 12px;
 
   ::after {
@@ -81,8 +81,8 @@ const SearchInputWrapper = styled.div`
     height: 20px;
     background: linear-gradient(
       to bottom,
-      rgba(255, 255, 255, 1),
-      rgba(255, 255, 255, 0)
+      var(--pg-surface, #fff),
+      transparent
     );
   }
 `;

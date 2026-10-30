@@ -30,7 +30,7 @@ const Divider = tasty({
 
 type TabId = 'results' | 'generated-sql' | 'json' | 'graphql' | 'sql';
 
-const QueryBuilderPanel = tasty(Panel, {
+export const QueryBuilderPanel = tasty(Panel, {
   isFlex: true,
   isStretched: true,
   qa: 'QueryBuilder',

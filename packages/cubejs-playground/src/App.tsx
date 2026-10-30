@@ -23,6 +23,7 @@ import { LoginPage } from './pages/Login/LoginPage';
 import { QUERY_BUILDER_COLOR_TOKENS } from './QueryBuilderV2';
 import { getSession, Session } from './shared/auth';
 import { setPlaygroundKey } from './shared/helpers';
+import ThemeStyles from './theme/ThemeStyles';
 
 const StyledLayoutContent = styled(Layout.Content)`
   height: 100%;
@@ -135,6 +136,7 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
       return (
         <>
           <GlobalStyles />
+          <ThemeStyles />
           <LoginPage
             basePath={loginContext.basePath}
             onLogin={(session) => this.onLogin(session)}
@@ -168,6 +170,7 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
       >
         <Root publicUrl="." styles={ROOT_STYLES}>
           <GlobalStyles />
+          <ThemeStyles />
 
           <Header selectedKeys={[location.pathname]} />
 

@@ -19,7 +19,7 @@ const StyledButton: typeof Button = styled(Button)`
     &:disabled {
       color: var(--disabled-color);
       border-color: var(--disabled-color);
-      background-color: white;
+      background-color: var(--pg-surface, white);
 
       &:hover,
       &:active,

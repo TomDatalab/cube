@@ -60,3 +60,124 @@ iframe {
     box-shadow: #eee 0 6px 6px -6px inset;
   }
 }
+
+/* Dark theme, palette C (see src/theme/dark-tokens.ts in the Playground).
+   ui-kit's Root re-declares its tokens on #cube-ui-kit-root with a doubled
+   class, (0,2,0), so the dark values need the id to win. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #e7e7ef;
+  background-color: #1c1c24;
+  --vizard-border-color: #363644;
+  --vizard-tab-bg-color: #2b2b40;
+}
+
+:root[data-theme="dark"],
+:root[data-theme="dark"] body,
+:root[data-theme="dark"] #cube-ui-kit-root {
+  --pink-color: rgba(255, 125, 160, 1);
+  --pink-color-rgb: 255, 125, 160;
+  --pink-02-color: rgba(255, 150, 185, 1);
+  --pink-02-color-rgb: 255, 150, 185;
+  --purple-color: rgba(143, 139, 255, 1);
+  --purple-color-rgb: 143, 139, 255;
+  --purple-text-color: rgba(169, 165, 255, 1);
+  --purple-text-color-rgb: 169, 165, 255;
+  --purple-01-color: rgba(143, 139, 255, 1);
+  --purple-01-color-rgb: 143, 139, 255;
+  --purple-02-color: rgba(128, 125, 230, 1);
+  --purple-02-color-rgb: 128, 125, 230;
+  --purple-03-color: rgba(110, 107, 200, 1);
+  --purple-03-color-rgb: 110, 107, 200;
+  --purple-04-color: rgba(80, 78, 150, 1);
+  --purple-04-color-rgb: 80, 78, 150;
+  --text-color: rgba(200, 200, 214, 1);
+  --text-color-rgb: 200, 200, 214;
+  --dark-color: rgba(231, 231, 239, 1);
+  --dark-color-rgb: 231, 231, 239;
+  --dark-01-color: rgba(231, 231, 239, 1);
+  --dark-01-color-rgb: 231, 231, 239;
+  --dark-02-color: rgba(200, 200, 214, 1);
+  --dark-02-color-rgb: 200, 200, 214;
+  --dark-03-color: rgba(154, 154, 175, 1);
+  --dark-03-color-rgb: 154, 154, 175;
+  --dark-04-color: rgba(110, 110, 130, 1);
+  --dark-04-color-rgb: 110, 110, 130;
+  --dark-05-color: rgba(54, 54, 68, 1);
+  --dark-05-color-rgb: 54, 54, 68;
+  --grey-light-color: rgba(35, 35, 45, 1);
+  --grey-light-color-rgb: 35, 35, 45;
+  --light-color: rgba(43, 43, 55, 1);
+  --light-color-rgb: 43, 43, 55;
+  --white-color: rgba(35, 35, 45, 1);
+  --white-color-rgb: 35, 35, 45;
+  --black-color: rgba(0, 0, 0, 1);
+  --black-color-rgb: 0, 0, 0;
+  --danger-text-color: rgba(235, 77, 106, 1);
+  --danger-text-color-rgb: 235, 77, 106;
+  --danger-color: rgba(255, 55, 73, 1);
+  --danger-color-rgb: 255, 55, 73;
+  --light-grey-color: rgba(35, 35, 45, 1);
+  --light-grey-color-rgb: 35, 35, 45;
+  --success-color: rgba(63, 191, 127, 1);
+  --success-color-rgb: 63, 191, 127;
+  --success-text-color: rgba(63, 191, 127, 1);
+  --success-text-color-rgb: 63, 191, 127;
+  --note-color: rgba(251, 188, 5, 1);
+  --note-color-rgb: 251, 188, 5;
+  --warning-color: rgba(226, 94, 54, 1);
+  --warning-color-rgb: 226, 94, 54;
+  --border-color: rgba(54, 54, 68, 1);
+  --border-color-rgb: 54, 54, 68;
+  --shadow-color: rgba(0, 0, 0, 0.4);
+  --shadow-color-rgb: 0, 0, 0;
+  --draft-color: rgba(231, 231, 239, 0.2);
+  --draft-color-rgb: 231, 231, 239;
+  --minor-color: rgba(231, 231, 239, 0.65);
+  --minor-color-rgb: 231, 231, 239;
+  --success-bg-color: rgba(63, 191, 127, 0.12);
+  --success-bg-color-rgb: 63, 191, 127;
+  --note-bg-color: rgba(251, 188, 5, 0.12);
+  --note-bg-color-rgb: 251, 188, 5;
+  --note-text-color: rgba(251, 188, 5, 1);
+  --note-text-color-rgb: 251, 188, 5;
+  --danger-bg-color: rgba(255, 55, 73, 0.1);
+  --danger-bg-color-rgb: 255, 55, 73;
+  --danger-bg-hover-color: rgba(255, 55, 73, 0.16);
+  --danger-bg-hover-color-rgb: 255, 55, 73;
+  --dark-75-color: rgba(231, 231, 239, 0.75);
+  --dark-75-color-rgb: 231, 231, 239;
+  --primary-color: rgba(143, 139, 255, 1);
+  --primary-color-rgb: 143, 139, 255;
+  --pink-8-color: rgba(255, 125, 160, 0.2);
+  --pink-8-color-rgb: 255, 125, 160;
+  --pink-9-color: rgba(255, 125, 160, 0.1);
+  --pink-9-color-rgb: 255, 125, 160;
+  --disabled-color: rgba(231, 231, 239, 0.25);
+  --disabled-color-rgb: 231, 231, 239;
+  --disabled-text-color: rgba(231, 231, 239, 0.25);
+  --disabled-text-color-rgb: 231, 231, 239;
+  --disabled-bg: rgba(54, 54, 68, 0.4);
+  --disabled-bg-color: rgba(54, 54, 68, 0.4);
+  --disabled-bg-color-rgb: 54, 54, 68;
+  --primary-1: rgba(143, 139, 255, 0.9);
+  --primary-2: rgba(143, 139, 255, 0.8);
+  --primary-3: rgba(143, 139, 255, 0.7);
+  --primary-4: rgba(143, 139, 255, 0.6);
+  --primary-5: rgba(143, 139, 255, 0.5);
+  --primary-6: rgba(143, 139, 255, 0.4);
+  --primary-7: rgba(143, 139, 255, 0.3);
+  --primary-8: rgba(143, 139, 255, 0.2);
+  --primary-9: rgba(143, 139, 255, 0.1);
+  --primary-10: rgba(143, 139, 255, 0);
+}
+
+/* ui-kit's GlobalStyles paint the body white with !important */
+:root[data-theme="dark"] body {
+  background-color: #1c1c24 !important;
+  color: rgba(231, 231, 239, 0.75);
+}
+
+:root[data-theme="dark"] .monaco-editor.monaco-editor .scroll-decoration {
+  box-shadow: #000 0 6px 6px -6px inset;
+}

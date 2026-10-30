@@ -14,6 +14,10 @@ export const StyledMenuItem = styled(Menu.Item)`
     font-weight: 500;
     line-height: 48px;
     height: 49px;
+    /* the dark antd sheet draws a second, near-white underline here */
+    &::after {
+      display: none;
+    }
     & > a {
       &,
       &:hover {
@@ -24,10 +28,10 @@ export const StyledMenuItem = styled(Menu.Item)`
     &.ant-menu-item-selected,
     &.ant-menu-item-active {
       color: white;
-      border-bottom: 2px solid white;
+      border-bottom: 2px solid var(--pg-accent);
 
       &:hover {
-        border-bottom: 2px solid white;
+        border-bottom: 2px solid var(--pg-accent);
       }
 
       a {
@@ -36,11 +40,17 @@ export const StyledMenuItem = styled(Menu.Item)`
       }
     }
 
+    /* hover in the purple accent; the selected tab keeps white text */
     &:not(.ant-menu-item-selected) {
       &.ant-menu-item-active,
       &:hover {
-        color: white;
-        border-bottom: 2px solid white;
+        color: var(--pg-accent);
+        border-bottom: 2px solid var(--pg-accent);
+
+        a {
+          opacity: 1;
+          color: var(--pg-accent);
+        }
       }
     }
   }

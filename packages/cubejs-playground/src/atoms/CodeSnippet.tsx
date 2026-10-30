@@ -41,7 +41,7 @@ const ButtonWrapper = styled.div`
     bottom: 0;
     background: linear-gradient(
       to right,
-      ${(props) => `${props.theme.background}00`},
+      transparent,
       ${(props) => props.theme.background}
     );
   }
@@ -65,7 +65,7 @@ export function CodeSnippet({
   return (
     <ThemeProvider
       theme={{
-        background: theme === 'dark' ? '#F6F6F8' : '#FFFFFF',
+        background: theme === 'dark' ? 'var(--pg-bg, #F6F6F8)' : 'var(--pg-surface, #FFFFFF)',
       }}
     >
       <StyledCodeSnippet style={style}>

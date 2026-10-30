@@ -2,11 +2,63 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <script>
+      // keeps in sync with src/shared/theme.ts, an inline script runs before any CSS and cannot import.
+      // The links are written here so the active sheet is parser-inserted and render-blocking,
+      // and the other one never downloads until the user switches.
+      (function () {
+        var theme = 'light';
+        try {
+          var pref = null;
+          try {
+            pref = window.localStorage.getItem('cube-playground-theme');
+          } catch (e) {}
+          theme =
+            pref === 'light' || pref === 'dark'
+              ? pref
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+        } catch (e) {
+          theme = 'light';
+        }
+        try {
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) {}
+
+        var light = '<link id="antd-light" rel="stylesheet" href="/antd.min.css"';
+        var dark = '<link id="antd-dark" rel="stylesheet" href="/antd.dark.min.css"';
+        var links =
+          theme === 'dark' ? dark + '>' + light + ' disabled>' : light + '>' + dark + ' disabled>';
+
+        try {
+          document.write(
+            '<style>html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}</style>' + links
+          );
+        } catch (e) {
+          // never leave the page unstyled: both sheets, the light one on
+          var add = function (id, href, disabled) {
+            var link = document.createElement('link');
+            link.id = id;
+            link.rel = 'stylesheet';
+            link.href = href;
+            if (disabled) {
+              link.setAttribute('disabled', '');
+            }
+            document.head.appendChild(link);
+          };
+          add('antd-light', '/antd.min.css', false);
+          add('antd-dark', '/antd.dark.min.css', true);
+          try {
+            document.documentElement.setAttribute('data-theme', 'light');
+          } catch (e2) {}
+        }
+      })();
+    </script>
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
     <link rel="icon" type="image/png" href="/favicon-32x32.png" sizes="32x32">
     <link rel="icon" type="image/png" href="/favicon-16x16.png" sizes="16x16">
     <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5">
-    <link rel="stylesheet" href="/antd.min.css">
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, shrink-to-fit=no"
@@ -19,7 +71,7 @@
       }
 
       #playground-root .ant-menu-item:not(.ant-menu-item-selected) a {
-          color: #a9a9b6;
+          color: var(--playground-muted, #a9a9b6);
       }
     </style>
     <title>Cube Playground</title>

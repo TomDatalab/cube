@@ -22,8 +22,8 @@ const GlobalStyles = createGlobalStyle`
     margin: 0 1px;
     padding: 0.2em 0.4em;
     font-size: 0.9em;
-    background: #f2f4f5;
-    border: 1px solid #eee;
+    background: var(--pg-code-bg, #f2f4f5);
+    border: 1px solid var(--pg-line, #eee);
     border-radius: 3px;
   }
   
@@ -111,8 +111,8 @@ const GlobalStyles = createGlobalStyle`
   }
 
   .schema-sidebar {
-    background: #fff;
-    border-right: 1px solid #eee;
+    background: var(--pg-surface, #fff);
+    border-right: 1px solid var(--pg-line, #eee);
     padding: 0;
   }
 
@@ -296,7 +296,7 @@ const GlobalStyles = createGlobalStyle`
       clear: both;
       margin: 0;
       padding: 5px 12px;
-      color: #5b5c7d;
+      color: var(--pg-menu-text, #5b5c7d);
       font-weight: 400;
       font-size: 14px;
       line-height: 22px;
@@ -309,7 +309,7 @@ const GlobalStyles = createGlobalStyle`
     }
     
     .ant-dropdown-menu-item.ant-menu-item-active {
-      background: rgb(243, 243, 251);
+      background: var(--pg-hover, rgb(243, 243, 251));
     }
     
     .ant-dropdown-menu-item-group-list {
