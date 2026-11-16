@@ -1,56 +1,89 @@
-import { LogoutOutlined, MenuOutlined } from '@ant-design/icons';
-import { Dropdown, Layout, Menu } from 'antd';
-import { useMediaQuery } from 'react-responsive';
-import { Link } from 'react-router-dom';
+import { LogoutOutlined, RightOutlined } from '@ant-design/icons';
 import styled from 'styled-components';
 
 import { usePlaygroundContext, useRbac } from '../../hooks';
 import { logout } from '../../shared/auth';
-import { StyledMenu, StyledMenuButton, StyledMenuItem } from './Menu';
-import { RunOnCubeCloud } from './RunOnCubeCloud';
+import { pageTrail } from '../Sidebar/Sidebar';
 import { ThemeSwitcher } from '../ThemeSwitcher';
 import { WorkspaceSelector } from './WorkspaceSelector';
 
-const StyledHeader = styled(Layout.Header)`
-  && {
-    background-color: var(--pg-bar);
-    color: white;
-    padding: 0 16px;
-    line-height: 44px;
-    height: 48px;
+// The bossa-arq-dashboard top bar: the page on the left, the actions on the
+// right. The pages themselves are in the sidebar.
+const Bar = styled.header`
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 44px;
+  padding: 0 24px;
+  background: var(--pg-surface);
+  border-bottom: 1px solid var(--pg-line);
+  color: var(--pg-text);
+`;
+
+const Crumb = styled.span`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`;
+
+const Actions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+`;
+
+const User = styled.span`
+  font-size: 13px;
+  color: var(--pg-muted);
+  white-space: nowrap;
+
+  @media (max-width: 767px) {
+    display: none;
+  }
+`;
+
+const IconButton = styled.button`
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--pg-muted);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--pg-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--pg-accent);
+    outline-offset: 2px;
   }
 `;
 
 type Props = {
-  selectedKeys: string[];
+  pathname: string;
 };
 
-export default function Header({ selectedKeys }: Props) {
-  const isDesktopOrLaptop = useMediaQuery({
-    query: '(min-width: 992px)',
-  });
-
-  const isMobileOrTable = useMediaQuery({
-    query: '(max-width: 991px)',
-  });
-
-  // With RBAC on, who logged in; Data Model and Data Source are for
-  // platform admins only.
+export default function Header({ pathname }: Props) {
+  // With RBAC on, who logged in and which workspace the data comes from.
   const { session, isAdmin } = useRbac();
   const { basePath = '' } = usePlaygroundContext();
-
-  const workspaceSelector = session ? (
-    <div style={{ float: 'right', marginLeft: 8 }}>
-      <WorkspaceSelector basePath={basePath} isAdmin={isAdmin} />
-    </div>
-  ) : null;
-
-  // floats right, so it comes first in the markup to sit left of the selector
-  const themeSwitcher = (
-    <div style={{ float: 'right', marginLeft: 8 }}>
-      <ThemeSwitcher />
-    </div>
-  );
+  // Admin > Users for a page inside a group
+  const trail = pageTrail(pathname);
 
   function logOut() {
     logout();
@@ -58,107 +91,29 @@ export default function Header({ selectedKeys }: Props) {
   }
 
   return (
-    <StyledHeader>
-      <div style={{ float: 'left' }}>
-        <img
-          src="./cube-core-logo-adapted_for_dark_bg.svg"
-          style={{ height: 28, marginRight: 28 }}
-          alt=""
-        />
-      </div>
+    <Bar>
+      <Crumb data-testid="page-title">
+        {trail[0]?.icon}
+        {trail.map((page, i) => (
+          <span key={page.path}>
+            {i > 0 ? <RightOutlined style={{ fontSize: 9, margin: '0 6px' }} /> : null}
+            {page.label}
+          </span>
+        ))}
+      </Crumb>
 
-      {workspaceSelector}
-      {themeSwitcher}
-
-      {/* outside the menu: rc-menu 9 makes it a flex row, where the buttons'
-          float has no effect; the buttons float right in markup order */}
-      {isDesktopOrLaptop && (
-        <div style={{ float: 'right' }}>
-          <RunOnCubeCloud />
-
-          {session ? (
-            <StyledMenuButton onClick={logOut}>
+      <Actions>
+        {session ? <WorkspaceSelector basePath={basePath} isAdmin={isAdmin} /> : null}
+        <ThemeSwitcher />
+        {session ? (
+          <>
+            <User>{session.user.name || session.user.id}</User>
+            <IconButton type="button" aria-label="Sair" title="Sair" onClick={logOut}>
               <LogoutOutlined />
-              Log out {session.user.name || session.user.id}
-            </StyledMenuButton>
-          ) : null}
-        </div>
-      )}
-
-      {isDesktopOrLaptop && (
-        <StyledMenu theme="light" mode="horizontal" selectedKeys={selectedKeys}>
-          <StyledMenuItem key="/build">
-            <Link to="/build">Playground</Link>
-          </StyledMenuItem>
-
-          {isAdmin ? (
-            <StyledMenuItem key="/schema">
-              <Link to="/schema">Data Model</Link>
-            </StyledMenuItem>
-          ) : null}
-
-          {isAdmin ? (
-            <StyledMenuItem key="/data-sources">
-              <Link to="/data-sources">Data Source</Link>
-            </StyledMenuItem>
-          ) : null}
-
-          <StyledMenuItem key="/frontend-integrations">
-            <Link to="/frontend-integrations">Frontend Integrations</Link>
-          </StyledMenuItem>
-
-          {session && isAdmin ? (
-            <StyledMenuItem key="/admin">
-              <Link to="/admin">Admin</Link>
-            </StyledMenuItem>
-          ) : null}
-
-        </StyledMenu>
-      )}
-
-      {isMobileOrTable && (
-        <div style={{ float: 'right' }}>
-          <Dropdown
-            overlay={(
-              <Menu>
-                <Menu.Item key="/build">
-                  <Link to="/build">Playground</Link>
-                </Menu.Item>
-
-                {isAdmin ? (
-                  <Menu.Item key="/schema">
-                    <Link to="/schema">Data Model</Link>
-                  </Menu.Item>
-                ) : null}
-
-                {isAdmin ? (
-                  <Menu.Item key="/data-sources">
-                    <Link to="/data-sources">Data Source</Link>
-                  </Menu.Item>
-                ) : null}
-
-                <Menu.Item key="/frontend-integrations">
-                  <Link to="/frontend-integrations">Frontend Integrations</Link>
-                </Menu.Item>
-
-                {session && isAdmin ? (
-                  <Menu.Item key="/admin">
-                    <Link to="/admin">Admin</Link>
-                  </Menu.Item>
-                ) : null}
-
-                {session ? (
-                  <Menu.Item key="logout" onClick={logOut}>
-                    Log out
-                  </Menu.Item>
-                ) : null}
-              </Menu>
-            )}
-          >
-            <MenuOutlined />
-          </Dropdown>
-        </div>
-      )}
-    </StyledHeader>
+            </IconButton>
+          </>
+        ) : null}
+      </Actions>
+    </Bar>
   );
 }
