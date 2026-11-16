@@ -28,11 +28,11 @@ export const LANGUAGE_MAP = {
 
 export type FileExtension = keyof typeof LANGUAGE_MAP;
 
-const PURPLE = '#665DE8';
+const PURPLE = '#2f5597';
 const PINK = '#D3005A';
 const GREEN = '#30A666';
 const VIOLET = '#993388';
-const DARK = '#141446';
+const DARK = '#21263f';
 const GREY = '#828282';
 const BROWN = '#986801';
 
@@ -75,45 +75,45 @@ editor.defineTheme('cube-dark', {
   base: 'vs-dark',
   inherit: true,
   colors: {
-    'editor.background': '#23232d',
-    'editor.foreground': '#e7e7ef',
-    'editor.lineHighlightBackground': '#363644',
-    'editor.lineHighlightBorder': '#363644',
-    'editor.selectionBackground': '#8f8bff44',
-    'editor.inactiveSelectionBackground': '#8f8bff26',
-    'editorCursor.foreground': '#8f8bff',
-    'editorLineNumber.foreground': '#6e6e82',
-    'editorLineNumber.activeForeground': '#e7e7ef',
-    'editorWidget.background': '#2b2b37',
-    'editorWidget.border': '#363644',
-    'editorGutter.background': '#23232d',
-    'scrollbarSlider.background': '#8f8bff33',
-    'scrollbarSlider.hoverBackground': '#8f8bff55',
+    'editor.background': '#1e2337',
+    'editor.foreground': '#e8eaf3',
+    'editor.lineHighlightBackground': '#333a57',
+    'editor.lineHighlightBorder': '#333a57',
+    'editor.selectionBackground': '#8fb4e644',
+    'editor.inactiveSelectionBackground': '#8fb4e626',
+    'editorCursor.foreground': '#8fb4e6',
+    'editorLineNumber.foreground': '#6f7594',
+    'editorLineNumber.activeForeground': '#e8eaf3',
+    'editorWidget.background': '#262c43',
+    'editorWidget.border': '#333a57',
+    'editorGutter.background': '#1e2337',
+    'scrollbarSlider.background': '#8fb4e633',
+    'scrollbarSlider.hoverBackground': '#8fb4e655',
   },
   rules: [
-    { token: 'keyword.sql', foreground: '#a9a5ff' },
+    { token: 'keyword.sql', foreground: '#9fbeeb' },
     { token: 'number.sql', foreground: '#e0b25c' },
-    { token: 'constant.other.table-name.sql', foreground: '#a9a5ff' },
+    { token: 'constant.other.table-name.sql', foreground: '#9fbeeb' },
     { token: 'string.sql', foreground: '#5fd39a' },
-    { token: 'comment.js', foreground: '#7d7d94' },
-    { token: 'comment.yaml', foreground: '#7d7d94' },
-    { token: 'identifier', foreground: '#e7e7ef' },
+    { token: 'comment.js', foreground: '#7c82a3' },
+    { token: 'comment.yaml', foreground: '#7c82a3' },
+    { token: 'identifier', foreground: '#e8eaf3' },
     { token: 'operators', foreground: '#5fd39a' },
     { token: 'number', foreground: '#5fd39a' },
     { token: 'number.yaml', foreground: '#ff7da0' },
     { token: 'entity', foreground: '#5fd39a' },
-    { token: 'keyword', foreground: '#a9a5ff' },
-    { token: 'keyword.json', foreground: '#a9a5ff' },
+    { token: 'keyword', foreground: '#9fbeeb' },
+    { token: 'keyword.json', foreground: '#9fbeeb' },
     { token: 'string', foreground: '#ff7da0' },
     { token: 'string.key.json', foreground: '#ff7da0' },
-    { token: 'string.yaml', foreground: '#a9a5ff' },
-    { token: 'string.value.json', foreground: '#a9a5ff' },
+    { token: 'string.yaml', foreground: '#9fbeeb' },
+    { token: 'string.value.json', foreground: '#9fbeeb' },
     { token: 'regexp', foreground: '#ff7da0' },
     { token: 'annotation', foreground: '#ff7da0' },
-    { token: 'type', foreground: '#e7e7ef' },
-    { token: 'constant', foreground: '#a9a5ff' },
-    { token: 'variable', foreground: '#a9a5ff' },
-    { token: 'operator.sql', foreground: '#a9a5ff' },
+    { token: 'type', foreground: '#e8eaf3' },
+    { token: 'constant', foreground: '#9fbeeb' },
+    { token: 'variable', foreground: '#9fbeeb' },
+    { token: 'operator.sql', foreground: '#9fbeeb' },
     { token: 'delimiter', foreground: '#d58bd0' },
     { token: 'operators.yaml', foreground: '#d58bd0' },
     { token: 'tag', foreground: '#d58bd0' },

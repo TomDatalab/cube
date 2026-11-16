@@ -10,26 +10,27 @@
 const UI_KIT_COLORS: Record<string, string> = {
   pink: '255, 125, 160',
   'pink-02': '255, 150, 185',
-  purple: '143, 139, 255',
-  'purple-text': '169, 165, 255',
-  'purple-01': '143, 139, 255',
-  'purple-02': '128, 125, 230',
-  'purple-03': '110, 107, 200',
-  'purple-04': '80, 78, 150',
-  text: '200, 200, 214',
-  dark: '231, 231, 239',
-  'dark-01': '231, 231, 239',
-  'dark-02': '200, 200, 214',
-  'dark-03': '154, 154, 175',
-  'dark-04': '110, 110, 130',
-  'dark-05': '54, 54, 68',
-  'grey-light': '35, 35, 45',
-  light: '43, 43, 55',
-  white: '35, 35, 45',
+  // the accent: bossa-arq-dashboard's light blue, #8fb4e6
+  purple: '143, 180, 230',
+  'purple-text': '159, 190, 235',
+  'purple-01': '143, 180, 230',
+  'purple-02': '118, 156, 214',
+  'purple-03': '86, 120, 180',
+  'purple-04': '58, 84, 130',
+  text: '203, 206, 222',
+  dark: '232, 234, 243',
+  'dark-01': '232, 234, 243',
+  'dark-02': '203, 206, 222',
+  'dark-03': '163, 168, 195',
+  'dark-04': '111, 117, 148',
+  'dark-05': '51, 58, 87',
+  'grey-light': '30, 35, 55',
+  light: '38, 44, 67',
+  white: '30, 35, 55',
   black: '0, 0, 0',
   'danger-text': '235, 77, 106',
   danger: '255, 55, 73',
-  'light-grey': '35, 35, 45',
+  'light-grey': '30, 35, 55',
   success: '63, 191, 127',
   'success-text': '63, 191, 127',
   note: '251, 188, 5',
@@ -40,7 +41,7 @@ const UI_KIT_COLORS: Record<string, string> = {
 const PLAYGROUND_COLORS: Record<string, string> = {
   green: '63, 191, 127',
   yellow: '255, 200, 60',
-  gray: '35, 35, 45',
+  gray: '30, 35, 55',
 };
 
 function rgba(triple: string, opacity: number | string = 1) {
@@ -51,8 +52,8 @@ const c = (name: string, opacity?: number) => rgba(UI_KIT_COLORS[name], opacity)
 
 // ui-kit tokens that are colors but not part of the palette
 const UI_KIT_DERIVED: Record<string, string> = {
-  'border-color': 'rgba(54, 54, 68, 1)',
-  'border-opaque-color': 'rgba(54, 54, 68, 1)',
+  'border-color': 'rgba(51, 58, 87, 1)',
+  'border-opaque-color': 'rgba(51, 58, 87, 1)',
   'shadow-color': c('black', 0.4),
   'draft-color': c('dark', 0.2),
   'minor-color': c('dark', 0.65),
@@ -93,8 +94,8 @@ const PLAYGROUND_DERIVED: Record<string, string> = {
   'heading-color': c('dark'),
   'link-color': c('purple'),
   'info-color': c('purple'),
-  'layout-body-background': '#1c1c24',
-  'layout-header-background': '#17171f',
+  'layout-body-background': '#171b2c',
+  'layout-header-background': '#141726',
   'menu-highlight-color': c('dark-01'),
   'item-hover-bg': c('light'),
   'menu-item-active-bg': c('light'),
@@ -166,10 +167,11 @@ const QUERY_BUILDER_COLORS: Record<string, Record<string, string>> = {
     hover: '38, 45, 64',
   },
   segment: {
-    strong: '219, 210, 229',
-    text: '189, 171, 207',
-    active: '69, 50, 87',
-    hover: '51, 38, 64',
+    // teal, as in the light theme
+    strong: '200, 234, 229',
+    text: '150, 212, 204',
+    active: '33, 78, 72',
+    hover: '27, 56, 54',
   },
   filter: {
     strong: '231, 208, 219',
@@ -185,6 +187,47 @@ const QUERY_BUILDER_COLORS: Record<string, Record<string, string>> = {
   },
 };
 
+// The light theme's ui-kit palette: the bossa-arq-dashboard blues and navy
+// in place of the ui-kit purple and its purple-tinted greys.
+const UI_KIT_LIGHT_COLORS: Record<string, string> = {
+  purple: '47, 85, 151', // #2f5597
+  'purple-text': '31, 58, 115', // #1f3a73
+  'purple-01': '47, 85, 151',
+  'purple-02': '61, 115, 201', // #3d73c9
+  'purple-03': '118, 156, 214', // #769cd6
+  'purple-04': '159, 182, 221', // #9fb6dd
+  text: '65, 69, 88', // #414558
+  dark: '33, 38, 63', // #21263f
+  'dark-01': '33, 38, 63',
+  'dark-02': '65, 69, 88',
+  'dark-03': '108, 115, 147', // #6c7393
+  'dark-04': '169, 173, 194', // #a9adc2
+  'dark-05': '227, 228, 238', // #e3e4ee
+  light: '246, 247, 251', // #f6f7fb
+};
+
+const lc = (name: string, opacity?: number) => rgba(UI_KIT_LIGHT_COLORS[name], opacity);
+
+export const UI_KIT_LIGHT: Record<string, string> = {
+  ...palette(UI_KIT_LIGHT_COLORS),
+  ...withRgb({
+    'border-color': lc('dark', 0.1),
+    'shadow-color': lc('dark-03', 0.1),
+    'draft-color': lc('dark', 0.2),
+    'minor-color': lc('dark', 0.65),
+    'dark-75-color': lc('dark', 0.75),
+    'primary-color': lc('purple'),
+    'disabled-color': lc('dark-01', 0.25),
+    'disabled-text-color': lc('dark-01', 0.25),
+    ...Object.fromEntries(
+      [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0].map((opacity, i) => [
+        `primary-${i + 1}`,
+        lc('purple', opacity),
+      ])
+    ),
+  }),
+};
+
 export const QUERY_BUILDER_DARK: Record<string, string> = Object.entries(
   QUERY_BUILDER_COLORS
 ).reduce<Record<string, string>>((map, [type, shades]) => {
@@ -195,29 +238,36 @@ export const QUERY_BUILDER_DARK: Record<string, string> = Object.entries(
   return map;
 }, {});
 
-// playground roles; light = what the Playground paints today
+// playground roles; light = the bossa-arq-dashboard palette
 export const PG_LIGHT: Record<string, string> = {
-  '--pg-bar': '#43436b', // header, var(--dark-02-color)
+  '--pg-bar': '#21263f', // login page band, the sidebar navy
   '--pg-bar-text': '#fff', // the bar is dark in both themes
-  '--pg-bg': '#f6f6f8', // @layout-body-background
+  // sidebar, the bossa-arq-dashboard's; navy in both themes
+  '--pg-nav': '#21263f',
+  '--pg-nav-deep': '#191c2e', // active item
+  '--pg-nav-text': '#fbfbfe',
+  '--pg-nav-accent': '#2eefd9', // active item text
+  '--pg-nav-hover': 'rgba(255, 255, 255, 0.06)',
+  '--pg-nav-line': '#383d57', // section divider
+  '--pg-bg': '#fbfbfe', // @layout-body-background
   '--pg-surface': '#ffffff',
   '--pg-raised': '#ffffff', // antd popovers and menus
-  '--pg-line': '#eeeeee', // sidebar and panel borders
-  '--pg-text': '#141446', // dark-01
-  '--pg-muted': '#a1a1b5', // theme.ts grey, dark-04
-  '--pg-accent': '#7a77ff', // purple
-  '--pg-accent-soft': 'rgba(122, 119, 255, 0.1)', // @primary-bg
+  '--pg-line': '#e3e4ee', // sidebar and panel borders
+  '--pg-text': '#21263f', // navy ink
+  '--pg-muted': '#6c7393',
+  '--pg-accent': '#2f5597', // blue
+  '--pg-accent-soft': 'rgba(47, 85, 151, 0.1)', // @primary-bg
   '--pg-success': '#41b56f', // variables.ts green
   '--playground-muted': '#a9a9b6', // index.html menu links
   // surfaces and lines the components used to hardcode
-  '--pg-hover': '#f3f3fb', // active dropdown item
+  '--pg-hover': '#edf3fb', // active dropdown item
   '--pg-code-bg': '#f2f4f5', // inline code
-  '--pg-menu-text': '#5b5c7d',
-  '--pg-subtle': '#f8f8f9', // database cards
+  '--pg-menu-text': '#414558',
+  '--pg-subtle': '#f6f7fb', // database cards
   '--pg-hairline': 'rgba(0, 0, 0, 0.06)',
-  '--pg-line-soft': '#d7d7f488', // card headers
-  '--pg-tab-line': 'rgb(234, 234, 238)',
-  '--pg-tab-bg': 'rgb(243, 243, 255)',
+  '--pg-line-soft': '#e3e4ee', // card headers
+  '--pg-tab-line': '#e3e4ee',
+  '--pg-tab-bg': '#edf3fb',
   '--pg-orange': '#D26E0B', // view tag
   '--pg-positive': '#52c41a',
   '--pg-negative': '#c2371b',
@@ -226,16 +276,16 @@ export const PG_LIGHT: Record<string, string> = {
   '--pg-axis': '#666666', // recharts default tick color
   '--pg-chart-border': '#cccccc', // recharts default tooltip border
   // access graph
-  '--pg-graph-accent-bg': '#e8e7ff',
-  '--pg-graph-line': '#d9d8e8',
-  '--pg-graph-muted': '#6b6a85',
-  '--pg-graph-fg': '#1f1d3a',
-  '--pg-graph-derived': '#9c9ab8',
-  '--pg-graph-panel': '#f6f6fb',
+  '--pg-graph-accent-bg': '#edf3fb',
+  '--pg-graph-line': '#dddee9',
+  '--pg-graph-muted': '#6c7393',
+  '--pg-graph-fg': '#21263f',
+  '--pg-graph-derived': '#a9adc2',
+  '--pg-graph-panel': '#f6f7fb',
   '--pg-graph-node': '#ffffff',
-  '--pg-graph-user': '#1f1d3a',
+  '--pg-graph-user': '#21263f',
   '--pg-graph-organization': '#2f7d6d',
-  '--pg-graph-workspace': '#6a66f0',
+  '--pg-graph-workspace': '#2f5597',
   '--pg-graph-connection': '#b8641e',
   // atoms/Alert
   '--pg-alert-error-border': '#FFCCC7',
@@ -258,42 +308,49 @@ export const PG_LIGHT: Record<string, string> = {
 
 // palette C
 export const PG_DARK: Record<string, string> = {
-  '--pg-bar': '#17171f',
+  '--pg-bar': '#141726',
   '--pg-bar-text': '#fff',
-  '--pg-bg': '#1c1c24',
-  '--pg-surface': '#23232d',
-  '--pg-raised': '#2b2b37',
-  '--pg-line': '#363644',
-  '--pg-text': '#e7e7ef',
-  '--pg-muted': '#9a9aaf',
-  '--pg-accent': '#8f8bff',
-  '--pg-accent-soft': 'rgba(143, 139, 255, 0.17)',
+  // sidebar, same as the light theme
+  '--pg-nav': '#21263f',
+  '--pg-nav-deep': '#191c2e', // active item
+  '--pg-nav-text': '#fbfbfe',
+  '--pg-nav-accent': '#2eefd9', // active item text
+  '--pg-nav-hover': 'rgba(255, 255, 255, 0.06)',
+  '--pg-nav-line': '#383d57', // section divider
+  '--pg-bg': '#171b2c',
+  '--pg-surface': '#1e2337',
+  '--pg-raised': '#262c43',
+  '--pg-line': '#333a57',
+  '--pg-text': '#e8eaf3',
+  '--pg-muted': '#a3a8c3',
+  '--pg-accent': '#8fb4e6',
+  '--pg-accent-soft': 'rgba(143, 180, 230, 0.17)',
   '--pg-success': '#3fbf7f',
-  '--playground-muted': '#9a9aaf',
-  '--pg-hover': '#2b2b37',
-  '--pg-code-bg': '#2b2b37',
-  '--pg-menu-text': '#c8c8d6',
-  '--pg-subtle': '#272731',
+  '--playground-muted': '#a3a8c3',
+  '--pg-hover': '#262c43',
+  '--pg-code-bg': '#262c43',
+  '--pg-menu-text': '#cbcede',
+  '--pg-subtle': '#1b2032',
   '--pg-hairline': 'rgba(255, 255, 255, 0.08)',
-  '--pg-line-soft': '#36364488',
-  '--pg-tab-line': '#363644',
-  '--pg-tab-bg': '#2b2b40',
+  '--pg-line-soft': '#333a5788',
+  '--pg-tab-line': '#333a57',
+  '--pg-tab-bg': '#2a3150',
   '--pg-orange': '#f0993f',
   '--pg-positive': '#3fbf7f',
   '--pg-negative': '#ff7a65',
-  '--pg-grid': '#2c2c38',
-  '--pg-axis': '#9a9aaf',
-  '--pg-chart-border': '#363644',
-  '--pg-graph-accent-bg': '#34336b',
-  '--pg-graph-line': '#3d3d52',
-  '--pg-graph-muted': '#a8a8c0',
-  '--pg-graph-fg': '#e7e7ef',
-  '--pg-graph-derived': '#6e6e88',
-  '--pg-graph-panel': '#262631',
-  '--pg-graph-node': '#2b2b37',
-  '--pg-graph-user': '#e7e7ef',
+  '--pg-grid': '#262c43',
+  '--pg-axis': '#a3a8c3',
+  '--pg-chart-border': '#333a57',
+  '--pg-graph-accent-bg': '#24365a',
+  '--pg-graph-line': '#39405e',
+  '--pg-graph-muted': '#a9aecb',
+  '--pg-graph-fg': '#e8eaf3',
+  '--pg-graph-derived': '#6f7594',
+  '--pg-graph-panel': '#1c2134',
+  '--pg-graph-node': '#262c43',
+  '--pg-graph-user': '#e8eaf3',
   '--pg-graph-organization': '#4fc3a8',
-  '--pg-graph-workspace': '#8f8bff',
+  '--pg-graph-workspace': '#8fb4e6',
   '--pg-graph-connection': '#f0993f',
   '--pg-alert-error-border': 'rgba(255, 100, 109, 0.45)',
   '--pg-alert-error-bg': 'rgba(255, 100, 109, 0.12)',
@@ -304,12 +361,12 @@ export const PG_DARK: Record<string, string> = {
   '--pg-alert-info-bg': 'rgba(64, 169, 255, 0.12)',
   '--pg-alert-success-border': 'rgba(63, 191, 127, 0.45)',
   '--pg-alert-success-bg': 'rgba(63, 191, 127, 0.12)',
-  '--pg-ansi-black': '#e7e7ef',
+  '--pg-ansi-black': '#e8eaf3',
   '--pg-ansi-red': '#ff7a65',
   '--pg-ansi-green': '#3fbf7f',
-  '--pg-ansi-blue': '#8f8bff',
-  '--pg-ansi-gray': '#9a9aaf',
-  '--pg-ansi-darkgrey': '#9a9aaf',
+  '--pg-ansi-blue': '#8fb4e6',
+  '--pg-ansi-gray': '#a3a8c3',
+  '--pg-ansi-darkgrey': '#a3a8c3',
 };
 
 function declarations(map: Record<string, string>) {
@@ -318,8 +375,19 @@ function declarations(map: Record<string, string>) {
     .join('\n');
 }
 
+// The ui-kit Root declares its tokens at (0,2,0) and its body text color,
+// the old violet navy, at (0,0,1); the dark blocks below win over these.
 export const LIGHT_CSS = `:root {
 ${declarations(PG_LIGHT)}
+}
+
+:root,
+:root #cube-ui-kit-root {
+${declarations(UI_KIT_LIGHT)}
+}
+
+:root body {
+  color: rgba(33, 38, 63, 0.75);
 }
 `;
 
@@ -366,7 +434,7 @@ ${declarations(QUERY_BUILDER_DARK)}
 
 ${DARK} body {
   background-color: var(--pg-bg) !important;
-  color: rgba(231, 231, 239, 0.75);
+  color: rgba(232, 234, 243, 0.75);
 }
 
 ${DARK} kbd {

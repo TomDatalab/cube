@@ -57,7 +57,7 @@ export function LoginPage({ basePath, onLogin }: Props) {
 
       <StyledCard
         title={(
-          <img src="./cube-logo.svg" style={{ height: 28 }} alt="Cube" />
+          <img src="./cube-logo-bossa.svg" style={{ height: 28 }} alt="Cube" />
         )}
       >
         <Form layout="vertical" onFinish={submit} requiredMark={false}>

@@ -74,7 +74,7 @@ function block(css: string, selector: string): string {
   return css.slice(start, css.indexOf('}', start));
 }
 
-const BG = parseColor('#1c1c24');
+const BG = parseColor('#171b2c');
 
 describe('dark tokens', () => {
   it('covers every ui-kit color with a dark value and rgb triple', () => {
@@ -91,9 +91,9 @@ describe('dark tokens', () => {
   });
 
   it('defines the palette C playground variables', () => {
-    expect(DARK_CSS).toContain('--pg-bg: #1c1c24;');
-    expect(DARK_CSS).toContain('--pg-accent: #8f8bff;');
-    expect(DARK_CSS).toContain('--pg-text: #e7e7ef;');
+    expect(DARK_CSS).toContain('--pg-bg: #171b2c;');
+    expect(DARK_CSS).toContain('--pg-accent: #8fb4e6;');
+    expect(DARK_CSS).toContain('--pg-text: #e8eaf3;');
   });
 
   it('defines every playground variable in both themes', () => {

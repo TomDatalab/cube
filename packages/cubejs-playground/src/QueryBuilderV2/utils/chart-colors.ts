@@ -4,8 +4,10 @@
 // solid - https://stackblitz.com/edit/chart-color-generator-4hi5b9?file=index.js
 
 export const CHART_COLORS: string[] = [
-  'rgb(42.487% 43.674% 77.307%)',
-  'rgb(54.856% 28.66% 56.547%)',
+  // the first two series in the bossa-arq-dashboard blue (#2f5597) and teal
+  // (#19bfad) instead of the generator's violets
+  'rgb(18.431% 33.333% 59.216%)',
+  'rgb(9.804% 74.902% 67.843%)',
   'rgb(95.77% 53.351% 60.514%)',
   'rgb(84.469% 50.392% 24.719%)',
   'rgb(59.928% 52.542% 0%)',
