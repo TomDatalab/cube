@@ -4,7 +4,9 @@
 //! Used to refuse queries that touch a blocked member through a member built
 //! on it, and to decide which cubes a query reads for row filters. When a
 //! reference cannot be resolved the graph depends on more (the whole cube),
-//! never on less.
+//! never on less. It also knows the reads an injected row filter cannot
+//! reach ([`OpaqueRead`]) and the join graph, for the cubes a query is
+//! joined through.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -20,6 +22,47 @@ pub enum Dep {
     /// A cube a view member is read through (an intermediate cube of its
     /// `join_path`): it counts as read for row filters, not for blocking.
     Joined(String),
+}
+
+/// A cube read where a row filter injected into the outer query does not
+/// reach: inside a `sub_query` dimension, a `{X.sql()}` (`{X.__sql_fn}`)
+/// subselect or a bare `{X}` in a cube's own `sql`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OpaqueRead {
+    /// The cube read.
+    pub cube: String,
+    /// The member (or, for a cube's own `sql`, the cube) the read is inside.
+    pub inside: String,
+    /// Inside a `sub_query` dimension with `propagate_filters_to_sub_query`:
+    /// the outer dimension filters are planned into it too.
+    pub propagates: bool,
+}
+
+/// Where a reference is written: what an embedded cube reads differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// A member's SQL: a bare `{X}` is the joined cube's alias.
+    Member,
+    /// A cube's own `sql`: a bare `{X}` is not joined, so it is read raw.
+    CubeSql,
+}
+
+/// What a reference stands for, past what it adds to the dependencies.
+enum Resolved {
+    /// A cube or view name (`{CUBE}`, `{TABLE}`, `{customers}`): the
+    /// caller decides, as a `.column` may follow the closing brace.
+    Whole { cube: String, own: bool },
+    /// `{X.sql()}` / `{X.__sql_fn}`: the cube's SQL as a subselect.
+    Table(String),
+    /// A member, parameters, or something placed on the whole cube.
+    Done,
+}
+
+/// What one member reads: all of it, and the part read opaquely.
+#[derive(Default)]
+struct Refs {
+    deps: BTreeSet<Dep>,
+    opaque: BTreeSet<Dep>,
 }
 
 impl Dep {
@@ -41,6 +84,20 @@ pub struct MemberGraph {
     /// Time dimensions (`cube.member`), the only members that may carry a
     /// granularity.
     time_dimensions: HashSet<String>,
+    /// Every dimension (`cube.member`), time dimensions included.
+    dimensions: HashSet<String>,
+    /// `sub_query` dimensions (`cube.member`).
+    sub_queries: HashSet<String>,
+    /// `cube.member` → what it reads where an outer row filter does not
+    /// reach (a subset of `direct`).
+    opaque: HashMap<String, BTreeSet<Dep>>,
+    /// `sub_query` dimension with `propagate_filters_to_sub_query` → what
+    /// its subquery reads.
+    propagating: HashMap<String, BTreeSet<Dep>>,
+    /// Cube → what its own `sql` reads opaquely.
+    cube_opaque: HashMap<String, BTreeSet<Dep>>,
+    /// Cube → the cubes it joins or is joined from (both ways).
+    joins: BTreeMap<String, BTreeSet<String>>,
     /// View names.
     views: BTreeSet<String>,
     /// `cube.member` → what it references directly (itself excluded).
@@ -107,11 +164,26 @@ impl MemberGraph {
                 graph.direct.insert(member.clone(), BTreeSet::new());
             }
             for (name, dimension) in &cube.dimensions {
+                let full = format!("{}.{name}", cube.name);
                 if dimension.member_type.as_deref() == Some("time") {
-                    graph
-                        .time_dimensions
-                        .insert(format!("{}.{name}", cube.name));
+                    graph.time_dimensions.insert(full.clone());
                 }
+                if dimension.sub_query == Some(true) {
+                    graph.sub_queries.insert(full.clone());
+                }
+                graph.dimensions.insert(full);
+            }
+            for join in &cube.joins {
+                graph
+                    .joins
+                    .entry(cube.name.clone())
+                    .or_default()
+                    .insert(join.name.clone());
+                graph
+                    .joins
+                    .entry(join.name.clone())
+                    .or_default()
+                    .insert(cube.name.clone());
             }
             graph.cube_members.insert(cube.name.clone(), members);
         }
@@ -158,10 +230,16 @@ impl MemberGraph {
         }
 
         for cube in model.cube_list().into_iter().filter(|cube| !cube.is_view) {
-            let mut shared = BTreeSet::new();
+            let mut shared = Refs::default();
             for sql in cube.sql.iter().chain(cube.sql_table.iter()) {
-                graph.references_in_str(&cube.name, sql, &mut shared);
+                graph.references_in_str(&cube.name, sql, Place::CubeSql, &mut shared);
             }
+            if !shared.opaque.is_empty() {
+                graph
+                    .cube_opaque
+                    .insert(cube.name.clone(), std::mem::take(&mut shared.opaque));
+            }
+            let dimensions = &cube.dimensions;
 
             let members = cube
                 .dimensions
@@ -179,14 +257,33 @@ impl MemberGraph {
                 );
             for (name, value) in members {
                 let full = format!("{}.{name}", cube.name);
-                let mut deps = shared.clone();
+                let mut refs = Refs::default();
                 match value {
-                    Ok(value) => graph.references_in_value(&cube.name, &value, &mut deps),
+                    Ok(value) => graph.references_in_value(&cube.name, &value, &mut refs),
                     // Cannot see what it reads: it may read anything of its cube.
                     Err(_) => {
-                        deps.insert(Dep::Cube(cube.name.clone()));
+                        refs.deps.insert(Dep::Cube(cube.name.clone()));
                     }
                 }
+                refs.deps.remove(&Dep::Member(full.clone()));
+                refs.opaque.remove(&Dep::Member(full.clone()));
+                // A `sub_query` dimension is planned as a subquery of what
+                // its SQL reads, joined back by the primary key of its cube.
+                if let Some(dimension) = dimensions.get(name.as_str()) {
+                    if dimension.sub_query == Some(true) {
+                        let inside = refs.deps.clone();
+                        if dimension.propagate_filters_to_sub_query == Some(true) {
+                            graph.propagating.insert(full.clone(), inside);
+                        } else {
+                            refs.opaque.extend(inside);
+                        }
+                    }
+                }
+                if !refs.opaque.is_empty() {
+                    graph.opaque.insert(full.clone(), refs.opaque);
+                }
+                let mut deps = shared.deps.clone();
+                deps.extend(refs.deps);
                 deps.remove(&Dep::Member(full.clone()));
                 graph.direct.insert(full, deps);
             }
@@ -226,6 +323,11 @@ impl MemberGraph {
             }
         }
 
+        self.expand(seeds)
+    }
+
+    /// `seeds` and everything their members read, transitively.
+    fn expand(&self, seeds: BTreeSet<Dep>) -> BTreeSet<Dep> {
         let mut visited = BTreeSet::new();
         let mut queue = VecDeque::new();
         for dep in seeds {
@@ -242,6 +344,116 @@ impl MemberGraph {
             }
         }
         visited
+    }
+
+    /// The cubes `names` read where a row filter injected into the outer
+    /// query does not reach, with the member each read is inside. A read
+    /// inside an opaque read is opaque too. The cube of a `sub_query`
+    /// dimension is not listed for it: its subquery is joined back by that
+    /// cube's primary key, so the outer filter holds.
+    pub fn opaque_reads(&self, names: &[String]) -> BTreeSet<OpaqueRead> {
+        // (what is read, inside what, propagates, the cube exempt)
+        type Pending = (Dep, String, bool, Option<String>);
+        let mut pending: Vec<Pending> = Vec::new();
+        let edges = |dep: &Dep, inside: Option<(&str, bool)>, pending: &mut Vec<Pending>| {
+            if let Dep::Member(member) = dep {
+                let (at, carried) = inside.unwrap_or((member, true));
+                let own = member.split('.').next().unwrap_or(member).to_string();
+                for next in self.opaque.get(member).into_iter().flatten() {
+                    let exempt = self.sub_queries.contains(member).then(|| own.clone());
+                    pending.push((next.clone(), at.to_string(), false, exempt));
+                }
+                for next in self.propagating.get(member).into_iter().flatten() {
+                    pending.push((next.clone(), at.to_string(), carried, Some(own.clone())));
+                }
+            }
+            let cube = dep.cube();
+            for next in self.cube_opaque.get(cube).into_iter().flatten() {
+                let at = inside.map_or(cube, |(at, _)| at);
+                pending.push((next.clone(), at.to_string(), false, None));
+            }
+        };
+
+        let outer: BTreeSet<Dep> = names.iter().flat_map(|name| self.closure(name)).collect();
+        for dep in &outer {
+            edges(dep, None, &mut pending);
+        }
+        let mut reads = BTreeSet::new();
+        let mut seen = HashSet::new();
+        while let Some((dep, inside, propagates, exempt)) = pending.pop() {
+            if !seen.insert((dep.clone(), inside.clone(), propagates, exempt.clone())) {
+                continue;
+            }
+            for reached in self.expand(BTreeSet::from([dep])) {
+                let cube = reached.cube().to_string();
+                if exempt.as_deref() != Some(cube.as_str()) {
+                    reads.insert(OpaqueRead {
+                        cube,
+                        inside: inside.clone(),
+                        propagates,
+                    });
+                }
+                edges(&reached, Some((&inside, propagates)), &mut pending);
+            }
+        }
+        // Read opaquely and with propagated filters: the opaque read wins.
+        let opaque: BTreeSet<String> = reads
+            .iter()
+            .filter(|read| !read.propagates)
+            .map(|read| read.cube.clone())
+            .collect();
+        reads.retain(|read| !read.propagates || !opaque.contains(&read.cube));
+        reads
+    }
+
+    /// Whether `member` is a `sub_query` dimension of a cube.
+    pub fn is_sub_query(&self, member: &str) -> bool {
+        self.sub_queries.contains(member)
+    }
+
+    /// Whether `member` (`cube.member`) is a dimension of a cube.
+    pub fn is_dimension(&self, member: &str) -> bool {
+        self.dimensions.contains(member)
+    }
+
+    /// `cubes` and every cube on a shortest join path between two of them,
+    /// joins followed both ways: the planner may join through any of them.
+    pub fn cubes_between(&self, cubes: &BTreeSet<String>) -> BTreeSet<String> {
+        let mut between = cubes.clone();
+        let from: Vec<(&str, HashMap<&str, usize>)> = cubes
+            .iter()
+            .filter(|cube| self.joins.contains_key(cube.as_str()))
+            .map(|cube| (cube.as_str(), self.join_distances(cube)))
+            .collect();
+        for (i, (_, from_a)) in from.iter().enumerate() {
+            for (b, from_b) in &from[i + 1..] {
+                let Some(&length) = from_a.get(b) else {
+                    continue;
+                };
+                for (cube, to_a) in from_a {
+                    if from_b.get(cube).is_some_and(|to_b| to_a + to_b == length) {
+                        between.insert(cube.to_string());
+                    }
+                }
+            }
+        }
+        between
+    }
+
+    /// Join hops from `from` to every cube it reaches.
+    fn join_distances<'a>(&'a self, from: &'a str) -> HashMap<&'a str, usize> {
+        let mut distance = HashMap::from([(from, 0)]);
+        let mut queue = VecDeque::from([from]);
+        while let Some(cube) = queue.pop_front() {
+            let next = distance[cube] + 1;
+            for other in self.joins.get(cube).into_iter().flatten() {
+                if !distance.contains_key(other.as_str()) {
+                    distance.insert(other, next);
+                    queue.push_back(other);
+                }
+            }
+        }
+        distance
     }
 
     /// View member → cube member; cube member → itself; `None` if unknown.
@@ -320,35 +532,66 @@ impl MemberGraph {
 
     /// Every reference in any string of `value`, plus bare member paths in
     /// the fields that hold them.
-    fn references_in_value(&self, cube: &str, value: &Value, deps: &mut BTreeSet<Dep>) {
+    fn references_in_value(&self, cube: &str, value: &Value, refs: &mut Refs) {
         match value {
-            Value::String(text) => self.references_in_str(cube, text, deps),
+            Value::String(text) => self.references_in_str(cube, text, Place::Member, refs),
             Value::Array(items) => {
                 for item in items {
-                    self.references_in_value(cube, item, deps);
+                    self.references_in_value(cube, item, refs);
                 }
             }
             Value::Object(fields) => {
                 for (key, field) in fields {
                     if BARE_REFERENCE_FIELDS.contains(&key.as_str()) {
-                        self.bare_references(cube, field, deps);
+                        self.bare_references(cube, field, refs);
                     }
-                    self.references_in_value(cube, field, deps);
+                    self.references_in_value(cube, field, refs);
                 }
             }
             _ => {}
         }
     }
 
-    fn bare_references(&self, cube: &str, value: &Value, deps: &mut BTreeSet<Dep>) {
+    fn bare_references(&self, cube: &str, value: &Value, refs: &mut Refs) {
         match value {
-            Value::String(path) => self.resolve(cube, path, deps),
+            Value::String(path) => {
+                let resolved = self.resolve(cube, path, &mut refs.deps);
+                self.place(resolved, None, Place::Member, refs);
+            }
             Value::Array(items) => {
                 for item in items {
-                    self.bare_references(cube, item, deps);
+                    self.bare_references(cube, item, refs);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Adds what a [`Resolved`] reference reads. `column` is the identifier
+    /// after `}.`, if any: after a cube it names that cube's member, as in
+    /// `{CUBE}.margin`.
+    fn place(&self, resolved: Resolved, column: Option<&str>, place: Place, refs: &mut Refs) {
+        match resolved {
+            Resolved::Done => {}
+            Resolved::Table(cube) => {
+                let mut whole = BTreeSet::new();
+                self.emit_whole(&cube, &mut whole);
+                refs.deps.extend(whole.iter().cloned());
+                refs.opaque.extend(whole);
+            }
+            Resolved::Whole { cube, own } => {
+                let mut read = BTreeSet::new();
+                let member = column
+                    .is_some_and(|column| self.emit_member(&format!("{cube}.{column}"), &mut read));
+                if !member && !own {
+                    self.emit_whole(&cube, &mut read);
+                }
+                if place == Place::CubeSql && !own {
+                    // Not joined in: the cube is read without the outer query.
+                    self.emit_whole(&cube, &mut refs.opaque);
+                }
+                refs.deps.extend(read);
+            }
         }
     }
 
@@ -356,22 +599,35 @@ impl MemberGraph {
     /// `{FILTER_PARAMS.a.b.filter((x) => `${x}`)}` both the outer text and
     /// `x` are resolved. A `{` with no `}` after it may hide anything of
     /// the cube.
-    fn references_in_str(&self, cube: &str, text: &str, deps: &mut BTreeSet<Dep>) {
+    fn references_in_str(&self, cube: &str, text: &str, place: Place, refs: &mut Refs) {
         for (start, _) in text.match_indices('{') {
             let rest = &text[start + 1..];
             if !rest.contains('}') {
-                deps.insert(Dep::Cube(cube.to_string()));
+                refs.deps.insert(Dep::Cube(cube.to_string()));
                 continue;
             }
             let end = rest.find(['{', '}']).unwrap_or(rest.len());
-            self.resolve(cube, &rest[..end], deps);
+            let resolved = self.resolve(cube, &rest[..end], &mut refs.deps);
+            // `}.identifier` right after a closing brace.
+            let column = rest[end..]
+                .strip_prefix('}')
+                .and_then(|after| after.strip_prefix('.'))
+                .map(|after| {
+                    let len = after
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .unwrap_or(after.len());
+                    &after[..len]
+                })
+                .filter(|column| !column.is_empty());
+            self.place(resolved, column, place, refs);
         }
     }
 
     /// Resolves one reference written inside `cube`, as the planner's
     /// `SymbolPath::resolve_parts` walks it. A path that cannot be placed
-    /// reads the whole cube it was walking.
-    fn resolve(&self, cube: &str, reference: &str, deps: &mut BTreeSet<Dep>) {
+    /// reads the whole cube it was walking. A path that ends on a cube is
+    /// left to the caller.
+    fn resolve(&self, cube: &str, reference: &str, deps: &mut BTreeSet<Dep>) -> Resolved {
         let reference = reference.trim();
         let head = reference
             .split(['.', '('])
@@ -383,18 +639,17 @@ impl MemberGraph {
                 if !self.filter_params(reference, deps) {
                     deps.insert(Dep::Cube(cube.to_string()));
                 }
-                return;
+                return Resolved::Done;
             }
             // Values of the request, not data of the model.
-            "SECURITY_CONTEXT" | "COMPILE_CONTEXT" => return,
+            "SECURITY_CONTEXT" | "COMPILE_CONTEXT" => return Resolved::Done,
             _ => {}
         }
 
         let parts: Vec<&str> = reference.split('.').map(str::trim).collect();
-        if matches!(parts.as_slice(), ["CUBE"] | ["TABLE"]) {
-            return;
-        }
         let mut current = cube.to_string();
+        // Still on the cube the reference is written in, by CUBE or TABLE.
+        let mut own = true;
         let mut index = 0;
         while index < parts.len() {
             let part = parts[index];
@@ -408,7 +663,7 @@ impl MemberGraph {
             });
             if takes_rest {
                 self.emit_member(&member, deps);
-                return;
+                return Resolved::Done;
             }
             if part == "CUBE" || part == "TABLE" {
                 index += 1;
@@ -416,14 +671,24 @@ impl MemberGraph {
             }
             if self.is_cube_or_view(part) {
                 current = part.to_string();
+                own = false;
                 index += 1;
                 continue;
             }
+            // The cube's SQL as a subselect, as the planner's `__sql_fn`.
+            if rest == 0 && (part == "__sql_fn" || part.starts_with("sql(")) {
+                return Resolved::Table(current);
+            }
             break;
         }
-        // Ran out on a cube name (`{customers}`, `{customers.CUBE}`) or hit
-        // something it cannot place (`{customers.sql()}`, `{CUBE.col}`).
+        if index == parts.len() {
+            // Ran out on a cube name (`{CUBE}`, `{customers}`,
+            // `{customers.CUBE}`).
+            return Resolved::Whole { cube: current, own };
+        }
+        // Hit something it cannot place (`{CUBE.col}`).
         self.emit_whole(&current, deps);
+        Resolved::Done
     }
 
     /// `Member(a.b)` for every `FILTER_PARAMS.a.b` in `reference`. False
@@ -1014,6 +1279,300 @@ views:
         assert_eq!(
             graph.closure("orders.through"),
             BTreeSet::from([member("orders.through"), member("customers.created_at")])
+        );
+    }
+
+    #[test]
+    fn a_column_after_a_cube_reference_is_its_member() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: margin
+        sql: margin
+        type: number
+      - name: double_margin
+        sql: "{CUBE}.margin * 2"
+        type: number
+      - name: by_table
+        sql: "{TABLE}.margin"
+        type: number
+      - name: by_name
+        sql: "{customers}.segment"
+        type: string
+      - name: raw
+        sql: "{CUBE}.not_a_member"
+        type: number
+"#,
+        ));
+        assert_eq!(
+            graph.closure("orders.double_margin"),
+            BTreeSet::from([member("orders.double_margin"), member("orders.margin")])
+        );
+        assert_eq!(
+            graph.closure("orders.by_table"),
+            BTreeSet::from([member("orders.by_table"), member("orders.margin")])
+        );
+        assert_eq!(
+            graph.closure("orders.by_name"),
+            BTreeSet::from([member("orders.by_name"), member("customers.segment")])
+        );
+        assert_eq!(
+            graph.closure("orders.raw"),
+            BTreeSet::from([member("orders.raw")])
+        );
+    }
+
+    fn read(cube: &str, inside: &str, propagates: bool) -> OpaqueRead {
+        OpaqueRead {
+            cube: cube.to_string(),
+            inside: inside.to_string(),
+            propagates,
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
+    const SUB_QUERY_MODEL: &str = r#"
+  - name: orders
+    sql_table: orders
+    joins:
+      - name: customers
+        sql: "{CUBE}.customer_id = {customers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+      - name: amount
+        sql: amount
+        type: number
+    measures:
+      - name: count
+        type: count
+      - name: total
+        sql: "{amount}"
+        type: sum
+"#;
+
+    #[test]
+    fn a_sub_query_dimension_reads_its_cubes_opaquely() {
+        let graph = graph(&format!(
+            "{}{}",
+            with_customers(SUB_QUERY_MODEL),
+            r#"
+  - name: buyers
+    sql_table: customers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: order_count
+        sql: "{orders.count}"
+        type: number
+        sub_query: true
+      - name: propagated_total
+        sql: "{orders.total} + {CUBE}.id"
+        type: number
+        sub_query: true
+        propagate_filters_to_sub_query: true
+      - name: plain
+        sql: "{orders.region}"
+        type: string
+"#
+        ));
+        // The member itself still depends on what it reads.
+        assert!(graph
+            .closure("buyers.order_count")
+            .contains(&member("orders.count")));
+        assert_eq!(
+            graph.opaque_reads(&names(&["buyers.order_count"])),
+            BTreeSet::from([read("orders", "buyers.order_count", false)])
+        );
+        // With propagated filters, the read is marked as such; the cube of
+        // the dimension itself is joined back by its primary key.
+        assert_eq!(
+            graph.opaque_reads(&names(&["buyers.propagated_total"])),
+            BTreeSet::from([read("orders", "buyers.propagated_total", true)])
+        );
+        assert!(graph.is_sub_query("buyers.order_count"));
+        assert!(!graph.is_sub_query("buyers.plain"));
+        // A plain reference is not opaque.
+        assert!(graph.opaque_reads(&names(&["buyers.plain"])).is_empty());
+        // Nor is a member built on a sub_query one: it reads it opaquely.
+        assert!(graph.opaque_reads(&names(&["orders.count"])).is_empty());
+    }
+
+    #[test]
+    fn cube_sql_and_sql_calls_read_opaquely() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql: "SELECT * FROM t JOIN {customers.sql()} c ON c.id = t.customer_id"
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+  - name: wrapped
+    sql: "SELECT * FROM {customers}"
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+  - name: events
+    sql_table: events
+    dimensions:
+      - name: kind
+        sql: kind
+        type: string
+      - name: biggest
+        sql: "(SELECT max(x) FROM {CUBE.__sql_fn})"
+        type: number
+      - name: other_table
+        sql: "(SELECT count(*) FROM {customers.__sql_fn})"
+        type: number
+      - name: customer_name
+        sql: "{customers}.name"
+        type: string
+"#,
+        ));
+        assert_eq!(
+            graph.opaque_reads(&names(&["orders.status"])),
+            BTreeSet::from([read("customers", "orders", false)])
+        );
+        assert_eq!(
+            graph.opaque_reads(&names(&["wrapped.status"])),
+            BTreeSet::from([read("customers", "wrapped", false)])
+        );
+        assert_eq!(
+            graph.opaque_reads(&names(&["events.biggest"])),
+            BTreeSet::from([read("events", "events.biggest", false)])
+        );
+        assert_eq!(
+            graph.opaque_reads(&names(&["events.other_table"])),
+            BTreeSet::from([read("customers", "events.other_table", false)])
+        );
+        // A bare cube in member SQL is the joined cube's alias: not opaque.
+        assert!(graph
+            .opaque_reads(&names(&["events.customer_name"]))
+            .is_empty());
+        assert!(graph.opaque_reads(&names(&["events.kind"])).is_empty());
+    }
+
+    #[test]
+    fn an_opaque_read_through_a_member_is_found() {
+        let graph = graph(&format!(
+            "{}{}",
+            with_customers(SUB_QUERY_MODEL),
+            r#"
+  - name: buyers
+    sql_table: customers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: order_count
+        sql: "{orders.count}"
+        type: number
+        sub_query: true
+      - name: doubled
+        sql: "{order_count} * 2"
+        type: number
+views:
+  - name: buyers_view
+    cubes:
+      - join_path: buyers
+        includes: [doubled]
+"#
+        ));
+        for name in ["buyers.doubled", "buyers_view.doubled"] {
+            assert_eq!(
+                graph.opaque_reads(&names(&[name])),
+                BTreeSet::from([read("orders", "buyers.order_count", false)]),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn dimensions_are_known() {
+        let graph = graph(&with_customers(SUB_QUERY_MODEL));
+        assert!(graph.is_dimension("orders.region"));
+        assert!(graph.is_dimension("customers.created_at"));
+        assert!(!graph.is_dimension("orders.count"));
+        assert!(!graph.is_dimension("orders.nope"));
+    }
+
+    #[test]
+    fn cubes_between_follow_the_shortest_join_paths() {
+        let graph = graph(
+            r#"
+cubes:
+  - name: a
+    sql_table: a
+    joins:
+      - name: b
+        sql: "{CUBE}.b_id = {b}.id"
+        relationship: many_to_one
+    measures:
+      - name: count
+        type: count
+  - name: b
+    sql_table: b
+    joins:
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    measures:
+      - name: count
+        type: count
+  - name: c
+    sql_table: c
+    measures:
+      - name: count
+        type: count
+  - name: d
+    sql_table: d
+    joins:
+      - name: a
+        sql: "{CUBE}.a_id = {a}.id"
+        relationship: many_to_one
+    measures:
+      - name: count
+        type: count
+  - name: alone
+    sql_table: alone
+    measures:
+      - name: count
+        type: count
+"#,
+        );
+        let set = |list: &[&str]| -> BTreeSet<String> {
+            list.iter().map(|cube| cube.to_string()).collect()
+        };
+        assert_eq!(
+            graph.cubes_between(&set(&["a", "c"])),
+            set(&["a", "b", "c"])
+        );
+        // Joins are followed both ways.
+        assert_eq!(
+            graph.cubes_between(&set(&["c", "d"])),
+            set(&["a", "b", "c", "d"])
+        );
+        assert_eq!(graph.cubes_between(&set(&["a"])), set(&["a"]));
+        // No path, nothing in between.
+        assert_eq!(
+            graph.cubes_between(&set(&["a", "alone"])),
+            set(&["a", "alone"])
         );
     }
 }

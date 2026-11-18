@@ -275,6 +275,9 @@ pub fn restrict_query(
         .flat_map(|name| graph.closure(name))
         .map(|dep| dep.cube().to_string())
         .collect();
+    // The planner may join through cubes the query does not name.
+    let read_cubes = graph.cubes_between(&read_cubes);
+    let opaque = graph.opaque_reads(&names);
     let direct = names.iter().any(|name| !graph.is_view(cube_of(name)));
     let views: BTreeSet<&str> = names
         .iter()
@@ -297,6 +300,26 @@ pub fn restrict_query(
                 filter.member
             )));
         };
+        // On a measure it would be a HAVING, on a segment a segment: neither
+        // keeps rows out.
+        if !graph.is_dimension(member) {
+            return Err(ApiError::forbidden(format!(
+                "Permission denied: your row filter on {} is not on a dimension",
+                filter.member
+            )));
+        }
+        // A read the injected filter does not reach. The planner propagates
+        // the outer dimension filters into a sub_query dimension that asks
+        // for it, but not those on a sub_query dimension.
+        if let Some(read) = opaque
+            .iter()
+            .find(|read| read.cube == cube && (!read.propagates || graph.is_sub_query(member)))
+        {
+            return Err(ApiError::forbidden(format!(
+                "Permission denied: your row filter on {cube} cannot be applied inside {}",
+                read.inside
+            )));
+        }
         let values = match (&filter.values, &filter.attribute) {
             (Some(values), _) if !values.is_empty() => values.clone(),
             (None, Some(attribute)) => match effective.attributes.get(attribute) {
@@ -555,13 +578,17 @@ views:
         includes: [count, status]
 "#;
 
-    fn model_graph() -> MemberGraph {
+    fn graph_of(model: &str) -> MemberGraph {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("model.yml"), MODEL).unwrap();
+        std::fs::write(dir.path().join("model.yml"), model).unwrap();
         let model = cubemodel::ModelLoader::with_context(cubemodel::TemplateContext::default())
             .load_dir_with(dir.path())
             .unwrap();
         MemberGraph::build(&model)
+    }
+
+    fn model_graph() -> MemberGraph {
+        graph_of(MODEL)
     }
 
     fn query(v: Value) -> NormalizedQuery {
@@ -840,5 +867,191 @@ views:
             restrict_query(q, &effective, &graph).unwrap().filters,
             vec![leaf("a_view.status", FilterOperator::Equals, &["open"])]
         );
+    }
+
+    const OPAQUE_MODEL: &str = r#"
+cubes:
+  - name: orders
+    sql_table: orders
+    joins:
+      - name: buyers
+        sql: "{CUBE}.buyer_id = {buyers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+      - name: big
+        sql: "{count} > 10"
+        type: boolean
+        sub_query: true
+        propagate_filters_to_sub_query: true
+    measures:
+      - name: count
+        type: count
+
+  - name: buyers
+    sql_table: buyers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: order_count
+        sql: "{orders.count}"
+        type: number
+        sub_query: true
+      - name: propagated_count
+        sql: "{orders.count}"
+        type: number
+        sub_query: true
+        propagate_filters_to_sub_query: true
+    measures:
+      - name: count
+        type: count
+
+  - name: wrapped
+    sql: "SELECT * FROM {orders.sql()}"
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+"#;
+
+    #[test]
+    fn a_row_filter_that_cannot_reach_inside_a_read_is_refused() {
+        let graph = graph_of(OPAQUE_MODEL);
+        let effective = filtering(
+            vec![filter("orders.region", Some("region"), None)],
+            &[("region", &["Sul"])],
+        );
+        for (q, inside) in [
+            (
+                json!({ "dimensions": ["buyers.order_count"] }),
+                "buyers.order_count",
+            ),
+            // Naming the cube directly does not filter the subquery.
+            (
+                json!({ "measures": ["orders.count"], "dimensions": ["buyers.order_count"] }),
+                "buyers.order_count",
+            ),
+            (json!({ "measures": ["wrapped.count"] }), "wrapped"),
+        ] {
+            assert_eq!(
+                refused(restrict_query(query(q.clone()), &effective, &graph)),
+                format!("Permission denied: your row filter on orders cannot be applied inside {inside}"),
+                "{q}"
+            );
+        }
+        // Filters propagated into the subquery carry the injected one.
+        let q = query(json!({ "dimensions": ["buyers.propagated_count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("orders.region", FilterOperator::Equals, &["Sul"])]
+        );
+        // The subquery's own cube is joined back by its primary key.
+        let effective = filtering(vec![filter("buyers.name", None, Some(vec!["x"]))], &[]);
+        let q = query(json!({ "dimensions": ["buyers.order_count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("buyers.name", FilterOperator::Equals, &["x"])]
+        );
+    }
+
+    #[test]
+    fn a_row_filter_on_a_sub_query_dimension_is_not_propagated() {
+        // The planner leaves filters on sub_query dimensions out of the
+        // filters it propagates.
+        let graph = graph_of(OPAQUE_MODEL);
+        let effective = filtering(vec![filter("orders.big", None, Some(vec!["true"]))], &[]);
+        let q = query(json!({ "dimensions": ["buyers.propagated_count"] }));
+        assert_eq!(
+            refused(restrict_query(q, &effective, &graph)),
+            "Permission denied: your row filter on orders cannot be applied inside buyers.propagated_count"
+        );
+    }
+
+    #[test]
+    fn a_row_filter_must_be_on_a_dimension() {
+        let graph = model_graph();
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        for member in ["a_orders.count", "a_orders.open"] {
+            let effective = filtering(vec![filter(member, None, Some(vec!["1"]))], &[]);
+            assert_eq!(
+                refused(restrict_query(q.clone(), &effective, &graph)),
+                format!("Permission denied: your row filter on {member} is not on a dimension")
+            );
+        }
+        // Named through a view, it is the source member that counts.
+        let effective = filtering(vec![filter("a_view.count", None, Some(vec!["1"]))], &[]);
+        assert_eq!(
+            refused(restrict_query(q, &effective, &graph)),
+            "Permission denied: your row filter on a_view.count is not on a dimension"
+        );
+    }
+
+    #[test]
+    fn cubes_joined_through_are_filtered() {
+        let graph = graph_of(
+            r#"
+cubes:
+  - name: a
+    sql_table: a
+    joins:
+      - name: b
+        sql: "{CUBE}.b_id = {b}.id"
+        relationship: many_to_one
+    measures:
+      - name: count
+        type: count
+  - name: b
+    sql_table: b
+    joins:
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: c
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+"#,
+        );
+        let effective = filtering(vec![filter("b.region", None, Some(vec!["Sul"]))], &[]);
+        let q = query(json!({ "measures": ["a.count"], "dimensions": ["c.name"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("b.region", FilterOperator::Equals, &["Sul"])]
+        );
+        // A query of one cube joins nothing.
+        let q = query(json!({ "measures": ["a.count"] }));
+        assert!(restrict_query(q, &effective, &graph)
+            .unwrap()
+            .filters
+            .is_empty());
     }
 }
