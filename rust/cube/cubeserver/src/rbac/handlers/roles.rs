@@ -8,6 +8,8 @@
 //! the access of every rule that uses it at once. The organization's admins
 //! manage its roles; anyone who views the organization lists them.
 
+use std::collections::BTreeSet;
+
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -20,6 +22,7 @@ use super::organizations::visible_organization;
 use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
+use crate::rbac::restrictions::Restrictions;
 use crate::rbac::store::{Role, StoreError};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
@@ -52,6 +55,7 @@ const MAX_NAME: usize = 100;
 pub struct NewRole {
     name: String,
     permissions: Vec<String>,
+    restrictions: Option<Restrictions>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +63,7 @@ pub struct NewRole {
 pub struct RolePatch {
     name: Option<String>,
     permissions: Option<Vec<String>>,
+    restrictions: Option<Restrictions>,
 }
 
 pub(crate) fn role_ref(id: Uuid) -> ObjectRef {
@@ -145,6 +150,7 @@ fn view(role: &Role, rules: i64) -> Value {
         "organizationId": role.organization_id,
         "name": role.name,
         "permissions": role.permissions,
+        "restrictions": role.restrictions,
         "rules": rules,
         "createdAt": role.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "createdBy": role.created_by,
@@ -206,7 +212,7 @@ pub async fn list(
     Ok(Json(json!({ "roles": roles })))
 }
 
-/// `{name, permissions}` → 201: `admin` on the organization.
+/// `{name, permissions, restrictions?}` → 201: `admin` on the organization.
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -218,6 +224,7 @@ pub async fn create(
     let request = body(request)?;
     let name = role_name(&request.name)?;
     let permissions = normalize(&request.permissions)?;
+    let restrictions = request.restrictions.unwrap_or_default().validated()?;
 
     let tx = rbac
         .store
@@ -225,7 +232,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let role = tx
-        .create_role(org.id, &name, &permissions, user)
+        .create_role(org.id, &name, &permissions, &restrictions, user)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     rbac.authz
@@ -249,7 +256,7 @@ pub async fn get(
     Ok(Json(view(&role, rules)))
 }
 
-/// `{name?, permissions?}`: `admin` on the organization. New permissions
+/// `{name?, permissions?, restrictions?}`: `admin` on the organization. New permissions
 /// reach every rule with the role at once.
 pub async fn update(
     State(state): State<AppState>,
@@ -267,6 +274,10 @@ pub async fn update(
     let permissions = match &patch.permissions {
         Some(p) => normalize(p)?,
         None => role.permissions.clone(),
+    };
+    let restrictions = match patch.restrictions {
+        Some(r) => r.validated()?,
+        None => role.restrictions.clone(),
     };
 
     let mut updates: Vec<Update> = wildcard_grants(role.id, &role.permissions)
@@ -292,7 +303,7 @@ pub async fn update(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let updated = tx
-        .update_role(role.id, &name, &permissions)
+        .update_role(role.id, &name, &permissions, &restrictions)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?
         .ok_or_else(not_found)?;
@@ -348,9 +359,117 @@ pub(crate) async fn forget(rbac: &Rbac, role: Uuid) -> Result<(), ApiError> {
         .map_err(authz_error)
 }
 
+/// Whether every data source of a cube is among `connections`. A cube the
+/// model cannot place (no data source) belongs to no one.
+fn owned_by(of_cube: &BTreeSet<String>, connections: &BTreeSet<String>) -> bool {
+    !of_cube.is_empty() && of_cube.is_subset(connections)
+}
+
+/// The members of one cube's meta kinds, as `[{name, title}]`.
+fn meta_members(cube: &Value, kind: &str) -> Vec<Value> {
+    cube[kind]
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .map(|m| json!({ "name": m["name"], "title": m["title"] }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The meta's cubes (no views) whose data sources are all `connections`, in
+/// the shape of the route's answer. A cube the model cannot place is left out.
+fn listable_cubes(
+    meta: &Value,
+    connections: &BTreeSet<String>,
+    is_view: impl Fn(&str) -> bool,
+    data_sources_of_cube: impl Fn(&str) -> BTreeSet<String>,
+) -> Vec<Value> {
+    meta["cubes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|cube| {
+            let Some(name) = cube["name"].as_str() else {
+                return false;
+            };
+            !is_view(name) && owned_by(&data_sources_of_cube(name), connections)
+        })
+        .map(|cube| {
+            json!({
+                "name": cube["name"],
+                "title": cube["title"],
+                "measures": meta_members(cube, "measures"),
+                "dimensions": meta_members(cube, "dimensions"),
+                "segments": meta_members(cube, "segments"),
+            })
+        })
+        .collect()
+}
+
+/// → `{cubes: [{name, title, measures, dimensions, segments}]}`: the model's
+/// cubes (no views) that read only from the organization's connections, for
+/// picking the members a role filters or blocks. `admin` on the organization.
+pub async fn model_members(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(org): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (rbac, user) = caller(&state, &ctx)?;
+    let org = visible_organization(rbac, &org, "admin", user).await?;
+    let connections: BTreeSet<String> = rbac
+        .store
+        .connections_of_organization(org.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    let sources = state.query.data_sources().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The data model is not available",
+        )
+    })?;
+    let meta = state.meta.meta(&ctx, false).await?;
+    let cubes = listable_cubes(
+        &meta,
+        &connections,
+        |cube| sources.graph().is_view(cube),
+        |cube| sources.data_sources_of_cube(cube),
+    );
+    Ok(Json(json!({ "cubes": cubes })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cube_the_model_cannot_place_is_not_listed() {
+        let meta = json!({ "cubes": [
+            { "name": "mine", "title": "Mine", "measures": [{"name": "mine.count", "title": "Count"}] },
+            { "name": "theirs", "title": "Theirs" },
+            { "name": "unplaced", "title": "Unplaced" },
+            { "name": "v", "title": "V" },
+        ]});
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let listed = listable_cubes(
+            &meta,
+            &set(&["a"]),
+            |cube| cube == "v",
+            |cube| match cube {
+                "mine" | "v" => set(&["a"]),
+                "theirs" => set(&["b"]),
+                _ => set(&[]),
+            },
+        );
+        let names: Vec<&str> = listed.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["mine"]);
+        assert_eq!(listed[0]["measures"][0]["title"], "Count");
+        assert!(!owned_by(&set(&[]), &set(&[])));
+    }
 
     fn n(list: &[&str]) -> Vec<String> {
         normalize(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()

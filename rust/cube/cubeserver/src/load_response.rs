@@ -49,16 +49,26 @@ pub async fn load(
         query_type,
         queries,
         pivot_query,
+        join_check,
     } = request;
 
-    let mut results = try_join_all(queries.into_iter().map(|query| {
+    let mut results = try_join_all(queries.into_iter().enumerate().map(|(index, query)| {
         let service = service.clone();
-        let single = NormalizedRequest {
-            query_type,
-            queries: vec![query],
-            pivot_query: pivot_query.clone(),
-        };
-        async move { service.load(ctx, single).await }
+        // A check set this early (none is, today) follows its own query.
+        let join_check = join_check
+            .as_ref()
+            .map(|check| check.of_query(index).ok_or_else(ApiError::internal))
+            .transpose();
+        let pivot_query = pivot_query.clone();
+        async move {
+            let single = NormalizedRequest {
+                query_type,
+                queries: vec![query],
+                pivot_query,
+                join_check: join_check?,
+            };
+            service.load(ctx, single).await
+        }
     }))
     .await?;
 
@@ -140,9 +150,7 @@ pub fn prepare_annotation(meta: &Value, query: &Value) -> Value {
         };
 
         let with_granularity = Value::String(format!("{dimension}.{granularity}"));
-        if let Some((key, mut item)) =
-            annotation(meta, MemberType::Dimensions, &with_granularity)
-        {
+        if let Some((key, mut item)) = annotation(meta, MemberType::Dimensions, &with_granularity) {
             let granularity_meta = if PREDEFINED_GRANULARITIES.contains(&granularity) {
                 json!({
                     "name": granularity,
@@ -170,10 +178,7 @@ pub fn prepare_annotation(meta: &Value, query: &Value) -> Value {
 
         // Deprecated in Node.js but kept: the time dimension without its
         // granularity, unless it is also a plain dimension of the query.
-        if dimension_list
-            .iter()
-            .any(|d| d.as_str() == Some(dimension))
-        {
+        if dimension_list.iter().any(|d| d.as_str() == Some(dimension)) {
             continue;
         }
         if let Some((key, mut item)) = annotation(
@@ -319,7 +324,10 @@ mod tests {
             annotation["dimensions"]["orders.status"]["title"],
             json!("Orders Status")
         );
-        assert_eq!(annotation["segments"]["orders.done"]["shortTitle"], json!("Done"));
+        assert_eq!(
+            annotation["segments"]["orders.done"]["shortTitle"],
+            json!("Done")
+        );
         assert_eq!(
             annotation["timeDimensions"]["orders.created_at.month"]["granularity"],
             json!({ "name": "month", "title": "month", "interval": "1 month" })
@@ -344,7 +352,9 @@ mod tests {
             json!("3 months")
         );
         // also a plain dimension: no extra deprecated entry
-        assert!(annotation["timeDimensions"].get("orders.created_at").is_none());
+        assert!(annotation["timeDimensions"]
+            .get("orders.created_at")
+            .is_none());
     }
 
     #[test]

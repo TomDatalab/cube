@@ -144,6 +144,7 @@ impl CubeQueryExecutor for ServiceExecutor {
                     query_type,
                     queries,
                     pivot_query,
+                    join_check: None,
                 },
             )
             .await

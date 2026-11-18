@@ -519,3 +519,73 @@ fn cubestore_dialect_renders_positional_parameters() {
     assert!(planned.sql.contains('?'), "{}", planned.sql);
     assert_eq!(planned.param_strings(), vec![Some("shipped".to_string())]);
 }
+
+/// Two equally short join paths, a -> b -> d and a -> c -> d: every fresh
+/// join graph must break the tie the same way, so identical models always
+/// plan the same SQL.
+#[test]
+fn a_tied_join_path_is_chosen_the_same_way_every_time() {
+    const TIED: &str = r#"
+cubes:
+  - name: a
+    sql_table: a
+    joins:
+      - name: b
+        sql: "{CUBE}.b_id = {b}.id"
+        relationship: many_to_one
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+  - name: b
+    sql_table: b
+    joins:
+      - name: d
+        sql: "{CUBE}.d_id = {d}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: c
+    sql_table: c
+    joins:
+      - name: d
+        sql: "{CUBE}.d_id = {d}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: d
+    sql_table: d
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+"#;
+    let query = json!({ "dimensions": ["a.name", "d.name"] });
+
+    let first = plan_query(&Model::from_yaml_str(TIED).unwrap(), query.clone()).sql;
+    // Decided by cube names alone, so it is the same in every process too.
+    assert!(first.contains(r#"LEFT JOIN  c  AS "c""#), "{first}");
+    for _ in 0..64 {
+        // Each plan builds a fresh join graph, with its own HashMap seeds,
+        // from a model compiled again, as each planner worker does.
+        let model = Model::from_yaml_str(TIED).unwrap();
+        assert_eq!(plan_query(&model, query.clone()).sql, first);
+    }
+}

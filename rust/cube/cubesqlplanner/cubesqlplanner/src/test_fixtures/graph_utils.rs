@@ -20,22 +20,32 @@ use std::collections::HashMap;
 /// # Note
 ///
 /// All cube names that appear in edges must also exist as keys in the outer HashMap.
+///
+/// Nodes and edges are added in name order, not in HashMap iteration order
+/// (which is seeded per map): the search breaks ties between equally short
+/// paths by insertion order, so two graphs built from the same joins must
+/// pick the same path.
 pub fn build_petgraph_from_hashmap(
     nodes: &HashMap<String, HashMap<String, u32>>,
 ) -> (Graph<String, u32>, HashMap<String, NodeIndex>) {
     let mut graph = Graph::<String, u32>::new();
     let mut node_indices = HashMap::new();
 
+    let mut cube_names: Vec<&String> = nodes.keys().collect();
+    cube_names.sort();
+
     // First pass: Add all nodes to the graph
-    for cube_name in nodes.keys() {
-        let node_index = graph.add_node(cube_name.clone());
-        node_indices.insert(cube_name.clone(), node_index);
+    for cube_name in &cube_names {
+        let node_index = graph.add_node((*cube_name).clone());
+        node_indices.insert((*cube_name).clone(), node_index);
     }
 
     // Second pass: Add all edges
-    for (from_cube, edges) in nodes.iter() {
-        let from_index = node_indices[from_cube];
-        for (to_cube, weight) in edges.iter() {
+    for from_cube in &cube_names {
+        let from_index = node_indices[*from_cube];
+        let mut edges: Vec<(&String, &u32)> = nodes[*from_cube].iter().collect();
+        edges.sort();
+        for (to_cube, weight) in edges {
             let to_index = node_indices[to_cube];
             graph.add_edge(from_index, to_index, *weight);
         }
@@ -256,6 +266,28 @@ mod tests {
             path,
             Some(vec!["A".to_string(), "B".to_string(), "C".to_string()])
         );
+    }
+
+    #[test]
+    fn test_tied_paths_are_broken_the_same_way_in_every_graph() {
+        // A -> B -> D and A -> C -> D are equally short. Each HashMap has its
+        // own seed, so only a build that ignores iteration order picks the
+        // same one every time.
+        let build = || {
+            let mut nodes = HashMap::new();
+            nodes.insert(
+                "A".to_string(),
+                HashMap::from([("B".to_string(), 1), ("C".to_string(), 1)]),
+            );
+            nodes.insert("B".to_string(), HashMap::from([("D".to_string(), 1)]));
+            nodes.insert("C".to_string(), HashMap::from([("D".to_string(), 1)]));
+            nodes.insert("D".to_string(), HashMap::new());
+            nodes
+        };
+        let first = find_shortest_path(&build(), "A", "D");
+        for _ in 0..64 {
+            assert_eq!(find_shortest_path(&build(), "A", "D"), first);
+        }
     }
 
     #[test]

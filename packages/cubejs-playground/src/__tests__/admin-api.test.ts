@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { adminApi, assignableDataSources, withImplied } from '../pages/Admin/api';
+import {
+  adminApi, assignableDataSources, attributesFromPairs, restrictionSummary, withImplied,
+} from '../pages/Admin/api';
 
 function answer(status: number, body: unknown) {
   return Promise.resolve(new Response(body == null ? null : JSON.stringify(body), { status }));
@@ -232,5 +234,57 @@ describe('the Admin page API client', () => {
     ({ url, init } = lastCall());
     expect(url).toBe('/cube/v1/workspaces/w1/rules');
     expect(JSON.parse(init.body)).toEqual({ description: 'd', type: 't', roleId: 'r1' });
+  });
+
+  it('userAttributes and setUserAttributes call the attributes route', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, { attributes: { region: ['eu', 'us'] } }));
+    expect(await adminApi('/cube').userAttributes('bia')).toEqual({ region: ['eu', 'us'] });
+    let { url, init } = lastCall();
+    expect(url).toBe('/cube/v1/users/bia/attributes');
+    expect(init.method).toBe('GET');
+
+    fetchMock.mockReturnValueOnce(answer(200, { attributes: { region: ['eu'] } }));
+    expect(await adminApi('/cube').setUserAttributes('bia', { region: ['eu'] })).toEqual({ region: ['eu'] });
+    ({ url, init } = lastCall());
+    expect(url).toBe('/cube/v1/users/bia/attributes');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ attributes: { region: ['eu'] } });
+  });
+
+  it('modelMembers calls the organization route', async () => {
+    const cubes = [{ name: 'orders', measures: [], dimensions: [{ name: 'orders.region' }], segments: [] }];
+    fetchMock.mockReturnValueOnce(answer(200, { cubes }));
+    expect(await adminApi('/cube').modelMembers('o1')).toEqual(cubes);
+    expect(lastCall().url).toBe('/cube/v1/organizations/o1/model-members');
+  });
+
+  it('createRole sends restrictions', async () => {
+    const restrictions = {
+      rowFilters: [{ member: 'orders.region', operator: 'equals' as const, attribute: 'region' }],
+      blockedMembers: ['orders.margin'],
+    };
+    await adminApi('/cube').createRole('o1', { name: 'Analyst', permissions: ['view'], restrictions });
+    const { url, init } = lastCall();
+    expect(url).toBe('/cube/v1/organizations/o1/roles');
+    expect(JSON.parse(init.body)).toEqual({ name: 'Analyst', permissions: ['view'], restrictions });
+  });
+
+  it('summarizes restrictions', () => {
+    const f = { member: 'a.b', operator: 'equals' as const, values: ['x'] };
+    expect(restrictionSummary({ rowFilters: [f, f], blockedMembers: ['a', 'b', 'c'] })).toBe('2 filters · 3 blocked');
+    expect(restrictionSummary({ rowFilters: [f], blockedMembers: ['a'] })).toBe('1 filter · 1 blocked');
+    expect(restrictionSummary({ rowFilters: [], blockedMembers: ['a'] })).toBe('1 blocked');
+    expect(restrictionSummary({ rowFilters: [], blockedMembers: [] })).toBe('');
+  });
+
+  it('builds attributes from pairs, with own-property duplicate checks', () => {
+    const a = attributesFromPairs([
+      { name: 'constructor', values: ['x'] },
+      { name: ' toString ', values: ['y'] },
+      { name: '__proto__', values: ['z'] },
+    ]);
+    expect(JSON.parse(JSON.stringify(a))).toEqual({ constructor: ['x'], toString: ['y'], ['__proto__']: ['z'] });
+    expect(Object.keys(a)).toEqual(['constructor', 'toString', '__proto__']);
+    expect(() => attributesFromPairs([{ name: 'r', values: [] }, { name: 'r ', values: [] }])).toThrow('twice');
   });
 });

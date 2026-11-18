@@ -24,6 +24,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 
 use crate::error::ApiError;
+use crate::rbac::dependencies::MemberGraph;
 use crate::services::{NormalizedRequest, QueryService, RequestContext};
 
 /// The planned statement of one query, in a form that can cross threads.
@@ -86,6 +87,8 @@ pub struct PlannedStatement {
     /// The data source the query's cubes declare, `None` when they declare
     /// none and the query runs on the caller's default one.
     pub data_source: Option<String>,
+    /// Every cube the plan reads ([`cubeplanner::PlannedSql::cubes`]).
+    pub cubes: Vec<String>,
 }
 
 struct Job {
@@ -238,6 +241,7 @@ impl PlannerPool {
                             params: planned.param_strings(),
                             alias_name_to_member: planned.alias_name_to_member.clone(),
                             data_source,
+                            cubes: planned.cubes.clone(),
                         })
                         .map_err(PlanFailure::from_planner)
                 });
@@ -362,6 +366,58 @@ impl PlannerQueryService {
             .await
     }
 
+    /// Plans one normalized query of a request.
+    async fn plan_statement(
+        &self,
+        ctx: &RequestContext,
+        normalized: &cubequery::types::NormalizedQuery,
+    ) -> Result<PlannedStatement, ApiError> {
+        // Both shapes are the camelCase JSON of the REST API.
+        let mut value = serde_json::to_value(normalized).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode the normalized query: {e}"),
+            )
+        })?;
+
+        // `remapToQueryAdapterFormat` mirrors `limit` into `rowLimit`, but
+        // the planner treats `rowLimit` as an alias of `limit`, so sending
+        // both is a duplicate field. They hold the same value here.
+        if let Some(object) = value.as_object_mut() {
+            if object.contains_key("limit") {
+                object.remove("rowLimit");
+            }
+        }
+        let members = query_members(&value);
+        let query = PlannerQuery::from_value(value)
+            .map_err(|e| Self::api_error(PlanFailure::from_planner(e)))?;
+
+        self.pool
+            .plan(query, members, ctx.security_context.clone())
+            .await
+            .map_err(Self::api_error)
+    }
+
+    /// Plans query `index` of `request` and runs the request's
+    /// [`NormalizedRequest::join_check`] on that very statement: what is
+    /// checked is what runs or is returned.
+    pub async fn plan_query(
+        &self,
+        ctx: &RequestContext,
+        request: &NormalizedRequest,
+        index: usize,
+    ) -> Result<PlannedStatement, ApiError> {
+        let normalized = request
+            .queries
+            .get(index)
+            .ok_or_else(|| ApiError::bad_request("Query param is required"))?;
+        let statement = self.plan_statement(ctx, normalized).await?;
+        if let Some(check) = &request.join_check {
+            check.check(index, &statement.cubes)?;
+        }
+        Ok(statement)
+    }
+
     async fn plan_all(
         &self,
         ctx: &RequestContext,
@@ -369,32 +425,8 @@ impl PlannerQueryService {
     ) -> Result<Vec<PlannedQuery>, ApiError> {
         let mut planned = Vec::with_capacity(request.queries.len());
 
-        for normalized in &request.queries {
-            // Both shapes are the camelCase JSON of the REST API.
-            let mut value = serde_json::to_value(normalized).map_err(|e| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to encode the normalized query: {e}"),
-                )
-            })?;
-
-            // `remapToQueryAdapterFormat` mirrors `limit` into `rowLimit`, but
-            // the planner treats `rowLimit` as an alias of `limit`, so sending
-            // both is a duplicate field. They hold the same value here.
-            if let Some(object) = value.as_object_mut() {
-                if object.contains_key("limit") {
-                    object.remove("rowLimit");
-                }
-            }
-            let members = query_members(&value);
-            let query = PlannerQuery::from_value(value)
-                .map_err(|e| Self::api_error(PlanFailure::from_planner(e)))?;
-
-            let statement = self
-                .pool
-                .plan(query, members, ctx.security_context.clone())
-                .await
-                .map_err(Self::api_error)?;
+        for (index, normalized) in request.queries.iter().enumerate() {
+            let statement = self.plan_query(ctx, request, index).await?;
 
             planned.push(PlannedQuery {
                 sql: statement.sql,
@@ -427,6 +459,8 @@ pub struct DataSources {
     members: HashMap<String, String>,
     /// Cube name → data source, for a query that names a cube but no member.
     cubes: HashMap<String, String>,
+    /// What each member reads, for the role restrictions.
+    graph: MemberGraph,
 }
 
 impl DataSources {
@@ -451,7 +485,13 @@ impl DataSources {
         Ok(Self {
             members: cubesqlbridge::member_to_data_source(&model),
             cubes,
+            graph: MemberGraph::build(&model),
         })
+    }
+
+    /// The member dependency graph of the same model.
+    pub fn graph(&self) -> &MemberGraph {
+        &self.graph
     }
 
     /// The data source one member (`cube.member`, optionally followed by a
@@ -600,6 +640,11 @@ impl QueryService for PlannerQueryService {
         Some(self.pool.data_sources())
     }
 
+    /// `sql` and `dry_run` plan through [`Self::plan_query`].
+    fn checks_joins(&self) -> bool {
+        true
+    }
+
     async fn sql(
         &self,
         ctx: &RequestContext,
@@ -687,6 +732,15 @@ views:
     }
 
     #[test]
+    fn the_snapshot_carries_the_member_graph_of_its_model() {
+        let sources = sources();
+        assert_eq!(
+            sources.graph().source_member("activity.kind"),
+            Some("events.kind")
+        );
+    }
+
+    #[test]
     fn a_cube_without_a_data_source_runs_on_the_default_one() {
         let query = json!({ "measures": ["orders.count"], "dimensions": ["orders.status"] });
         assert_eq!(of(query).unwrap(), None);
@@ -734,6 +788,106 @@ views:
             BTreeSet::from(["default".to_string()])
         );
         assert!(sources.data_sources_of_cube("nowhere").is_empty());
+    }
+
+    /// The statement `sql` and `dry_run` return is the one the request's
+    /// join check runs on.
+    #[tokio::test]
+    async fn the_join_check_runs_on_the_statement_returned() {
+        use crate::rbac::dependencies::MemberGraph;
+        use crate::rbac::restrictions::{
+            Effective, JoinCheck, Restrictions, RowFilter, RowOperator,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("model.yml"),
+            r#"
+cubes:
+  - name: orders
+    sql_table: orders
+    joins:
+      - name: buyers
+        sql: "{CUBE}.buyer_id = {buyers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+  - name: buyers
+    sql_table: buyers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+"#,
+        )
+        .unwrap();
+        let service = PlannerQueryService::load(dir.path(), Dialect::Postgres, 1).unwrap();
+        let graph = MemberGraph::default();
+        let effective = Effective::combine(
+            [&Restrictions {
+                row_filters: vec![RowFilter {
+                    member: "buyers.region".into(),
+                    operator: RowOperator::Equals,
+                    attribute: None,
+                    values: Some(vec!["Sul".into()]),
+                }],
+                blocked_members: vec![],
+            }],
+            Default::default(),
+        );
+        let request = |dimensions: Value, covered: &[&str]| {
+            let (query_type, queries) = cubequery::get_normalized_queries(
+                &json!({ "dimensions": dimensions }),
+                false,
+                None,
+                &cubequery::QueryConfig::default(),
+            )
+            .unwrap();
+            let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+                join_check: Some(JoinCheck::new(
+                    &effective,
+                    &graph,
+                    vec![covered.iter().map(|c| c.to_string()).collect()],
+                )),
+            }
+        };
+        let ctx = RequestContext::default();
+        let joins = json!(["orders.status", "buyers.region"]);
+
+        let err = service
+            .sql(&ctx, request(joins.clone(), &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.body.error,
+            "Permission denied: your row filter on buyers could not be applied to this query"
+        );
+        let err = service
+            .dry_run(&ctx, request(joins.clone(), &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        // Covered, or not joined at all, it plans.
+        assert!(service.sql(&ctx, request(joins, &["buyers"])).await.is_ok());
+        assert!(service
+            .sql(&ctx, request(json!(["orders.status"]), &[]))
+            .await
+            .is_ok());
     }
 
     #[test]

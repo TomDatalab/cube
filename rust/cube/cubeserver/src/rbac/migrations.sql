@@ -109,3 +109,14 @@ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS rules_role_idx ON rules (role_id);
+
+-- Data restrictions of an organization role (blocked members, row filters)
+-- and the attributes of a user those filters read.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS restrictions jsonb NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS user_attributes (
+    user_id text NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    name text NOT NULL,
+    values text[] NOT NULL,
+    PRIMARY KEY (user_id, name)
+);

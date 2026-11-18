@@ -7,9 +7,13 @@ import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, OrgRole, Permission, PERMISSION_LABELS, PERMISSIONS, withImplied,
+  AdminApi, ModelCube, OrgRole, Permission, PERMISSION_LABELS, PERMISSIONS, restrictionSummary, withImplied,
 } from './api';
 import { organizationOptions, RemoteSelect } from './RemoteSelect';
+import {
+  RestrictionsFields, RestrictionsFormValues, toFormRestrictions, toRestrictions,
+} from './RestrictionsFields';
+import { useLatestCall } from './useLatestCall';
 
 type Props = {
   api: AdminApi;
@@ -26,7 +30,7 @@ const BUILTIN: { name: string; permissions: Permission[] }[] = [
   { name: 'viewer', permissions: ['view', 'query', 'read_objects'] },
 ];
 
-type FormValues = { name: string; permissions: Permission[] };
+type FormValues = { name: string; permissions: Permission[]; restrictions?: RestrictionsFormValues };
 
 function PermissionTags({ permissions }: { permissions: readonly string[] }) {
   return (
@@ -49,7 +53,10 @@ export function RolesTab({ api }: Props) {
   const [editing, setEditing] = useState<OrgRole | true | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cubes, setCubes] = useState<ModelCube[]>([]);
+  const [cubesError, setCubesError] = useState<string | null>(null);
   const [form] = Form.useForm<FormValues>();
+  const beginMembers = useLatestCall();
 
   async function load(org: string) {
     setLoading(true);
@@ -72,25 +79,56 @@ export function RolesTab({ api }: Props) {
 
   useEffect(() => {
     setRoles(null);
+    // The members of the organization left behind are not this one's.
+    beginMembers();
+    setCubes([]);
     if (organization) {
       load(organization);
     }
   }, [api, organization]);
 
+  // The members the restrictions can name; the form stays usable without them.
+  // Only the latest load counts: one for another organization may answer
+  // after it.
+  async function loadMembers(org: string) {
+    const current = beginMembers();
+    setCubes([]);
+    setCubesError(null);
+    try {
+      const loaded = await api.modelMembers(org);
+      if (isMounted() && current()) {
+        setCubes(loaded);
+      }
+    } catch (e: any) {
+      if (isMounted() && current()) {
+        setCubesError(e.message);
+      }
+    }
+  }
+
   function open(role: OrgRole | true) {
     form.resetFields();
     form.setFieldsValue(role === true
-      ? { permissions: ['view'] }
-      : { name: role.name, permissions: role.permissions });
+      ? { permissions: ['view'], restrictions: { rowFilters: [], blockedMembers: [] } }
+      : {
+        name: role.name,
+        permissions: role.permissions,
+        restrictions: toFormRestrictions(role.restrictions),
+      });
     setError(null);
     setEditing(role);
+    loadMembers(organization!);
   }
 
   async function save(values: FormValues) {
     setSaving(true);
     setError(null);
     try {
-      const role = { name: values.name.trim(), permissions: withImplied(values.permissions) };
+      const role = {
+        name: values.name.trim(),
+        permissions: withImplied(values.permissions),
+        restrictions: toRestrictions(values.restrictions),
+      };
       if (editing === true) {
         await api.createRole(organization!, role);
       } else if (editing) {
@@ -149,6 +187,11 @@ export function RolesTab({ api }: Props) {
               title: 'Permissions',
               dataIndex: 'permissions',
               render: (permissions: Permission[]) => <PermissionTags permissions={permissions} />,
+            },
+            {
+              title: 'Restrictions',
+              dataIndex: 'restrictions',
+              render: (r: OrgRole['restrictions']) => restrictionSummary(r) || <Typography.Text type="secondary">None</Typography.Text>,
             },
             {
               title: 'Rules',
@@ -215,6 +258,7 @@ export function RolesTab({ api }: Props) {
         onOk={() => form.submit()}
         okText="Save"
         confirmLoading={saving}
+        width={640}
         destroyOnClose
       >
         <Form
@@ -255,6 +299,16 @@ export function RolesTab({ api }: Props) {
               ))}
             </Checkbox.Group>
           </Form.Item>
+          {cubesError ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="Could not load the model members, so the pickers below are empty"
+              description={cubesError}
+            />
+          ) : null}
+          <RestrictionsFields cubes={cubes} />
           {editingRules ? (
             <Alert
               type="info"

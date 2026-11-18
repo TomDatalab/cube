@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use cubeauth::AuthConfig;
 use cubeserver::auth_adapter::CubeAuthService;
-use cubeserver::planner_adapter::DataSources;
+use cubeserver::planner_adapter::{DataSources, PlannerQueryService};
 use cubeserver::rbac::config::{check_rbac_compatible, RbacConfig};
 use cubeserver::rbac::enforce::WORKSPACE_REQUIRED;
 use cubeserver::rbac::identity::{hash_password, verify_password};
@@ -2558,9 +2558,26 @@ cubes:
       - name: status
         sql: status
         type: string
+      - name: region
+        sql: region
+        type: string
+      - name: margin
+        sql: margin
+        type: number
+      - name: margin_pct
+        sql: "{margin} * 100"
+        type: number
     measures:
       - name: count
         type: count
+    hierarchies:
+      - name: by_money
+        levels: [margin, region]
+      - name: by_margin
+        levels: [margin]
+    folders:
+      - name: money
+        includes: [margin, margin_pct]
 
   - name: b_orders
     data_source: b_sqlite
@@ -2605,6 +2622,12 @@ views:
       - join_path: a_orders.b_orders
         prefix: true
         includes: [status]
+
+  # a_orders without `region`.
+  - name: a_view
+    cubes:
+      - join_path: a_orders
+        includes: [count, status]
 "#;
 
 /// Answers every query with no rows and keeps what it was asked. Its
@@ -2644,6 +2667,11 @@ impl RecordingQuery {
 impl QueryService for RecordingQuery {
     fn data_sources(&self) -> Option<Arc<DataSources>> {
         Some(self.sources.clone())
+    }
+
+    /// Plans nothing, so it joins nothing: there is no statement to check.
+    fn checks_joins(&self) -> bool {
+        true
     }
 
     async fn load(
@@ -2687,6 +2715,12 @@ struct DataScenario {
 /// whose model has `a_orders` (on `a_sqlite`), `b_orders` and `b_view` (on
 /// `b_sqlite`), and a query service that records what reaches it.
 async fn data_scenario(store: Store) -> DataScenario {
+    data_scenario_on(store, DATA_MODEL, false).await
+}
+
+/// As [`data_scenario`], with the `model` given and, with `planner`, the
+/// real planner (Tesseract) behind the RBAC checks instead of the recorder.
+async fn data_scenario_on(store: Store, data_model: &str, planner: bool) -> DataScenario {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("cube.yml");
     std::fs::write(
@@ -2697,7 +2731,7 @@ async fn data_scenario(store: Store) -> DataScenario {
     std::fs::write(dir.path().join(".env"), "PORT=4000\n").unwrap();
     let model = dir.path().join("model");
     std::fs::create_dir(&model).unwrap();
-    std::fs::write(model.join("model.yml"), DATA_MODEL).unwrap();
+    std::fs::write(model.join("model.yml"), data_model).unwrap();
     let server = ServerConfig {
         config_file: Some(file),
         schema_path: model.to_string_lossy().into_owned(),
@@ -2712,7 +2746,23 @@ async fn data_scenario(store: Store) -> DataScenario {
             .expect("rbac starts"),
     );
     let mut state = state_with(Some(rbac.clone()), server);
-    state.query = queries.clone();
+    state.query = if planner {
+        Arc::new(
+            PlannerQueryService::load_with_dialects(
+                &model,
+                cubeplanner::Dialect::Postgres,
+                ["a_sqlite", "b_sqlite", "c_sqlite"]
+                    .into_iter()
+                    .map(|name| (name.to_string(), cubeplanner::Dialect::Sqlite))
+                    .collect(),
+                1,
+                cubemodel::TemplateContext::default(),
+            )
+            .expect("the model plans"),
+        )
+    } else {
+        queries.clone()
+    };
     state.meta = Arc::new(cubeserver::meta_adapter::ModelMetaService::load(&model, false).unwrap());
     let env = Env {
         router: build_app(state.clone()),
@@ -3299,7 +3349,10 @@ db_test!(meta_shows_only_released_cubes, |store| {
     let env = &d.s.env;
     assert_eq!(
         meta_cubes(env, &d.s.bia, Some(&d.w1)).await,
-        (StatusCode::OK, vec!["a_orders".to_string()])
+        (
+            StatusCode::OK,
+            vec!["a_orders".to_string(), "a_view".to_string()]
+        )
     );
     assert_eq!(
         meta_cubes(env, &d.s.ana, Some(&d.w2)).await,
@@ -3311,11 +3364,14 @@ db_test!(meta_shows_only_released_cubes, |store| {
     // Without a workspace: the connections the user can query somewhere.
     assert_eq!(
         meta_cubes(env, &d.s.bia, None).await,
-        (StatusCode::OK, vec!["a_orders".to_string()])
+        (
+            StatusCode::OK,
+            vec!["a_orders".to_string(), "a_view".to_string()]
+        )
     );
     assert_eq!(
         meta_cubes(env, &d.s.ana, None).await.1,
-        ["a_orders", "b_orders", "b_view", "mixed_view"]
+        ["a_orders", "a_view", "b_orders", "b_view", "mixed_view"]
     );
     // A workspace the user is not in shows nothing of it.
     let (status, cubes) = meta_cubes(env, &d.s.bia, Some(&d.w2)).await;
@@ -3326,6 +3382,7 @@ db_test!(meta_shows_only_released_cubes, |store| {
         meta_cubes(env, &d.s.admin, None).await.1,
         [
             "a_orders",
+            "a_view",
             "b_orders",
             "b_view",
             "c_orders",
@@ -3598,6 +3655,7 @@ db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
             query_type,
             queries,
             pivot_query,
+            join_check: None,
         }
     };
 
@@ -3609,7 +3667,7 @@ db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
         .unwrap_err();
     assert_eq!(err.status, StatusCode::FORBIDDEN);
     let cubes = meta.meta(&ctx, false).await.unwrap();
-    assert_eq!(cubes["cubes"].as_array().unwrap().len(), 1, "{cubes}");
+    assert_eq!(cubes["cubes"].as_array().unwrap().len(), 2, "{cubes}");
 
     env.authz.set_failing(true);
     let err = query
@@ -3693,6 +3751,7 @@ db_test!(
             query_type,
             queries,
             pivot_query,
+            join_check: None,
         };
 
         // Nothing runs yet: 404 for everyone.
@@ -3860,7 +3919,7 @@ db_test!(
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             meta_cubes(env, &d.s.ana, Some(&w3)).await.1,
-            ["a_orders", "b_orders", "b_view", "mixed_view"]
+            ["a_orders", "a_view", "b_orders", "b_view", "mixed_view"]
         );
     }
 );
@@ -3885,7 +3944,7 @@ db_test!(the_default_data_source_must_be_released_too, |store| {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1,
-        ["a_orders", "plain_orders"]
+        ["a_orders", "a_view", "plain_orders"]
     );
 });
 
@@ -3901,8 +3960,14 @@ db_test!(
         // c_sqlite belongs to B, but a stale relationship releases it to A's W1.
         grant_connection(env, "c_sqlite", &org_b, &[&d.w1]).await;
 
-        assert_eq!(meta_cubes(env, &d.s.bia, None).await.1, ["a_orders"]);
-        assert_eq!(meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1, ["a_orders"]);
+        assert_eq!(
+            meta_cubes(env, &d.s.bia, None).await.1,
+            ["a_orders", "a_view"]
+        );
+        assert_eq!(
+            meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1,
+            ["a_orders", "a_view"]
+        );
         // B's owner sees it.
         assert_eq!(meta_cubes(env, &dan, None).await.1, ["c_orders"]);
     }
@@ -3954,7 +4019,7 @@ db_test!(meta_extended_is_filtered_too, |store| {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["a_orders"]);
+    assert_eq!(names, ["a_orders", "a_view"]);
 });
 
 db_test!(a_query_service_without_a_snapshot_is_503, |store| {
@@ -3979,6 +4044,7 @@ db_test!(a_query_service_without_a_snapshot_is_503, |store| {
                 query_type,
                 queries,
                 pivot_query,
+                join_check: None,
             },
         )
         .await
@@ -4078,7 +4144,10 @@ db_test!(the_check_follows_the_planner_not_the_files, |store| {
     let (status, body) = sql("a_orders.count").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(sql("b_orders.count").await.0, StatusCode::FORBIDDEN);
-    assert_eq!(meta_cubes(env, &s.bia, Some(&w1)).await.1, ["a_orders"]);
+    assert_eq!(
+        meta_cubes(env, &s.bia, Some(&w1)).await.1,
+        ["a_orders", "a_view"]
+    );
 
     // After the reload both move together.
     assert!(registry.reload_all().await.is_empty());
@@ -5369,3 +5438,1538 @@ db_test!(roles_validate_and_cannot_be_deleted_while_in_use, |store| {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 });
+
+async fn set_attributes(env: &Env, token: &str, user: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/users/{user}/attributes"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn get_attributes(env: &Env, token: &str, user: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/users/{user}/attributes"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+db_test!(
+    user_attributes_are_set_and_read_by_platform_admins,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let attributes = json!({ "attributes": { "region": ["south", "north"], "team": [] } });
+        let (status, saved) = set_attributes(env, &s.admin, "bia", attributes.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved, attributes);
+        let (status, read) = get_attributes(env, &s.admin, "bia").await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read, attributes);
+
+        // The whole set is replaced.
+        let (status, saved) =
+            set_attributes(env, &s.admin, "bia", json!({ "attributes": {} })).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved, json!({ "attributes": {} }));
+
+        // Only platform admins.
+        let (status, _) = get_attributes(env, &s.ana, "bia").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = set_attributes(env, &s.ana, "bia", attributes.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown user.
+        let (status, _) = get_attributes(env, &s.admin, "nobody").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = set_attributes(env, &s.admin, "nobody", attributes).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Malformed names are refused.
+        let (status, _) = set_attributes(
+            env,
+            &s.admin,
+            "bia",
+            json!({ "attributes": { "Bad Name": ["x"] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+);
+
+db_test!(
+    role_restrictions_are_saved_validated_and_returned,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+        set_role(env, &s.ana, &w1, "bia", "viewer").await;
+        let restrictions = json!({
+            "rowFilters": [
+                { "member": "a_orders.region", "operator": "equals", "attribute": "region" },
+                { "member": "a_orders.status", "operator": "notEquals", "values": ["internal"] }
+            ],
+            "blockedMembers": ["a_customers.cpf", "a_orders.margin"]
+        });
+        let (status, role) = create_role(
+            env,
+            &s.ana,
+            &s.org_a,
+            json!({ "name": "R", "permissions": ["view"], "restrictions": restrictions }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{role}");
+        assert_eq!(role["restrictions"], restrictions);
+        let id = role["id"].as_str().unwrap().to_string();
+
+        // Without `restrictions`, a patch keeps them.
+        let (status, patched) = patch_role(env, &s.ana, &id, json!({ "name": "R2" })).await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(patched["restrictions"], restrictions);
+
+        let (status, patched) = patch_role(
+            env,
+            &s.ana,
+            &id,
+            json!({ "restrictions": { "blockedMembers": ["a_orders.status"] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(
+            patched["restrictions"],
+            json!({ "rowFilters": [], "blockedMembers": ["a_orders.status"] })
+        );
+        let (status, got) = send(
+            &env.router,
+            Method::GET,
+            &format!("/cube/v1/roles/{id}"),
+            Some(&s.ana),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["restrictions"], patched["restrictions"]);
+
+        // A role without restrictions answers both keys, empty.
+        let (_, plain) = create_role(
+            env,
+            &s.ana,
+            &s.org_a,
+            json!({ "name": "Plain", "permissions": ["view"] }),
+        )
+        .await;
+        assert_eq!(
+            plain["restrictions"],
+            json!({ "rowFilters": [], "blockedMembers": [] })
+        );
+
+        let (status, answer) = patch_role(
+        env,
+        &s.ana,
+        &id,
+        json!({ "restrictions": { "rowFilters": [{ "member": "a_orders.status", "operator": "equals" }] } }),
+    )
+    .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+
+        let (status, _) = patch_role(
+            env,
+            &s.bia,
+            &id,
+            json!({ "restrictions": { "blockedMembers": [] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+);
+
+// ---- role restrictions on queries ----
+
+/// A role of organization A with `restrictions`, on a rule in `ws` whose
+/// only member is `user`.
+async fn restricted_rule(d: &DataScenario, ws: &str, user: &str, restrictions: Value) -> String {
+    let env = &d.s.env;
+    let (status, role) = create_role(
+        env,
+        &d.s.ana,
+        &d.s.org_a,
+        json!({ "name": "Restricted", "permissions": ["view", "query"], "restrictions": restrictions }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{role}");
+    let (status, rule) = create_rule(
+        env,
+        &d.s.ana,
+        ws,
+        json!({ "description": "Restricted", "type": "t", "roleId": role["id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rule}");
+    let rule = rule["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        rule_member(env, &d.s.ana, Method::PUT, &rule, user).await,
+        StatusCode::OK
+    );
+    rule
+}
+
+fn by_region() -> Value {
+    json!({
+        "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "attribute": "region" }],
+        "blockedMembers": ["a_orders.margin"]
+    })
+}
+
+fn region_leaf(values: &[&str]) -> Value {
+    json!({ "member": "a_orders.region", "operator": "equals", "values": values })
+}
+
+/// The filters of the last query that reached the planner.
+fn last_filters(d: &DataScenario) -> Value {
+    d.queries.seen().last().unwrap()["filters"].clone()
+}
+
+db_test!(
+    a_restricted_role_filters_the_rows_that_reach_the_planner,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        restricted_rule(&d, &d.w1, "bia", by_region()).await;
+        let (status, _) = set_attributes(
+            env,
+            &d.s.admin,
+            "bia",
+            json!({ "attributes": { "region": ["Sul"] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = load_in(
+            env,
+            &d.s.bia,
+            Some(&d.w1),
+            json!({
+                "measures": ["a_orders.count"],
+                "filters": [{ "member": "a_orders.status", "operator": "equals", "values": ["x"] }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            last_filters(&d),
+            json!([
+                { "member": "a_orders.status", "operator": "equals", "values": ["x"] },
+                region_leaf(&["Sul"])
+            ])
+        );
+
+        // Without the attribute, nothing runs.
+        set_attributes(env, &d.s.admin, "bia", json!({ "attributes": {} })).await;
+        let before = d.queries.seen().len();
+        let (status, body) = load_in(
+            env,
+            &d.s.bia,
+            Some(&d.w1),
+            json!({ "measures": ["a_orders.count"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["error"],
+            "Permission denied: you have no region attribute, which a_orders needs"
+        );
+        assert_eq!(d.queries.seen().len(), before);
+    }
+);
+
+db_test!(a_restricted_role_blocks_members, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.margin"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["error"],
+        "Permission denied: a_orders.margin is not available to you"
+    );
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "dimensions": ["a_orders.margin_pct"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["error"],
+        "Permission denied: a_orders.margin_pct depends on a_orders.margin, which is not available to you"
+    );
+    assert!(d.queries.seen().is_empty());
+});
+
+db_test!(restrictions_apply_even_with_an_unrestricted_role, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    // bia is also a `viewer` of W1 (from `data_scenario`): rule B.
+    restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([region_leaf(&["Sul"])]));
+    // caio, an editor without the restricted rule, is not filtered.
+    let (status, body) = load_in(
+        env,
+        &d.s.caio,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+});
+
+db_test!(platform_admins_are_not_restricted, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(&d, &d.w1, ADMIN, by_region()).await;
+    let query = json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.margin"] });
+    let (status, body) = load_in(env, &d.s.admin, Some(&d.w1), query).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+});
+
+db_test!(restrictions_stay_in_their_workspace, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(
+        &d,
+        &d.w1,
+        "bia",
+        json!({
+            "rowFilters": [{ "member": "b_orders.status", "operator": "equals", "values": ["open"] }],
+            "blockedMembers": ["b_orders.id"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        set_role(env, &d.s.ana, &d.w2, "bia", "viewer").await,
+        StatusCode::OK
+    );
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w2),
+        json!({ "measures": ["b_orders.count"], "dimensions": ["b_orders.id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+});
+
+db_test!(
+    changing_attributes_takes_effect_on_the_next_query,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        restricted_rule(&d, &d.w1, "bia", by_region()).await;
+        let query = json!({ "measures": ["a_orders.count"] });
+        set_attributes(
+            env,
+            &d.s.admin,
+            "bia",
+            json!({ "attributes": { "region": ["Sul"] } }),
+        )
+        .await;
+        let (status, _) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last_filters(&d), json!([region_leaf(&["Sul"])]));
+        set_attributes(
+            env,
+            &d.s.admin,
+            "bia",
+            json!({ "attributes": { "region": ["Norte"] } }),
+        )
+        .await;
+        let (status, _) = load_in(env, &d.s.bia, Some(&d.w1), query).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last_filters(&d), json!([region_leaf(&["Norte"])]));
+    }
+);
+
+db_test!(restrictions_apply_on_sql_and_dry_run, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    for path in ["/cube/v1/sql", "/cube/v1/dry-run"] {
+        let before = d.queries.seen().len();
+        let answer = call(
+            &env.router,
+            Method::POST,
+            path,
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": { "measures": ["a_orders.count"] } })),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "{path} {}", answer.json());
+        assert_eq!(d.queries.seen().len(), before + 1, "{path}");
+        assert_eq!(last_filters(&d), json!([region_leaf(&["Sul"])]), "{path}");
+        let answer = call(
+            &env.router,
+            Method::POST,
+            path,
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": { "dimensions": ["a_orders.margin"] } })),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(d.queries.seen().len(), before + 1, "{path}");
+    }
+});
+
+db_test!(a_rule_missing_from_the_store_is_503, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let rule = restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    // The row goes, SpiceDB keeps the rule: its restrictions are unknown.
+    assert!(env
+        .rbac
+        .store
+        .delete_rule(rule.parse().unwrap())
+        .await
+        .unwrap());
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(d.queries.seen().is_empty());
+});
+
+/// Drops the row of `rule` from the store, as a failed cleanup would leave
+/// it: SpiceDB keeps `rule#member`.
+async fn orphan(env: &Env, rule: &str) {
+    assert!(env
+        .rbac
+        .store
+        .delete_rule(rule.parse().unwrap())
+        .await
+        .unwrap());
+}
+
+async fn meta_status(env: &Env, token: &str, workspace: Option<&str>) -> (StatusCode, Value) {
+    let headers: Vec<(&str, &str)> = workspace
+        .map(|ws| vec![("x-cube-workspace", ws)])
+        .unwrap_or_default();
+    let answer = call(
+        &env.router,
+        Method::GET,
+        "/cube/v1/meta",
+        Some(token),
+        &headers,
+        None,
+    )
+    .await;
+    (answer.status, answer.json())
+}
+
+db_test!(an_orphan_rule_no_workspace_places_is_ignored, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let rule = restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    orphan(env, &rule).await;
+    // Nothing places it any more: it grants nothing, so it restricts nothing.
+    env.authz
+        .delete_matching(&RelationshipFilter {
+            kind: "workspace",
+            id: None,
+            relation: None,
+            subject: Some(ObjectRef::new("rule", rule.clone())),
+        })
+        .await
+        .unwrap();
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+    let (status, body) = meta_status(env, &d.s.bia, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(an_orphan_rule_placed_elsewhere_holds_only_there, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let rule = restricted_rule(&d, &d.w2, "bia", by_region()).await;
+    orphan(env, &rule).await;
+    // Placed in W2: a query in W1 is not its business.
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The meta of every workspace includes W2's.
+    let (status, body) = meta_status(env, &d.s.bia, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = meta_status(env, &d.s.bia, Some(&d.w1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(a_rule_member_that_is_not_a_uuid_is_503, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    env.authz
+        .touch(&[Relationship {
+            resource: ObjectRef::new("rule", "not-a-uuid"),
+            relation: "member",
+            subject: ObjectRef::new("user", "bia"),
+        }])
+        .await
+        .unwrap();
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(d.queries.seen().is_empty());
+});
+
+// ---- restrictions through the real planner ----
+
+const PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_orders
+    data_source: a_sqlite
+    sql_table: orders
+    joins:
+      - name: a_buyers
+        sql: "{CUBE}.buyer_id = {a_buyers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+      - name: status
+        sql: status
+        type: string
+      - name: buyer_orders
+        sql: "{a_buyers.count}"
+        type: number
+        sub_query: true
+      # Reaches a sub_query dimension one level down.
+      - name: size
+        sql: "CASE WHEN {buyer_orders} > 1 THEN 'big' ELSE 'small' END"
+        type: string
+    measures:
+      - name: count
+        type: count
+
+  - name: a_buyers
+    data_source: a_sqlite
+    sql_table: buyers
+    measures:
+      - name: count
+        type: count
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: order_count
+        sql: "{a_orders.count}"
+        type: number
+        sub_query: true
+      - name: propagated_count
+        sql: "{a_orders.count}"
+        type: number
+        sub_query: true
+        propagate_filters_to_sub_query: true
+
+views:
+  # Exposes the filtered member.
+  - name: regional
+    cubes:
+      - join_path: a_orders
+        includes: [count, region]
+
+  # Reads a_orders only to join through it to a_buyers.
+  - name: buyers_by_order
+    cubes:
+      - join_path: a_orders.a_buyers
+        includes: [name]
+"#;
+
+/// The SQL the real planner generates for `query` as bia in W1, and its
+/// parameters.
+async fn planned_sql(d: &DataScenario, query: Value) -> (StatusCode, String, Value) {
+    let answer = call(
+        &d.s.env.router,
+        Method::POST,
+        "/cube/v1/sql",
+        Some(&d.s.bia),
+        &[("x-cube-workspace", &d.w1)],
+        Some(json!({ "query": query })),
+    )
+    .await;
+    let body = answer.json();
+    let sql = body["sql"]["sql"][0]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    (answer.status, sql, body)
+}
+
+/// bia, in W1, may read only the Sul rows of a_orders.
+async fn planner_scenario(store: Store) -> DataScenario {
+    let d = data_scenario_on(store, PLANNER_MODEL, true).await;
+    restricted_rule(
+        &d,
+        &d.w1,
+        "bia",
+        json!({
+            "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "attribute": "region" }]
+        }),
+    )
+    .await;
+    let (status, _) = set_attributes(
+        &d.s.env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    d
+}
+
+/// The planned SQL filters `region` by the Sul parameter.
+fn filters_by_region(sql: &str, body: &Value) {
+    assert!(
+        sql.contains("\"region\"") || sql.contains(".region"),
+        "{sql}"
+    );
+    assert!(sql.to_lowercase().contains("where"), "{sql}");
+    assert_eq!(body["sql"]["sql"][1], json!(["Sul"]), "{body}");
+}
+
+db_test!(the_planner_applies_a_row_filter_on_a_cube, |store| {
+    let d = planner_scenario(store).await;
+    let (status, sql, body) = planned_sql(
+        &d,
+        json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.status"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    filters_by_region(&sql, &body);
+});
+
+db_test!(
+    the_planner_applies_a_row_filter_through_a_view_that_exposes_it,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, sql, body) = planned_sql(&d, json!({ "measures": ["regional.count"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        filters_by_region(&sql, &body);
+    }
+);
+
+db_test!(
+    the_planner_applies_a_row_filter_on_a_cube_a_view_joins_through,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, sql, body) =
+            planned_sql(&d, json!({ "dimensions": ["buyers_by_order.name"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        filters_by_region(&sql, &body);
+        assert!(sql.contains("orders"), "{sql}");
+    }
+);
+
+db_test!(
+    the_planner_propagates_a_row_filter_into_a_sub_query_that_asks_for_it,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, sql, body) =
+            planned_sql(&d, json!({ "dimensions": ["a_buyers.propagated_count"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Once in the subquery, once outside it.
+        let subquery = sql
+            .split("LEFT JOIN (")
+            .nth(1)
+            .and_then(|rest| rest.split(") AS").next())
+            .unwrap_or_else(|| panic!("no subquery in {sql}"));
+        assert!(subquery.contains("\"a_orders\".region = ?"), "{sql}");
+        assert_eq!(sql.matches("region = ?").count(), 2, "{sql}");
+        assert_eq!(body["sql"]["sql"][1], json!(["Sul", "Sul"]), "{body}");
+    }
+);
+
+db_test!(
+    the_planner_never_sees_a_row_filter_it_cannot_apply_in_a_sub_query,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, _, body) =
+            planned_sql(&d, json!({ "dimensions": ["a_buyers.order_count"] })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["error"],
+            "Permission denied: your row filter on a_orders cannot be applied inside a_buyers.order_count"
+        );
+        // Without the restriction the same query plans: the refusal is ours.
+        let answer = call(
+            &d.s.env.router,
+            Method::POST,
+            "/cube/v1/sql",
+            Some(&d.s.caio),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": { "dimensions": ["a_buyers.order_count"] } })),
+        )
+        .await;
+        let body = answer.json();
+        assert_eq!(answer.status, StatusCode::OK, "{body}");
+        assert!(body["sql"]["sql"][0].is_string(), "{body}");
+    }
+);
+
+db_test!(
+    the_planner_never_sees_a_row_filter_that_reaches_a_sub_query_dimension,
+    |store| {
+        let d = data_scenario_on(store, PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [{ "member": "a_orders.size", "operator": "equals", "values": ["small"] }]
+            }),
+        )
+        .await;
+        // The planner would leave the filter out of the propagated ones.
+        let (status, sql, body) =
+            planned_sql(&d, json!({ "dimensions": ["a_buyers.propagated_count"] })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{sql}");
+        assert_eq!(
+            body["error"],
+            "Permission denied: your row filter on a_orders cannot be applied inside a_buyers.propagated_count"
+        );
+    }
+);
+
+/// D→A, D→C and A→X→Y→C: the planner joins A to C through X and Y,
+/// though D is fewer hops away either way.
+const DIRECTED_PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_d
+    data_source: a_sqlite
+    sql_table: d
+    joins:
+      - name: a_a
+        sql: "{CUBE}.a_id = {a_a}.id"
+        relationship: many_to_one
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a_a
+    data_source: a_sqlite
+    sql_table: a
+    joins:
+      - name: a_x
+        sql: "{CUBE}.x_id = {a_x}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+  - name: a_x
+    data_source: a_sqlite
+    sql_table: x
+    joins:
+      - name: a_y
+        sql: "{CUBE}.y_id = {a_y}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_y
+    data_source: a_sqlite
+    sql_table: y
+    joins:
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_c
+    data_source: a_sqlite
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+"#;
+
+db_test!(
+    the_planner_filters_the_cubes_its_directed_join_goes_through,
+    |store| {
+        let d = data_scenario_on(store, DIRECTED_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_x.region", "operator": "equals", "values": ["Sul"] },
+                    { "member": "a_y.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(
+            &d,
+            json!({ "measures": ["a_a.count"], "dimensions": ["a_c.name"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The planner really joins through X and Y, not D.
+        assert!(sql.contains("AS \"a_x\" ON"), "{sql}");
+        assert!(sql.contains("AS \"a_y\" ON"), "{sql}");
+        assert!(!sql.contains("\"a_d\""), "{sql}");
+        assert!(sql.contains("\"a_x\".region = ?"), "{sql}");
+        assert!(sql.contains("\"a_y\".region = ?"), "{sql}");
+        assert_eq!(body["sql"]["sql"][1], json!(["Sul", "Norte"]), "{body}");
+    }
+);
+
+/// A→P→Q→X→B, X→Z→A, B→W→A: a filter on X makes the planner root the
+/// join at X, which joins Z.
+const LOOP_PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_a
+    data_source: a_sqlite
+    sql_table: a
+    joins:
+      - name: a_p
+        sql: "{CUBE}.p_id = {a_p}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+  - name: a_p
+    data_source: a_sqlite
+    sql_table: p
+    joins:
+      - name: a_q
+        sql: "{CUBE}.q_id = {a_q}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a_q
+    data_source: a_sqlite
+    sql_table: q
+    joins:
+      - name: a_x
+        sql: "{CUBE}.x_id = {a_x}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a_x
+    data_source: a_sqlite
+    sql_table: x
+    joins:
+      - name: a_b
+        sql: "{CUBE}.b_id = {a_b}.id"
+        relationship: many_to_one
+      - name: a_z
+        sql: "{CUBE}.z_id = {a_z}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_z
+    data_source: a_sqlite
+    sql_table: z
+    joins:
+      - name: a_a
+        sql: "{CUBE}.a_id = {a_a}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_b
+    data_source: a_sqlite
+    sql_table: b
+    joins:
+      - name: a_w
+        sql: "{CUBE}.w_id = {a_w}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+  - name: a_w
+    data_source: a_sqlite
+    sql_table: w
+    joins:
+      - name: a_a
+        sql: "{CUBE}.a_id = {a_a}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+"#;
+
+db_test!(
+    the_planner_filters_the_cubes_an_injected_filter_makes_it_join,
+    |store| {
+        let d = data_scenario_on(store, LOOP_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_x.region", "operator": "equals", "values": ["Sul"] },
+                    { "member": "a_z.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(
+            &d,
+            json!({ "measures": ["a_a.count"], "dimensions": ["a_b.name"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Whatever the planner joins, every filtered cube it joins is filtered.
+        for cube in ["a_x", "a_z"] {
+            if sql.contains(&format!("AS \"{cube}\"")) {
+                assert!(sql.contains(&format!("\"{cube}\".region = ?")), "{sql}");
+            }
+        }
+        assert!(sql.contains("AS \"a_z\""), "{sql}");
+    }
+);
+
+/// The names of the `kind` members (`measures`, `dimensions`, `segments`)
+/// of `cube` in the meta (empty when the cube is not listed).
+async fn meta_members(
+    env: &Env,
+    token: &str,
+    workspace: Option<&str>,
+    cube: &str,
+    kind: &str,
+) -> Vec<String> {
+    let headers: Vec<(&str, &str)> = workspace
+        .map(|ws| vec![("x-cube-workspace", ws)])
+        .unwrap_or_default();
+    let answer = call(
+        &env.router,
+        Method::GET,
+        "/cube/v1/meta",
+        Some(token),
+        &headers,
+        None,
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let body = answer.json();
+    let mut names: Vec<String> = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == cube)
+        .flat_map(|c| c[kind].as_array().cloned().unwrap_or_default())
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+db_test!(
+    meta_hides_blocked_members_and_what_depends_on_them,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let ws = Some(d.w1.as_str());
+        let before = meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await;
+        assert!(
+            before.contains(&"a_orders.margin_pct".to_string()),
+            "{before:?}"
+        );
+        // `a_view` exposes `a_orders.status` as `a_view.status`.
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({ "blockedMembers": ["a_orders.margin", "a_orders.status"] }),
+        )
+        .await;
+        let dims = meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await;
+        assert_eq!(dims, ["a_orders.region"]);
+        assert_eq!(
+            meta_members(env, &d.s.bia, ws, "a_orders", "measures").await,
+            ["a_orders.count"]
+        );
+        assert_eq!(
+            meta_members(env, &d.s.bia, ws, "a_view", "dimensions").await,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            meta_members(env, &d.s.bia, ws, "a_view", "measures").await,
+            ["a_view.count"]
+        );
+        // No blocked name, nor one built on it, is left anywhere in the body.
+        let answer = call(
+            &env.router,
+            Method::GET,
+            "/cube/v1/meta",
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            None,
+        )
+        .await;
+        let text = String::from_utf8(answer.bytes).unwrap();
+        for name in ["a_orders.margin", "a_orders.margin_pct", "a_view.status"] {
+            assert!(!text.contains(name), "{name} leaks in {text}");
+        }
+        let meta: Value = serde_json::from_str(&text).unwrap();
+        let cube = meta["cubes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "a_orders")
+            .unwrap();
+        // The hierarchy left with a level stays; the emptied ones and the
+        // folder are gone; the drill members lose only the blocked one.
+        assert_eq!(cube["hierarchies"].as_array().unwrap().len(), 1);
+        assert_eq!(cube["hierarchies"][0]["levels"], json!(["a_orders.region"]));
+        assert_eq!(cube["folders"], json!([]));
+        assert_eq!(cube["nestedFolders"], json!([]));
+        // caio has no restricted rule: nothing is hidden.
+        assert_eq!(
+            meta_members(env, &d.s.caio, ws, "a_orders", "dimensions").await,
+            before
+        );
+    }
+);
+
+db_test!(
+    meta_without_a_workspace_hides_members_blocked_anywhere,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({ "blockedMembers": ["a_orders.margin"] }),
+        )
+        .await;
+        let dims = meta_members(env, &d.s.bia, None, "a_orders", "dimensions").await;
+        assert!(!dims.contains(&"a_orders.margin".to_string()), "{dims:?}");
+        assert!(
+            !dims.contains(&"a_orders.margin_pct".to_string()),
+            "{dims:?}"
+        );
+        assert!(dims.contains(&"a_orders.region".to_string()), "{dims:?}");
+    }
+);
+
+db_test!(row_filters_do_not_change_the_meta, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let ws = Some(d.w1.as_str());
+    let before = meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await;
+    restricted_rule(
+        &d,
+        &d.w1,
+        "bia",
+        json!({
+            "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "attribute": "region" }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await,
+        before
+    );
+});
+
+db_test!(organization_model_members_list_only_its_cubes, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let path = format!("/cube/v1/organizations/{}/model-members", d.s.org_a);
+    let answer = call(&env.router, Method::GET, &path, Some(&d.s.ana), &[], None).await;
+    assert_eq!(answer.status, StatusCode::OK, "{:?}", answer.json());
+    let body = answer.json();
+    let mut names: Vec<&str> = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a_orders", "b_orders"]);
+    let a = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "a_orders")
+        .unwrap();
+    assert!(a["measures"][0]["name"]
+        .as_str()
+        .unwrap()
+        .starts_with("a_orders."));
+    assert!(a["measures"][0]["title"].is_string(), "{a}");
+    assert!(a["dimensions"].is_array() && a["segments"].is_array());
+    // Only an admin of the organization lists them.
+    let answer = call(&env.router, Method::GET, &path, Some(&d.s.bia), &[], None).await;
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+});
+
+/// A→B→C and A→C, on `a_sqlite`. The view `a_v` reaches `a_c` through
+/// a_a.a_b.a_c, so a view member of `a_c` makes the planner join `a_b`.
+/// `a_a.via_b` reads `{a_b.a_c.name}`, which joins `a_b` too.
+const VIEW_PATH_PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_a
+    data_source: a_sqlite
+    sql_table: a
+    joins:
+      - name: a_b
+        sql: "{CUBE}.b_id = {a_b}.id"
+        relationship: many_to_one
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: label
+        sql: "{a_c.name}"
+        type: string
+      - name: via_b
+        sql: "{a_b.a_c.name}"
+        type: string
+  - name: a_b
+    data_source: a_sqlite
+    sql_table: b
+    joins:
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_c
+    data_source: a_sqlite
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: region
+        sql: region
+        type: string
+views:
+  - name: a_v
+    cubes:
+      - join_path: a_a
+        includes: [name, label]
+      - join_path: a_a.a_b.a_c
+        includes: [region]
+"#;
+
+/// Every filtered cube of `cubes` the SQL joins carries its filter.
+fn assert_filtered_where_joined(sql: &str, cubes: &[&str]) {
+    for cube in cubes {
+        if sql.contains(&format!("AS \"{cube}\"")) {
+            assert!(sql.contains(&format!("\"{cube}\".region = ?")), "{sql}");
+        }
+    }
+}
+
+db_test!(
+    the_planner_filters_the_cubes_the_view_path_of_an_injected_leaf_joins,
+    |store| {
+        let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_a.label", "operator": "equals", "values": ["x"] },
+                    { "member": "a_c.region", "operator": "equals", "values": ["Sul"] },
+                    { "member": "a_b.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(&d, json!({ "dimensions": ["a_v.name"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The view leaf on a_c.region joins a_b through the view's path.
+        assert!(sql.contains("AS \"a_b\""), "{sql}");
+        assert_filtered_where_joined(&sql, &["a_b", "a_c"]);
+    }
+);
+
+db_test!(
+    the_planner_filters_the_cubes_a_dotted_reference_joins_through,
+    |store| {
+        let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_b.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(&d, json!({ "dimensions": ["a_a.via_b"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(sql.contains("AS \"a_b\""), "{sql}");
+        assert_filtered_where_joined(&sql, &["a_b"]);
+    }
+);
+
+/// The real planner, whose plan for the guard is honest but whose plan that
+/// runs joins one more cube: two plans of the same request that differ, as
+/// a tie broken differently would make them.
+#[derive(Debug)]
+struct RunsADifferentPlan {
+    planner: PlannerQueryService,
+    extra: &'static str,
+}
+
+impl RunsADifferentPlan {
+    fn widened(&self, mut request: NormalizedRequest) -> NormalizedRequest {
+        for query in &mut request.queries {
+            query
+                .dimensions
+                .push(cubequery::types::QueryMember::Name(self.extra.to_string()));
+        }
+        request
+    }
+}
+
+#[async_trait]
+impl QueryService for RunsADifferentPlan {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        QueryService::data_sources(&self.planner)
+    }
+
+    fn checks_joins(&self) -> bool {
+        true
+    }
+
+    async fn sql(
+        &self,
+        ctx: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        self.planner.sql(ctx, self.widened(request)).await
+    }
+
+    async fn dry_run(
+        &self,
+        ctx: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        self.planner.dry_run(ctx, self.widened(request)).await
+    }
+
+    async fn load(
+        &self,
+        ctx: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        // Plans what it would run, as the orchestrated load does; running
+        // it after that is the leak.
+        self.planner
+            .plan_query(ctx, &self.widened(request), 0)
+            .await?;
+        Ok(json!({ "data": [] }))
+    }
+}
+
+db_test!(
+    the_row_filter_check_runs_on_the_plan_that_executes,
+    |store| {
+        let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_c.region", "operator": "equals", "values": ["Sul"] }
+                ]
+            }),
+        )
+        .await;
+        let model = d._dir.path().join("model");
+        let planner = PlannerQueryService::load_with_dialects(
+            &model,
+            cubeplanner::Dialect::Postgres,
+            [("a_sqlite".to_string(), cubeplanner::Dialect::Sqlite)]
+                .into_iter()
+                .collect(),
+            1,
+            cubemodel::TemplateContext::default(),
+        )
+        .unwrap();
+        let service = cubeserver::rbac::enforce::RbacQueryService::new(
+            Arc::new(RunsADifferentPlan {
+                planner,
+                extra: "a_c.name",
+            }),
+            d.s.env.rbac.clone(),
+        );
+        let ctx = |user: &str| RequestContext {
+            request_id: "req-executed-plan".into(),
+            user: Some(user.into()),
+            workspace: Some(d.w1.clone()),
+            ..RequestContext::default()
+        };
+        let request = || {
+            let value = json!({ "dimensions": ["a_a.name"] });
+            let (query_type, queries) = cubequery::get_normalized_queries(
+                &value,
+                false,
+                None,
+                &cubequery::QueryConfig::default(),
+            )
+            .unwrap();
+            let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+                join_check: None,
+            }
+        };
+        let message =
+            "Permission denied: your row filter on a_c could not be applied to this query";
+        let sql = service.sql(&ctx("bia"), request()).await;
+        assert_eq!(
+            sql.as_ref().map_err(|e| e.status),
+            Err(StatusCode::FORBIDDEN),
+            "{sql:?}"
+        );
+        assert_eq!(sql.unwrap_err().body.error, message);
+        let dry_run = service.dry_run(&ctx("bia"), request()).await;
+        assert_eq!(
+            dry_run.map_err(|e| e.status).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let load = service.load(&ctx("bia"), request()).await;
+        assert_eq!(
+            load.map_err(|e| e.status).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        // caio has no row filter: the widened query runs and joins a_c.
+        let caio = service.sql(&ctx("caio"), request()).await.unwrap();
+        assert!(caio.to_string().contains("AS \\\"a_c\\\""), "{caio}");
+    }
+);
+
+/// A query service with a snapshot that cannot say what a query joins.
+#[derive(Debug)]
+struct Unreporting {
+    sources: Arc<DataSources>,
+}
+
+#[async_trait]
+impl QueryService for Unreporting {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        Some(self.sources.clone())
+    }
+
+    async fn sql(&self, _: &RequestContext, _: NormalizedRequest) -> Result<Value, ApiError> {
+        Ok(json!({ "sql": { "sql": ["SELECT 1", []] } }))
+    }
+}
+
+db_test!(
+    a_row_filter_is_unavailable_when_the_planner_cannot_report_its_joins,
+    |store| {
+        let d = data_scenario(store).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "values": ["Sul"] }]
+            }),
+        )
+        .await;
+        let service = cubeserver::rbac::enforce::RbacQueryService::new(
+            Arc::new(Unreporting {
+                sources: d.queries.data_sources().unwrap(),
+            }),
+            d.s.env.rbac.clone(),
+        );
+        let ctx = |user: &str| RequestContext {
+            request_id: "req-unreporting".into(),
+            user: Some(user.into()),
+            workspace: Some(d.w1.clone()),
+            ..RequestContext::default()
+        };
+        let request = || {
+            let value = json!({ "measures": ["a_orders.count"] });
+            let (query_type, queries) = cubequery::get_normalized_queries(
+                &value,
+                false,
+                None,
+                &cubequery::QueryConfig::default(),
+            )
+            .unwrap();
+            let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+                join_check: None,
+            }
+        };
+        let err = service.sql(&ctx("bia"), request()).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        // No row filter, nothing to check.
+        assert!(service.sql(&ctx("caio"), request()).await.is_ok());
+    }
+);

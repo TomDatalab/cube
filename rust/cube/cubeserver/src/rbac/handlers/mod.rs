@@ -47,6 +47,10 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         )
         .route(&format!("{base}/v1/users/:id/access"), get(users::access))
         .route(
+            &format!("{base}/v1/users/:id/attributes"),
+            get(users::attributes).put(users::set_attributes),
+        )
+        .route(
             &format!("{base}/v1/users/:id/tokens"),
             post(users::issue_token),
         )
@@ -110,6 +114,10 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/organizations/:id/roles"),
             get(roles::list).post(roles::create),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/model-members"),
+            get(roles::model_members),
         )
         .route(
             &format!("{base}/v1/roles/:id"),

@@ -34,6 +34,10 @@ pub struct PlannedSql {
     /// own identity for it, `expr:<cube>.<expressionName>` — the JS map holds
     /// the expression object itself in that slot, for the same reason.
     pub alias_name_to_member: HashMap<String, String>,
+    /// Every cube the plan reads: the roots and joined cubes of its joins,
+    /// and those of its subqueries and CTEs. Views never appear, only the
+    /// cubes they resolve to.
+    pub cubes: Vec<String>,
 }
 
 impl PlannedSql {
@@ -82,12 +86,12 @@ pub fn plan(
     let query_options = query.to_options(&evaluator, &timezone.to_string(), flags)?;
 
     let properties = QueryPropertiesCompiler::new(state.clone()).build(query_options)?;
-    let (raw_sql, pre_aggregation_usages) = TopLevelPlanner::new(
+    let (raw_sql, pre_aggregation_usages, cubes) = TopLevelPlanner::new(
         properties.clone(),
         state.clone(),
         query.cubestore_support_multistage(),
     )
-    .plan()?;
+    .plan_with_cube_names()?;
 
     // A query fully covered by external pre-aggregations is read from the
     // external store, so it renders in that store's dialect.
@@ -106,6 +110,7 @@ pub fn plan(
         sql,
         params,
         alias_name_to_member: alias_name_to_member(&properties),
+        cubes,
     })
 }
 

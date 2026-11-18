@@ -23,6 +23,7 @@ use crate::error::ApiError;
 use crate::handlers::data_sources::data_source_types;
 use crate::rbac::access::{self, AccessInput};
 use crate::rbac::identity::{hash_password, user_token_claims, validate_user_id};
+use crate::rbac::restrictions::{validated_attributes, Attributes};
 use crate::rbac::store::{NewUser, StoreError, User};
 use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
 use crate::services::RequestContext;
@@ -191,6 +192,57 @@ pub async fn issue_token(
         "token": token,
         "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     })))
+}
+
+/// The user in the path, or 404.
+async fn known_user(rbac: &Rbac, id: &str) -> Result<(), ApiError> {
+    validate_user_id(id)?;
+    rbac.store
+        .user(id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .map(|_| ())
+        .ok_or_else(user_not_found)
+}
+
+/// → `{attributes: {name: [values]}}`. Platform admins only.
+pub(crate) async fn attributes(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = require_admin(&state, &ctx)?;
+    known_user(rbac, &id).await?;
+    let attributes = rbac
+        .store
+        .user_attributes(&id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    Ok(Json(json!({ "attributes": attributes })))
+}
+
+/// `{attributes: {name: [values]}}` replaces the whole set → the saved set.
+/// Platform admins only.
+pub(crate) async fn set_attributes(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    request: Result<Json<AttributesBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = require_admin(&state, &ctx)?;
+    known_user(rbac, &id).await?;
+    let attributes = validated_attributes(body(request)?.attributes)?;
+    rbac.store
+        .set_user_attributes(&id, &attributes)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    Ok(Json(json!({ "attributes": attributes })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttributesBody {
+    attributes: Attributes,
 }
 
 /// → the user's access graph (`rbac::access::build`). Platform admins only.
