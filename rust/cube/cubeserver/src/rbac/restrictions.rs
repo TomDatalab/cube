@@ -237,6 +237,38 @@ impl Effective {
     }
 }
 
+/// The cubes the planner may join for a query reading `read_cubes`, to a
+/// fixed point: the cubes on the join paths between them, and, for each
+/// row filter on one of those, what its member reads. An injected filter is
+/// a join hint the planner may root its join at, so the paths out of it
+/// count too.
+fn joined_cubes(
+    mut cubes: BTreeSet<String>,
+    effective: &Effective,
+    graph: &MemberGraph,
+) -> BTreeSet<String> {
+    loop {
+        let mut next = graph.cubes_between(&cubes);
+        for filter in &effective.row_filters {
+            let Some(member) = graph.source_member(&filter.member) else {
+                continue;
+            };
+            if next.contains(cube_of(member)) {
+                next.extend(
+                    graph
+                        .closure(member)
+                        .iter()
+                        .map(|dep| dep.cube().to_string()),
+                );
+            }
+        }
+        if next == cubes {
+            return cubes;
+        }
+        cubes = next;
+    }
+}
+
 /// Applies `effective` to one query: 403 when it names a blocked member, or
 /// one built on a blocked member; otherwise the row filters of every cube it
 /// reads are ANDed to its filters (the user's are never rewritten). A filter
@@ -275,8 +307,7 @@ pub fn restrict_query(
         .flat_map(|name| graph.closure(name))
         .map(|dep| dep.cube().to_string())
         .collect();
-    // The planner may join through cubes the query does not name.
-    let read_cubes = graph.cubes_between(&read_cubes);
+    let read_cubes = joined_cubes(read_cubes, effective, graph);
     let opaque = graph.opaque_reads(&names);
     let direct = names.iter().any(|name| !graph.is_view(cube_of(name)));
     let views: BTreeSet<&str> = names
@@ -1152,6 +1183,125 @@ cubes:
             vec![
                 leaf("x.region", FilterOperator::Equals, &["Sul"]),
                 leaf("y.region", FilterOperator::Equals, &["Norte"]),
+            ]
+        );
+    }
+
+    /// A→P→Q→X→B, X→Z→A, B→W→A: reading A and B, the shortest join runs
+    /// through X but not Z; once X's filter makes X a join hint, the
+    /// X-rooted tree (X→Z→A, X→B) is the shortest, and it joins Z.
+    const LOOP_MODEL: &str = r#"
+cubes:
+  - name: a
+    sql_table: a
+    joins:
+      - name: p
+        sql: "{CUBE}.p_id = {p}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+  - name: p
+    sql_table: p
+    joins:
+      - name: q
+        sql: "{CUBE}.q_id = {q}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: q
+    sql_table: q
+    joins:
+      - name: x
+        sql: "{CUBE}.x_id = {x}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: x
+    sql_table: x
+    joins:
+      - name: b
+        sql: "{CUBE}.b_id = {b}.id"
+        relationship: many_to_one
+      - name: z
+        sql: "{CUBE}.z_id = {z}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: z
+    sql_table: z
+    joins:
+      - name: a
+        sql: "{CUBE}.a_id = {a}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: b
+    sql_table: b
+    joins:
+      - name: w
+        sql: "{CUBE}.w_id = {w}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+  - name: w
+    sql_table: w
+    joins:
+      - name: a
+        sql: "{CUBE}.a_id = {a}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+"#;
+
+    #[test]
+    fn cubes_an_injected_filter_makes_the_planner_join_are_filtered() {
+        let graph = graph_of(LOOP_MODEL);
+        let effective = filtering(
+            vec![
+                filter("x.region", None, Some(vec!["Sul"])),
+                filter("z.region", None, Some(vec!["Norte"])),
+            ],
+            &[],
+        );
+        let q = query(json!({ "measures": ["a.count"], "dimensions": ["b.name"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![
+                leaf("x.region", FilterOperator::Equals, &["Sul"]),
+                leaf("z.region", FilterOperator::Equals, &["Norte"]),
             ]
         );
     }

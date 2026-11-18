@@ -6322,6 +6322,143 @@ db_test!(
     }
 );
 
+/// A→P→Q→X→B, X→Z→A, B→W→A: a filter on X makes the planner root the
+/// join at X, which joins Z.
+const LOOP_PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_a
+    data_source: a_sqlite
+    sql_table: a
+    joins:
+      - name: a_p
+        sql: "{CUBE}.p_id = {a_p}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+  - name: a_p
+    data_source: a_sqlite
+    sql_table: p
+    joins:
+      - name: a_q
+        sql: "{CUBE}.q_id = {a_q}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a_q
+    data_source: a_sqlite
+    sql_table: q
+    joins:
+      - name: a_x
+        sql: "{CUBE}.x_id = {a_x}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a_x
+    data_source: a_sqlite
+    sql_table: x
+    joins:
+      - name: a_b
+        sql: "{CUBE}.b_id = {a_b}.id"
+        relationship: many_to_one
+      - name: a_z
+        sql: "{CUBE}.z_id = {a_z}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_z
+    data_source: a_sqlite
+    sql_table: z
+    joins:
+      - name: a_a
+        sql: "{CUBE}.a_id = {a_a}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_b
+    data_source: a_sqlite
+    sql_table: b
+    joins:
+      - name: a_w
+        sql: "{CUBE}.w_id = {a_w}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+  - name: a_w
+    data_source: a_sqlite
+    sql_table: w
+    joins:
+      - name: a_a
+        sql: "{CUBE}.a_id = {a_a}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+"#;
+
+db_test!(
+    the_planner_filters_the_cubes_an_injected_filter_makes_it_join,
+    |store| {
+        let d = data_scenario_on(store, LOOP_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_x.region", "operator": "equals", "values": ["Sul"] },
+                    { "member": "a_z.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(
+            &d,
+            json!({ "measures": ["a_a.count"], "dimensions": ["a_b.name"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Whatever the planner joins, every filtered cube it joins is filtered.
+        for cube in ["a_x", "a_z"] {
+            if sql.contains(&format!("AS \"{cube}\"")) {
+                assert!(sql.contains(&format!("\"{cube}\".region = ?")), "{sql}");
+            }
+        }
+        assert!(sql.contains("AS \"a_z\""), "{sql}");
+    }
+);
+
 /// The names of the `kind` members (`measures`, `dimensions`, `segments`)
 /// of `cube` in the meta (empty when the cube is not listed).
 async fn meta_members(
