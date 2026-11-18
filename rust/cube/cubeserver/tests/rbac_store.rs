@@ -622,3 +622,22 @@ db_test!(deleting_a_user_deletes_their_attributes, |store, url| {
         .get(0);
     assert_eq!(left, 0);
 });
+
+db_test!(
+    moving_a_connection_changes_its_organization_and_origin,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let a = store.create_organization("a", "ann").await.unwrap();
+        let b = store.create_organization("b", "ann").await.unwrap();
+        store
+            .create_connection("x", a.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
+        assert!(store.move_connection("x", b.id).await.unwrap());
+        let row = store.connection("x").await.unwrap().unwrap();
+        assert_eq!(row.organization_id, b.id);
+        assert_eq!(row.origin, ConnectionOrigin::Assigned);
+        assert!(!store.move_connection("nope", b.id).await.unwrap());
+        assert!(store.delete_organization(a.id).await.unwrap());
+    }
+);

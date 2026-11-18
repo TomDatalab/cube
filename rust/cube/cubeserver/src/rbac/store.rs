@@ -463,6 +463,22 @@ mod q {
             > 0)
     }
 
+    /// Hands the connection to `organization_id`; it is then `assigned`
+    /// (the new organization did not create it). `true` when a row changed.
+    pub async fn move_connection(
+        c: &tokio_postgres::Client,
+        name: &str,
+        organization_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        Ok(c
+            .execute(
+                "UPDATE connections SET organization_id = $2, origin = 'assigned' WHERE name = $1",
+                &[&name, &organization_id],
+            )
+            .await?
+            > 0)
+    }
+
     pub async fn delete_connection(
         c: &tokio_postgres::Client,
         name: &str,
@@ -665,6 +681,16 @@ macro_rules! shared_creates {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
             q::delete_workspace(c, id).await
+        }
+        /// See [`q::move_connection`].
+        pub async fn move_connection(
+            &self,
+            name: &str,
+            organization_id: Uuid,
+        ) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::move_connection(c, name, organization_id).await
         }
         pub async fn delete_connection(&self, name: &str) -> Result<bool, StoreError> {
             let guard = $conn(self).await?;
