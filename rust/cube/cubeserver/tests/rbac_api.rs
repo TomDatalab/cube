@@ -5865,6 +5865,104 @@ db_test!(a_rule_missing_from_the_store_is_503, |store| {
     assert!(d.queries.seen().is_empty());
 });
 
+/// Drops the row of `rule` from the store, as a failed cleanup would leave
+/// it: SpiceDB keeps `rule#member`.
+async fn orphan(env: &Env, rule: &str) {
+    assert!(env
+        .rbac
+        .store
+        .delete_rule(rule.parse().unwrap())
+        .await
+        .unwrap());
+}
+
+async fn meta_status(env: &Env, token: &str, workspace: Option<&str>) -> (StatusCode, Value) {
+    let headers: Vec<(&str, &str)> = workspace
+        .map(|ws| vec![("x-cube-workspace", ws)])
+        .unwrap_or_default();
+    let answer = call(
+        &env.router,
+        Method::GET,
+        "/cube/v1/meta",
+        Some(token),
+        &headers,
+        None,
+    )
+    .await;
+    (answer.status, answer.json())
+}
+
+db_test!(an_orphan_rule_no_workspace_places_is_ignored, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let rule = restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    orphan(env, &rule).await;
+    // Nothing places it any more: it grants nothing, so it restricts nothing.
+    env.authz
+        .delete_matching(&RelationshipFilter {
+            kind: "workspace",
+            id: None,
+            relation: None,
+            subject: Some(ObjectRef::new("rule", rule.clone())),
+        })
+        .await
+        .unwrap();
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+    let (status, body) = meta_status(env, &d.s.bia, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(an_orphan_rule_placed_elsewhere_holds_only_there, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let rule = restricted_rule(&d, &d.w2, "bia", by_region()).await;
+    orphan(env, &rule).await;
+    // Placed in W2: a query in W1 is not its business.
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The meta of every workspace includes W2's.
+    let (status, body) = meta_status(env, &d.s.bia, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = meta_status(env, &d.s.bia, Some(&d.w1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(a_rule_member_that_is_not_a_uuid_is_503, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    env.authz
+        .touch(&[Relationship {
+            resource: ObjectRef::new("rule", "not-a-uuid"),
+            relation: "member",
+            subject: ObjectRef::new("user", "bia"),
+        }])
+        .await
+        .unwrap();
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(d.queries.seen().is_empty());
+});
+
 /// The names of the `kind` members (`measures`, `dimensions`, `segments`)
 /// of `cube` in the meta (empty when the cube is not listed).
 async fn meta_members(

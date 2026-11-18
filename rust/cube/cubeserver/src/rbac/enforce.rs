@@ -37,6 +37,7 @@ use uuid::Uuid;
 
 use super::handlers::connections::released_connections;
 use super::handlers::organizations::user_ref;
+use super::handlers::rules::rule_ref;
 use super::handlers::workspaces::workspace_ref;
 use super::restrictions::{restrict_query, Effective};
 use super::{authz_error, unauthenticated, unavailable, Rbac, RelationshipFilter};
@@ -123,13 +124,16 @@ async fn query_access(
 /// the user is a member of (`rule#member` in SpiceDB, checked against the
 /// rule rows and, with `workspace`, only that workspace's), with the user's
 /// attributes. `workspace: None` takes every rule of the user (the meta
-/// without a workspace). Never cached: a change holds on the next query.
+/// without a workspace). A rule id that is not a UUID, or a rule with no row
+/// that is still placed, is a 503 ([`check_orphans`]). Never cached: a change
+/// holds on the next query.
 async fn restrictions_of(
     rbac: &Rbac,
     user: &str,
     workspace: Option<Uuid>,
 ) -> Result<Effective, ApiError> {
-    let rule_ids: BTreeSet<Uuid> = rbac
+    let mut rule_ids = BTreeSet::new();
+    for rel in rbac
         .authz
         .read(&RelationshipFilter {
             kind: "rule",
@@ -139,9 +143,18 @@ async fn restrictions_of(
         })
         .await
         .map_err(authz_error)?
-        .iter()
-        .filter_map(|r| r.resource.id.parse().ok())
-        .collect();
+    {
+        // Rules are created with a UUID: anything else is not ours to
+        // judge, so nothing runs.
+        let Ok(id) = rel.resource.id.parse::<Uuid>() else {
+            tracing::error!(
+                "Rule {} of {user} in SpiceDB is not a UUID; refusing",
+                rel.resource.id
+            );
+            return Err(unavailable());
+        };
+        rule_ids.insert(id);
+    }
     let rule_ids: Vec<Uuid> = rule_ids.into_iter().collect();
     let store_failed = |e| {
         tracing::error!("RBAC store failed: {e}");
@@ -155,11 +168,16 @@ async fn restrictions_of(
             .await
             .map_err(store_failed)?
     };
-    // A rule SpiceDB still names may still grant access; without its row
-    // its role, and so its restrictions, are unknown: nothing runs.
+    // A rule SpiceDB still names without a row in the store: its role, and
+    // so its restrictions, are unknown.
     if rules.len() != rule_ids.len() {
-        tracing::error!("A rule of {user} in SpiceDB has no row in the RBAC store");
-        return Err(unavailable());
+        let stored: BTreeSet<Uuid> = rules.iter().map(|rule| rule.id).collect();
+        let orphans: Vec<Uuid> = rule_ids
+            .iter()
+            .filter(|id| !stored.contains(id))
+            .copied()
+            .collect();
+        check_orphans(rbac, user, workspace, &orphans).await?;
     }
     let role_ids: BTreeSet<Uuid> = rules
         .iter()
@@ -190,6 +208,42 @@ async fn restrictions_of(
         roles.iter().map(|role| &role.restrictions),
         attributes,
     ))
+}
+
+/// The workspace relations that place a rule.
+const RULE_PLACEMENTS: [&str; 4] = ["rule", "owner_rule", "editor_rule", "viewer_rule"];
+
+/// Rules in SpiceDB without a row (`orphans`): while one is still placed
+/// (in `workspace`, or with `None` in any workspace) it may grant access
+/// with restrictions nobody can read, so nothing runs (503). One placed
+/// nowhere grants nothing and is ignored.
+async fn check_orphans(
+    rbac: &Rbac,
+    user: &str,
+    workspace: Option<Uuid>,
+    orphans: &[Uuid],
+) -> Result<(), ApiError> {
+    tracing::warn!("Rules {orphans:?} of {user} are in SpiceDB with no row in the RBAC store");
+    for id in orphans {
+        let placed = rbac
+            .authz
+            .read(&RelationshipFilter {
+                kind: "workspace",
+                id: workspace.map(|ws| ws.to_string()),
+                relation: None,
+                subject: Some(rule_ref(*id)),
+            })
+            .await
+            .map_err(authz_error)?
+            .iter()
+            .any(|rel| RULE_PLACEMENTS.contains(&rel.relation));
+        if placed {
+            tracing::error!("Rule {id} of {user} has no row but is still placed; refusing");
+            return Err(unavailable());
+        }
+        tracing::warn!("Rule {id} of {user} has no row and is placed nowhere; ignored");
+    }
+    Ok(())
 }
 
 /// What `/v1/meta` may show: with a workspace, as a query; without one, the
@@ -708,6 +762,7 @@ pub async fn platform_admin_only(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn prune_cube_removes_every_mention_of_a_blocked_member() {
@@ -750,7 +805,6 @@ mod tests {
             })
         );
     }
-    use serde_json::json;
 
     fn normalized(query: Value) -> NormalizedQuery {
         let (_, mut queries) = cubequery::get_normalized_queries(
