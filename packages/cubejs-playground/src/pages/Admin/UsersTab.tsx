@@ -2,13 +2,15 @@ import {
   EditOutlined, HolderOutlined, LockOutlined, SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import {
-  Alert, Button, Col, Form, Input, message, Modal, Row, Space, Switch, Table, Tag, Tooltip, Typography,
+  Alert, Button, Col, Form, Input, message, Modal, Row, Space, Switch, Table, Tabs, Tag, Tooltip,
+  Typography,
 } from 'antd';
 import { useState } from 'react';
 
 import { AccessModal } from './access/AccessModal';
 import { AdminApi, PAGE_SIZE, User } from './api';
 import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
+import { RuleTree } from './RuleTree';
 import { useSearch } from './useSearch';
 
 type Props = {
@@ -121,7 +123,8 @@ export function UsersTab({ api, currentUser }: Props) {
             onChange: setPage,
             showSizeChanger: false,
           }}
-          // Enabled users drag onto a workspace of the tree to join it.
+          // Enabled users drag onto a workspace, or a rule, of the tree to
+          // join it.
           onRow={(user) => (user.disabled ? {} : {
             draggable: true,
             onDragStart: (e) => {
@@ -280,11 +283,20 @@ export function UsersTab({ api, currentUser }: Props) {
         <AccessModal api={api} user={accessing} onClose={() => setAccessing(null)} />
       </Col>
       <Col xs={24} xl={9}>
-        <Typography.Title level={5}>Workspaces</Typography.Title>
-        <Typography.Paragraph type="secondary">
-          Drag a user onto a workspace to add them as a viewer.
-        </Typography.Paragraph>
-        <MembershipTree api={api} />
+        <Tabs defaultActiveKey="members" size="small">
+          <Tabs.TabPane tab="Workspaces" key="members">
+            <Typography.Paragraph type="secondary">
+              Drag a user onto a workspace to add them as a viewer.
+            </Typography.Paragraph>
+            <MembershipTree api={api} />
+          </Tabs.TabPane>
+          <Tabs.TabPane tab="Rules" key="rules">
+            <Typography.Paragraph type="secondary">
+              Drag a user onto a rule to give them its role in the rule&apos;s workspace.
+            </Typography.Paragraph>
+            <RuleTree api={api} />
+          </Tabs.TabPane>
+        </Tabs>
       </Col>
     </Row>
   );

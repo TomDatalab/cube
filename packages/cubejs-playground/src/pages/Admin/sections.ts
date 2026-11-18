@@ -2,6 +2,8 @@
 export const ADMIN_SECTIONS = [
   { key: 'organizations', label: 'Organizations' },
   { key: 'workspaces', label: 'Workspaces' },
+  { key: 'roles', label: 'Roles' },
+  { key: 'rules', label: 'Rules' },
   { key: 'users', label: 'Users' },
 ] as const;
 

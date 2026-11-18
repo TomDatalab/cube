@@ -43,6 +43,71 @@ export type Role = typeof ROLES[number];
 
 export type Member = { user: string; role: Role };
 
+// The workspace permissions an organization's role can grant, in order.
+export const PERMISSIONS = [
+  'view', 'query', 'read_objects', 'write_objects', 'execute', 'manage',
+] as const;
+export type Permission = typeof PERMISSIONS[number];
+
+export const PERMISSION_LABELS: Record<Permission, string> = {
+  view: 'View the workspace',
+  query: 'Query data',
+  read_objects: 'Read objects',
+  write_objects: 'Write objects',
+  execute: 'Execute',
+  manage: 'Manage (members, rules, the workspace)',
+};
+
+// What a permission implies, as the server adds it: `manage` implies all,
+// `write_objects` implies `read_objects`, any implies `view`.
+export function withImplied(chosen: readonly string[]): Permission[] {
+  const has = (p: string) => chosen.includes(p);
+  const manage = has('manage');
+  return PERMISSIONS.filter((p) => {
+    if (p === 'view') return chosen.length > 0;
+    if (p === 'read_objects') return manage || has('read_objects') || has('write_objects');
+    return manage || has(p);
+  });
+}
+
+// A role an organization defines, with how many rules use it.
+export type OrgRole = {
+  id: string;
+  organizationId: string;
+  name: string;
+  permissions: Permission[];
+  rules: number;
+  createdAt: string;
+  createdBy: string | null;
+};
+
+// A named role in one workspace: its members hold a built-in `role`, or the
+// organization's role `roleId`, there. `type` is any label (e.g. "finance").
+export type Rule = {
+  id: string;
+  description: string;
+  type: string;
+  role: Role | null;
+  roleId: string | null;
+  roleName: string;
+  permissions: Permission[];
+  workspaceId: string;
+  workspaceName: string;
+  organizationId: string;
+  organizationName: string;
+  createdAt: string;
+  createdBy: string | null;
+};
+
+// What a rule grants: a built-in role or an organization role's id.
+export type RuleGrant = { role: Role } | { roleId: string };
+
+export type RulePatch = {
+  description?: string;
+  type?: string;
+  workspaceId?: string;
+} & Partial<{ role: Role; roleId: string }>;
+
 // A connection of an organization, with the workspaces it is released to.
 // `created` by the organization (its owners edit and delete it) or
 // `assigned` to it by a platform admin (only platform admins edit, delete or
@@ -95,6 +160,7 @@ export function adminApi(basePath: string) {
     q: string;
     page: number;
     organizationId?: string | null;
+    workspaceId?: string | null;
   }): Promise<Page<any>> {
     const query = new URLSearchParams();
     if (params.q) {
@@ -104,6 +170,9 @@ export function adminApi(basePath: string) {
     query.set('offset', String((params.page - 1) * PAGE_SIZE));
     if (params.organizationId) {
       query.set('organizationId', params.organizationId);
+    }
+    if (params.workspaceId) {
+      query.set('workspaceId', params.workspaceId);
     }
     const json = await call('GET', `/v1/${resource}?${query}`);
     return { items: json[key], total: json.total };
@@ -119,6 +188,13 @@ export function adminApi(basePath: string) {
       organizationId?: string | null;
       page: number;
     }): Promise<Page<WorkspaceListing>> => search('workspaces', 'workspaces', opts),
+
+    searchRules: (opts: {
+      q: string;
+      organizationId?: string | null;
+      workspaceId?: string | null;
+      page: number;
+    }): Promise<Page<Rule>> => search('rules', 'rules', opts),
 
     users: async (): Promise<User[]> => (await call('GET', '/v1/users')).users,
     createUser: (user: { id: string; name?: string; email?: string; password: string }) => call(
@@ -168,6 +244,41 @@ export function adminApi(basePath: string) {
     removeMember: (ws: string, user: string) => call(
       'DELETE', `/v1/workspaces/${id(ws)}/members/${id(user)}`
     ),
+
+    rulesOf: async (ws: string): Promise<Rule[]> => (
+      await call('GET', `/v1/workspaces/${id(ws)}/rules`)
+    ).rules,
+    createRule: (ws: string, rule: { description: string; type: string } & RuleGrant): Promise<Rule> => call(
+      'POST', `/v1/workspaces/${id(ws)}/rules`, rule
+    ),
+    // `workspaceId` moves the rule, with its members, to that workspace.
+    updateRule: (rule: string, patch: RulePatch): Promise<Rule> => call(
+      'PATCH', `/v1/rules/${id(rule)}`, patch
+    ),
+    deleteRule: (rule: string) => call('DELETE', `/v1/rules/${id(rule)}`),
+    ruleMembers: async (rule: string): Promise<string[]> => (
+      await call('GET', `/v1/rules/${id(rule)}/members`)
+    ).members.map((m: { user: string }) => m.user),
+    addRuleMember: (rule: string, user: string) => call(
+      'PUT', `/v1/rules/${id(rule)}/members/${id(user)}`
+    ),
+    removeRuleMember: (rule: string, user: string) => call(
+      'DELETE', `/v1/rules/${id(rule)}/members/${id(user)}`
+    ),
+
+    roles: async (org: string): Promise<OrgRole[]> => (
+      await call('GET', `/v1/organizations/${id(org)}/roles`)
+    ).roles,
+    createRole: (org: string, role: { name: string; permissions: Permission[] }): Promise<OrgRole> => call(
+      'POST', `/v1/organizations/${id(org)}/roles`, role
+    ),
+    // New permissions reach every rule with the role at once.
+    updateRole: (role: string, patch: { name?: string; permissions?: Permission[] }): Promise<OrgRole> => call(
+      'PATCH', `/v1/roles/${id(role)}`, patch
+    ),
+    // 409 while a rule uses the role.
+    deleteRole: (role: string) => call('DELETE', `/v1/roles/${id(role)}`),
+    workspace: (ws: string): Promise<Workspace> => call('GET', `/v1/workspaces/${id(ws)}`),
 
     connections: async (org: string): Promise<Connection[]> => (
       await call('GET', `/v1/organizations/${id(org)}/connections`)

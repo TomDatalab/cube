@@ -6,12 +6,15 @@ import { usePlaygroundContext, useRbac } from '../../hooks';
 import { Content, Header } from '../components/Ui';
 import { adminApi } from './api';
 import { OrganizationsTab } from './OrganizationsTab';
+import { RolesTab } from './RolesTab';
+import { RulesTab } from './RulesTab';
 import { ADMIN_SECTIONS, adminPath, adminSectionOf } from './sections';
 import { UsersTab } from './UsersTab';
 import { WorkspacesTab } from './WorkspacesTab';
 
 // With RBAC on: organizations, workspaces (with their members and connection
-// releases) and users, each at its own /admin/<section> path, listed under
+// releases), roles (what an organization's rules may grant), rules (named
+// roles in a workspace) and users, each at its own /admin/<section> path, listed under
 // Admin in the sidebar, through the management API. A section loads when
 // shown, so it sees what the others changed. Platform admins only
 // (`AdminOnly`).
@@ -56,6 +59,8 @@ export function AdminPage() {
                 onOrganizationChange={setWorkspacesOf}
               />
             ) : null}
+            {section === 'roles' ? <RolesTab api={api} /> : null}
+            {section === 'rules' ? <RulesTab api={api} /> : null}
             {section === 'users' ? (
               <UsersTab
                 api={api}
@@ -68,7 +73,7 @@ export function AdminPage() {
             type="info"
             showIcon
             message="RBAC is off"
-            description="Set CUBE_RBAC=spicedb to manage users, organizations and workspaces here."
+            description="Set CUBE_RBAC=spicedb to manage users, organizations, workspaces and rules here."
           />
         )}
       </Content>
