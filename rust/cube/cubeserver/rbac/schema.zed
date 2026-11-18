@@ -10,9 +10,11 @@ definition organization {
     relation owner: user
     // Quem tem qualquer papel em algum workspace da organização; serve para listar a organização.
     relation member: user
+    // As regras dos workspaces da organização; seus membros a enxergam.
+    relation rule: rule
 
     permission admin = owner + platform->manage
-    permission view = admin + member
+    permission view = admin + member + rule->member
     permission manage_connections = admin
 }
 
@@ -21,12 +23,45 @@ definition workspace {
     relation owner: user
     relation editor: user
     relation viewer: user
+    // Regras: os membros de cada uma têm o papel do seu tipo.
+    relation owner_rule: rule
+    relation editor_rule: rule
+    relation viewer_rule: rule
+    // Regras com uma role da organização: cada permissão vem da role.
+    relation rule: rule
 
-    permission manage = owner + organization->admin
-    permission edit = editor + manage
-    permission view = viewer + edit
-    permission query = view
-    permission execute = manage
+    permission manage = owner + owner_rule->member + rule->manage + organization->admin
+    permission edit = editor + editor_rule->member + manage
+    permission view = viewer + viewer_rule->member + rule->view + edit
+    permission query = viewer + viewer_rule->member + rule->query + edit
+    permission read_objects = viewer + viewer_rule->member + rule->read_objects + edit
+    permission write_objects = rule->write_objects + edit
+    permission execute = rule->execute + manage
+}
+
+// Uma role definida por uma organização: cada permissão concedida é
+// `role#can_<permissão>@user:*`.
+definition role {
+    relation can_view: user:*
+    relation can_query: user:*
+    relation can_read_objects: user:*
+    relation can_write_objects: user:*
+    relation can_execute: user:*
+    relation can_manage: user:*
+}
+
+// Um papel nomeado em um workspace: um papel pronto (owner_rule, editor_rule,
+// viewer_rule do workspace) ou uma role da organização (`role`).
+definition rule {
+    relation member: user
+    relation role: role
+
+    permission view = member & role->can_view
+    permission query = member & role->can_query
+    permission read_objects = member & role->can_read_objects
+    permission write_objects = member & role->can_write_objects
+    permission execute = member & role->can_execute
+    permission manage = member & role->can_manage
 }
 
 definition connection {
@@ -40,6 +75,6 @@ definition connection {
 
 definition object {
     relation workspace: workspace
-    permission read = workspace->view
-    permission write = workspace->edit
+    permission read = workspace->read_objects
+    permission write = workspace->write_objects
 }

@@ -14,10 +14,11 @@ export const QUERY_BUILDER_COLOR_TOKENS = {
   '@dimension-active-color': 'rgb(200, 212, 239)', // 87 / 0.4
   '@dimension-hover-color': 'rgb(231, 238, 255)', // 95 / 0.3
 
-  '@segment-strong-color': 'rgb(72, 41, 98)', // 35 / 0.1
-  '@segment-text-color': 'rgb(114, 83, 144)', // 50 / 0.1
-  '@segment-active-color': 'rgb(219, 206, 233)', // 87 / 0.4
-  '@segment-hover-color': 'rgb(244, 234, 255)', // 95 / 0.3
+  // the bossa-arq-dashboard teal (#19bfad) instead of violet
+  '@segment-strong-color': 'rgb(10, 82, 75)',
+  '@segment-text-color': 'rgb(16, 104, 96)',
+  '@segment-active-color': 'rgb(183, 230, 224)',
+  '@segment-hover-color': 'rgb(225, 247, 244)',
 
   '@filter-strong-color': 'rgb(95, 31, 64)', // 35 / 0.1
   '@filter-text-color': 'rgb(142, 73, 106)', // 50 / 0.1

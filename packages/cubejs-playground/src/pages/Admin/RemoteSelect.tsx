@@ -105,3 +105,10 @@ export const userOptions = (api: AdminApi) => async (q: string): Promise<Option[
 export const organizationOptions = (api: AdminApi) => async (q: string): Promise<Option[]> => (
   (await api.searchOrganizations(q, 1)).items.map((o) => ({ value: o.id, label: o.name }))
 );
+
+export const workspaceOptions = (api: AdminApi) => async (q: string): Promise<Option[]> => (
+  (await api.searchWorkspaces({ q, page: 1 })).items.map((w) => ({
+    value: w.id,
+    label: `${w.organizationName} / ${w.name}`,
+  }))
+);

@@ -95,11 +95,11 @@ describe('index.html', () => {
 
     expect(r.theme).toBe('dark');
     expect(r.first).toBe('antd-dark');
-    expect(r.dark).toContain('href="/antd.dark.min.css"');
+    expect(r.dark).toMatch(/href="\/antd\.dark\.min\.css\?v=[\w-]+"/);
     expect(r.dark).not.toContain('disabled');
-    expect(r.light).toContain('href="/antd.min.css"');
+    expect(r.light).toMatch(/href="\/antd\.min\.css\?v=[\w-]+"/);
     expect(r.light).toContain('disabled');
-    expect(r.written).toContain('html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}');
+    expect(r.written).toContain('html[data-theme="dark"]{background:#171b2c;color-scheme:dark}');
   });
 
   it('keeps the light sheet for a light preference over a dark system', () => {
@@ -126,10 +126,10 @@ describe('index.html', () => {
     const dark = document.getElementById('antd-dark') as HTMLLinkElement | null;
 
     expect(light?.parentNode).toBe(document.head);
-    expect(light?.getAttribute('href')).toBe('/antd.min.css');
+    expect(light?.getAttribute('href')).toMatch(/^\/antd\.min\.css\?v=[\w-]+$/);
     expect(light?.rel).toBe('stylesheet');
     expect(light?.hasAttribute('disabled')).toBe(false);
-    expect(dark?.getAttribute('href')).toBe('/antd.dark.min.css');
+    expect(dark?.getAttribute('href')).toMatch(/^\/antd\.dark\.min\.css\?v=[\w-]+$/);
     expect(dark?.rel).toBe('stylesheet');
     expect(dark?.hasAttribute('disabled')).toBe(true);
     // the tokens follow the sheet that is on

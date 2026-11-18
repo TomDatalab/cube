@@ -26,14 +26,17 @@
           document.documentElement.setAttribute('data-theme', theme);
         } catch (e) {}
 
-        var light = '<link id="antd-light" rel="stylesheet" href="/antd.min.css"';
-        var dark = '<link id="antd-dark" rel="stylesheet" href="/antd.dark.min.css"';
+        // the sheets keep their names across builds: bump this when they
+        // change, or browsers keep the cached ones
+        var version = '?v=bossa-navy';
+        var light = '<link id="antd-light" rel="stylesheet" href="/antd.min.css' + version + '"';
+        var dark = '<link id="antd-dark" rel="stylesheet" href="/antd.dark.min.css' + version + '"';
         var links =
           theme === 'dark' ? dark + '>' + light + ' disabled>' : light + '>' + dark + ' disabled>';
 
         try {
           document.write(
-            '<style>html[data-theme="dark"]{background:#1c1c24;color-scheme:dark}</style>' + links
+            '<style>html[data-theme="dark"]{background:#171b2c;color-scheme:dark}</style>' + links
           );
         } catch (e) {
           // never leave the page unstyled: both sheets, the light one on
@@ -47,8 +50,8 @@
             }
             document.head.appendChild(link);
           };
-          add('antd-light', '/antd.min.css', false);
-          add('antd-dark', '/antd.dark.min.css', true);
+          add('antd-light', '/antd.min.css' + version, false);
+          add('antd-dark', '/antd.dark.min.css' + version, true);
           try {
             document.documentElement.setAttribute('data-theme', 'light');
           } catch (e2) {}

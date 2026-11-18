@@ -1,12 +1,16 @@
-import { HolderOutlined } from '@ant-design/icons';
 import {
-  Alert, Button, Col, Form, Input, message, Modal, Row, Space, Switch, Table, Tag, Typography,
+  EditOutlined, HolderOutlined, LockOutlined, SafetyCertificateOutlined,
+} from '@ant-design/icons';
+import {
+  Alert, Button, Col, Form, Input, message, Modal, Row, Space, Switch, Table, Tabs, Tag, Tooltip,
+  Typography,
 } from 'antd';
 import { useState } from 'react';
 
 import { AccessModal } from './access/AccessModal';
 import { AdminApi, PAGE_SIZE, User } from './api';
 import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
+import { RuleTree } from './RuleTree';
 import { useSearch } from './useSearch';
 
 type Props = {
@@ -87,7 +91,7 @@ export function UsersTab({ api, currentUser }: Props) {
 
   return (
     <Row gutter={24}>
-      <Col xs={24} xl={14}>
+      <Col xs={24} xl={15}>
         <Space style={{ marginBottom: 16 }}>
           <Button type="primary" onClick={() => open(setCreating, true)}>
             New user
@@ -119,7 +123,8 @@ export function UsersTab({ api, currentUser }: Props) {
             onChange: setPage,
             showSizeChanger: false,
           }}
-          // Enabled users drag onto a workspace of the tree to join it.
+          // Enabled users drag onto a workspace, or a rule, of the tree to
+          // join it.
           onRow={(user) => (user.disabled ? {} : {
             draggable: true,
             onDragStart: (e) => {
@@ -136,9 +141,27 @@ export function UsersTab({ api, currentUser }: Props) {
                 <HolderOutlined title="Drag onto a workspace" style={{ color: 'var(--pg-muted, #a1a1b5)' }} />
               )),
             },
-            { title: 'Username', dataIndex: 'id' },
+            {
+              title: 'Username',
+              dataIndex: 'id',
+              render: (id) => (
+                <Space size={6}>
+                  {id}
+                  {id === currentUser ? <Tag style={{ marginRight: 0 }}>you</Tag> : null}
+                </Space>
+              ),
+            },
             { title: 'Name', dataIndex: 'name', render: (v) => v || '—' },
-            { title: 'Email', dataIndex: 'email', render: (v) => v || '—' },
+            {
+              title: 'Email',
+              dataIndex: 'email',
+              // long addresses end in an ellipsis; the whole one is the title
+              render: (v) => (v ? (
+                <Typography.Text ellipsis={{ tooltip: v }} style={{ maxWidth: 190 }}>
+                  {v}
+                </Typography.Text>
+              ) : '—'),
+            },
             {
               title: 'Enabled',
               render: (_, user) => (
@@ -152,26 +175,41 @@ export function UsersTab({ api, currentUser }: Props) {
               ),
             },
             {
+              // Icon buttons, so the actions fit beside the workspaces
+              // panel; the name is in the tooltip and the aria-label.
               title: '',
+              key: 'actions',
               align: 'right',
+              fixed: 'right',
               render: (_, user) => (
-                <Space>
-                  {user.id === currentUser ? <Tag>you</Tag> : null}
-                  <Button
-                    size="small"
-                    onClick={() => open(setEditing, user, {
-                      name: user.name || '',
-                      email: user.email || '',
-                    })}
-                  >
-                    Edit
-                  </Button>
-                  <Button size="small" onClick={() => setAccessing(user)}>
-                    Access
-                  </Button>
-                  <Button size="small" onClick={() => open(setResetting, user)}>
-                    Reset password
-                  </Button>
+                <Space size={4}>
+                  <Tooltip title="Edit">
+                    <Button
+                      size="small"
+                      aria-label={`Edit ${user.id}`}
+                      icon={<EditOutlined />}
+                      onClick={() => open(setEditing, user, {
+                        name: user.name || '',
+                        email: user.email || '',
+                      })}
+                    />
+                  </Tooltip>
+                  <Tooltip title="Access">
+                    <Button
+                      size="small"
+                      aria-label={`Access of ${user.id}`}
+                      icon={<SafetyCertificateOutlined />}
+                      onClick={() => setAccessing(user)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="Reset password">
+                    <Button
+                      size="small"
+                      aria-label={`Reset the password of ${user.id}`}
+                      icon={<LockOutlined />}
+                      onClick={() => open(setResetting, user)}
+                    />
+                  </Tooltip>
                 </Space>
               ),
             },
@@ -244,12 +282,21 @@ export function UsersTab({ api, currentUser }: Props) {
         </Modal>
         <AccessModal api={api} user={accessing} onClose={() => setAccessing(null)} />
       </Col>
-      <Col xs={24} xl={10}>
-        <Typography.Title level={5}>Workspaces</Typography.Title>
-        <Typography.Paragraph type="secondary">
-          Drag a user onto a workspace to add them as a viewer.
-        </Typography.Paragraph>
-        <MembershipTree api={api} />
+      <Col xs={24} xl={9}>
+        <Tabs defaultActiveKey="members" size="small">
+          <Tabs.TabPane tab="Workspaces" key="members">
+            <Typography.Paragraph type="secondary">
+              Drag a user onto a workspace to add them as a viewer.
+            </Typography.Paragraph>
+            <MembershipTree api={api} />
+          </Tabs.TabPane>
+          <Tabs.TabPane tab="Rules" key="rules">
+            <Typography.Paragraph type="secondary">
+              Drag a user onto a rule to give them its role in the rule&apos;s workspace.
+            </Typography.Paragraph>
+            <RuleTree api={api} />
+          </Tabs.TabPane>
+        </Tabs>
       </Col>
     </Row>
   );

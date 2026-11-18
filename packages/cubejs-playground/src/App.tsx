@@ -10,6 +10,7 @@ import { CubeLoader } from './atoms';
 import { AppContextConsumer, PlaygroundContext } from './components/AppContext';
 import GlobalStyles from './components/GlobalStyles';
 import Header from './components/Header/Header';
+import { Sidebar } from './components/Sidebar/Sidebar';
 import { LivePreviewContextProvider } from './components/LivePreviewContext/LivePreviewContextProvider';
 import {
   event,
@@ -26,7 +27,14 @@ import { setPlaygroundKey } from './shared/helpers';
 import ThemeStyles from './theme/ThemeStyles';
 
 const StyledLayoutContent = styled(Layout.Content)`
-  height: 100%;
+  flex: 1;
+`;
+
+// Right of the sidebar: the top bar over the page.
+const Main = styled.div`
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 `;
 
 // A token saved from the Security Context dialog would win over the login's;
@@ -51,7 +59,7 @@ type AppState = {
 const ROOT_STYLES = {
   height: 'min 100vh',
   display: 'grid',
-  gridTemplateRows: 'min-content 1fr',
+  gridTemplateColumns: 'max-content minmax(0, 1fr)',
   ...QUERY_BUILDER_COLOR_TOKENS,
 };
 
@@ -172,19 +180,23 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
           <GlobalStyles />
           <ThemeStyles />
 
-          <Header selectedKeys={[location.pathname]} />
+          <Sidebar pathname={location.pathname} />
 
-          <StyledLayoutContent>
-            {fatalError ? (
-              <Alert
-                message="Error occured while rendering"
-                description={fatalError.stack || ''}
-                type="error"
-              />
-            ) : (
-              children
-            )}
-          </StyledLayoutContent>
+          <Main>
+            <Header pathname={location.pathname} />
+
+            <StyledLayoutContent>
+              {fatalError ? (
+                <Alert
+                  message="Error occured while rendering"
+                  description={fatalError.stack || ''}
+                  type="error"
+                />
+              ) : (
+                children
+              )}
+            </StyledLayoutContent>
+          </Main>
         </Root>
       </LivePreviewContextProvider>
     );

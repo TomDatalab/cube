@@ -1,18 +1,18 @@
 const colors = {
   pink: '255, 100, 146',
-  purple: '122, 119, 255',
-  'purple-03': '175, 173, 255',
-  'purple-04': '202, 201, 255',
-  text: '91, 92, 125',
-  'dark-01': '20, 20, 70',
-  'dark-02': '67, 67, 107',
-  'dark-03': '114, 114, 144',
-  'dark-04': '161, 161, 181',
-  'dark-05': '213, 213, 226',
-  light: '243, 243, 251',
+  purple: '47, 85, 151', // bossa-arq blue #2f5597
+  'purple-03': '118, 156, 214',
+  'purple-04': '159, 182, 221',
+  text: '65, 69, 88',
+  'dark-01': '33, 38, 63', // bossa-arq navy
+  'dark-02': '65, 69, 88',
+  'dark-03': '108, 115, 147',
+  'dark-04': '169, 173, 194',
+  'dark-05': '227, 228, 238',
+  light: '241, 242, 248',
   green: '65, 181, 111',
   yellow: '251, 188, 5',
-  gray: '246, 246, 248',
+  gray: '251, 251, 254',
 };
 
 function color(name, opacity = 1) {
@@ -48,8 +48,8 @@ const VARIABLES = {
   'heading-color': color('dark', 0.65),
   'link-color': color('purple'),
   'info-color': color('purple'),
-  'layout-body-background': '#f6f6f8;',
-  'layout-header-background': '#eeeef5',
+  'layout-body-background': '#fbfbfe',
+  'layout-header-background': '#fbfbfe',
   'menu-highlight-color': color('dark-01'),
   'item-hover-bg': color('light'),
   'layout-header-height': '48px',

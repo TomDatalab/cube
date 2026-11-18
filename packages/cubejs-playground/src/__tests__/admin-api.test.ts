@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { adminApi, assignableDataSources } from '../pages/Admin/api';
+import { adminApi, assignableDataSources, withImplied } from '../pages/Admin/api';
 
 function answer(status: number, body: unknown) {
   return Promise.resolve(new Response(body == null ? null : JSON.stringify(body), { status }));
@@ -178,5 +178,59 @@ describe('the Admin page API client', () => {
     expect(url).toBe('/cube/v1/connections/sales%2Feu/organization');
     expect(init.method).toBe('DELETE');
     expect(init.body).toBeUndefined();
+  });
+
+  it('searches rules by workspace', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, { rules: [{ id: 'r1' }], total: 1 }));
+
+    const page = await adminApi('/cube').searchRules({ q: 'ops', workspaceId: 'w1', page: 2 });
+
+    expect(page).toEqual({ items: [{ id: 'r1' }], total: 1 });
+    const url = new URL(lastCall().url, 'http://x');
+    expect(url.pathname).toBe('/cube/v1/rules');
+    expect(url.searchParams.get('q')).toBe('ops');
+    expect(url.searchParams.get('workspaceId')).toBe('w1');
+    expect(url.searchParams.get('offset')).toBe('50');
+  });
+
+  it('moves a rule to another workspace', async () => {
+    await adminApi('/cube').updateRule('r/1', { workspaceId: 'w2' });
+
+    const { url, init } = lastCall();
+    expect(url).toBe('/cube/v1/rules/r%2F1');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body)).toEqual({ workspaceId: 'w2' });
+  });
+
+  it('lists and adds rule members', async () => {
+    fetchMock.mockReturnValueOnce(answer(200, { members: [{ user: 'ana' }, { user: 'bia' }] }));
+
+    expect(await adminApi('/cube').ruleMembers('r1')).toEqual(['ana', 'bia']);
+
+    await adminApi('/cube').addRuleMember('r1', 'a b');
+    const { url, init } = lastCall();
+    expect(url).toBe('/cube/v1/rules/r1/members/a%20b');
+    expect(init.method).toBe('PUT');
+  });
+
+  it('adds what a permission implies, in order', () => {
+    expect(withImplied(['query'])).toEqual(['view', 'query']);
+    expect(withImplied(['write_objects'])).toEqual(['view', 'read_objects', 'write_objects']);
+    expect(withImplied(['manage'])).toEqual(
+      ['view', 'query', 'read_objects', 'write_objects', 'execute', 'manage']
+    );
+    expect(withImplied([])).toEqual([]);
+  });
+
+  it('creates an organization role and a rule that uses it', async () => {
+    await adminApi('/cube').createRole('o/1', { name: 'Analyst', permissions: ['view', 'query'] });
+    let { url, init } = lastCall();
+    expect(url).toBe('/cube/v1/organizations/o%2F1/roles');
+    expect(JSON.parse(init.body)).toEqual({ name: 'Analyst', permissions: ['view', 'query'] });
+
+    await adminApi('/cube').createRule('w1', { description: 'd', type: 't', roleId: 'r1' });
+    ({ url, init } = lastCall());
+    expect(url).toBe('/cube/v1/workspaces/w1/rules');
+    expect(JSON.parse(init.body)).toEqual({ description: 'd', type: 't', roleId: 'r1' });
   });
 });

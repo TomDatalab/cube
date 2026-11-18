@@ -4,7 +4,7 @@
   font-weight: 400;
 
   color-scheme: light dark;
-  color: rgb(20, 20, 70);
+  color: rgb(33, 38, 63);
   background-color: white;
 
   font-synthesis: none;
@@ -61,15 +61,62 @@ iframe {
   }
 }
 
-/* Dark theme, palette C (see src/theme/dark-tokens.ts in the Playground).
+/* Light theme: the bossa-arq-dashboard blues and navy in place of the ui-kit
+   purple, as in the Playground's src/theme/dark-tokens.ts. The dark block
+   below wins at (1,2,0). */
+:root,
+:root #cube-ui-kit-root {
+  --purple-color: rgba(47, 85, 151, 1);
+  --purple-color-rgb: 47, 85, 151;
+  --purple-text-color: rgba(31, 58, 115, 1);
+  --purple-text-color-rgb: 31, 58, 115;
+  --purple-01-color: rgba(47, 85, 151, 1);
+  --purple-01-color-rgb: 47, 85, 151;
+  --purple-02-color: rgba(61, 115, 201, 1);
+  --purple-02-color-rgb: 61, 115, 201;
+  --purple-03-color: rgba(118, 156, 214, 1);
+  --purple-03-color-rgb: 118, 156, 214;
+  --purple-04-color: rgba(159, 182, 221, 1);
+  --purple-04-color-rgb: 159, 182, 221;
+  --text-color: rgba(65, 69, 88, 1);
+  --text-color-rgb: 65, 69, 88;
+  --dark-color: rgba(33, 38, 63, 1);
+  --dark-color-rgb: 33, 38, 63;
+  --dark-01-color: rgba(33, 38, 63, 1);
+  --dark-01-color-rgb: 33, 38, 63;
+  --dark-02-color: rgba(65, 69, 88, 1);
+  --dark-02-color-rgb: 65, 69, 88;
+  --dark-03-color: rgba(108, 115, 147, 1);
+  --dark-03-color-rgb: 108, 115, 147;
+  --dark-04-color: rgba(169, 173, 194, 1);
+  --dark-04-color-rgb: 169, 173, 194;
+  --dark-05-color: rgba(227, 228, 238, 1);
+  --dark-05-color-rgb: 227, 228, 238;
+  --light-color: rgba(246, 247, 251, 1);
+  --light-color-rgb: 246, 247, 251;
+  --primary-color: rgba(47, 85, 151, 1);
+  --primary-color-rgb: 47, 85, 151;
+  --primary-1: rgba(47, 85, 151, 0.9);
+  --primary-2: rgba(47, 85, 151, 0.8);
+  --primary-3: rgba(47, 85, 151, 0.7);
+  --primary-4: rgba(47, 85, 151, 0.6);
+  --primary-5: rgba(47, 85, 151, 0.5);
+  --primary-6: rgba(47, 85, 151, 0.4);
+  --primary-7: rgba(47, 85, 151, 0.3);
+  --primary-8: rgba(47, 85, 151, 0.2);
+  --primary-9: rgba(47, 85, 151, 0.1);
+  --primary-10: rgba(47, 85, 151, 0);
+}
+
+/* Dark theme, the navy palette (see src/theme/dark-tokens.ts in the Playground).
    ui-kit's Root re-declares its tokens on #cube-ui-kit-root with a doubled
    class, (0,2,0), so the dark values need the id to win. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  color: #e7e7ef;
-  background-color: #1c1c24;
-  --vizard-border-color: #363644;
-  --vizard-tab-bg-color: #2b2b40;
+  color: #e8eaf3;
+  background-color: #171b2c;
+  --vizard-border-color: #333a57;
+  --vizard-tab-bg-color: #2a3150;
 }
 
 :root[data-theme="dark"],
@@ -79,46 +126,46 @@ iframe {
   --pink-color-rgb: 255, 125, 160;
   --pink-02-color: rgba(255, 150, 185, 1);
   --pink-02-color-rgb: 255, 150, 185;
-  --purple-color: rgba(143, 139, 255, 1);
-  --purple-color-rgb: 143, 139, 255;
-  --purple-text-color: rgba(169, 165, 255, 1);
-  --purple-text-color-rgb: 169, 165, 255;
-  --purple-01-color: rgba(143, 139, 255, 1);
-  --purple-01-color-rgb: 143, 139, 255;
-  --purple-02-color: rgba(128, 125, 230, 1);
-  --purple-02-color-rgb: 128, 125, 230;
-  --purple-03-color: rgba(110, 107, 200, 1);
-  --purple-03-color-rgb: 110, 107, 200;
-  --purple-04-color: rgba(80, 78, 150, 1);
-  --purple-04-color-rgb: 80, 78, 150;
-  --text-color: rgba(200, 200, 214, 1);
-  --text-color-rgb: 200, 200, 214;
-  --dark-color: rgba(231, 231, 239, 1);
-  --dark-color-rgb: 231, 231, 239;
-  --dark-01-color: rgba(231, 231, 239, 1);
-  --dark-01-color-rgb: 231, 231, 239;
-  --dark-02-color: rgba(200, 200, 214, 1);
-  --dark-02-color-rgb: 200, 200, 214;
-  --dark-03-color: rgba(154, 154, 175, 1);
-  --dark-03-color-rgb: 154, 154, 175;
-  --dark-04-color: rgba(110, 110, 130, 1);
-  --dark-04-color-rgb: 110, 110, 130;
-  --dark-05-color: rgba(54, 54, 68, 1);
-  --dark-05-color-rgb: 54, 54, 68;
-  --grey-light-color: rgba(35, 35, 45, 1);
-  --grey-light-color-rgb: 35, 35, 45;
-  --light-color: rgba(43, 43, 55, 1);
-  --light-color-rgb: 43, 43, 55;
-  --white-color: rgba(35, 35, 45, 1);
-  --white-color-rgb: 35, 35, 45;
+  --purple-color: rgba(143, 180, 230, 1);
+  --purple-color-rgb: 143, 180, 230;
+  --purple-text-color: rgba(159, 190, 235, 1);
+  --purple-text-color-rgb: 159, 190, 235;
+  --purple-01-color: rgba(143, 180, 230, 1);
+  --purple-01-color-rgb: 143, 180, 230;
+  --purple-02-color: rgba(118, 156, 214, 1);
+  --purple-02-color-rgb: 118, 156, 214;
+  --purple-03-color: rgba(86, 120, 180, 1);
+  --purple-03-color-rgb: 86, 120, 180;
+  --purple-04-color: rgba(58, 84, 130, 1);
+  --purple-04-color-rgb: 58, 84, 130;
+  --text-color: rgba(203, 206, 222, 1);
+  --text-color-rgb: 203, 206, 222;
+  --dark-color: rgba(232, 234, 243, 1);
+  --dark-color-rgb: 232, 234, 243;
+  --dark-01-color: rgba(232, 234, 243, 1);
+  --dark-01-color-rgb: 232, 234, 243;
+  --dark-02-color: rgba(203, 206, 222, 1);
+  --dark-02-color-rgb: 203, 206, 222;
+  --dark-03-color: rgba(163, 168, 195, 1);
+  --dark-03-color-rgb: 163, 168, 195;
+  --dark-04-color: rgba(111, 117, 148, 1);
+  --dark-04-color-rgb: 111, 117, 148;
+  --dark-05-color: rgba(51, 58, 87, 1);
+  --dark-05-color-rgb: 51, 58, 87;
+  --grey-light-color: rgba(30, 35, 55, 1);
+  --grey-light-color-rgb: 30, 35, 55;
+  --light-color: rgba(38, 44, 67, 1);
+  --light-color-rgb: 38, 44, 67;
+  --white-color: rgba(30, 35, 55, 1);
+  --white-color-rgb: 30, 35, 55;
   --black-color: rgba(0, 0, 0, 1);
   --black-color-rgb: 0, 0, 0;
   --danger-text-color: rgba(235, 77, 106, 1);
   --danger-text-color-rgb: 235, 77, 106;
   --danger-color: rgba(255, 55, 73, 1);
   --danger-color-rgb: 255, 55, 73;
-  --light-grey-color: rgba(35, 35, 45, 1);
-  --light-grey-color-rgb: 35, 35, 45;
+  --light-grey-color: rgba(30, 35, 55, 1);
+  --light-grey-color-rgb: 30, 35, 55;
   --success-color: rgba(63, 191, 127, 1);
   --success-color-rgb: 63, 191, 127;
   --success-text-color: rgba(63, 191, 127, 1);
@@ -127,14 +174,14 @@ iframe {
   --note-color-rgb: 251, 188, 5;
   --warning-color: rgba(226, 94, 54, 1);
   --warning-color-rgb: 226, 94, 54;
-  --border-color: rgba(54, 54, 68, 1);
-  --border-color-rgb: 54, 54, 68;
+  --border-color: rgba(51, 58, 87, 1);
+  --border-color-rgb: 51, 58, 87;
   --shadow-color: rgba(0, 0, 0, 0.4);
   --shadow-color-rgb: 0, 0, 0;
-  --draft-color: rgba(231, 231, 239, 0.2);
-  --draft-color-rgb: 231, 231, 239;
-  --minor-color: rgba(231, 231, 239, 0.65);
-  --minor-color-rgb: 231, 231, 239;
+  --draft-color: rgba(232, 234, 243, 0.2);
+  --draft-color-rgb: 232, 234, 243;
+  --minor-color: rgba(232, 234, 243, 0.65);
+  --minor-color-rgb: 232, 234, 243;
   --success-bg-color: rgba(63, 191, 127, 0.12);
   --success-bg-color-rgb: 63, 191, 127;
   --note-bg-color: rgba(251, 188, 5, 0.12);
@@ -145,37 +192,37 @@ iframe {
   --danger-bg-color-rgb: 255, 55, 73;
   --danger-bg-hover-color: rgba(255, 55, 73, 0.16);
   --danger-bg-hover-color-rgb: 255, 55, 73;
-  --dark-75-color: rgba(231, 231, 239, 0.75);
-  --dark-75-color-rgb: 231, 231, 239;
-  --primary-color: rgba(143, 139, 255, 1);
-  --primary-color-rgb: 143, 139, 255;
+  --dark-75-color: rgba(232, 234, 243, 0.75);
+  --dark-75-color-rgb: 232, 234, 243;
+  --primary-color: rgba(143, 180, 230, 1);
+  --primary-color-rgb: 143, 180, 230;
   --pink-8-color: rgba(255, 125, 160, 0.2);
   --pink-8-color-rgb: 255, 125, 160;
   --pink-9-color: rgba(255, 125, 160, 0.1);
   --pink-9-color-rgb: 255, 125, 160;
-  --disabled-color: rgba(231, 231, 239, 0.25);
-  --disabled-color-rgb: 231, 231, 239;
-  --disabled-text-color: rgba(231, 231, 239, 0.25);
-  --disabled-text-color-rgb: 231, 231, 239;
-  --disabled-bg: rgba(54, 54, 68, 0.4);
-  --disabled-bg-color: rgba(54, 54, 68, 0.4);
-  --disabled-bg-color-rgb: 54, 54, 68;
-  --primary-1: rgba(143, 139, 255, 0.9);
-  --primary-2: rgba(143, 139, 255, 0.8);
-  --primary-3: rgba(143, 139, 255, 0.7);
-  --primary-4: rgba(143, 139, 255, 0.6);
-  --primary-5: rgba(143, 139, 255, 0.5);
-  --primary-6: rgba(143, 139, 255, 0.4);
-  --primary-7: rgba(143, 139, 255, 0.3);
-  --primary-8: rgba(143, 139, 255, 0.2);
-  --primary-9: rgba(143, 139, 255, 0.1);
-  --primary-10: rgba(143, 139, 255, 0);
+  --disabled-color: rgba(232, 234, 243, 0.25);
+  --disabled-color-rgb: 232, 234, 243;
+  --disabled-text-color: rgba(232, 234, 243, 0.25);
+  --disabled-text-color-rgb: 232, 234, 243;
+  --disabled-bg: rgba(51, 58, 87, 0.4);
+  --disabled-bg-color: rgba(51, 58, 87, 0.4);
+  --disabled-bg-color-rgb: 51, 58, 87;
+  --primary-1: rgba(143, 180, 230, 0.9);
+  --primary-2: rgba(143, 180, 230, 0.8);
+  --primary-3: rgba(143, 180, 230, 0.7);
+  --primary-4: rgba(143, 180, 230, 0.6);
+  --primary-5: rgba(143, 180, 230, 0.5);
+  --primary-6: rgba(143, 180, 230, 0.4);
+  --primary-7: rgba(143, 180, 230, 0.3);
+  --primary-8: rgba(143, 180, 230, 0.2);
+  --primary-9: rgba(143, 180, 230, 0.1);
+  --primary-10: rgba(143, 180, 230, 0);
 }
 
 /* ui-kit's GlobalStyles paint the body white with !important */
 :root[data-theme="dark"] body {
-  background-color: #1c1c24 !important;
-  color: rgba(231, 231, 239, 0.75);
+  background-color: #171b2c !important;
+  color: rgba(232, 234, 243, 0.75);
 }
 
 :root[data-theme="dark"] .monaco-editor.monaco-editor .scroll-decoration {
