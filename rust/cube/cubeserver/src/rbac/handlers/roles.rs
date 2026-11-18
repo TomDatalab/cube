@@ -378,6 +378,36 @@ fn meta_members(cube: &Value, kind: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// The meta's cubes (no views) whose data sources are all `connections`, in
+/// the shape of the route's answer. A cube the model cannot place is left out.
+fn listable_cubes(
+    meta: &Value,
+    connections: &BTreeSet<String>,
+    is_view: impl Fn(&str) -> bool,
+    data_sources_of_cube: impl Fn(&str) -> BTreeSet<String>,
+) -> Vec<Value> {
+    meta["cubes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|cube| {
+            let Some(name) = cube["name"].as_str() else {
+                return false;
+            };
+            !is_view(name) && owned_by(&data_sources_of_cube(name), connections)
+        })
+        .map(|cube| {
+            json!({
+                "name": cube["name"],
+                "title": cube["title"],
+                "measures": meta_members(cube, "measures"),
+                "dimensions": meta_members(cube, "dimensions"),
+                "segments": meta_members(cube, "segments"),
+            })
+        })
+        .collect()
+}
+
 /// → `{cubes: [{name, title, measures, dimensions, segments}]}`: the model's
 /// cubes (no views) that read only from the organization's connections, for
 /// picking the members a role filters or blocks. `admin` on the organization.
@@ -403,44 +433,43 @@ pub async fn model_members(
         )
     })?;
     let meta = state.meta.meta(&ctx, false).await?;
-    let cubes: Vec<Value> = meta["cubes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|cube| {
-            let Some(name) = cube["name"].as_str() else {
-                return false;
-            };
-            !sources.graph().is_view(name)
-                && sources.data_sources_of_cube(name).is_subset(&connections)
-        })
-        .map(|cube| {
-            json!({
-                "name": cube["name"],
-                "title": cube["title"],
-                "measures": meta_members(cube, "measures"),
-                "dimensions": meta_members(cube, "dimensions"),
-                "segments": meta_members(cube, "segments"),
-            })
-        })
-        .collect();
+    let cubes = listable_cubes(
+        &meta,
+        &connections,
+        |cube| sources.graph().is_view(cube),
+        |cube| sources.data_sources_of_cube(cube),
+    );
     Ok(Json(json!({ "cubes": cubes })))
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_cube_without_a_data_source_is_nobodys() {
-        use super::owned_by;
-        use std::collections::BTreeSet;
-        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
-        assert!(!owned_by(&set(&[]), &set(&["a"])));
-        assert!(!owned_by(&set(&[]), &set(&[])));
-        assert!(!owned_by(&set(&["c"]), &set(&["a"])));
-        assert!(owned_by(&set(&["a"]), &set(&["a", "b"])));
-    }
-
     use super::*;
+
+    #[test]
+    fn a_cube_the_model_cannot_place_is_not_listed() {
+        let meta = json!({ "cubes": [
+            { "name": "mine", "title": "Mine", "measures": [{"name": "mine.count", "title": "Count"}] },
+            { "name": "theirs", "title": "Theirs" },
+            { "name": "unplaced", "title": "Unplaced" },
+            { "name": "v", "title": "V" },
+        ]});
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let listed = listable_cubes(
+            &meta,
+            &set(&["a"]),
+            |cube| cube == "v",
+            |cube| match cube {
+                "mine" | "v" => set(&["a"]),
+                "theirs" => set(&["b"]),
+                _ => set(&[]),
+            },
+        );
+        let names: Vec<&str> = listed.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["mine"]);
+        assert_eq!(listed[0]["measures"][0]["title"], "Count");
+        assert!(!owned_by(&set(&[]), &set(&[])));
+    }
 
     fn n(list: &[&str]) -> Vec<String> {
         normalize(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
