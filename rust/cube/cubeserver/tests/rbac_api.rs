@@ -4740,3 +4740,632 @@ db_test!(access_graph_queries_only_configured_connections, |store| {
         .unwrap_or_else(|| panic!("no connection node: {graph}"));
     assert_eq!(node["notes"], json!(["data source missing"]), "{node}");
 });
+
+// ---- rules ----
+
+async fn create_rule(env: &Env, token: &str, ws: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/workspaces/{ws}/rules"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn rule_member(env: &Env, token: &str, method: Method, rule: &str, user: &str) -> StatusCode {
+    send(
+        &env.router,
+        method,
+        &format!("/cube/v1/rules/{rule}/members/{user}"),
+        Some(token),
+        None,
+    )
+    .await
+    .0
+}
+
+async fn patch_rule(env: &Env, token: &str, rule: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::PATCH,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn rename_status(env: &Env, token: &str, ws: &str) -> StatusCode {
+    send(
+        &env.router,
+        Method::PATCH,
+        &format!("/cube/v1/workspaces/{ws}"),
+        Some(token),
+        Some(json!({ "name": format!("renamed-{}", uuid::Uuid::new_v4().simple()) })),
+    )
+    .await
+    .0
+}
+
+async fn workspace_status(env: &Env, token: &str, ws: &str) -> StatusCode {
+    send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{ws}"),
+        Some(token),
+        None,
+    )
+    .await
+    .0
+}
+
+db_test!(
+    a_rule_gives_its_members_its_type_in_the_workspace,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+
+        let (status, rule) = create_rule(
+            env,
+            &s.ana,
+            &w1,
+            json!({ "description": "  Analysts  ", "type": "Analytics", "role": "viewer" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{rule}");
+        assert_eq!(rule["description"], "Analysts");
+        assert_eq!(rule["type"], "Analytics");
+        assert_eq!(rule["role"], "viewer");
+        assert_eq!(rule["workspaceId"], json!(w1));
+        assert_eq!(rule["workspaceName"], "W1");
+        assert_eq!(rule["organizationId"], json!(s.org_a));
+        assert_eq!(rule["organizationName"], "A");
+        let rule = rule["id"].as_str().unwrap().to_string();
+
+        // Before joining, bia sees nothing.
+        assert_eq!(
+            workspace_status(env, &s.bia, &w1).await,
+            StatusCode::NOT_FOUND
+        );
+        assert!(org_names(env, &s.bia).await.is_empty());
+
+        assert_eq!(
+            rule_member(env, &s.ana, Method::PUT, &rule, "bia").await,
+            StatusCode::OK
+        );
+        // A viewer: sees the workspace and its organization, cannot manage it.
+        assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::OK);
+        assert_eq!(org_names(env, &s.bia).await, ["A"]);
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+        // Nor manage the rule.
+        assert_eq!(
+            rule_member(env, &s.bia, Method::PUT, &rule, "caio").await,
+            StatusCode::FORBIDDEN
+        );
+
+        let (status, members) = send(
+            &env.router,
+            Method::GET,
+            &format!("/cube/v1/rules/{rule}/members"),
+            Some(&s.bia),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{members}");
+        assert_eq!(members["members"], json!([{ "user": "bia" }]));
+
+        // A new type is only a label: the role stays.
+        let (status, body) =
+            patch_rule(env, &s.ana, &rule, json!({ "type": "Finance team" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            (body["type"].as_str(), body["role"].as_str()),
+            (Some("Finance team"), Some("viewer"))
+        );
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+        // The role changes the access.
+        let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "role": "owner" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::OK);
+
+        // bia lists the rule.
+        let (status, list) = send(
+            &env.router,
+            Method::GET,
+            "/cube/v1/rules?q=finance",
+            Some(&s.bia),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["total"], 1, "{list}");
+        assert_eq!(list["rules"][0]["id"], json!(rule));
+        // caio sees none.
+        let (_, list) = send(
+            &env.router,
+            Method::GET,
+            "/cube/v1/rules",
+            Some(&s.caio),
+            None,
+        )
+        .await;
+        assert_eq!(list["total"], 0, "{list}");
+
+        // Leaving the rule takes the access away.
+        assert_eq!(
+            rule_member(env, &s.ana, Method::DELETE, &rule, "bia").await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            workspace_status(env, &s.bia, &w1).await,
+            StatusCode::NOT_FOUND
+        );
+        assert!(org_names(env, &s.bia).await.is_empty());
+    }
+);
+
+db_test!(a_rule_moves_between_workspaces_with_its_members, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let w2 = workspace_id(env, &s.ana, &s.org_a, "W2").await;
+    let org_b = create_org(env, &s.admin, "B", "caio").await;
+    let wb = workspace_id(env, &s.admin, &org_b, "WB").await;
+
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "Ops", "type": "Ops", "role": "editor" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    rule_member(env, &s.ana, Method::PUT, &rule, "bia").await;
+
+    let (status, moved) = patch_rule(env, &s.ana, &rule, json!({ "workspaceId": w2 })).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["workspaceName"], "W2");
+    assert_eq!(
+        workspace_status(env, &s.bia, &w1).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(workspace_status(env, &s.bia, &w2).await, StatusCode::OK);
+
+    // Into another organization only with `manage` on the target too.
+    let (status, _) = patch_rule(env, &s.ana, &rule, json!({ "workspaceId": wb })).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, moved) = patch_rule(env, &s.admin, &rule, json!({ "workspaceId": wb })).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["organizationName"], "B");
+    assert_eq!(org_names(env, &s.bia).await, ["B"]);
+    assert_eq!(workspace_status(env, &s.bia, &wb).await, StatusCode::OK);
+    assert_eq!(
+        workspace_status(env, &s.bia, &w2).await,
+        StatusCode::NOT_FOUND
+    );
+
+    // Deleting the workspace takes the rule and every relationship of it.
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{wb}"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let left = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "rule",
+            id: None,
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    let in_org = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "organization",
+            id: Some(org_b.clone()),
+            relation: Some("rule"),
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(in_org.is_empty(), "{in_org:?}");
+    assert!(org_names(env, &s.bia).await.is_empty());
+    let (status, _) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+db_test!(rules_validate_their_fields_and_delete, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    for body in [
+        json!({ "description": " ", "type": "Analytics", "role": "viewer" }),
+        json!({ "description": "x", "type": "Ops", "role": "admin" }),
+        json!({ "description": "x", "type": " ", "role": "viewer" }),
+        json!({ "description": "x", "type": "t".repeat(101), "role": "viewer" }),
+        json!({ "description": "x", "type": "Ops" }),
+        json!({ "description": "x".repeat(501), "type": "Analytics", "role": "viewer" }),
+        json!({ "description": "x", "role": "viewer" }),
+    ] {
+        let (status, answer) = create_rule(env, &s.ana, &w1, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    }
+    // Only who manages the workspace creates rules.
+    let (status, _) = create_rule(
+        env,
+        &s.bia,
+        &w1,
+        json!({ "description": "x", "type": "Analytics", "role": "viewer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "Temp", "type": "Analytics", "role": "viewer" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    // Disabled and unknown users do not join.
+    assert_eq!(
+        rule_member(env, &s.ana, Method::PUT, &rule, "nobody").await,
+        StatusCode::NOT_FOUND
+    );
+    rule_member(env, &s.ana, Method::PUT, &rule, "bia").await;
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        workspace_status(env, &s.bia, &w1).await,
+        StatusCode::NOT_FOUND
+    );
+    let (status, _) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+// ---- organization roles ----
+
+async fn create_role(env: &Env, token: &str, org: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{org}/roles"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn patch_role(env: &Env, token: &str, role: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::PATCH,
+        &format!("/cube/v1/roles/{role}"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn objects_status(env: &Env, token: &str, ws: &str) -> StatusCode {
+    send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{ws}/objects"),
+        Some(token),
+        None,
+    )
+    .await
+    .0
+}
+
+db_test!(
+    an_organization_role_grants_exactly_its_permissions,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+
+        let (status, role) = create_role(
+            env,
+            &s.ana,
+            &s.org_a,
+            json!({ "name": "Analyst", "permissions": ["query"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{role}");
+        // What `query` implies comes along.
+        assert_eq!(role["permissions"], json!(["view", "query"]));
+        let role = role["id"].as_str().unwrap().to_string();
+
+        let (status, rule) = create_rule(
+            env,
+            &s.ana,
+            &w1,
+            json!({ "description": "Analysts", "type": "finance", "roleId": role }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{rule}");
+        assert_eq!(rule["role"], Value::Null);
+        assert_eq!(rule["roleId"], json!(role));
+        assert_eq!(rule["roleName"], "Analyst");
+        assert_eq!(rule["permissions"], json!(["view", "query"]));
+        let rule = rule["id"].as_str().unwrap().to_string();
+        rule_member(env, &s.ana, Method::PUT, &rule, "bia").await;
+
+        // view and query only: no objects, no managing.
+        assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::OK);
+        assert_eq!(org_names(env, &s.bia).await, ["A"]);
+        assert_eq!(
+            objects_status(env, &s.bia, &w1).await,
+            StatusCode::FORBIDDEN
+        );
+        let (status, _) = create_object(env, &s.bia, &w1, pipeline("p", "{}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+
+        // Editing the role reaches the rule at once.
+        let (status, edited) = patch_role(
+            env,
+            &s.ana,
+            &role,
+            json!({ "permissions": ["query", "write_objects"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        assert_eq!(
+            edited["permissions"],
+            json!(["view", "query", "read_objects", "write_objects"])
+        );
+        assert_eq!(edited["rules"], 1);
+        assert_eq!(objects_status(env, &s.bia, &w1).await, StatusCode::OK);
+        let (status, body) = create_object(env, &s.bia, &w1, pipeline("p", "{}")).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+
+        let (status, _) =
+            patch_role(env, &s.ana, &role, json!({ "permissions": ["manage"] })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::OK);
+
+        let (status, _) = patch_role(env, &s.ana, &role, json!({ "permissions": ["view"] })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            objects_status(env, &s.bia, &w1).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+        assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::OK);
+
+        // The access graph names the role.
+        let (status, graph) = access_graph(env, &s.admin, "bia").await;
+        assert_eq!(status, StatusCode::OK, "{graph}");
+        assert!(
+            graph["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["label"] == "Analyst via rule Analysts"),
+            "{graph}"
+        );
+
+        // A rule turns from the custom role to a built-in one and back.
+        let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "role": "editor" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            (body["role"].as_str(), body["roleId"].as_str()),
+            (Some("editor"), None)
+        );
+        assert_eq!(objects_status(env, &s.bia, &w1).await, StatusCode::OK);
+        let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "roleId": role })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            objects_status(env, &s.bia, &w1).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+);
+
+db_test!(organization_roles_stay_in_their_organization, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let org_b = create_org(env, &s.admin, "B", "caio").await;
+    let wb = workspace_id(env, &s.admin, &org_b, "WB").await;
+    let (_, role_a) = create_role(
+        env,
+        &s.ana,
+        &s.org_a,
+        json!({ "name": "R", "permissions": ["view"] }),
+    )
+    .await;
+    let role_a = role_a["id"].as_str().unwrap().to_string();
+    let (_, role_b) = create_role(
+        env,
+        &s.caio,
+        &org_b,
+        json!({ "name": "R", "permissions": ["query"] }),
+    )
+    .await;
+    let role_b = role_b["id"].as_str().unwrap().to_string();
+
+    // A role of B in a workspace of A.
+    let (status, _) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "x", "type": "t", "roleId": role_b }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Both or neither.
+    let (status, _) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "x", "type": "t", "role": "viewer", "roleId": role_a }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "x", "type": "t", "roleId": role_a }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    rule_member(env, &s.ana, Method::PUT, &rule, "bia").await;
+    // To B only with a role of B.
+    let (status, _) = patch_rule(env, &s.admin, &rule, json!({ "workspaceId": wb })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, moved) = patch_rule(
+        env,
+        &s.admin,
+        &rule,
+        json!({ "workspaceId": wb, "roleId": role_b }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["permissions"], json!(["view", "query"]));
+    assert_eq!(
+        workspace_status(env, &s.bia, &w1).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(workspace_status(env, &s.bia, &wb).await, StatusCode::OK);
+    assert_eq!(org_names(env, &s.bia).await, ["B"]);
+
+    // Only the organization's admins manage its roles; members list them.
+    let (status, _) = create_role(
+        env,
+        &s.bia,
+        &org_b,
+        json!({ "name": "S", "permissions": ["view"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{org_b}/roles"),
+        Some(&s.bia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["roles"][0]["rules"], 1, "{list}");
+    let (status, _) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{}/roles", s.org_a),
+        Some(&s.caio),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+db_test!(roles_validate_and_cannot_be_deleted_while_in_use, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    for body in [
+        json!({ "name": " ", "permissions": ["view"] }),
+        json!({ "name": "x", "permissions": [] }),
+        json!({ "name": "x", "permissions": ["admin"] }),
+        json!({ "name": "x".repeat(101), "permissions": ["view"] }),
+    ] {
+        let (status, answer) = create_role(env, &s.ana, &s.org_a, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    }
+    let (_, role) = create_role(
+        env,
+        &s.ana,
+        &s.org_a,
+        json!({ "name": "Ops", "permissions": ["execute"] }),
+    )
+    .await;
+    let role = role["id"].as_str().unwrap().to_string();
+    let (status, _) = create_role(
+        env,
+        &s.ana,
+        &s.org_a,
+        json!({ "name": "Ops", "permissions": ["view"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "x", "type": "t", "roleId": role }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    let role_path = format!("/cube/v1/roles/{role}");
+    let delete_role = || send(&env.router, Method::DELETE, &role_path, Some(&s.ana), None);
+    assert_eq!(delete_role().await.0, StatusCode::CONFLICT);
+    send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(delete_role().await.0, StatusCode::NO_CONTENT);
+    let left = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "role",
+            id: None,
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    let (status, _) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/roles/{role}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});

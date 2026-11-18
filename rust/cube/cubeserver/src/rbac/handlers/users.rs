@@ -214,6 +214,8 @@ pub(crate) async fn access(
         direct: vec![],
         organizations: vec![],
         workspaces: vec![],
+        rules: vec![],
+        roles: vec![],
         connections: vec![],
         releases: vec![],
         configured: BTreeSet::new(),
@@ -243,7 +245,33 @@ pub(crate) async fn access(
             .filter_map(|r| r.resource.id.parse().ok())
             .collect()
     };
+    // The rules the user is a member of give a role in their workspace.
+    let rule_ids: Vec<Uuid> = rbac
+        .authz
+        .read(&RelationshipFilter {
+            kind: "rule",
+            id: None,
+            relation: Some("member"),
+            subject: Some(user_ref(&id)),
+        })
+        .await
+        .map_err(authz_error)?
+        .iter()
+        .filter_map(|r| r.resource.id.parse().ok())
+        .collect();
+    let rules = rbac
+        .store
+        .rules_by_ids(&rule_ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let role_ids: Vec<Uuid> = rules.iter().filter_map(|r| r.role_id).collect();
+    let roles = rbac
+        .store
+        .roles_by_ids(&role_ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
     let mut workspace_ids = ids_of("workspace");
+    workspace_ids.extend(rules.iter().map(|r| r.workspace_id));
     let mut organization_ids = ids_of("organization");
     let owned: Vec<Uuid> = direct
         .iter()
@@ -308,6 +336,8 @@ pub(crate) async fn access(
     input.direct = direct;
     input.organizations = organizations;
     input.workspaces = workspaces;
+    input.rules = rules;
+    input.roles = roles;
     input.connections = connections;
     input.releases = releases;
     input.configured = data_source_types(&state).into_keys().collect();

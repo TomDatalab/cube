@@ -9,7 +9,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::authz::Relationship;
-use super::store::{ConnectionOrigin, ConnectionRow, Organization, User, Workspace};
+use super::store::{
+    ConnectionOrigin, ConnectionRow, Organization, Role, Rule, RuleRole, User, Workspace,
+};
 
 const ORG_OWNER: &[&str] = &["admin", "view", "manage_connections"];
 const ORG_MEMBER: &[&str] = &["view"];
@@ -25,6 +27,25 @@ const WS_OWNER: &[&str] = &[
 const WS_EDITOR: &[&str] = &["edit", "view", "query", "read objects", "write objects"];
 const WS_VIEWER: &[&str] = &["view", "query", "read objects"];
 
+/// The graph's names for the permissions of an organization's role
+/// (`manage` grants everything a workspace owner has).
+fn role_perms(permissions: &[String]) -> Vec<&'static str> {
+    if permissions.iter().any(|p| p == "manage") {
+        return WS_OWNER.to_vec();
+    }
+    permissions
+        .iter()
+        .filter_map(|p| match p.as_str() {
+            "view" => Some("view"),
+            "query" => Some("query"),
+            "read_objects" => Some("read objects"),
+            "write_objects" => Some("write objects"),
+            "execute" => Some("execute"),
+            _ => None,
+        })
+        .collect()
+}
+
 const ORG_ORDER: &[&str] = &["admin", "view", "manage_connections"];
 const WS_ORDER: &[&str] = WS_OWNER;
 
@@ -38,6 +59,10 @@ pub struct AccessInput {
     pub direct: Vec<Relationship>,
     pub organizations: Vec<Organization>,
     pub workspaces: Vec<Workspace>,
+    /// The rules the user is a member of.
+    pub rules: Vec<Rule>,
+    /// The organization roles those rules grant.
+    pub roles: Vec<Role>,
     pub connections: Vec<ConnectionRow>,
     /// (connection, workspace) pairs.
     pub releases: Vec<(String, Uuid)>,
@@ -101,7 +126,7 @@ pub struct AccessGraph {
 struct Source {
     text: String,
     path: Vec<String>,
-    perms: &'static [&'static str],
+    perms: Vec<&'static str>,
 }
 
 /// Grants for `resource`, one per permission in `order`, each with a reason
@@ -229,7 +254,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             .push(Source {
                 text: rel.relation.to_string(),
                 path: vec![user_id.clone(), node],
-                perms,
+                perms: perms.to_vec(),
             });
     }
 
@@ -257,8 +282,59 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             .push(Source {
                 text: rel.relation.to_string(),
                 path: vec![user_id.clone(), node],
-                perms,
+                perms: perms.to_vec(),
             });
+    }
+    // Workspaces: the role of each rule the user is a member of.
+    for rule in &input.rules {
+        let Some(ws) = workspaces.get(&rule.workspace_id.to_string()) else {
+            continue;
+        };
+        let (role, perms): (String, Vec<&'static str>) = match rule.role_ref() {
+            RuleRole::Builtin(r) => (
+                r.to_string(),
+                match r {
+                    "owner" => WS_OWNER,
+                    "editor" => WS_EDITOR,
+                    "viewer" => WS_VIEWER,
+                    _ => continue,
+                }
+                .to_vec(),
+            ),
+            RuleRole::Custom(id) => {
+                let Some(role) = input.roles.iter().find(|r| r.id == id) else {
+                    continue;
+                };
+                (role.name.clone(), role_perms(&role.permissions))
+            }
+        };
+        let node = format!("workspace:{}", ws.id);
+        edges.add(
+            &user_id,
+            &node,
+            &format!("{role} via rule {}", rule.description),
+            "derived",
+        );
+        ws_sources
+            .entry(ws.id.to_string())
+            .or_default()
+            .push(Source {
+                text: format!("{role} through the rule {}", rule.description),
+                path: vec![user_id.clone(), node.clone()],
+                perms: perms.to_vec(),
+            });
+        // `organization#rule`: the rule's members see its organization.
+        if let Some(org) = orgs.get(&ws.organization_id.to_string()) {
+            let org_node = format!("organization:{}", org.id);
+            org_sources
+                .entry(org.id.to_string())
+                .or_default()
+                .push(Source {
+                    text: format!("member of the rule {}", rule.description),
+                    path: vec![user_id.clone(), node, org_node],
+                    perms: ORG_MEMBER.to_vec(),
+                });
+        }
     }
     for org in &owned_orgs {
         let org_node = format!("organization:{}", org.id);
@@ -275,7 +351,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                 .push(Source {
                     text: format!("owner of {}", org.name),
                     path: vec![user_id.clone(), org_node.clone(), node],
-                    perms: WS_OWNER,
+                    perms: WS_OWNER.to_vec(),
                 });
         }
     }
@@ -306,7 +382,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                     .push(Source {
                         text: format!("owner of {}", org.name),
                         path: vec![user_id.clone(), org_node.clone(), node],
-                        perms: &["manage"],
+                        perms: vec!["manage"],
                     });
             }
         }
@@ -344,7 +420,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                 .push(Source {
                     text: format!("released to {} (as {})", ws.name, s.text),
                     path,
-                    perms: &["query"],
+                    perms: vec!["query"],
                 });
         }
     }
@@ -494,6 +570,8 @@ mod tests {
             direct,
             organizations: vec![org()],
             workspaces: vec![ws()],
+            rules: vec![],
+            roles: vec![],
             connections: vec![],
             releases: vec![],
             configured: BTreeSet::new(),
@@ -555,6 +633,63 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.label == "admin ⇒ manage" && e.kind == "derived"));
+    }
+
+    #[test]
+    fn a_rule_member_holds_the_rule_type_in_its_workspace() {
+        let mut i = input(vec![]);
+        i.rules = vec![Rule {
+            id: Uuid::from_u128(3),
+            workspace_id: W,
+            description: "Analysts".into(),
+            r#type: "finance".into(),
+            role: Some("editor".into()),
+            role_id: None,
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        let g = build(&i);
+        let id = format!("workspace:{W}");
+        assert_eq!(
+            perms(&g, &id),
+            ["edit", "view", "query", "read objects", "write objects"]
+        );
+        let r = &grant(&g, &id, "edit").unwrap().reasons;
+        assert_eq!(r[0].text, "editor through the rule Analysts");
+        assert!(g
+            .edges
+            .iter()
+            .any(|e| e.label == "editor via rule Analysts" && e.kind == "derived"));
+        assert_eq!(perms(&g, &format!("organization:{O}")), ["view"]);
+    }
+
+    #[test]
+    fn a_rule_with_an_organization_role_grants_its_permissions() {
+        let role = Uuid::from_u128(4);
+        let mut i = input(vec![]);
+        i.rules = vec![Rule {
+            id: Uuid::from_u128(3),
+            workspace_id: W,
+            description: "Analysts".into(),
+            r#type: "finance".into(),
+            role: None,
+            role_id: Some(role),
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        i.roles = vec![Role {
+            id: role,
+            organization_id: O,
+            name: "Analyst".into(),
+            permissions: vec!["view".into(), "query".into()],
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        let g = build(&i);
+        let id = format!("workspace:{W}");
+        assert_eq!(perms(&g, &id), ["view", "query"]);
+        let r = &grant(&g, &id, "query").unwrap().reasons;
+        assert_eq!(r[0].text, "Analyst through the rule Analysts");
     }
 
     #[test]

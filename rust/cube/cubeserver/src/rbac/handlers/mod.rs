@@ -4,6 +4,8 @@ pub mod auth;
 pub mod connections;
 pub mod objects;
 pub mod organizations;
+pub mod roles;
+pub mod rules;
 pub mod users;
 pub mod workspaces;
 
@@ -104,6 +106,28 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/workspaces/:id/connections/:name"),
             put(connections::release).delete(connections::withdraw),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/roles"),
+            get(roles::list).post(roles::create),
+        )
+        .route(
+            &format!("{base}/v1/roles/:id"),
+            get(roles::get).patch(roles::update).delete(roles::delete),
+        )
+        .route(
+            &format!("{base}/v1/workspaces/:id/rules"),
+            get(rules::of_workspace).post(rules::create),
+        )
+        .route(&format!("{base}/v1/rules"), get(rules::list_all))
+        .route(
+            &format!("{base}/v1/rules/:id"),
+            get(rules::get).patch(rules::update).delete(rules::delete),
+        )
+        .route(&format!("{base}/v1/rules/:id/members"), get(rules::members))
+        .route(
+            &format!("{base}/v1/rules/:id/members/:user"),
+            put(rules::add_member).delete(rules::remove_member),
         )
         .route(
             &format!("{base}/v1/workspaces/:id/objects"),

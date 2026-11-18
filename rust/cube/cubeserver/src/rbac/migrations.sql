@@ -50,3 +50,62 @@ CREATE TABLE IF NOT EXISTS objects (
 );
 
 CREATE INDEX IF NOT EXISTS objects_workspace_idx ON objects (workspace_id);
+
+-- A rule: a named role in one workspace. `type` is a free label (e.g.
+-- `finance`); `role` (`owner`, `editor` or `viewer`) is what its members
+-- hold in the workspace through SpiceDB (`workspace#<role>_rule@rule`,
+-- `rule#member@user`); the organization is the workspace's.
+CREATE TABLE IF NOT EXISTS rules (
+    id uuid PRIMARY KEY,
+    workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    description text NOT NULL,
+    type text NOT NULL,
+    role text NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS rules_workspace_idx ON rules (workspace_id);
+
+-- Rules from before `role` existed had the role in `type`, restricted to the
+-- three roles: it becomes their role, and `type` any label.
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS role text;
+UPDATE rules SET role = type WHERE role IS NULL;
+ALTER TABLE rules ALTER COLUMN role SET NOT NULL;
+ALTER TABLE rules DROP CONSTRAINT IF EXISTS rules_type_check;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rules_role_check') THEN
+        ALTER TABLE rules ADD CONSTRAINT rules_role_check
+            CHECK (role IN ('owner', 'editor', 'viewer'));
+    END IF;
+END $$;
+
+-- A role an organization defines: a name and the workspace permissions it
+-- grants (`view`, `query`, `read_objects`, `write_objects`, `execute`,
+-- `manage`). In SpiceDB each permission is `role#can_<permission>@user:*`;
+-- a rule with the role gives its members those permissions in its
+-- workspace.
+CREATE TABLE IF NOT EXISTS roles (
+    id uuid PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations (id) ON DELETE CASCADE,
+    name text NOT NULL,
+    permissions text[] NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    UNIQUE (organization_id, name)
+);
+
+-- A rule holds a built-in role (`role`) or one of its organization's
+-- (`role_id`), never both. A role in use cannot be deleted.
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS role_id uuid REFERENCES roles (id);
+ALTER TABLE rules ALTER COLUMN role DROP NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rules_one_role') THEN
+        ALTER TABLE rules ADD CONSTRAINT rules_one_role
+            CHECK ((role IS NULL) <> (role_id IS NULL));
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS rules_role_idx ON rules (role_id);

@@ -188,7 +188,7 @@ async fn visible_object(
         .ok_or_else(not_found)
 }
 
-/// `POST /v1/workspaces/{id}/objects`: `edit` on the workspace.
+/// `POST /v1/workspaces/{id}/objects`: `write_objects` on the workspace.
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -196,7 +196,7 @@ pub async fn create(
     request: Result<Json<CreateObject>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
-    let ws = visible_workspace(rbac, &id, "edit", user).await?;
+    let ws = visible_workspace(rbac, &id, "write_objects", user).await?;
     let request = body(request)?;
     let new = NewObject {
         workspace_id: ws.id,
@@ -230,7 +230,8 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(Value::Object(metadata(&object)))).into_response())
 }
 
-/// `GET /v1/workspaces/{id}/objects?type=`: `view` on the workspace.
+/// `GET /v1/workspaces/{id}/objects?type=`: `read_objects` on the
+/// workspace.
 /// Metadata only.
 pub async fn list(
     State(state): State<AppState>,
@@ -239,7 +240,7 @@ pub async fn list(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
-    let ws = visible_workspace(rbac, &id, "view", user).await?;
+    let ws = visible_workspace(rbac, &id, "read_objects", user).await?;
     let objects = rbac
         .store
         .objects_of_workspace(ws.id, params.r#type.as_deref())

@@ -220,6 +220,12 @@ pub async fn delete(
     if !workspaces.is_empty() || !connections.is_empty() {
         return Err(in_use());
     }
+    // Its roles go with the row; their grants go after the commit.
+    let roles = rbac
+        .store
+        .roles_of_organization(org.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
 
     // The row goes in a transaction committed only once SpiceDB forgot the
     // organization: a failure leaves both or neither.
@@ -245,6 +251,9 @@ pub async fn delete(
         // Dropping `tx` rolls the row delete back.
         .map_err(authz_error)?;
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
+    for role in &roles {
+        super::roles::forget(rbac, role.role.id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

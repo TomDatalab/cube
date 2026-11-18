@@ -123,6 +123,77 @@ pub struct Page<T> {
     pub total: i64,
 }
 
+/// A role an organization defines: the workspace permissions it grants.
+#[derive(Debug, Clone)]
+pub struct Role {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub permissions: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+/// A role with the number of rules that use it.
+#[derive(Debug, Clone)]
+pub struct RoleListing {
+    pub role: Role,
+    pub rules: i64,
+}
+
+/// A named role in a workspace: its members hold a built-in `role`
+/// (`owner`, `editor`, `viewer`) or the organization's `role_id` there,
+/// exactly one of them. `type` is a free label.
+#[derive(Debug, Clone)]
+pub struct Rule {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub description: String,
+    pub r#type: String,
+    pub role: Option<String>,
+    pub role_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+/// What a rule grants: a built-in role or one of its organization's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleRole<'a> {
+    Builtin(&'a str),
+    Custom(Uuid),
+}
+
+impl<'a> RuleRole<'a> {
+    fn columns(self) -> (Option<&'a str>, Option<Uuid>) {
+        match self {
+            Self::Builtin(r) => (Some(r), None),
+            Self::Custom(id) => (None, Some(id)),
+        }
+    }
+}
+
+impl Rule {
+    pub fn role_ref(&self) -> RuleRole<'_> {
+        match (&self.role, self.role_id) {
+            (_, Some(id)) => RuleRole::Custom(id),
+            (Some(r), None) => RuleRole::Builtin(r),
+            // The table's check rules this out.
+            (None, None) => RuleRole::Builtin("viewer"),
+        }
+    }
+}
+
+/// A rule with the workspace and organization it belongs to.
+#[derive(Debug, Clone)]
+pub struct RuleListing {
+    pub rule: Rule,
+    pub workspace_name: String,
+    pub organization_id: Uuid,
+    pub organization_name: String,
+    /// The name and permissions of its custom role, if it has one.
+    pub custom_role: Option<(String, Vec<String>)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceListing {
     pub workspace: Workspace,
@@ -233,6 +304,41 @@ fn workspace_from(r: &Row) -> Workspace {
         name: r.get(2),
         created_at: r.get(3),
         created_by: r.get(4),
+    }
+}
+
+const RULE_COLS: &str =
+    "id, workspace_id, description, type, role, role_id, created_at, created_by";
+const ROLE_COLS: &str = "id, organization_id, name, permissions, created_at, created_by";
+
+fn rule_from(r: &Row) -> Rule {
+    Rule {
+        id: r.get(0),
+        workspace_id: r.get(1),
+        description: r.get(2),
+        r#type: r.get(3),
+        role: r.get(4),
+        role_id: r.get(5),
+        created_at: r.get(6),
+        created_by: r.get(7),
+    }
+}
+
+/// `(name, permissions)` at columns `at` and `at + 1`, `None` when NULL.
+fn custom_role(r: &Row, at: usize) -> Option<(String, Vec<String>)> {
+    let name: Option<String> = r.get(at);
+    let permissions: Option<Vec<String>> = r.get(at + 1);
+    name.zip(permissions)
+}
+
+fn role_from(r: &Row) -> Role {
+    Role {
+        id: r.get(0),
+        organization_id: r.get(1),
+        name: r.get(2),
+        permissions: r.get(3),
+        created_at: r.get(4),
+        created_by: r.get(5),
     }
 }
 
@@ -353,6 +459,112 @@ mod q {
         )
     }
 
+    pub async fn create_rule(
+        c: &tokio_postgres::Client,
+        workspace_id: Uuid,
+        description: &str,
+        r#type: &str,
+        role: RuleRole<'_>,
+        created_by: &str,
+    ) -> Result<Rule, StoreError> {
+        let sql = format!(
+            "INSERT INTO rules (id, workspace_id, description, type, role, role_id, created_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {RULE_COLS}"
+        );
+        let (role, role_id) = role.columns();
+        let row = c
+            .query_one(
+                &sql,
+                &[
+                    &Uuid::new_v4(),
+                    &workspace_id,
+                    &description,
+                    &r#type,
+                    &role,
+                    &role_id,
+                    &created_by,
+                ],
+            )
+            .await?;
+        Ok(rule_from(&row))
+    }
+
+    pub async fn update_rule(
+        c: &tokio_postgres::Client,
+        id: Uuid,
+        workspace_id: Uuid,
+        description: &str,
+        r#type: &str,
+        role: RuleRole<'_>,
+    ) -> Result<Option<Rule>, StoreError> {
+        let sql = format!(
+            "UPDATE rules SET workspace_id = $2, description = $3, type = $4, role = $5, \
+             role_id = $6 WHERE id = $1 RETURNING {RULE_COLS}"
+        );
+        let (role, role_id) = role.columns();
+        let row = c
+            .query_opt(
+                &sql,
+                &[&id, &workspace_id, &description, &r#type, &role, &role_id],
+            )
+            .await?;
+        Ok(row.as_ref().map(rule_from))
+    }
+
+    pub async fn delete_rule(c: &tokio_postgres::Client, id: Uuid) -> Result<bool, StoreError> {
+        Ok(c.execute("DELETE FROM rules WHERE id = $1", &[&id]).await? > 0)
+    }
+
+    pub async fn create_role(
+        c: &tokio_postgres::Client,
+        organization_id: Uuid,
+        name: &str,
+        permissions: &[String],
+        created_by: &str,
+    ) -> Result<Role, StoreError> {
+        let sql = format!(
+            "INSERT INTO roles (id, organization_id, name, permissions, created_by) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING {ROLE_COLS}"
+        );
+        let row = c
+            .query_one(
+                &sql,
+                &[
+                    &Uuid::new_v4(),
+                    &organization_id,
+                    &name,
+                    &permissions,
+                    &created_by,
+                ],
+            )
+            .await?;
+        Ok(role_from(&row))
+    }
+
+    pub async fn update_role(
+        c: &tokio_postgres::Client,
+        id: Uuid,
+        name: &str,
+        permissions: &[String],
+    ) -> Result<Option<Role>, StoreError> {
+        let sql = format!(
+            "UPDATE roles SET name = $2, permissions = $3 WHERE id = $1 RETURNING {ROLE_COLS}"
+        );
+        let row = c.query_opt(&sql, &[&id, &name, &permissions]).await?;
+        Ok(row.as_ref().map(role_from))
+    }
+
+    /// Fails with `Conflict` while a rule uses the role.
+    pub async fn delete_role(c: &tokio_postgres::Client, id: Uuid) -> Result<bool, StoreError> {
+        match c.execute("DELETE FROM roles WHERE id = $1", &[&id]).await {
+            Ok(n) => Ok(n > 0),
+            Err(e) if e.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) => {
+                Err(StoreError::Conflict("role still used by rules".into()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn create_object(
         c: &tokio_postgres::Client,
         o: &NewObject,
@@ -435,6 +647,64 @@ macro_rules! shared_creates {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
             q::delete_connection(c, name).await
+        }
+        pub async fn create_rule(
+            &self,
+            workspace_id: Uuid,
+            description: &str,
+            r#type: &str,
+            role: RuleRole<'_>,
+            created_by: &str,
+        ) -> Result<Rule, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::create_rule(c, workspace_id, description, r#type, role, created_by).await
+        }
+        /// The rule with every field replaced, `None` when it does not exist.
+        pub async fn update_rule(
+            &self,
+            id: Uuid,
+            workspace_id: Uuid,
+            description: &str,
+            r#type: &str,
+            role: RuleRole<'_>,
+        ) -> Result<Option<Rule>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::update_rule(c, id, workspace_id, description, r#type, role).await
+        }
+        /// `true` when a row was deleted.
+        pub async fn delete_rule(&self, id: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_rule(c, id).await
+        }
+        pub async fn create_role(
+            &self,
+            organization_id: Uuid,
+            name: &str,
+            permissions: &[String],
+            created_by: &str,
+        ) -> Result<Role, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::create_role(c, organization_id, name, permissions, created_by).await
+        }
+        pub async fn update_role(
+            &self,
+            id: Uuid,
+            name: &str,
+            permissions: &[String],
+        ) -> Result<Option<Role>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::update_role(c, id, name, permissions).await
+        }
+        /// `true` when a row was deleted; `Conflict` while a rule uses it.
+        pub async fn delete_role(&self, id: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_role(c, id).await
         }
         pub async fn create_object(&self, o: &NewObject) -> Result<StoredObject, StoreError> {
             let guard = $conn(self).await?;
@@ -740,6 +1010,145 @@ impl Store {
             )
             .await?;
         Ok(row.as_ref().map(workspace_from))
+    }
+
+    // roles
+    pub async fn role(&self, id: Uuid) -> Result<Option<Role>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {ROLE_COLS} FROM roles WHERE id = $1");
+        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(role_from))
+    }
+
+    pub async fn roles_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Role>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {ROLE_COLS} FROM roles WHERE id = ANY($1) ORDER BY name");
+        Ok(c.query(&sql, &[&ids])
+            .await?
+            .iter()
+            .map(role_from)
+            .collect())
+    }
+
+    /// The organization's roles by name, each with how many rules use it.
+    pub async fn roles_of_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<RoleListing>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "SELECT {ROLE_COLS}, (SELECT count(*) FROM rules r WHERE r.role_id = roles.id) \
+             FROM roles WHERE organization_id = $1 ORDER BY name, id"
+        );
+        Ok(c.query(&sql, &[&organization_id])
+            .await?
+            .iter()
+            .map(|r| RoleListing {
+                role: role_from(r),
+                rules: r.get(6),
+            })
+            .collect())
+    }
+
+    /// The rules that use the role.
+    pub async fn rules_of_role(&self, role_id: Uuid) -> Result<Vec<Rule>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {RULE_COLS} FROM rules WHERE role_id = $1");
+        Ok(c.query(&sql, &[&role_id])
+            .await?
+            .iter()
+            .map(rule_from)
+            .collect())
+    }
+
+    // rules
+    pub async fn rule(&self, id: Uuid) -> Result<Option<Rule>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {RULE_COLS} FROM rules WHERE id = $1");
+        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(rule_from))
+    }
+
+    pub async fn rules_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Rule>, StoreError> {
+        let c = self.conn().await?;
+        let sql =
+            format!("SELECT {RULE_COLS} FROM rules WHERE id = ANY($1) ORDER BY description, id");
+        Ok(c.query(&sql, &[&ids])
+            .await?
+            .iter()
+            .map(rule_from)
+            .collect())
+    }
+
+    pub async fn rules_of_workspace(&self, workspace_id: Uuid) -> Result<Vec<Rule>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "SELECT {RULE_COLS} FROM rules WHERE workspace_id = $1 ORDER BY description, id"
+        );
+        Ok(c.query(&sql, &[&workspace_id])
+            .await?
+            .iter()
+            .map(rule_from)
+            .collect())
+    }
+
+    /// Searches the description, type, role, workspace and organization names.
+    /// `visible: None` lists the rules of every workspace; `organization`
+    /// and `workspace` narrow it.
+    pub async fn search_rules(
+        &self,
+        visible: Option<&[Uuid]>,
+        organization: Option<Uuid>,
+        workspace: Option<Uuid>,
+        s: &Search,
+    ) -> Result<Page<RuleListing>, StoreError> {
+        let c = self.conn().await?;
+        let q = s.escaped();
+        let visible = visible.map(<[Uuid]>::to_vec);
+        const FROM: &str = "FROM rules r JOIN workspaces w ON w.id = r.workspace_id \
+             JOIN organizations o ON o.id = w.organization_id \
+             LEFT JOIN roles ro ON ro.id = r.role_id \
+             WHERE ($1::text IS NULL OR r.description ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR r.type ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR coalesce(r.role, ro.name) ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR w.name ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR o.name ILIKE '%' || $1 || '%' ESCAPE '\\') \
+             AND ($2::uuid[] IS NULL OR w.id = ANY($2)) \
+             AND ($3::uuid IS NULL OR w.organization_id = $3) \
+             AND ($4::uuid IS NULL OR w.id = $4)";
+        let sql = format!(
+            "SELECT r.id, r.workspace_id, r.description, r.type, r.role, r.role_id, \
+             r.created_at, r.created_by, w.name, o.id, o.name, ro.name, ro.permissions {FROM} \
+             ORDER BY o.name, o.id, w.name, w.id, r.description, r.id LIMIT $5 OFFSET $6"
+        );
+        let items = c
+            .query(
+                &sql,
+                &[
+                    &q,
+                    &visible,
+                    &organization,
+                    &workspace,
+                    &s.limit(),
+                    &s.offset(),
+                ],
+            )
+            .await?
+            .iter()
+            .map(|r| RuleListing {
+                rule: rule_from(r),
+                workspace_name: r.get(8),
+                organization_id: r.get(9),
+                organization_name: r.get(10),
+                custom_role: custom_role(r, 11),
+            })
+            .collect();
+        let total = c
+            .query_one(
+                &format!("SELECT count(*) {FROM}"),
+                &[&q, &visible, &organization, &workspace],
+            )
+            .await?
+            .get(0);
+        Ok(Page { items, total })
     }
 
     // connections

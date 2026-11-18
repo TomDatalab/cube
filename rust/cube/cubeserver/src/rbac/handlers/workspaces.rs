@@ -301,6 +301,11 @@ pub async fn delete(
         .await?;
 
     let members = read_members(rbac, ws.id).await?;
+    let rules = rbac
+        .store
+        .rules_of_workspace(ws.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
     // The row (and its objects) go in a transaction committed only once
     // SpiceDB forgot the workspace; a SpiceDB failure rolls it back. The
     // workspace's own relationships go last, so a failure midway leaves it
@@ -334,6 +339,11 @@ pub async fn delete(
             subject: None,
         },
     ];
+    // Its rules (the rows go with the workspace's) lose their members and
+    // their place in the organization.
+    for rule in &rules {
+        super::rules::forget(rbac, rule, &ws).await?;
+    }
     for filter in &filters {
         rbac.authz
             .delete_matching(filter)

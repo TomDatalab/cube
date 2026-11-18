@@ -10,10 +10,12 @@ use super::authz::{
     Authz, AuthzError, ObjectRef, Precondition, Relationship, RelationshipFilter, Update,
 };
 
-/// One term of a permission expression: a direct relation or `relation->perm`.
+/// One term of a permission expression: a direct relation, `relation->perm`,
+/// or the intersection (`&`) of terms.
 enum Term {
     Rel(&'static str),
     Arrow(&'static str, &'static str),
+    All(Vec<Term>),
 }
 
 /// Permission definitions, written from `rbac/schema.zed`.
@@ -22,17 +24,49 @@ fn definition(kind: &str, name: &str) -> Option<Vec<Term>> {
     Some(match (kind, name) {
         ("platform", "manage") => vec![Rel("admin")],
         ("organization", "admin") => vec![Rel("owner"), Arrow("platform", "manage")],
-        ("organization", "view") => vec![Rel("admin"), Rel("member")],
+        ("organization", "view") => vec![Rel("admin"), Rel("member"), Arrow("rule", "member")],
         ("organization", "manage_connections") => vec![Rel("admin")],
-        ("workspace", "manage") => vec![Rel("owner"), Arrow("organization", "admin")],
-        ("workspace", "edit") => vec![Rel("editor"), Rel("manage")],
-        ("workspace", "view") => vec![Rel("viewer"), Rel("edit")],
-        ("workspace", "query") => vec![Rel("view")],
-        ("workspace", "execute") => vec![Rel("manage")],
+        ("workspace", "manage") => vec![
+            Rel("owner"),
+            Arrow("owner_rule", "member"),
+            Arrow("rule", "manage"),
+            Arrow("organization", "admin"),
+        ],
+        ("workspace", "edit") => vec![Rel("editor"), Arrow("editor_rule", "member"), Rel("manage")],
+        ("workspace", "view") => vec![
+            Rel("viewer"),
+            Arrow("viewer_rule", "member"),
+            Arrow("rule", "view"),
+            Rel("edit"),
+        ],
+        ("workspace", "query") => vec![
+            Rel("viewer"),
+            Arrow("viewer_rule", "member"),
+            Arrow("rule", "query"),
+            Rel("edit"),
+        ],
+        ("workspace", "read_objects") => vec![
+            Rel("viewer"),
+            Arrow("viewer_rule", "member"),
+            Arrow("rule", "read_objects"),
+            Rel("edit"),
+        ],
+        ("workspace", "write_objects") => vec![Arrow("rule", "write_objects"), Rel("edit")],
+        ("workspace", "execute") => vec![Arrow("rule", "execute"), Rel("manage")],
+        ("rule", "view") => vec![All(vec![Rel("member"), Arrow("role", "can_view")])],
+        ("rule", "query") => vec![All(vec![Rel("member"), Arrow("role", "can_query")])],
+        ("rule", "read_objects") => {
+            vec![All(vec![Rel("member"), Arrow("role", "can_read_objects")])]
+        }
+        ("rule", "write_objects") => {
+            vec![All(vec![Rel("member"), Arrow("role", "can_write_objects")])]
+        }
+        ("rule", "execute") => vec![All(vec![Rel("member"), Arrow("role", "can_execute")])],
+        ("rule", "manage") => vec![All(vec![Rel("member"), Arrow("role", "can_manage")])],
         ("connection", "manage") => vec![Arrow("organization", "admin")],
         ("connection", "query") => vec![Arrow("workspace", "query"), Rel("manage")],
-        ("object", "read") => vec![Arrow("workspace", "view")],
-        ("object", "write") => vec![Arrow("workspace", "edit")],
+        ("object", "read") => vec![Arrow("workspace", "read_objects")],
+        ("object", "write") => vec![Arrow("workspace", "write_objects")],
         _ => return None,
     })
 }
@@ -97,26 +131,39 @@ impl FakeAuthz {
             return false;
         }
         if let Some(terms) = definition(kind, name) {
-            return terms.iter().any(|t| match t {
-                Term::Rel(r) => self.has_depth(rels, kind, id, r, user, depth + 1),
-                Term::Arrow(rel, perm) => rels
-                    .iter()
-                    .filter(|x| {
-                        x.resource.kind == kind && x.resource.id == id && x.relation == *rel
-                    })
-                    .any(|x| {
-                        self.has_depth(rels, x.subject.kind, &x.subject.id, perm, user, depth + 1)
-                    }),
-            });
+            return terms
+                .iter()
+                .any(|t| self.term(rels, kind, id, t, user, depth + 1));
         }
-        // A plain relation: direct user subject.
+        // A plain relation: direct user subject, or the `user:*` wildcard.
         rels.iter().any(|x| {
             x.resource.kind == kind
                 && x.resource.id == id
                 && x.relation == name
                 && x.subject.kind == "user"
-                && x.subject.id == user
+                && (x.subject.id == user || x.subject.id == "*")
         })
+    }
+
+    fn term(
+        &self,
+        rels: &[Relationship],
+        kind: &str,
+        id: &str,
+        term: &Term,
+        user: &str,
+        depth: usize,
+    ) -> bool {
+        match term {
+            Term::Rel(r) => self.has_depth(rels, kind, id, r, user, depth),
+            Term::Arrow(rel, perm) => rels
+                .iter()
+                .filter(|x| x.resource.kind == kind && x.resource.id == id && x.relation == *rel)
+                .any(|x| self.has_depth(rels, x.subject.kind, &x.subject.id, perm, user, depth)),
+            Term::All(terms) => terms
+                .iter()
+                .all(|t| self.term(rels, kind, id, t, user, depth)),
+        }
     }
 }
 
