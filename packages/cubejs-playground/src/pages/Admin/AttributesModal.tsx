@@ -33,26 +33,33 @@ export function AttributesModal({ api, user, onClose }: Props) {
     if (!user) {
       return;
     }
+    // The modal stays mounted: an answer for another user, or for an earlier
+    // attempt, must neither fill the form nor allow saving.
+    let cancelled = false;
+    const current = () => !cancelled && isMounted();
     setError(null);
     setLoaded(false);
     setLoading(true);
     form.setFieldsValue({ pairs: [] });
     api.userAttributes(user.id).then((attributes) => {
-      if (isMounted()) {
+      if (current()) {
         form.setFieldsValue({
           pairs: Object.entries(attributes).map(([name, values]) => ({ name, values })),
         });
         setLoaded(true);
       }
     }).catch((e: any) => {
-      if (isMounted()) {
+      if (current()) {
         setError(e.message);
       }
     }).finally(() => {
-      if (isMounted()) {
+      if (current()) {
         setLoading(false);
       }
     });
+    return () => {
+      cancelled = true;
+    };
   }, [api, user, attempt]);
 
   async function save({ pairs }: { pairs?: Pair[] }) {

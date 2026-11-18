@@ -13,6 +13,7 @@ import { organizationOptions, RemoteSelect } from './RemoteSelect';
 import {
   RestrictionsFields, RestrictionsFormValues, toFormRestrictions, toRestrictions,
 } from './RestrictionsFields';
+import { useLatestCall } from './useLatestCall';
 
 type Props = {
   api: AdminApi;
@@ -55,6 +56,7 @@ export function RolesTab({ api }: Props) {
   const [cubes, setCubes] = useState<ModelCube[]>([]);
   const [cubesError, setCubesError] = useState<string | null>(null);
   const [form] = Form.useForm<FormValues>();
+  const beginMembers = useLatestCall();
 
   async function load(org: string) {
     setLoading(true);
@@ -77,22 +79,28 @@ export function RolesTab({ api }: Props) {
 
   useEffect(() => {
     setRoles(null);
+    // The members of the organization left behind are not this one's.
+    beginMembers();
+    setCubes([]);
     if (organization) {
       load(organization);
     }
   }, [api, organization]);
 
   // The members the restrictions can name; the form stays usable without them.
+  // Only the latest load counts: one for another organization may answer
+  // after it.
   async function loadMembers(org: string) {
+    const current = beginMembers();
     setCubes([]);
     setCubesError(null);
     try {
       const loaded = await api.modelMembers(org);
-      if (isMounted()) {
+      if (isMounted() && current()) {
         setCubes(loaded);
       }
     } catch (e: any) {
-      if (isMounted()) {
+      if (isMounted() && current()) {
         setCubesError(e.message);
       }
     }
