@@ -6,7 +6,9 @@ import {
   CodeOutlined,
   DatabaseOutlined,
   DownOutlined,
+  IdcardOutlined,
   LeftOutlined,
+  NodeIndexOutlined,
   RightOutlined,
   SafetyOutlined,
   TeamOutlined,
@@ -17,7 +19,7 @@ import { Link } from 'react-router-dom';
 import styled, { css } from 'styled-components';
 
 import { useRbac } from '../../hooks';
-import { ADMIN_SECTIONS, adminPath } from '../../pages/Admin/sections';
+import { ADMIN_SECTIONS, AdminSection, adminPath } from '../../pages/Admin/sections';
 
 // The bossa-arq-dashboard sidebar: 196px open, 64px collapsed.
 const OPEN = 196;
@@ -36,9 +38,12 @@ export type NavPage = {
   children?: NavPage[];
 };
 
-const ADMIN_ICONS: Record<string, ReactNode> = {
+// Typed by section, so a new Admin page cannot go without an icon.
+const ADMIN_ICONS: Record<AdminSection, ReactNode> = {
   organizations: <ApartmentOutlined />,
   workspaces: <AppstoreOutlined />,
+  roles: <IdcardOutlined />,
+  rules: <NodeIndexOutlined />,
   users: <TeamOutlined />,
 };
 
