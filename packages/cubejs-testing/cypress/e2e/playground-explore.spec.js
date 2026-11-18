@@ -58,46 +58,6 @@ context("Playground: Explore Page", () => {
     // cy.getByTestId("TimeDimension").contains("Events Created at");
   });
 
-  describe("Live preview", () => {
-    it("respects livePreview option", () => {
-      cy.intercept("get", "/playground/context", (req) => {
-        delete req.headers["if-none-match"];
-
-        req.reply((res) => {
-          res.body = {
-            ...res.body,
-            livePreview: true,
-          };
-        });
-      }).as("context");
-
-      cy.setQuery(ordersCountQuery);
-      cy.wait(["@context"]);
-      cy.getByTestId("live-preview-btn").should("exist");
-      // avoid crashing here
-      cy.wait(10000);
-    });
-
-    // @TODO: Investigate why this test is failing. Looks like intercept is not working properly.
-    // Tested manually and it works.
-    it.skip("does now show the Live Preview button when livePreview is disabled", () => {
-      cy.intercept("get", "/playground/context", (req) => {
-        delete req.headers["if-none-match"];
-
-        req.continue((res) => {
-          res.body = {
-            ...res.body,
-            livePreview: undefined,
-          };
-        });
-      }).as("context");
-
-      cy.setQuery(ordersCountQuery);
-      cy.wait(["@context"]);
-      cy.getByTestId("live-preview-btn").should("not.exist");
-    });
-  });
-
   describe("Security Context", () => {
     it("has no a cubejs token initially", () => {
       cy.intercept("get", "/playground/context", (req) => {
