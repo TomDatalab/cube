@@ -8,6 +8,8 @@
 //! the access of every rule that uses it at once. The organization's admins
 //! manage its roles; anyone who views the organization lists them.
 
+use std::collections::BTreeSet;
+
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -381,4 +383,66 @@ mod tests {
         assert!(normalize(&["admin".to_string()]).is_err());
         assert!(normalize(&[]).is_err());
     }
+}
+
+/// The members of one cube's meta kinds, as `[{name, title}]`.
+fn meta_members(cube: &Value, kind: &str) -> Vec<Value> {
+    cube[kind]
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .map(|m| json!({ "name": m["name"], "title": m["title"] }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// → `{cubes: [{name, title, measures, dimensions, segments}]}`: the model's
+/// cubes (no views) that read only from the organization's connections, for
+/// picking the members a role filters or blocks. `admin` on the organization.
+pub async fn model_members(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(org): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (rbac, user) = caller(&state, &ctx)?;
+    let org = visible_organization(rbac, &org, "admin", user).await?;
+    let connections: BTreeSet<String> = rbac
+        .store
+        .connections_of_organization(org.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    let sources = state.query.data_sources().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The data model is not available",
+        )
+    })?;
+    let meta = state.meta.meta(&ctx, false).await?;
+    let cubes: Vec<Value> = meta["cubes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|cube| {
+            let Some(name) = cube["name"].as_str() else {
+                return false;
+            };
+            !sources.graph().is_view(name)
+                && sources.data_sources_of_cube(name).is_subset(&connections)
+        })
+        .map(|cube| {
+            json!({
+                "name": cube["name"],
+                "title": cube["title"],
+                "measures": meta_members(cube, "measures"),
+                "dimensions": meta_members(cube, "dimensions"),
+                "segments": meta_members(cube, "segments"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "cubes": cubes })))
 }

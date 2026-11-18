@@ -116,6 +116,10 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             get(roles::list).post(roles::create),
         )
         .route(
+            &format!("{base}/v1/organizations/:id/model-members"),
+            get(roles::model_members),
+        )
+        .route(
             &format!("{base}/v1/roles/:id"),
             get(roles::get).patch(roles::update).delete(roles::delete),
         )

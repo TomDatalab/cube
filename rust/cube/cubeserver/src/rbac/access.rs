@@ -9,6 +9,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::authz::Relationship;
+use super::restrictions::{Restrictions, RowOperator};
 use super::store::{
     ConnectionOrigin, ConnectionRow, Organization, Role, Rule, RuleRole, User, Workspace,
 };
@@ -29,6 +30,43 @@ const WS_VIEWER: &[&str] = &["view", "query", "read objects"];
 
 /// The graph's names for the permissions of an organization's role
 /// (`manage` grants everything a workspace owner has).
+/// `(filters: orders.region = region; blocks: orders.margin)`: what a role
+/// hides, a filter reading `member = attribute`, `member != [v1, v2]` for
+/// fixed values. `None` when the role has no restrictions.
+fn restriction_note(r: &Restrictions) -> Option<String> {
+    let mut parts = Vec::new();
+    if !r.row_filters.is_empty() {
+        let filters: Vec<String> = r
+            .row_filters
+            .iter()
+            .map(|f| {
+                let op = match f.operator {
+                    RowOperator::Equals => "=",
+                    RowOperator::NotEquals => "!=",
+                };
+                let source = match (&f.attribute, &f.values) {
+                    (Some(attribute), _) => attribute.clone(),
+                    (None, values) => format!(
+                        "[{}]",
+                        values
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                format!("{} {op} {source}", f.member)
+            })
+            .collect();
+        parts.push(format!("filters: {}", filters.join(", ")));
+    }
+    if !r.blocked_members.is_empty() {
+        parts.push(format!("blocks: {}", r.blocked_members.join(", ")));
+    }
+    (!parts.is_empty()).then(|| format!("({})", parts.join("; ")))
+}
+
 fn role_perms(permissions: &[String]) -> Vec<&'static str> {
     if permissions.iter().any(|p| p == "manage") {
         return WS_OWNER.to_vec();
@@ -290,7 +328,8 @@ pub fn build(input: &AccessInput) -> AccessGraph {
         let Some(ws) = workspaces.get(&rule.workspace_id.to_string()) else {
             continue;
         };
-        let (role, perms): (String, Vec<&'static str>) = match rule.role_ref() {
+        let (role, perms, note): (String, Vec<&'static str>, Option<String>) = match rule.role_ref()
+        {
             RuleRole::Builtin(r) => (
                 r.to_string(),
                 match r {
@@ -300,12 +339,17 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                     _ => continue,
                 }
                 .to_vec(),
+                None,
             ),
             RuleRole::Custom(id) => {
                 let Some(role) = input.roles.iter().find(|r| r.id == id) else {
                     continue;
                 };
-                (role.name.clone(), role_perms(&role.permissions))
+                (
+                    role.name.clone(),
+                    role_perms(&role.permissions),
+                    restriction_note(&role.restrictions),
+                )
             }
         };
         let node = format!("workspace:{}", ws.id);
@@ -319,7 +363,11 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             .entry(ws.id.to_string())
             .or_default()
             .push(Source {
-                text: format!("{role} through the rule {}", rule.description),
+                text: format!(
+                    "{role} through the rule {}{}",
+                    rule.description,
+                    note.map(|n| format!(" {n}")).unwrap_or_default()
+                ),
                 path: vec![user_id.clone(), node.clone()],
                 perms: perms.to_vec(),
             });
@@ -691,6 +739,57 @@ mod tests {
         assert_eq!(perms(&g, &id), ["view", "query"]);
         let r = &grant(&g, &id, "query").unwrap().reasons;
         assert_eq!(r[0].text, "Analyst through the rule Analysts");
+    }
+
+    #[test]
+    fn a_restricted_rule_explains_its_restrictions() {
+        use crate::rbac::restrictions::RowFilter;
+        let role = Uuid::from_u128(4);
+        let mut i = input(vec![]);
+        i.rules = vec![Rule {
+            id: Uuid::from_u128(3),
+            workspace_id: W,
+            description: "Analysts".into(),
+            r#type: "finance".into(),
+            role: None,
+            role_id: Some(role),
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        i.roles = vec![Role {
+            id: role,
+            organization_id: O,
+            name: "Analyst".into(),
+            permissions: vec!["view".into(), "query".into()],
+            restrictions: Restrictions {
+                row_filters: vec![
+                    RowFilter {
+                        member: "orders.region".into(),
+                        operator: RowOperator::Equals,
+                        attribute: Some("region".into()),
+                        values: None,
+                    },
+                    RowFilter {
+                        member: "orders.status".into(),
+                        operator: RowOperator::NotEquals,
+                        attribute: None,
+                        values: Some(vec!["draft".into(), "void".into()]),
+                    },
+                ],
+                blocked_members: vec!["orders.margin".into()],
+            },
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        let g = build(&i);
+        let r = &grant(&g, &format!("workspace:{W}"), "query")
+            .unwrap()
+            .reasons;
+        assert_eq!(
+            r[0].text,
+            "Analyst through the rule Analysts (filters: orders.region = region, orders.status != [draft, void]; blocks: orders.margin)"
+        );
+        assert_eq!(restriction_note(&Restrictions::default()), None);
     }
 
     #[test]

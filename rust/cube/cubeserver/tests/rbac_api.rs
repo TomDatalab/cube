@@ -6009,3 +6009,30 @@ db_test!(row_filters_do_not_change_the_meta, |store| {
         before
     );
 });
+
+db_test!(organization_model_members_list_only_its_cubes, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let path = format!("/cube/v1/organizations/{}/model-members", d.s.org_a);
+    let answer = call(&env.router, Method::GET, &path, Some(&d.s.ana), &[], None).await;
+    assert_eq!(answer.status, StatusCode::OK, "{:?}", answer.json());
+    let body = answer.json();
+    let mut names: Vec<&str> = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a_orders", "b_orders"]);
+    let a = &body["cubes"][0];
+    assert!(a["measures"][0]["name"]
+        .as_str()
+        .unwrap()
+        .starts_with("a_orders."));
+    assert!(a["measures"][0]["title"].is_string(), "{a}");
+    assert!(a["dimensions"].is_array() && a["segments"].is_array());
+    // Only an admin of the organization lists them.
+    let answer = call(&env.router, Method::GET, &path, Some(&d.s.bia), &[], None).await;
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+});
