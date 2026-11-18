@@ -1,5 +1,5 @@
 import {
-  EditOutlined, HolderOutlined, LockOutlined, SafetyCertificateOutlined,
+  EditOutlined, HolderOutlined, LockOutlined, SafetyCertificateOutlined, TagsOutlined,
 } from '@ant-design/icons';
 import {
   Alert, Button, Col, Form, Input, message, Modal, Row, Space, Switch, Table, Tabs, Tag, Tooltip,
@@ -9,6 +9,7 @@ import { useState } from 'react';
 
 import { AccessModal } from './access/AccessModal';
 import { AdminApi, PAGE_SIZE, User } from './api';
+import { AttributesModal } from './AttributesModal';
 import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
 import { RuleTree } from './RuleTree';
 import { useSearch } from './useSearch';
@@ -34,6 +35,7 @@ export function UsersTab({ api, currentUser }: Props) {
   const [editing, setEditing] = useState<User | null>(null);
   const [resetting, setResetting] = useState<User | null>(null);
   const [accessing, setAccessing] = useState<User | null>(null);
+  const [attributing, setAttributing] = useState<User | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form] = Form.useForm();
@@ -202,6 +204,14 @@ export function UsersTab({ api, currentUser }: Props) {
                       onClick={() => setAccessing(user)}
                     />
                   </Tooltip>
+                  <Tooltip title="Attributes">
+                    <Button
+                      size="small"
+                      aria-label={`Attributes of ${user.id}`}
+                      icon={<TagsOutlined />}
+                      onClick={() => setAttributing(user)}
+                    />
+                  </Tooltip>
                   <Tooltip title="Reset password">
                     <Button
                       size="small"
@@ -281,6 +291,7 @@ export function UsersTab({ api, currentUser }: Props) {
           </Form>
         </Modal>
         <AccessModal api={api} user={accessing} onClose={() => setAccessing(null)} />
+        <AttributesModal api={api} user={attributing} onClose={() => setAttributing(null)} />
       </Col>
       <Col xs={24} xl={9}>
         <Tabs defaultActiveKey="members" size="small">

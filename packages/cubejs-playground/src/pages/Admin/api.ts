@@ -70,12 +70,49 @@ export function withImplied(chosen: readonly string[]): Permission[] {
   });
 }
 
+// A row filter of a role: the member must (not) equal the user's attribute
+// `attribute`, or the fixed `values`; exactly one of the two is set.
+export type RowFilter = {
+  member: string;
+  operator: 'equals' | 'notEquals';
+  attribute?: string;
+  values?: string[];
+};
+
+export type Restrictions = { rowFilters: RowFilter[]; blockedMembers: string[] };
+
+// A user's attributes: name -> values.
+export type Attributes = Record<string, string[]>;
+
+export type ModelMember = { name: string; title?: string };
+
+export type ModelCube = {
+  name: string;
+  title?: string;
+  measures: ModelMember[];
+  dimensions: ModelMember[];
+  segments: ModelMember[];
+};
+
+// "2 filters · 3 blocked"; "" when the role restricts nothing.
+export function restrictionSummary(r: Restrictions): string {
+  const parts: string[] = [];
+  if (r.rowFilters.length) {
+    parts.push(`${r.rowFilters.length} ${r.rowFilters.length === 1 ? 'filter' : 'filters'}`);
+  }
+  if (r.blockedMembers.length) {
+    parts.push(`${r.blockedMembers.length} blocked`);
+  }
+  return parts.join(' · ');
+}
+
 // A role an organization defines, with how many rules use it.
 export type OrgRole = {
   id: string;
   organizationId: string;
   name: string;
   permissions: Permission[];
+  restrictions: Restrictions;
   rules: number;
   createdAt: string;
   createdBy: string | null;
@@ -203,6 +240,13 @@ export function adminApi(basePath: string) {
     updateUser: (user: string, patch: { name?: string; email?: string; disabled?: boolean }) => call(
       'PATCH', `/v1/users/${id(user)}`, patch
     ),
+    userAttributes: async (user: string): Promise<Attributes> => (
+      await call('GET', `/v1/users/${id(user)}/attributes`)
+    ).attributes,
+    // Replaces the whole set (platform admin only).
+    setUserAttributes: async (user: string, attributes: Attributes): Promise<Attributes> => (
+      await call('PUT', `/v1/users/${id(user)}/attributes`, { attributes })
+    ).attributes,
     access: (user: string): Promise<AccessGraph> => call('GET', `/v1/users/${id(user)}/access`),
     setPassword: (user: string, password: string) => call(
       'PUT', `/v1/users/${id(user)}/password`, { password }
@@ -269,15 +313,24 @@ export function adminApi(basePath: string) {
     roles: async (org: string): Promise<OrgRole[]> => (
       await call('GET', `/v1/organizations/${id(org)}/roles`)
     ).roles,
-    createRole: (org: string, role: { name: string; permissions: Permission[] }): Promise<OrgRole> => call(
+    createRole: (org: string, role: {
+      name: string; permissions: Permission[]; restrictions?: Restrictions;
+    }): Promise<OrgRole> => call(
       'POST', `/v1/organizations/${id(org)}/roles`, role
     ),
     // New permissions reach every rule with the role at once.
-    updateRole: (role: string, patch: { name?: string; permissions?: Permission[] }): Promise<OrgRole> => call(
+    updateRole: (role: string, patch: {
+      name?: string; permissions?: Permission[]; restrictions?: Restrictions;
+    }): Promise<OrgRole> => call(
       'PATCH', `/v1/roles/${id(role)}`, patch
     ),
     // 409 while a rule uses the role.
     deleteRole: (role: string) => call('DELETE', `/v1/roles/${id(role)}`),
+    // The cubes (never views) of the organization's connections, for picking
+    // restriction members.
+    modelMembers: async (org: string): Promise<ModelCube[]> => (
+      await call('GET', `/v1/organizations/${id(org)}/model-members`)
+    ).cubes,
     workspace: (ws: string): Promise<Workspace> => call('GET', `/v1/workspaces/${id(ws)}`),
 
     connections: async (org: string): Promise<Connection[]> => (
