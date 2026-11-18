@@ -682,6 +682,7 @@ mod tests {
             organization_id: O,
             name: "Analyst".into(),
             permissions: vec!["view".into(), "query".into()],
+            restrictions: Default::default(),
             created_at: Utc::now(),
             created_by: "x".into(),
         }];

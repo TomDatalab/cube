@@ -20,6 +20,7 @@ use super::organizations::visible_organization;
 use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
+use crate::rbac::restrictions::Restrictions;
 use crate::rbac::store::{Role, StoreError};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
@@ -225,7 +226,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let role = tx
-        .create_role(org.id, &name, &permissions, user)
+        .create_role(org.id, &name, &permissions, &Restrictions::default(), user)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     rbac.authz
@@ -292,7 +293,7 @@ pub async fn update(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let updated = tx
-        .update_role(role.id, &name, &permissions)
+        .update_role(role.id, &name, &permissions, &Restrictions::default())
         .await
         .map_err(|e| store_error(e, DUPLICATE))?
         .ok_or_else(not_found)?;

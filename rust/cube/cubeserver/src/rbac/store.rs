@@ -7,6 +7,8 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::{NoTls, Row};
 use uuid::Uuid;
 
+use super::restrictions::{Attributes, Restrictions};
+
 const MIGRATIONS: &str = include_str!("migrations.sql");
 
 #[derive(Debug)]
@@ -130,6 +132,7 @@ pub struct Role {
     pub organization_id: Uuid,
     pub name: String,
     pub permissions: Vec<String>,
+    pub restrictions: Restrictions,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
 }
@@ -309,7 +312,8 @@ fn workspace_from(r: &Row) -> Workspace {
 
 const RULE_COLS: &str =
     "id, workspace_id, description, type, role, role_id, created_at, created_by";
-const ROLE_COLS: &str = "id, organization_id, name, permissions, created_at, created_by";
+const ROLE_COLS: &str =
+    "id, organization_id, name, permissions, restrictions, created_at, created_by";
 
 fn rule_from(r: &Row) -> Rule {
     Rule {
@@ -331,15 +335,26 @@ fn custom_role(r: &Row, at: usize) -> Option<(String, Vec<String>)> {
     name.zip(permissions)
 }
 
-fn role_from(r: &Row) -> Role {
-    Role {
+/// A stored `restrictions` that does not parse is an error, never "no
+/// restriction".
+fn role_from(r: &Row) -> Result<Role, StoreError> {
+    let restrictions: serde_json::Value = r.get(4);
+    let restrictions = serde_json::from_value(restrictions)
+        .map_err(|e| StoreError::Db(format!("invalid role restrictions: {e}")))?;
+    Ok(Role {
         id: r.get(0),
         organization_id: r.get(1),
         name: r.get(2),
         permissions: r.get(3),
-        created_at: r.get(4),
-        created_by: r.get(5),
-    }
+        restrictions,
+        created_at: r.get(5),
+        created_by: r.get(6),
+    })
+}
+
+fn restrictions_json(restrictions: &Restrictions) -> Result<serde_json::Value, StoreError> {
+    serde_json::to_value(restrictions)
+        .map_err(|e| StoreError::Db(format!("invalid role restrictions: {e}")))
 }
 
 fn object_from(r: &Row) -> StoredObject {
@@ -520,11 +535,13 @@ mod q {
         organization_id: Uuid,
         name: &str,
         permissions: &[String],
+        restrictions: &Restrictions,
         created_by: &str,
     ) -> Result<Role, StoreError> {
+        let restrictions = restrictions_json(restrictions)?;
         let sql = format!(
-            "INSERT INTO roles (id, organization_id, name, permissions, created_by) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING {ROLE_COLS}"
+            "INSERT INTO roles (id, organization_id, name, permissions, restrictions, created_by) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING {ROLE_COLS}"
         );
         let row = c
             .query_one(
@@ -534,11 +551,12 @@ mod q {
                     &organization_id,
                     &name,
                     &permissions,
+                    &restrictions,
                     &created_by,
                 ],
             )
             .await?;
-        Ok(role_from(&row))
+        role_from(&row)
     }
 
     pub async fn update_role(
@@ -546,12 +564,17 @@ mod q {
         id: Uuid,
         name: &str,
         permissions: &[String],
+        restrictions: &Restrictions,
     ) -> Result<Option<Role>, StoreError> {
+        let restrictions = restrictions_json(restrictions)?;
         let sql = format!(
-            "UPDATE roles SET name = $2, permissions = $3 WHERE id = $1 RETURNING {ROLE_COLS}"
+            "UPDATE roles SET name = $2, permissions = $3, restrictions = $4 \
+             WHERE id = $1 RETURNING {ROLE_COLS}"
         );
-        let row = c.query_opt(&sql, &[&id, &name, &permissions]).await?;
-        Ok(row.as_ref().map(role_from))
+        let row = c
+            .query_opt(&sql, &[&id, &name, &permissions, &restrictions])
+            .await?;
+        row.as_ref().map(role_from).transpose()
     }
 
     /// Fails with `Conflict` while a rule uses the role.
@@ -684,21 +707,31 @@ macro_rules! shared_creates {
             organization_id: Uuid,
             name: &str,
             permissions: &[String],
+            restrictions: &Restrictions,
             created_by: &str,
         ) -> Result<Role, StoreError> {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
-            q::create_role(c, organization_id, name, permissions, created_by).await
+            q::create_role(
+                c,
+                organization_id,
+                name,
+                permissions,
+                restrictions,
+                created_by,
+            )
+            .await
         }
         pub async fn update_role(
             &self,
             id: Uuid,
             name: &str,
             permissions: &[String],
+            restrictions: &Restrictions,
         ) -> Result<Option<Role>, StoreError> {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
-            q::update_role(c, id, name, permissions).await
+            q::update_role(c, id, name, permissions, restrictions).await
         }
         /// `true` when a row was deleted; `Conflict` while a rule uses it.
         pub async fn delete_role(&self, id: Uuid) -> Result<bool, StoreError> {
@@ -1016,17 +1049,21 @@ impl Store {
     pub async fn role(&self, id: Uuid) -> Result<Option<Role>, StoreError> {
         let c = self.conn().await?;
         let sql = format!("SELECT {ROLE_COLS} FROM roles WHERE id = $1");
-        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(role_from))
+        c.query_opt(&sql, &[&id])
+            .await?
+            .as_ref()
+            .map(role_from)
+            .transpose()
     }
 
     pub async fn roles_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Role>, StoreError> {
         let c = self.conn().await?;
         let sql = format!("SELECT {ROLE_COLS} FROM roles WHERE id = ANY($1) ORDER BY name");
-        Ok(c.query(&sql, &[&ids])
+        c.query(&sql, &[&ids])
             .await?
             .iter()
             .map(role_from)
-            .collect())
+            .collect()
     }
 
     /// The organization's roles by name, each with how many rules use it.
@@ -1039,14 +1076,49 @@ impl Store {
             "SELECT {ROLE_COLS}, (SELECT count(*) FROM rules r WHERE r.role_id = roles.id) \
              FROM roles WHERE organization_id = $1 ORDER BY name, id"
         );
-        Ok(c.query(&sql, &[&organization_id])
+        c.query(&sql, &[&organization_id])
             .await?
             .iter()
-            .map(|r| RoleListing {
-                role: role_from(r),
-                rules: r.get(6),
+            .map(|r| {
+                Ok(RoleListing {
+                    role: role_from(r)?,
+                    rules: r.get(7),
+                })
             })
-            .collect())
+            .collect()
+    }
+
+    /// The user's attributes: name to values.
+    pub async fn user_attributes(&self, user: &str) -> Result<Attributes, StoreError> {
+        let c = self.conn().await?;
+        let rows = c
+            .query(
+                "SELECT name, values FROM user_attributes WHERE user_id = $1",
+                &[&user],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    /// Replaces the user's whole set of attributes, in one transaction.
+    pub async fn set_user_attributes(
+        &self,
+        user: &str,
+        attributes: &Attributes,
+    ) -> Result<(), StoreError> {
+        let mut c = self.conn().await?;
+        let tx = c.transaction().await?;
+        tx.execute("DELETE FROM user_attributes WHERE user_id = $1", &[&user])
+            .await?;
+        for (name, values) in attributes {
+            tx.execute(
+                "INSERT INTO user_attributes (user_id, name, values) VALUES ($1, $2, $3)",
+                &[&user, name, values],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// The rules that use the role.

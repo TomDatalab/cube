@@ -4,6 +4,7 @@
 
 mod support;
 
+use cubeserver::rbac::restrictions::{Attributes, Restrictions, RowFilter, RowOperator};
 use cubeserver::rbac::store::{ConnectionOrigin, NewObject, NewUser, Search, StoreError};
 use support::{connect, with_db, TestDb};
 use uuid::Uuid;
@@ -538,3 +539,86 @@ db_test!(
         assert_eq!(all[1].origin, ConnectionOrigin::Assigned);
     }
 );
+
+db_test!(role_restrictions_round_trip, |store, _url| {
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "ann").await.unwrap();
+    let restrictions = Restrictions {
+        row_filters: vec![
+            RowFilter {
+                member: "orders.region".into(),
+                operator: RowOperator::Equals,
+                attribute: Some("region".into()),
+                values: None,
+            },
+            RowFilter {
+                member: "orders.status".into(),
+                operator: RowOperator::NotEquals,
+                attribute: None,
+                values: Some(vec!["internal".into()]),
+            },
+        ],
+        blocked_members: vec!["orders.margin".into()],
+    };
+    let created = store
+        .create_role(
+            o.id,
+            "analyst",
+            &["workspace#query".into()],
+            &restrictions,
+            "ann",
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.restrictions, restrictions);
+    assert_eq!(
+        store.role(created.id).await.unwrap().unwrap().restrictions,
+        restrictions
+    );
+    let by_ids = store.roles_by_ids(&[created.id]).await.unwrap();
+    assert_eq!(by_ids[0].restrictions, restrictions);
+
+    let plain = store
+        .update_role(created.id, "analyst", &[], &Restrictions::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(plain.restrictions.is_empty());
+    let listed = store.roles_of_organization(o.id).await.unwrap();
+    assert!(listed[0].role.restrictions.is_empty());
+});
+
+db_test!(user_attributes_are_replaced_as_a_set, |store, _url| {
+    store.create_user(&user("ann")).await.unwrap();
+    assert!(store.user_attributes("ann").await.unwrap().is_empty());
+    let first = Attributes::from([
+        (
+            "region".to_string(),
+            vec!["Sul".to_string(), "Sudeste".to_string()],
+        ),
+        ("cost_center".to_string(), vec!["1020".to_string()]),
+    ]);
+    store.set_user_attributes("ann", &first).await.unwrap();
+    assert_eq!(store.user_attributes("ann").await.unwrap(), first);
+
+    let second = Attributes::from([("region".to_string(), vec!["Norte".to_string()])]);
+    store.set_user_attributes("ann", &second).await.unwrap();
+    assert_eq!(store.user_attributes("ann").await.unwrap(), second);
+});
+
+db_test!(deleting_a_user_deletes_their_attributes, |store, url| {
+    store.create_user(&user("ann")).await.unwrap();
+    let attributes = Attributes::from([("region".to_string(), vec!["Sul".to_string()])]);
+    store.set_user_attributes("ann", &attributes).await.unwrap();
+    let raw = connect(&url).await;
+    raw.execute("DELETE FROM users WHERE id = 'ann'", &[])
+        .await
+        .unwrap();
+    assert!(store.user_attributes("ann").await.unwrap().is_empty());
+    let left: i64 = raw
+        .query_one("SELECT count(*) FROM user_attributes", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(left, 0);
+});
