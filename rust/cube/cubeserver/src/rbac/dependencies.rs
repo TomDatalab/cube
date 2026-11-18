@@ -6,7 +6,7 @@
 //! reference cannot be resolved the graph depends on more (the whole cube),
 //! never on less.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 
@@ -17,6 +17,9 @@ pub enum Dep {
     Member(String),
     /// The whole cube.
     Cube(String),
+    /// A cube a view member is read through (an intermediate cube of its
+    /// `join_path`): it counts as read for row filters, not for blocking.
+    Joined(String),
 }
 
 impl Dep {
@@ -24,7 +27,7 @@ impl Dep {
     pub fn cube(&self) -> &str {
         match self {
             Dep::Member(member) => member.split('.').next().unwrap_or(member),
-            Dep::Cube(cube) => cube,
+            Dep::Cube(cube) | Dep::Joined(cube) => cube,
         }
     }
 }
@@ -35,24 +38,52 @@ pub struct MemberGraph {
     /// Cube (not view) name → its dimensions, measures and segments as
     /// `cube.member`, in declaration order.
     cube_members: BTreeMap<String, Vec<String>>,
+    /// Cube dimensions (`cube.member`), which may carry a granularity.
+    dimensions: HashSet<String>,
     /// View names.
     views: BTreeSet<String>,
     /// `cube.member` → what it references directly (itself excluded).
     direct: HashMap<String, BTreeSet<Dep>>,
     /// `view.member` → `cube.member` it was included from.
     view_sources: HashMap<String, String>,
+    /// `view.member` → the other cubes of its `join_path`.
+    view_joined: HashMap<String, BTreeSet<String>>,
     /// View → (`cube.member` → first `view.member` exposing it).
     view_members: HashMap<String, HashMap<String, String>>,
+    /// View → what a read of the whole view reads: `Cube` for each cube it
+    /// includes, `Joined` for the other cubes of its join paths.
+    view_cubes: HashMap<String, BTreeSet<Dep>>,
 }
 
-/// Member fields whose value is a bare member path (no braces).
-const BARE_REFERENCE_FIELDS: [&str; 5] = [
+/// Member fields whose value is a bare member path (no braces), in the
+/// typed (camelCase) and the verbatim YAML (snake_case) spelling.
+const BARE_REFERENCE_FIELDS: [&str; 12] = [
     "aliasMember",
+    "alias_member",
     "keyReference",
+    "key_reference",
     "reduceBy",
+    "reduce_by",
     "groupBy",
+    "group_by",
     "addGroupBy",
+    "add_group_by",
+    "timeDimension",
+    "time_dimension",
 ];
+
+/// The cubes of a `join_path`: every part but the last is read through.
+fn join_path_cubes(join_path: &str) -> (Vec<&str>, &str) {
+    let parts: Vec<&str> = join_path
+        .split('.')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.split_last() {
+        Some((last, through)) => (through.to_vec(), last),
+        None => (Vec::new(), ""),
+    }
+}
 
 impl MemberGraph {
     pub fn build(model: &cubemodel::DataModel) -> MemberGraph {
@@ -74,20 +105,51 @@ impl MemberGraph {
             for member in &members {
                 graph.direct.insert(member.clone(), BTreeSet::new());
             }
+            for name in cube.dimensions.keys() {
+                graph.dimensions.insert(format!("{}.{name}", cube.name));
+            }
             graph.cube_members.insert(cube.name.clone(), members);
         }
 
         for view in model.cube_list().into_iter().filter(|cube| cube.is_view) {
+            // Source cube → the cubes it is read through, over every
+            // include that reaches it (the member's own include is not
+            // recorded, so this may name more, never fewer).
+            let mut through: HashMap<&str, BTreeSet<String>> = HashMap::new();
+            let mut whole = BTreeSet::new();
+            for include in &view.cubes {
+                let (via, source) = join_path_cubes(include.join_path.as_deref().unwrap_or(""));
+                if source.is_empty() {
+                    continue;
+                }
+                whole.insert(Dep::Cube(source.to_string()));
+                let entry = through.entry(source).or_default();
+                for cube in via.into_iter().filter(|cube| *cube != source) {
+                    entry.insert(cube.to_string());
+                }
+            }
+
             let index = graph.view_members.entry(view.name.clone()).or_default();
             for included in &view.included_members {
                 let view_member = format!("{}.{}", view.name, included.name);
+                let source_cube = included.member_path.split('.').next().unwrap_or_default();
+                whole.insert(Dep::Cube(source_cube.to_string()));
                 index
                     .entry(included.member_path.clone())
                     .or_insert_with(|| view_member.clone());
+                let joined = through.get(source_cube).cloned().unwrap_or_default();
+                graph.view_joined.insert(view_member.clone(), joined);
                 graph
                     .view_sources
                     .insert(view_member, included.member_path.clone());
             }
+
+            for via in through.values().flatten() {
+                if !whole.contains(&Dep::Cube(via.clone())) {
+                    whole.insert(Dep::Joined(via.clone()));
+                }
+            }
+            graph.view_cubes.insert(view.name.clone(), whole);
         }
 
         for cube in model.cube_list().into_iter().filter(|cube| !cube.is_view) {
@@ -131,46 +193,46 @@ impl MemberGraph {
     /// Transitive closure of what `name` reads: `cube.member`,
     /// `view.member`, `cube.member.granularity` or just `cube`.
     /// Includes the member itself (resolved to the cube's). An unknown name
-    /// gives `{Cube(first part)}`.
+    /// gives `{Cube(first part)}`; for a view, the cubes it includes.
     pub fn closure(&self, name: &str) -> BTreeSet<Dep> {
         let mut parts = name.split('.');
         let first = parts.next().unwrap_or_default();
-        let Some(second) = parts.next() else {
-            if self.is_view(first) {
-                // A bare view reads every member it includes.
-                let mut deps = BTreeSet::new();
+        let mut seeds = BTreeSet::new();
+        match parts.next() {
+            Some(second) => {
+                let member = format!("{first}.{second}");
+                if !self.emit_member(&member, &mut seeds) {
+                    self.emit_whole(first, &mut seeds);
+                }
+            }
+            None => {
+                self.emit_whole(first, &mut seeds);
+                // A bare view also reads what each of its members reads.
                 for source in self
                     .view_members
                     .get(first)
                     .into_iter()
                     .flat_map(|m| m.keys())
                 {
-                    deps.extend(self.closure(source));
+                    if self.direct.contains_key(source) {
+                        seeds.insert(Dep::Member(source.clone()));
+                    }
                 }
-                deps.insert(Dep::Cube(first.to_string()));
-                return deps;
             }
-            return BTreeSet::from([Dep::Cube(first.to_string())]);
-        };
-
-        let start = match self.source_member(&format!("{first}.{second}")) {
-            Some(member) => member.to_string(),
-            None => return BTreeSet::from([Dep::Cube(first.to_string())]),
-        };
-        if !self.direct.contains_key(&start) {
-            // A view member whose source is not a cube member (a hierarchy).
-            let cube = start.split('.').next().unwrap_or(first);
-            return BTreeSet::from([Dep::Cube(cube.to_string())]);
         }
 
-        let mut visited = BTreeSet::from([Dep::Member(start.clone())]);
-        let mut queue = VecDeque::from([start]);
-        while let Some(member) = queue.pop_front() {
-            for dep in self.direct.get(&member).into_iter().flatten() {
-                if visited.insert(dep.clone()) {
-                    if let Dep::Member(next) = dep {
-                        queue.push_back(next.clone());
-                    }
+        let mut visited = BTreeSet::new();
+        let mut queue = VecDeque::new();
+        for dep in seeds {
+            if visited.insert(dep.clone()) {
+                queue.push_back(dep);
+            }
+        }
+        while let Some(dep) = queue.pop_front() {
+            let Dep::Member(member) = dep else { continue };
+            for next in self.direct.get(&member).into_iter().flatten() {
+                if visited.insert(next.clone()) {
+                    queue.push_back(next.clone());
                 }
             }
         }
@@ -216,12 +278,39 @@ impl MemberGraph {
             .unwrap_or_default()
     }
 
-    fn is_cube(&self, name: &str) -> bool {
-        self.cube_members.contains_key(name)
+    fn is_cube_or_view(&self, name: &str) -> bool {
+        self.cube_members.contains_key(name) || self.views.contains(name)
     }
 
-    fn is_cube_member(&self, name: &str) -> bool {
-        self.direct.contains_key(name)
+    /// `Member` of the cube member `name` stands for (a view member's
+    /// source, plus `Joined` for its join path). False when unknown.
+    fn emit_member(&self, name: &str, deps: &mut BTreeSet<Dep>) -> bool {
+        let Some(source) = self.source_member(name) else {
+            return false;
+        };
+        if self.direct.contains_key(source) {
+            deps.insert(Dep::Member(source.to_string()));
+        } else {
+            // A view member whose source is not a cube member (a hierarchy).
+            let cube = source.split('.').next().unwrap_or(source);
+            deps.insert(Dep::Cube(cube.to_string()));
+        }
+        for cube in self.view_joined.get(name).into_iter().flatten() {
+            deps.insert(Dep::Joined(cube.clone()));
+        }
+        true
+    }
+
+    /// The whole of `name`: `Cube(name)`, or for a view the cubes it
+    /// includes (`Dep::Cube` never names a view).
+    fn emit_whole(&self, name: &str, deps: &mut BTreeSet<Dep>) {
+        match self.view_cubes.get(name) {
+            Some(cubes) => deps.extend(cubes.iter().cloned()),
+            None if self.is_view(name) => {}
+            None => {
+                deps.insert(Dep::Cube(name.to_string()));
+            }
+        }
     }
 
     /// Every reference in any string of `value`, plus bare member paths in
@@ -258,62 +347,106 @@ impl MemberGraph {
         }
     }
 
-    /// Each text between `{` and the next `}` is a reference; a `{` with
-    /// no `}` after it may hide anything of the cube.
+    /// Each `{` starts a reference, which runs to the next `{` or `}`: in
+    /// `{FILTER_PARAMS.a.b.filter((x) => `${x}`)}` both the outer text and
+    /// `x` are resolved. A `{` with no `}` after it may hide anything of
+    /// the cube.
     fn references_in_str(&self, cube: &str, text: &str, deps: &mut BTreeSet<Dep>) {
         for (start, _) in text.match_indices('{') {
             let rest = &text[start + 1..];
-            match rest.find('}') {
-                Some(end) => {
-                    let inner = &rest[..end];
-                    // `{a{b}`: the innermost opening brace starts the reference.
-                    let inner = inner.rsplit('{').next().unwrap_or(inner);
-                    self.resolve(cube, inner, deps);
-                }
-                None => {
-                    deps.insert(Dep::Cube(cube.to_string()));
-                }
+            if !rest.contains('}') {
+                deps.insert(Dep::Cube(cube.to_string()));
+                continue;
             }
+            let end = rest.find(['{', '}']).unwrap_or(rest.len());
+            self.resolve(cube, &rest[..end], deps);
         }
     }
 
-    /// Resolves one reference `r` written inside `cube`.
+    /// Resolves one reference written inside `cube`, as the planner's
+    /// `SymbolPath::resolve_parts` walks it. A path that cannot be placed
+    /// reads the whole cube it was walking.
     fn resolve(&self, cube: &str, reference: &str, deps: &mut BTreeSet<Dep>) {
         let reference = reference.trim();
-        let parts: Vec<&str> = reference.split('.').map(str::trim).collect();
-        match parts.as_slice() {
-            ["CUBE"] => {}
-            ["FILTER_PARAMS", a, b, ..] => self.member_if_known(&format!("{a}.{b}"), deps),
-            ["FILTER_PARAMS", ..] | ["SECURITY_CONTEXT", ..] | ["COMPILE_CONTEXT", ..] => {}
-            ["CUBE", x, ..] => self.member_if_known(&format!("{cube}.{x}"), deps),
-            [x] => {
-                let member = format!("{cube}.{x}");
-                if self.is_cube_member(&member) {
-                    deps.insert(Dep::Member(member));
-                } else if self.is_cube(x) {
-                    deps.insert(Dep::Cube(x.to_string()));
-                } else {
+        let head = reference
+            .split(['.', '('])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        match head {
+            "FILTER_PARAMS" | "FILTER_GROUP" => {
+                if !self.filter_params(reference, deps) {
                     deps.insert(Dep::Cube(cube.to_string()));
                 }
+                return;
             }
-            [a, b, ..] => {
-                let member = format!("{a}.{b}");
-                if let Some(source) = self.source_member(&member) {
-                    deps.insert(Dep::Member(source.to_string()));
-                } else if self.is_cube(a) {
-                    deps.insert(Dep::Cube(a.to_string()));
-                }
-            }
-            [] => {}
+            // Values of the request, not data of the model.
+            "SECURITY_CONTEXT" | "COMPILE_CONTEXT" => return,
+            _ => {}
         }
+
+        let parts: Vec<&str> = reference.split('.').map(str::trim).collect();
+        if matches!(parts.as_slice(), ["CUBE"] | ["TABLE"]) {
+            return;
+        }
+        let mut current = cube.to_string();
+        let mut index = 0;
+        while index < parts.len() {
+            let part = parts[index];
+            let rest = parts.len() - index - 1;
+            let member = format!("{current}.{part}");
+            if self.emit_member(&member, deps) {
+                let source = self.source_member(&member).unwrap_or_default();
+                let allowed = usize::from(self.dimensions.contains(source));
+                if rest > allowed {
+                    self.emit_whole(&current, deps);
+                }
+                return;
+            }
+            if part == "CUBE" || part == "TABLE" {
+                index += 1;
+                continue;
+            }
+            if self.is_cube_or_view(part) {
+                current = part.to_string();
+                index += 1;
+                continue;
+            }
+            break;
+        }
+        // Ran out on a cube name (`{customers}`, `{customers.CUBE}`) or hit
+        // something it cannot place (`{customers.sql()}`, `{CUBE.col}`).
+        self.emit_whole(&current, deps);
     }
 
-    /// `Member(member)` when it is a cube member (or a view member, resolved
-    /// to its source); nothing otherwise.
-    fn member_if_known(&self, member: &str, deps: &mut BTreeSet<Dep>) {
-        if let Some(source) = self.source_member(member) {
-            deps.insert(Dep::Member(source.to_string()));
+    /// `Member(a.b)` for every `FILTER_PARAMS.a.b` in `reference`. False
+    /// when one names no member, or there is none.
+    fn filter_params(&self, reference: &str, deps: &mut BTreeSet<Dep>) -> bool {
+        let identifier = |text: &str| -> String {
+            text.trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        };
+        let mut found = false;
+        for (start, marker) in reference.match_indices("FILTER_PARAMS.") {
+            let after = &reference[start + marker.len()..];
+            let cube = identifier(after);
+            let member = after
+                .trim_start()
+                .get(cube.len()..)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .map(identifier)
+                .unwrap_or_default();
+            if cube.is_empty() || member.is_empty() {
+                return false;
+            }
+            if !self.emit_member(&format!("{cube}.{member}"), deps) {
+                return false;
+            }
+            found = true;
         }
+        found
     }
 }
 
@@ -352,6 +485,9 @@ mod tests {
       - name: cpf
         sql: cpf
         type: string
+      - name: created_at
+        sql: created_at
+        type: time
 "#;
 
     fn with_customers(cubes: &str) -> String {
@@ -570,6 +706,20 @@ views:
     }
 
     #[test]
+    fn unknown_names_of_a_view_depend_on_every_cube_it_includes() {
+        let graph = graph(&format!("{}{}", with_customers(ORDERS), ORDERS_VIEW));
+        for name in ["orders_view", "orders_view.nope"] {
+            let deps = graph.closure(name);
+            assert!(deps.contains(&cube("orders")), "{name}: {deps:?}");
+            assert!(deps.contains(&cube("customers")), "{name}: {deps:?}");
+            assert!(
+                deps.iter().all(|dep| dep.cube() != "orders_view"),
+                "{name}: {deps:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cycles_terminate() {
         let graph = graph(&with_customers(
             r#"
@@ -613,5 +763,160 @@ views:
             graph.closure("orders.params"),
             BTreeSet::from([member("orders.params"), member("customers.cpf")])
         );
+    }
+
+    const ORDERS: &str = r#"
+  - name: orders
+    sql_table: orders
+    joins:
+      - name: customers
+        sql: "{CUBE}.customer_id = {customers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+"#;
+
+    const ORDERS_VIEW: &str = r#"
+views:
+  - name: orders_view
+    cubes:
+      - join_path: orders
+        includes: [status]
+      - join_path: orders.customers
+        includes: [segment]
+"#;
+
+    #[test]
+    fn view_members_depend_on_their_join_path() {
+        let graph = graph(&format!("{}{}", with_customers(ORDERS), ORDERS_VIEW));
+        assert_eq!(
+            graph.closure("orders_view.segment"),
+            BTreeSet::from([
+                member("customers.segment"),
+                Dep::Joined("orders".to_string())
+            ])
+        );
+        assert_eq!(
+            graph.closure("orders_view.status"),
+            BTreeSet::from([member("orders.status")])
+        );
+        assert_eq!(Dep::Joined("orders".to_string()).cube(), "orders");
+    }
+
+    #[test]
+    fn paths_resolve_like_the_planner() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: status
+        sql: status
+        type: string
+      - name: created_at
+        sql: created_at
+        type: time
+      - name: via_cube
+        sql: "{CUBE.customers.cpf}"
+        type: string
+      - name: via_name
+        sql: "{orders.customers.cpf}"
+        type: string
+      - name: via_table
+        sql: "{TABLE.status}"
+        type: string
+      - name: granularity
+        sql: "{created_at.day}"
+        type: time
+      - name: column
+        sql: "{CUBE}.col"
+        type: string
+      - name: unplaced
+        sql: "{CUBE.col}"
+        type: string
+"#,
+        ));
+        let has = |name: &str, dep: Dep| {
+            let deps = graph.closure(name);
+            assert!(deps.contains(&dep), "{name}: {deps:?}");
+        };
+        has("orders.via_cube", member("customers.cpf"));
+        has("orders.via_name", member("customers.cpf"));
+        has("orders.via_table", member("orders.status"));
+        has("orders.granularity", member("orders.created_at"));
+        has("orders.unplaced", cube("orders"));
+        assert_eq!(
+            graph.closure("orders.column"),
+            BTreeSet::from([member("orders.column")])
+        );
+    }
+
+    #[test]
+    fn filter_group_params_are_followed() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: grouped
+        sql: "{FILTER_GROUP(FILTER_PARAMS.customers.cpf.filter('x'), FILTER_PARAMS.customers.segment.filter('y'))}"
+        type: string
+      - name: opaque
+        sql: "{FILTER_GROUP(something)}"
+        type: string
+"#,
+        ));
+        let grouped = graph.closure("orders.grouped");
+        assert!(grouped.contains(&member("customers.cpf")), "{grouped:?}");
+        assert!(
+            grouped.contains(&member("customers.segment")),
+            "{grouped:?}"
+        );
+        assert!(graph.closure("orders.opaque").contains(&cube("orders")));
+    }
+
+    #[test]
+    fn nested_braces_resolve_the_outer_reference() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: ranged
+        sql: "{FILTER_PARAMS.customers.created_at.filter((a, b) => `${a} AND ${b}`)}"
+        type: string
+"#,
+        ));
+        let deps = graph.closure("orders.ranged");
+        assert!(deps.contains(&member("customers.created_at")), "{deps:?}");
+    }
+
+    #[test]
+    fn time_shift_time_dimensions_are_followed() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: created_at
+        sql: created_at
+        type: time
+    measures:
+      - name: count
+        type: count
+      - name: count_prior_year
+        multi_stage: true
+        sql: "{count}"
+        type: number
+        time_shift:
+          - time_dimension: created_at
+            interval: 1 year
+            type: prior
+"#,
+        ));
+        let deps = graph.closure("orders.count_prior_year");
+        assert!(deps.contains(&member("orders.created_at")), "{deps:?}");
     }
 }
