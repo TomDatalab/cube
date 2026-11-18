@@ -401,6 +401,15 @@ pub fn restrict_query_covering(
                 read.inside
             )));
         }
+        // Nor is it known to reach the rows a multi-stage dimension's CTE
+        // reads (multi-stage measures are planned with the outer filters).
+        if let Some(inside) = graph
+            .multi_stage_dimension_reading(names.iter().map(String::as_str).chain([member]), cube)
+        {
+            return Err(ApiError::forbidden(format!(
+                "Permission denied: your row filter on {cube} cannot be applied inside {inside}"
+            )));
+        }
         let values = match (&filter.values, &filter.attribute) {
             (Some(values), _) if !values.is_empty() => values.clone(),
             (None, Some(attribute)) => match effective.attributes.get(attribute) {
@@ -442,29 +451,65 @@ pub fn restrict_query_covering(
     Ok((query, covered))
 }
 
-/// The planner's word on a restricted query: every cube it `joined` that a
-/// row filter of `effective` is on must be one `covered` (its filter was
-/// injected). Otherwise 403: the prediction missed a cube, and the query
-/// would read it unfiltered.
-pub fn check_joined_cubes(
-    effective: &Effective,
-    graph: &MemberGraph,
-    covered: &BTreeSet<String>,
-    joined: &BTreeSet<String>,
-) -> Result<(), ApiError> {
-    for filter in &effective.row_filters {
-        let cube = cube_of(
-            graph
-                .source_member(&filter.member)
-                .unwrap_or(&filter.member),
-        );
-        if joined.contains(cube) && !covered.contains(cube) {
-            return Err(ApiError::forbidden(format!(
-                "Permission denied: your row filter on {cube} could not be applied to this query"
-            )));
-        }
+/// The planner's word on a restricted request, checked on each statement
+/// it plans to run or return ([`NormalizedRequest::join_check`]): every cube
+/// a plan reads that a row filter is on must be one whose filter was
+/// injected into that query. Otherwise 403: the prediction of
+/// [`restrict_query`] missed a cube, and the query would read it unfiltered.
+///
+/// [`NormalizedRequest::join_check`]: crate::services::NormalizedRequest::join_check
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinCheck {
+    /// The cubes a row filter is on; a view member's filter is on its
+    /// source cube.
+    filtered: BTreeSet<String>,
+    /// Per query of the request, in order: the cubes whose filter was
+    /// injected.
+    covered: Vec<BTreeSet<String>>,
+}
+
+impl JoinCheck {
+    pub fn new(effective: &Effective, graph: &MemberGraph, covered: Vec<BTreeSet<String>>) -> Self {
+        let filtered = effective
+            .row_filters
+            .iter()
+            .map(|filter| {
+                cube_of(
+                    graph
+                        .source_member(&filter.member)
+                        .unwrap_or(&filter.member),
+                )
+                .to_string()
+            })
+            .collect();
+        Self { filtered, covered }
     }
-    Ok(())
+
+    /// The check of query `index` alone, for a request split into one
+    /// request per query. `None` when there is no such query.
+    pub fn of_query(&self, index: usize) -> Option<JoinCheck> {
+        Some(Self {
+            filtered: self.filtered.clone(),
+            covered: vec![self.covered.get(index)?.clone()],
+        })
+    }
+
+    /// Checks the cubes the plan of query `index` reads. A query the check
+    /// was not built for is a 500: it was never restricted.
+    pub fn check(&self, index: usize, planned: &[String]) -> Result<(), ApiError> {
+        let Some(covered) = self.covered.get(index) else {
+            tracing::error!("A query reached the planner without its row-filter check");
+            return Err(ApiError::internal());
+        };
+        for cube in planned {
+            if self.filtered.contains(cube) && !covered.contains(cube) {
+                return Err(ApiError::forbidden(format!(
+                    "Permission denied: your row filter on {cube} could not be applied to this query"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1460,6 +1505,100 @@ views:
         );
     }
 
+    const MULTI_STAGE_MODEL: &str = r#"
+cubes:
+  - name: orders
+    sql_table: orders
+    joins:
+      - name: buyers
+        sql: "{CUBE}.buyer_id = {buyers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+      - name: size
+        sql: "CASE WHEN {count} > 10 THEN 'big' ELSE 'small' END"
+        type: string
+        multi_stage: true
+      - name: size_label
+        sql: "UPPER({size})"
+        type: string
+    measures:
+      - name: count
+        type: count
+      - name: count_share
+        sql: "{count}"
+        type: number
+        multi_stage: true
+
+  - name: buyers
+    sql_table: buyers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: tier
+        sql: "CASE WHEN {orders.count} > 10 THEN 'gold' END"
+        type: string
+        multi_stage: true
+"#;
+
+    #[test]
+    fn a_row_filter_is_refused_inside_a_multi_stage_dimension() {
+        let graph = graph_of(MULTI_STAGE_MODEL);
+        let effective = filtering(vec![filter("orders.region", None, Some(vec!["Sul"]))], &[]);
+        for (q, inside) in [
+            (json!({ "dimensions": ["orders.size"] }), "orders.size"),
+            // Built on one, at any depth.
+            (
+                json!({ "measures": ["orders.count"], "dimensions": ["orders.size_label"] }),
+                "orders.size",
+            ),
+            // One of another cube whose CTE reads the filtered cube.
+            (json!({ "dimensions": ["buyers.tier"] }), "buyers.tier"),
+        ] {
+            assert_eq!(
+                refused(restrict_query(query(q.clone()), &effective, &graph)),
+                format!(
+                    "Permission denied: your row filter on orders cannot be applied inside {inside}"
+                ),
+                "{q}"
+            );
+        }
+        // A filter on a multi-stage dimension is not a row filter either.
+        let on_it = filtering(vec![filter("orders.size", None, Some(vec!["big"]))], &[]);
+        assert_eq!(
+            refused(restrict_query(
+                query(json!({ "measures": ["orders.count"] })),
+                &on_it,
+                &graph
+            )),
+            "Permission denied: your row filter on orders cannot be applied inside orders.size"
+        );
+        // Multi-stage measures are not refused: the filter is injected.
+        let q = query(json!({ "measures": ["orders.count_share"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("orders.region", FilterOperator::Equals, &["Sul"])]
+        );
+        // A filter on a cube the multi-stage dimension does not read holds.
+        let on_buyers = filtering(vec![filter("buyers.name", None, Some(vec!["ana"]))], &[]);
+        let q = query(json!({ "dimensions": ["orders.size"] }));
+        assert_eq!(
+            restrict_query(q, &on_buyers, &graph).unwrap().filters,
+            vec![]
+        );
+    }
+
     #[test]
     fn a_joined_cube_whose_filter_was_not_injected_is_refused() {
         let graph = graph_of(VIEW_PATH_MODEL);
@@ -1471,21 +1610,24 @@ views:
             &[],
         );
         let set = |cubes: &[&str]| cubes.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>();
+        let planned = |cubes: &[&str]| cubes.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let check = JoinCheck::new(&effective, &graph, vec![set(&["c"]), set(&["b", "c"])]);
         // A view member's filter is on its source cube.
-        assert!(check_joined_cubes(&effective, &graph, &set(&["c"]), &set(&["a", "c"])).is_ok());
-        assert!(check_joined_cubes(
-            &effective,
-            &graph,
-            &set(&["b", "c"]),
-            &set(&["a", "b", "c"])
-        )
-        .is_ok());
-        let err = check_joined_cubes(&effective, &graph, &set(&["c"]), &set(&["a", "b", "c"]))
-            .unwrap_err();
+        assert!(check.check(0, &planned(&["a", "c"])).is_ok());
+        assert!(check.check(1, &planned(&["a", "b", "c"])).is_ok());
+        let err = check.check(0, &planned(&["a", "b", "c"])).unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
         assert_eq!(
             err.body.error,
             "Permission denied: your row filter on b could not be applied to this query"
         );
+        // A query the check was not built for never runs.
+        let err = check.check(2, &planned(&["a"])).unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        // Split per query, each keeps its own coverage.
+        let second = check.of_query(1).unwrap();
+        assert!(second.check(0, &planned(&["a", "b", "c"])).is_ok());
+        assert!(second.check(1, &planned(&["a"])).is_err());
+        assert_eq!(check.of_query(2), None);
     }
 }

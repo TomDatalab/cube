@@ -88,6 +88,8 @@ pub struct MemberGraph {
     dimensions: HashSet<String>,
     /// `sub_query` dimensions (`cube.member`).
     sub_queries: HashSet<String>,
+    /// `multi_stage` dimensions (`cube.member`).
+    multi_stage_dimensions: HashSet<String>,
     /// `cube.member` → what it reads where an outer row filter does not
     /// reach (a subset of `direct`).
     opaque: HashMap<String, BTreeSet<Dep>>,
@@ -174,6 +176,9 @@ impl MemberGraph {
                 }
                 if dimension.sub_query == Some(true) {
                     graph.sub_queries.insert(full.clone());
+                }
+                if dimension.multi_stage == Some(true) {
+                    graph.multi_stage_dimensions.insert(full.clone());
                 }
                 graph.dimensions.insert(full);
             }
@@ -431,6 +436,30 @@ impl MemberGraph {
         self.closure(member)
             .iter()
             .any(|dep| matches!(dep, Dep::Member(m) if self.is_sub_query(m)))
+    }
+
+    /// The first `multi_stage` dimension in the closures of `names` that
+    /// reads `cube`, itself included. Its CTE is planned apart from the
+    /// outer query, and an injected filter is not known to reach the rows
+    /// it reads.
+    pub fn multi_stage_dimension_reading<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+        cube: &str,
+    ) -> Option<String> {
+        let mut reached = BTreeSet::new();
+        for name in names {
+            for dep in self.closure(name) {
+                if let Dep::Member(member) = dep {
+                    if self.multi_stage_dimensions.contains(&member) {
+                        reached.insert(member);
+                    }
+                }
+            }
+        }
+        reached
+            .into_iter()
+            .find(|dimension| self.closure(dimension).iter().any(|dep| dep.cube() == cube))
     }
 
     /// Whether `member` (`cube.member`) is a dimension of a cube.

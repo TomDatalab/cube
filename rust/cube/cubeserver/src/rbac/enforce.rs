@@ -35,12 +35,11 @@ use cubequery::types::{NormalizedFilter, NormalizedQuery, QueryMember};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::dependencies::MemberGraph;
 use super::handlers::connections::released_connections;
 use super::handlers::organizations::user_ref;
 use super::handlers::rules::rule_ref;
 use super::handlers::workspaces::workspace_ref;
-use super::restrictions::{check_joined_cubes, restrict_query_covering, Effective};
+use super::restrictions::{restrict_query_covering, Effective, JoinCheck};
 use super::{authz_error, unauthenticated, unavailable, Rbac, RelationshipFilter};
 use crate::app::AppState;
 use crate::error::ApiError;
@@ -509,6 +508,7 @@ impl RbacQueryService {
             query_type,
             queries,
             pivot_query,
+            join_check,
         } = request;
         let (queries, covered): (Vec<_>, Vec<_>) = queries
             .into_iter()
@@ -516,42 +516,25 @@ impl RbacQueryService {
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .unzip();
-        let request = NormalizedRequest {
-            query_type,
-            queries,
-            pivot_query,
-        };
-        if !effective.row_filters.is_empty() {
-            self.check_planned(ctx, &request, &effective, sources.graph(), &covered)
-                .await?;
-        }
-        Ok(request)
-    }
-
-    /// Plans the restricted `request` without running it and refuses it when
-    /// the planner joins a cube a row filter is on but none was injected
-    /// for: the prediction of `restrict_query` missed it.
-    async fn check_planned(
-        &self,
-        ctx: &RequestContext,
-        request: &NormalizedRequest,
-        effective: &Effective,
-        graph: &MemberGraph,
-        covered: &[BTreeSet<String>],
-    ) -> Result<(), ApiError> {
-        let Some(joined) = self.inner.joined_cubes(ctx, request).await? else {
+        // The prediction of `restrict_query` is checked against the plan
+        // that runs: the inner service plans each query once, runs the
+        // check on that statement, and only then runs or returns it.
+        let join_check = if effective.row_filters.is_empty() {
+            join_check
+        } else if self.inner.checks_joins() {
+            Some(JoinCheck::new(&effective, sources.graph(), covered))
+        } else {
             return Err(ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The planner cannot report the cubes a query joins, so your row filters cannot be checked",
             ));
         };
-        if joined.len() != covered.len() {
-            return Err(ApiError::internal());
-        }
-        for (joined, covered) in joined.iter().zip(covered) {
-            check_joined_cubes(effective, graph, covered, joined)?;
-        }
-        Ok(())
+        Ok(NormalizedRequest {
+            query_type,
+            queries,
+            pivot_query,
+            join_check,
+        })
     }
 }
 

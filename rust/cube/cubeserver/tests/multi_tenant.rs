@@ -473,6 +473,7 @@ fn normalized(query: Value) -> cubeserver::services::NormalizedRequest {
         query_type,
         queries,
         pivot_query,
+        join_check: None,
     }
 }
 

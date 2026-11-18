@@ -13,6 +13,7 @@ use cubequery::types::{NormalizedQuery, PivotQuery, QueryType};
 use serde_json::{Map, Value};
 
 use crate::error::ApiError;
+use crate::rbac::restrictions::JoinCheck;
 
 /// Result of authenticating one request (`req.context` in Node.js).
 #[derive(Debug, Clone, Default)]
@@ -97,6 +98,10 @@ pub struct NormalizedRequest {
     pub queries: Vec<NormalizedQuery>,
     /// `getPivotQuery` of the request, used to shape the response.
     pub pivot_query: PivotQuery,
+    /// RBAC: set when row filters apply. The service runs it on every
+    /// statement it plans, before that statement runs or is returned, and
+    /// answers its error instead ([`QueryService::checks_joins`]).
+    pub join_check: Option<JoinCheck>,
 }
 
 /// Query endpoints (`/v1/load`, `/v1/sql`, `/v1/dry-run`). Implemented once
@@ -137,15 +142,11 @@ pub trait QueryService: Send + Sync + Debug {
         ))
     }
 
-    /// The cubes the planner joins for each query of `request`, in order:
-    /// planned, never run. `None` when this service cannot tell, and RBAC
-    /// then refuses any query a row filter applies to.
-    async fn joined_cubes(
-        &self,
-        _ctx: &RequestContext,
-        _request: &NormalizedRequest,
-    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
-        Ok(None)
+    /// Whether `load`, `sql` and `dry_run` run
+    /// [`NormalizedRequest::join_check`] on the statements they plan. RBAC
+    /// refuses any query a row filter applies to when they do not.
+    fn checks_joins(&self) -> bool {
+        false
     }
 
     /// `DELETE /v1/running-query/:requestId` — cancels the running query of a

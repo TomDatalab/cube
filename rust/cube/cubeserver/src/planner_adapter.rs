@@ -398,18 +398,24 @@ impl PlannerQueryService {
             .map_err(Self::api_error)
     }
 
-    /// The cubes each query of `request` joins, as planned.
-    pub async fn planned_cubes(
+    /// Plans query `index` of `request` and runs the request's
+    /// [`NormalizedRequest::join_check`] on that very statement: what is
+    /// checked is what runs or is returned.
+    pub async fn plan_query(
         &self,
         ctx: &RequestContext,
         request: &NormalizedRequest,
-    ) -> Result<Vec<BTreeSet<String>>, ApiError> {
-        let mut cubes = Vec::with_capacity(request.queries.len());
-        for normalized in &request.queries {
-            let statement = self.plan_statement(ctx, normalized).await?;
-            cubes.push(statement.cubes.into_iter().collect());
+        index: usize,
+    ) -> Result<PlannedStatement, ApiError> {
+        let normalized = request
+            .queries
+            .get(index)
+            .ok_or_else(|| ApiError::bad_request("Query param is required"))?;
+        let statement = self.plan_statement(ctx, normalized).await?;
+        if let Some(check) = &request.join_check {
+            check.check(index, &statement.cubes)?;
         }
-        Ok(cubes)
+        Ok(statement)
     }
 
     async fn plan_all(
@@ -419,8 +425,8 @@ impl PlannerQueryService {
     ) -> Result<Vec<PlannedQuery>, ApiError> {
         let mut planned = Vec::with_capacity(request.queries.len());
 
-        for normalized in &request.queries {
-            let statement = self.plan_statement(ctx, normalized).await?;
+        for (index, normalized) in request.queries.iter().enumerate() {
+            let statement = self.plan_query(ctx, request, index).await?;
 
             planned.push(PlannedQuery {
                 sql: statement.sql,
@@ -634,12 +640,9 @@ impl QueryService for PlannerQueryService {
         Some(self.pool.data_sources())
     }
 
-    async fn joined_cubes(
-        &self,
-        ctx: &RequestContext,
-        request: &NormalizedRequest,
-    ) -> Result<Option<Vec<BTreeSet<String>>>, ApiError> {
-        self.planned_cubes(ctx, request).await.map(Some)
+    /// `sql` and `dry_run` plan through [`Self::plan_query`].
+    fn checks_joins(&self) -> bool {
+        true
     }
 
     async fn sql(
@@ -785,6 +788,106 @@ views:
             BTreeSet::from(["default".to_string()])
         );
         assert!(sources.data_sources_of_cube("nowhere").is_empty());
+    }
+
+    /// The statement `sql` and `dry_run` return is the one the request's
+    /// join check runs on.
+    #[tokio::test]
+    async fn the_join_check_runs_on_the_statement_returned() {
+        use crate::rbac::dependencies::MemberGraph;
+        use crate::rbac::restrictions::{
+            Effective, JoinCheck, Restrictions, RowFilter, RowOperator,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("model.yml"),
+            r#"
+cubes:
+  - name: orders
+    sql_table: orders
+    joins:
+      - name: buyers
+        sql: "{CUBE}.buyer_id = {buyers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+  - name: buyers
+    sql_table: buyers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+"#,
+        )
+        .unwrap();
+        let service = PlannerQueryService::load(dir.path(), Dialect::Postgres, 1).unwrap();
+        let graph = MemberGraph::default();
+        let effective = Effective::combine(
+            [&Restrictions {
+                row_filters: vec![RowFilter {
+                    member: "buyers.region".into(),
+                    operator: RowOperator::Equals,
+                    attribute: None,
+                    values: Some(vec!["Sul".into()]),
+                }],
+                blocked_members: vec![],
+            }],
+            Default::default(),
+        );
+        let request = |dimensions: Value, covered: &[&str]| {
+            let (query_type, queries) = cubequery::get_normalized_queries(
+                &json!({ "dimensions": dimensions }),
+                false,
+                None,
+                &cubequery::QueryConfig::default(),
+            )
+            .unwrap();
+            let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+                join_check: Some(JoinCheck::new(
+                    &effective,
+                    &graph,
+                    vec![covered.iter().map(|c| c.to_string()).collect()],
+                )),
+            }
+        };
+        let ctx = RequestContext::default();
+        let joins = json!(["orders.status", "buyers.region"]);
+
+        let err = service
+            .sql(&ctx, request(joins.clone(), &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.body.error,
+            "Permission denied: your row filter on buyers could not be applied to this query"
+        );
+        let err = service
+            .dry_run(&ctx, request(joins.clone(), &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        // Covered, or not joined at all, it plans.
+        assert!(service.sql(&ctx, request(joins, &["buyers"])).await.is_ok());
+        assert!(service
+            .sql(&ctx, request(json!(["orders.status"]), &[]))
+            .await
+            .is_ok());
     }
 
     #[test]

@@ -50,6 +50,7 @@ fn normalize(state: &AppState, value: &Value) -> Result<NormalizedRequest, ApiEr
         query_type,
         queries,
         pivot_query,
+        join_check: None,
     })
 }
 

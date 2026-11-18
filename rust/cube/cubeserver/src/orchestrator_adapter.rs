@@ -235,21 +235,9 @@ impl QueryService for OrchestratedQueryService {
         let query = serde_json::to_value(normalized).map_err(|_| ApiError::internal())?;
 
         // One plan gives both the statement to run and the alias map the
-        // response needs, like a single `getSql` call in Node.js.
-        let statement = self
-            .planner
-            .plan_value(&query, &ctx.security_context)
-            .await
-            .map_err(|failure| {
-                if failure.user_error {
-                    ApiError::bad_request(failure.message)
-                } else {
-                    ApiError::new(
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        failure.message,
-                    )
-                }
-            })?;
+        // response needs, like a single `getSql` call in Node.js. It is the
+        // plan the request's join check runs on.
+        let statement = self.planner.plan_query(ctx, &request, 0).await?;
 
         let body = QueryBody {
             query: Some(statement.sql),
@@ -299,13 +287,10 @@ impl QueryService for OrchestratedQueryService {
         ))
     }
 
-    /// `load` runs what the same planner plans, so its cubes are these.
-    async fn joined_cubes(
-        &self,
-        ctx: &RequestContext,
-        request: &NormalizedRequest,
-    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
-        self.planner.joined_cubes(ctx, request).await
+    /// `load` plans through [`PlannerQueryService::plan_query`]; `sql` and
+    /// `dry_run` are the planner's.
+    fn checks_joins(&self) -> bool {
+        true
     }
 
     async fn sql(

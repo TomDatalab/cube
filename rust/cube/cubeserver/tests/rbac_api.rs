@@ -2669,13 +2669,9 @@ impl QueryService for RecordingQuery {
         Some(self.sources.clone())
     }
 
-    /// Plans nothing, so it joins nothing.
-    async fn joined_cubes(
-        &self,
-        _: &RequestContext,
-        request: &NormalizedRequest,
-    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
-        Ok(Some(vec![Default::default(); request.queries.len()]))
+    /// Plans nothing, so it joins nothing: there is no statement to check.
+    fn checks_joins(&self) -> bool {
+        true
     }
 
     async fn load(
@@ -3659,6 +3655,7 @@ db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
             query_type,
             queries,
             pivot_query,
+            join_check: None,
         }
     };
 
@@ -3754,6 +3751,7 @@ db_test!(
             query_type,
             queries,
             pivot_query,
+            join_check: None,
         };
 
         // Nothing runs yet: 404 for everyone.
@@ -4046,6 +4044,7 @@ db_test!(a_query_service_without_a_snapshot_is_503, |store| {
                 query_type,
                 queries,
                 pivot_query,
+                join_check: None,
             },
         )
         .await
@@ -6768,15 +6767,16 @@ db_test!(
     }
 );
 
-/// The real planner, asked for one more dimension than RBAC saw: it joins
-/// a cube the prediction did not, as a gap in the prediction would.
+/// The real planner, whose plan for the guard is honest but whose plan that
+/// runs joins one more cube: two plans of the same request that differ, as
+/// a tie broken differently would make them.
 #[derive(Debug)]
-struct JoinsMore {
+struct RunsADifferentPlan {
     planner: PlannerQueryService,
     extra: &'static str,
 }
 
-impl JoinsMore {
+impl RunsADifferentPlan {
     fn widened(&self, mut request: NormalizedRequest) -> NormalizedRequest {
         for query in &mut request.queries {
             query
@@ -6788,19 +6788,13 @@ impl JoinsMore {
 }
 
 #[async_trait]
-impl QueryService for JoinsMore {
+impl QueryService for RunsADifferentPlan {
     fn data_sources(&self) -> Option<Arc<DataSources>> {
         QueryService::data_sources(&self.planner)
     }
 
-    async fn joined_cubes(
-        &self,
-        ctx: &RequestContext,
-        request: &NormalizedRequest,
-    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
-        self.planner
-            .joined_cubes(ctx, &self.widened(request.clone()))
-            .await
+    fn checks_joins(&self) -> bool {
+        true
     }
 
     async fn sql(
@@ -6819,14 +6813,22 @@ impl QueryService for JoinsMore {
         self.planner.dry_run(ctx, self.widened(request)).await
     }
 
-    async fn load(&self, _: &RequestContext, _: NormalizedRequest) -> Result<Value, ApiError> {
-        // What the planner would run; reaching it at all is the leak.
+    async fn load(
+        &self,
+        ctx: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        // Plans what it would run, as the orchestrated load does; running
+        // it after that is the leak.
+        self.planner
+            .plan_query(ctx, &self.widened(request), 0)
+            .await?;
         Ok(json!({ "data": [] }))
     }
 }
 
 db_test!(
-    a_cube_the_planner_joins_without_its_row_filter_is_refused,
+    the_row_filter_check_runs_on_the_plan_that_executes,
     |store| {
         let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
         restricted_rule(
@@ -6852,14 +6854,14 @@ db_test!(
         )
         .unwrap();
         let service = cubeserver::rbac::enforce::RbacQueryService::new(
-            Arc::new(JoinsMore {
+            Arc::new(RunsADifferentPlan {
                 planner,
                 extra: "a_c.name",
             }),
             d.s.env.rbac.clone(),
         );
         let ctx = |user: &str| RequestContext {
-            request_id: "req-guard".into(),
+            request_id: "req-executed-plan".into(),
             user: Some(user.into()),
             workspace: Some(d.w1.clone()),
             ..RequestContext::default()
@@ -6878,6 +6880,7 @@ db_test!(
                 query_type,
                 queries,
                 pivot_query,
+                join_check: None,
             }
         };
         let message =
@@ -6899,7 +6902,7 @@ db_test!(
             load.map_err(|e| e.status).err(),
             Some(StatusCode::FORBIDDEN)
         );
-        // caio has no row filter: the same widened query plans, and joins a_c.
+        // caio has no row filter: the widened query runs and joins a_c.
         let caio = service.sql(&ctx("caio"), request()).await.unwrap();
         assert!(caio.to_string().contains("AS \\\"a_c\\\""), "{caio}");
     }
@@ -6961,6 +6964,7 @@ db_test!(
                 query_type,
                 queries,
                 pivot_query,
+                join_check: None,
             }
         };
         let err = service.sql(&ctx("bia"), request()).await.unwrap_err();
