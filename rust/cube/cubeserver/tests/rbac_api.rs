@@ -6025,7 +6025,12 @@ db_test!(organization_model_members_list_only_its_cubes, |store| {
         .collect();
     names.sort();
     assert_eq!(names, ["a_orders", "b_orders"]);
-    let a = &body["cubes"][0];
+    let a = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "a_orders")
+        .unwrap();
     assert!(a["measures"][0]["name"]
         .as_str()
         .unwrap()

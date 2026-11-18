@@ -359,30 +359,10 @@ pub(crate) async fn forget(rbac: &Rbac, role: Uuid) -> Result<(), ApiError> {
         .map_err(authz_error)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn n(list: &[&str]) -> Vec<String> {
-        normalize(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
-    }
-
-    #[test]
-    fn permissions_take_what_they_imply_in_order() {
-        assert_eq!(n(&["query"]), ["view", "query"]);
-        assert_eq!(
-            n(&["write_objects"]),
-            ["view", "read_objects", "write_objects"]
-        );
-        assert_eq!(n(&["manage"]), PERMISSIONS);
-        assert_eq!(n(&["execute", "view", "execute"]), ["view", "execute"]);
-    }
-
-    #[test]
-    fn unknown_or_no_permissions_are_refused() {
-        assert!(normalize(&["admin".to_string()]).is_err());
-        assert!(normalize(&[]).is_err());
-    }
+/// Whether every data source of a cube is among `connections`. A cube the
+/// model cannot place (no data source) belongs to no one.
+fn owned_by(of_cube: &BTreeSet<String>, connections: &BTreeSet<String>) -> bool {
+    !of_cube.is_empty() && of_cube.is_subset(connections)
 }
 
 /// The members of one cube's meta kinds, as `[{name, title}]`.
@@ -445,4 +425,41 @@ pub async fn model_members(
         })
         .collect();
     Ok(Json(json!({ "cubes": cubes })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_cube_without_a_data_source_is_nobodys() {
+        use super::owned_by;
+        use std::collections::BTreeSet;
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        assert!(!owned_by(&set(&[]), &set(&["a"])));
+        assert!(!owned_by(&set(&[]), &set(&[])));
+        assert!(!owned_by(&set(&["c"]), &set(&["a"])));
+        assert!(owned_by(&set(&["a"]), &set(&["a", "b"])));
+    }
+
+    use super::*;
+
+    fn n(list: &[&str]) -> Vec<String> {
+        normalize(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn permissions_take_what_they_imply_in_order() {
+        assert_eq!(n(&["query"]), ["view", "query"]);
+        assert_eq!(
+            n(&["write_objects"]),
+            ["view", "read_objects", "write_objects"]
+        );
+        assert_eq!(n(&["manage"]), PERMISSIONS);
+        assert_eq!(n(&["execute", "view", "execute"]), ["view", "execute"]);
+    }
+
+    #[test]
+    fn unknown_or_no_permissions_are_refused() {
+        assert!(normalize(&["admin".to_string()]).is_err());
+        assert!(normalize(&[]).is_err());
+    }
 }

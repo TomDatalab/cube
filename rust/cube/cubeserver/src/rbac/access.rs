@@ -28,8 +28,6 @@ const WS_OWNER: &[&str] = &[
 const WS_EDITOR: &[&str] = &["edit", "view", "query", "read objects", "write objects"];
 const WS_VIEWER: &[&str] = &["view", "query", "read objects"];
 
-/// The graph's names for the permissions of an organization's role
-/// (`manage` grants everything a workspace owner has).
 /// `(filters: orders.region = region; blocks: orders.margin)`: what a role
 /// hides, a filter reading `member = attribute`, `member != [v1, v2]` for
 /// fixed values. `None` when the role has no restrictions.
@@ -67,6 +65,8 @@ fn restriction_note(r: &Restrictions) -> Option<String> {
     (!parts.is_empty()).then(|| format!("({})", parts.join("; ")))
 }
 
+/// The graph's names for the permissions of an organization's role
+/// (`manage` grants everything a workspace owner has).
 fn role_perms(permissions: &[String]) -> Vec<&'static str> {
     if permissions.iter().any(|p| p == "manage") {
         return WS_OWNER.to_vec();
