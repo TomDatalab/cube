@@ -2570,6 +2570,14 @@ cubes:
     measures:
       - name: count
         type: count
+    hierarchies:
+      - name: by_money
+        levels: [margin, region]
+      - name: by_margin
+        levels: [margin]
+    folders:
+      - name: money
+        includes: [margin, margin_pct]
 
   - name: b_orders
     data_source: b_sqlite
@@ -5925,6 +5933,33 @@ db_test!(
             meta_members(env, &d.s.bia, ws, "a_view", "measures").await,
             ["a_view.count"]
         );
+        // No blocked name, nor one built on it, is left anywhere in the body.
+        let answer = call(
+            &env.router,
+            Method::GET,
+            "/cube/v1/meta",
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            None,
+        )
+        .await;
+        let text = String::from_utf8(answer.bytes).unwrap();
+        for name in ["a_orders.margin", "a_orders.margin_pct", "a_view.status"] {
+            assert!(!text.contains(name), "{name} leaks in {text}");
+        }
+        let meta: Value = serde_json::from_str(&text).unwrap();
+        let cube = meta["cubes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "a_orders")
+            .unwrap();
+        // The hierarchy left with a level stays; the emptied ones and the
+        // folder are gone; the drill members lose only the blocked one.
+        assert_eq!(cube["hierarchies"].as_array().unwrap().len(), 1);
+        assert_eq!(cube["hierarchies"][0]["levels"], json!(["a_orders.region"]));
+        assert_eq!(cube["folders"], json!([]));
+        assert_eq!(cube["nestedFolders"], json!([]));
         // caio has no restricted rule: nothing is hidden.
         assert_eq!(
             meta_members(env, &d.s.caio, ws, "a_orders", "dimensions").await,

@@ -560,24 +560,80 @@ impl RbacMetaService {
             });
         }
         if let Some(effective) = effective.filter(|e| !e.blocked.is_empty()) {
+            let blocked = |name: &str| {
+                effective
+                    .blocked_dependency(sources.graph(), name)
+                    .is_some()
+            };
             for cube in cubes.iter_mut() {
-                for kind in ["measures", "dimensions", "segments"] {
-                    let Some(members) = cube.get_mut(kind).and_then(Value::as_array_mut) else {
-                        continue;
-                    };
-                    members.retain(|member| {
-                        let Some(name) = member.get("name").and_then(Value::as_str) else {
-                            return true;
-                        };
-                        effective
-                            .blocked_dependency(sources.graph(), name)
-                            .is_none()
-                    });
-                }
+                prune_cube(cube, &blocked);
             }
         }
         Ok(meta)
     }
+}
+
+/// Removes from one cube of the meta every member `blocked` names, and every
+/// other place the meta repeats a member name: aliases (the member is
+/// dropped, as an alias exposes the same data), drill members, hierarchies
+/// and folders (emptied ones are dropped).
+fn prune_cube(cube: &mut Value, blocked: &dyn Fn(&str) -> bool) {
+    let is_blocked = |value: &Value| value.as_str().is_some_and(blocked);
+    for kind in ["measures", "dimensions", "segments"] {
+        let Some(members) = cube.get_mut(kind).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        members.retain(|member| {
+            let named = member.get("name").and_then(Value::as_str);
+            let alias = member.get("aliasMember").and_then(Value::as_str);
+            !named.is_some_and(blocked) && !alias.is_some_and(blocked)
+        });
+        for member in members {
+            if let Some(drill) = member.get_mut("drillMembers").and_then(Value::as_array_mut) {
+                drill.retain(|name| !is_blocked(name));
+            }
+            for key in ["measures", "dimensions"] {
+                if let Some(drill) = member
+                    .pointer_mut(&format!("/drillMembersGrouped/{key}"))
+                    .and_then(Value::as_array_mut)
+                {
+                    drill.retain(|name| !is_blocked(name));
+                }
+            }
+        }
+    }
+    if let Some(hierarchies) = cube.get_mut("hierarchies").and_then(Value::as_array_mut) {
+        hierarchies.retain_mut(|hierarchy| {
+            if hierarchy
+                .get("aliasMember")
+                .is_some_and(|alias| is_blocked(alias))
+            {
+                return false;
+            }
+            let Some(levels) = hierarchy.get_mut("levels").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            levels.retain(|level| !is_blocked(level));
+            !levels.is_empty()
+        });
+    }
+    for key in ["folders", "nestedFolders"] {
+        if let Some(folders) = cube.get_mut(key).and_then(Value::as_array_mut) {
+            folders.retain_mut(|folder| prune_folder(folder, blocked));
+        }
+    }
+}
+
+/// Prunes the members of a folder (recursively); false when nothing is left.
+fn prune_folder(folder: &mut Value, blocked: &dyn Fn(&str) -> bool) -> bool {
+    let Some(members) = folder.get_mut("members").and_then(Value::as_array_mut) else {
+        return true;
+    };
+    members.retain_mut(|member| match member {
+        Value::String(name) => !blocked(name),
+        nested => prune_folder(nested, blocked),
+    });
+    !members.is_empty()
 }
 
 #[async_trait]
@@ -652,6 +708,48 @@ pub async fn platform_admin_only(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_cube_removes_every_mention_of_a_blocked_member() {
+        let mut cube = json!({
+            "name": "c",
+            "measures": [
+                { "name": "c.count", "drillMembers": ["c.id", "c.secret"],
+                  "drillMembersGrouped": { "measures": ["c.secret_sum"], "dimensions": ["c.id", "c.secret"] } },
+                { "name": "c.twin", "aliasMember": "c.secret" }
+            ],
+            "dimensions": [{ "name": "c.id" }, { "name": "c.secret" }],
+            "segments": [],
+            "hierarchies": [
+                { "name": "c.h", "levels": ["c.id", "c.secret"] },
+                { "name": "c.only", "levels": ["c.secret"] },
+                { "name": "c.aliased", "aliasMember": "c.secret", "levels": ["c.id"] }
+            ],
+            "folders": [
+                { "name": "f", "members": ["c.id", "c.secret"] },
+                { "name": "g", "members": ["c.secret"] }
+            ],
+            "nestedFolders": [
+                { "name": "f", "members": ["c.id", { "name": "n", "members": ["c.secret"] }] }
+            ]
+        });
+        prune_cube(&mut cube, &|name| name.contains("secret"));
+        assert_eq!(
+            cube,
+            json!({
+                "name": "c",
+                "measures": [
+                    { "name": "c.count", "drillMembers": ["c.id"],
+                      "drillMembersGrouped": { "measures": [], "dimensions": ["c.id"] } }
+                ],
+                "dimensions": [{ "name": "c.id" }],
+                "segments": [],
+                "hierarchies": [{ "name": "c.h", "levels": ["c.id"] }],
+                "folders": [{ "name": "f", "members": ["c.id"] }],
+                "nestedFolders": [{ "name": "f", "members": ["c.id"] }]
+            })
+        );
+    }
     use serde_json::json;
 
     fn normalized(query: Value) -> NormalizedQuery {
