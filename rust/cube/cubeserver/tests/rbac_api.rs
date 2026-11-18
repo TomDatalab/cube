@@ -5369,3 +5369,154 @@ db_test!(roles_validate_and_cannot_be_deleted_while_in_use, |store| {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 });
+
+async fn set_attributes(env: &Env, token: &str, user: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/users/{user}/attributes"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn get_attributes(env: &Env, token: &str, user: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/users/{user}/attributes"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+db_test!(
+    user_attributes_are_set_and_read_by_platform_admins,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let attributes = json!({ "attributes": { "region": ["south", "north"], "team": [] } });
+        let (status, saved) = set_attributes(env, &s.admin, "bia", attributes.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved, attributes);
+        let (status, read) = get_attributes(env, &s.admin, "bia").await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read, attributes);
+
+        // The whole set is replaced.
+        let (status, saved) =
+            set_attributes(env, &s.admin, "bia", json!({ "attributes": {} })).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved, json!({ "attributes": {} }));
+
+        // Only platform admins.
+        let (status, _) = get_attributes(env, &s.ana, "bia").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = set_attributes(env, &s.ana, "bia", attributes.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown user.
+        let (status, _) = get_attributes(env, &s.admin, "nobody").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = set_attributes(env, &s.admin, "nobody", attributes).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Malformed names are refused.
+        let (status, _) = set_attributes(
+            env,
+            &s.admin,
+            "bia",
+            json!({ "attributes": { "Bad Name": ["x"] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+);
+
+db_test!(
+    role_restrictions_are_saved_validated_and_returned,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+        set_role(env, &s.ana, &w1, "bia", "viewer").await;
+        let restrictions = json!({
+            "rowFilters": [
+                { "member": "a_orders.region", "operator": "equals", "attribute": "region" },
+                { "member": "a_orders.status", "operator": "notEquals", "values": ["internal"] }
+            ],
+            "blockedMembers": ["a_customers.cpf", "a_orders.margin"]
+        });
+        let (status, role) = create_role(
+            env,
+            &s.ana,
+            &s.org_a,
+            json!({ "name": "R", "permissions": ["view"], "restrictions": restrictions }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{role}");
+        assert_eq!(role["restrictions"], restrictions);
+        let id = role["id"].as_str().unwrap().to_string();
+
+        // Without `restrictions`, a patch keeps them.
+        let (status, patched) = patch_role(env, &s.ana, &id, json!({ "name": "R2" })).await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(patched["restrictions"], restrictions);
+
+        let (status, patched) = patch_role(
+            env,
+            &s.ana,
+            &id,
+            json!({ "restrictions": { "blockedMembers": ["a_orders.status"] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(
+            patched["restrictions"],
+            json!({ "rowFilters": [], "blockedMembers": ["a_orders.status"] })
+        );
+        let (status, got) = send(
+            &env.router,
+            Method::GET,
+            &format!("/cube/v1/roles/{id}"),
+            Some(&s.ana),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["restrictions"], patched["restrictions"]);
+
+        // A role without restrictions answers both keys, empty.
+        let (_, plain) = create_role(
+            env,
+            &s.ana,
+            &s.org_a,
+            json!({ "name": "Plain", "permissions": ["view"] }),
+        )
+        .await;
+        assert_eq!(
+            plain["restrictions"],
+            json!({ "rowFilters": [], "blockedMembers": [] })
+        );
+
+        let (status, answer) = patch_role(
+        env,
+        &s.ana,
+        &id,
+        json!({ "restrictions": { "rowFilters": [{ "member": "a_orders.status", "operator": "equals" }] } }),
+    )
+    .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+
+        let (status, _) = patch_role(
+            env,
+            &s.bia,
+            &id,
+            json!({ "restrictions": { "blockedMembers": [] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+);

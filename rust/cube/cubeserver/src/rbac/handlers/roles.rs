@@ -53,6 +53,7 @@ const MAX_NAME: usize = 100;
 pub struct NewRole {
     name: String,
     permissions: Vec<String>,
+    restrictions: Option<Restrictions>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +61,7 @@ pub struct NewRole {
 pub struct RolePatch {
     name: Option<String>,
     permissions: Option<Vec<String>>,
+    restrictions: Option<Restrictions>,
 }
 
 pub(crate) fn role_ref(id: Uuid) -> ObjectRef {
@@ -146,6 +148,7 @@ fn view(role: &Role, rules: i64) -> Value {
         "organizationId": role.organization_id,
         "name": role.name,
         "permissions": role.permissions,
+        "restrictions": role.restrictions,
         "rules": rules,
         "createdAt": role.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "createdBy": role.created_by,
@@ -207,7 +210,7 @@ pub async fn list(
     Ok(Json(json!({ "roles": roles })))
 }
 
-/// `{name, permissions}` → 201: `admin` on the organization.
+/// `{name, permissions, restrictions?}` → 201: `admin` on the organization.
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -219,6 +222,7 @@ pub async fn create(
     let request = body(request)?;
     let name = role_name(&request.name)?;
     let permissions = normalize(&request.permissions)?;
+    let restrictions = request.restrictions.unwrap_or_default().validated()?;
 
     let tx = rbac
         .store
@@ -226,7 +230,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let role = tx
-        .create_role(org.id, &name, &permissions, &Restrictions::default(), user)
+        .create_role(org.id, &name, &permissions, &restrictions, user)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     rbac.authz
@@ -250,7 +254,7 @@ pub async fn get(
     Ok(Json(view(&role, rules)))
 }
 
-/// `{name?, permissions?}`: `admin` on the organization. New permissions
+/// `{name?, permissions?, restrictions?}`: `admin` on the organization. New permissions
 /// reach every rule with the role at once.
 pub async fn update(
     State(state): State<AppState>,
@@ -268,6 +272,10 @@ pub async fn update(
     let permissions = match &patch.permissions {
         Some(p) => normalize(p)?,
         None => role.permissions.clone(),
+    };
+    let restrictions = match patch.restrictions {
+        Some(r) => r.validated()?,
+        None => role.restrictions.clone(),
     };
 
     let mut updates: Vec<Update> = wildcard_grants(role.id, &role.permissions)
@@ -293,7 +301,7 @@ pub async fn update(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let updated = tx
-        .update_role(role.id, &name, &permissions, &Restrictions::default())
+        .update_role(role.id, &name, &permissions, &restrictions)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?
         .ok_or_else(not_found)?;
