@@ -6007,6 +6007,14 @@ cubes:
       - name: status
         sql: status
         type: string
+      - name: buyer_orders
+        sql: "{a_buyers.count}"
+        type: number
+        sub_query: true
+      # Reaches a sub_query dimension one level down.
+      - name: size
+        sql: "CASE WHEN {buyer_orders} > 1 THEN 'big' ELSE 'small' END"
+        type: string
     measures:
       - name: count
         type: count
@@ -6014,6 +6022,9 @@ cubes:
   - name: a_buyers
     data_source: a_sqlite
     sql_table: buyers
+    measures:
+      - name: count
+        type: count
     dimensions:
       - name: id
         sql: id
@@ -6175,6 +6186,139 @@ db_test!(
         let body = answer.json();
         assert_eq!(answer.status, StatusCode::OK, "{body}");
         assert!(body["sql"]["sql"][0].is_string(), "{body}");
+    }
+);
+
+db_test!(
+    the_planner_never_sees_a_row_filter_that_reaches_a_sub_query_dimension,
+    |store| {
+        let d = data_scenario_on(store, PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [{ "member": "a_orders.size", "operator": "equals", "values": ["small"] }]
+            }),
+        )
+        .await;
+        // The planner would leave the filter out of the propagated ones.
+        let (status, sql, body) =
+            planned_sql(&d, json!({ "dimensions": ["a_buyers.propagated_count"] })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{sql}");
+        assert_eq!(
+            body["error"],
+            "Permission denied: your row filter on a_orders cannot be applied inside a_buyers.propagated_count"
+        );
+    }
+);
+
+/// D→A, D→C and A→X→Y→C: the planner joins A to C through X and Y,
+/// though D is fewer hops away either way.
+const DIRECTED_PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_d
+    data_source: a_sqlite
+    sql_table: d
+    joins:
+      - name: a_a
+        sql: "{CUBE}.a_id = {a_a}.id"
+        relationship: many_to_one
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a_a
+    data_source: a_sqlite
+    sql_table: a
+    joins:
+      - name: a_x
+        sql: "{CUBE}.x_id = {a_x}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+  - name: a_x
+    data_source: a_sqlite
+    sql_table: x
+    joins:
+      - name: a_y
+        sql: "{CUBE}.y_id = {a_y}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_y
+    data_source: a_sqlite
+    sql_table: y
+    joins:
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_c
+    data_source: a_sqlite
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+"#;
+
+db_test!(
+    the_planner_filters_the_cubes_its_directed_join_goes_through,
+    |store| {
+        let d = data_scenario_on(store, DIRECTED_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_x.region", "operator": "equals", "values": ["Sul"] },
+                    { "member": "a_y.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(
+            &d,
+            json!({ "measures": ["a_a.count"], "dimensions": ["a_c.name"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The planner really joins through X and Y, not D.
+        assert!(sql.contains("AS \"a_x\" ON"), "{sql}");
+        assert!(sql.contains("AS \"a_y\" ON"), "{sql}");
+        assert!(!sql.contains("\"a_d\""), "{sql}");
+        assert!(sql.contains("\"a_x\".region = ?"), "{sql}");
+        assert!(sql.contains("\"a_y\".region = ?"), "{sql}");
+        assert_eq!(body["sql"]["sql"][1], json!(["Sul", "Norte"]), "{body}");
     }
 );
 

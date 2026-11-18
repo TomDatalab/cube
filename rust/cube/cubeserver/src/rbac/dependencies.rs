@@ -98,6 +98,10 @@ pub struct MemberGraph {
     cube_opaque: HashMap<String, BTreeSet<Dep>>,
     /// Cube → the cubes it joins or is joined from (both ways).
     joins: BTreeMap<String, BTreeSet<String>>,
+    /// Cube → the cubes it joins (from→to, the way the planner follows).
+    joins_to: BTreeMap<String, BTreeSet<String>>,
+    /// Cube → the cubes that join it (to→from).
+    joined_from: BTreeMap<String, BTreeSet<String>>,
     /// View names.
     views: BTreeSet<String>,
     /// `cube.member` → what it references directly (itself excluded).
@@ -174,6 +178,16 @@ impl MemberGraph {
                 graph.dimensions.insert(full);
             }
             for join in &cube.joins {
+                graph
+                    .joins_to
+                    .entry(cube.name.clone())
+                    .or_default()
+                    .insert(join.name.clone());
+                graph
+                    .joined_from
+                    .entry(join.name.clone())
+                    .or_default()
+                    .insert(cube.name.clone());
                 graph
                     .joins
                     .entry(cube.name.clone())
@@ -411,42 +425,67 @@ impl MemberGraph {
         self.sub_queries.contains(member)
     }
 
+    /// Whether `member` reads a `sub_query` dimension, itself included, at
+    /// any depth: the planner does not propagate a filter on it.
+    pub fn reaches_sub_query(&self, member: &str) -> bool {
+        self.closure(member)
+            .iter()
+            .any(|dep| matches!(dep, Dep::Member(m) if self.is_sub_query(m)))
+    }
+
     /// Whether `member` (`cube.member`) is a dimension of a cube.
     pub fn is_dimension(&self, member: &str) -> bool {
         self.dimensions.contains(member)
     }
 
-    /// `cubes` and every cube on a shortest join path between two of them,
-    /// joins followed both ways: the planner may join through any of them.
+    /// `cubes` and every cube on a shortest join path between two of them.
+    /// The planner joins along directed (from→to) shortest paths, rooted at
+    /// one of the cubes; which root and which of equal-length paths it
+    /// picks is not ours to know, so every directed shortest path between
+    /// every ordered pair counts, and every undirected one too.
     pub fn cubes_between(&self, cubes: &BTreeSet<String>) -> BTreeSet<String> {
         let mut between = cubes.clone();
-        let from: Vec<(&str, HashMap<&str, usize>)> = cubes
-            .iter()
-            .filter(|cube| self.joins.contains_key(cube.as_str()))
-            .map(|cube| (cube.as_str(), self.join_distances(cube)))
-            .collect();
-        for (i, (_, from_a)) in from.iter().enumerate() {
-            for (b, from_b) in &from[i + 1..] {
-                let Some(&length) = from_a.get(b) else {
-                    continue;
-                };
-                for (cube, to_a) in from_a {
-                    if from_b.get(cube).is_some_and(|to_b| to_a + to_b == length) {
-                        between.insert(cube.to_string());
+        let mut paths = |forward: &BTreeMap<String, BTreeSet<String>>,
+                         backward: &BTreeMap<String, BTreeSet<String>>| {
+            let from: Vec<(&str, HashMap<&str, usize>)> = cubes
+                .iter()
+                .map(|cube| (cube.as_str(), Self::join_distances(forward, cube)))
+                .collect();
+            let to: HashMap<&str, HashMap<&str, usize>> = cubes
+                .iter()
+                .map(|cube| (cube.as_str(), Self::join_distances(backward, cube)))
+                .collect();
+            for (a, from_a) in &from {
+                for (b, to_b) in &to {
+                    if a == b {
+                        continue;
+                    }
+                    let Some(&length) = from_a.get(b) else {
+                        continue;
+                    };
+                    for (cube, hops) in from_a {
+                        if to_b.get(cube).is_some_and(|rest| hops + rest == length) {
+                            between.insert(cube.to_string());
+                        }
                     }
                 }
             }
-        }
+        };
+        paths(&self.joins_to, &self.joined_from);
+        paths(&self.joins, &self.joins);
         between
     }
 
-    /// Join hops from `from` to every cube it reaches.
-    fn join_distances<'a>(&'a self, from: &'a str) -> HashMap<&'a str, usize> {
+    /// Hops from `from` to every cube it reaches along `edges`.
+    fn join_distances<'a>(
+        edges: &'a BTreeMap<String, BTreeSet<String>>,
+        from: &'a str,
+    ) -> HashMap<&'a str, usize> {
         let mut distance = HashMap::from([(from, 0)]);
         let mut queue = VecDeque::from([from]);
         while let Some(cube) = queue.pop_front() {
             let next = distance[cube] + 1;
-            for other in self.joins.get(cube).into_iter().flatten() {
+            for other in edges.get(cube).into_iter().flatten() {
                 if !distance.contains_key(other.as_str()) {
                     distance.insert(other, next);
                     queue.push_back(other);
@@ -1573,6 +1612,96 @@ cubes:
         assert_eq!(
             graph.cubes_between(&set(&["a", "alone"])),
             set(&["a", "alone"])
+        );
+    }
+
+    /// D→A, D→C and A→X→Y→C: undirected, A and C are two hops apart
+    /// through D; the planner, which follows joins from→to only, joins
+    /// A→X→Y→C.
+    const DIRECTED_MODEL: &str = r#"
+cubes:
+  - name: d
+    sql_table: d
+    joins:
+      - name: a
+        sql: "{CUBE}.a_id = {a}.id"
+        relationship: many_to_one
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: a
+    sql_table: a
+    joins:
+      - name: x
+        sql: "{CUBE}.x_id = {x}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+    measures:
+      - name: count
+        type: count
+  - name: x
+    sql_table: x
+    joins:
+      - name: y
+        sql: "{CUBE}.y_id = {y}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: y
+    sql_table: y
+    joins:
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: c
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+"#;
+
+    #[test]
+    fn cubes_between_cover_the_directed_join_paths() {
+        let graph = graph(DIRECTED_MODEL);
+        let set = |list: &[&str]| -> BTreeSet<String> {
+            list.iter().map(|cube| cube.to_string()).collect()
+        };
+        assert_eq!(
+            graph.cubes_between(&set(&["a", "c"])),
+            set(&["a", "c", "d", "x", "y"])
+        );
+        // D→A→X, and X-A-D both ways.
+        assert_eq!(
+            graph.cubes_between(&set(&["x", "d"])),
+            set(&["a", "d", "x"])
         );
     }
 }
