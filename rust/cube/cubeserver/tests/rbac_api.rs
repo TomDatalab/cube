@@ -5856,3 +5856,121 @@ db_test!(a_rule_missing_from_the_store_is_503, |store| {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(d.queries.seen().is_empty());
 });
+
+/// The names of the `kind` members (`measures`, `dimensions`, `segments`)
+/// of `cube` in the meta (empty when the cube is not listed).
+async fn meta_members(
+    env: &Env,
+    token: &str,
+    workspace: Option<&str>,
+    cube: &str,
+    kind: &str,
+) -> Vec<String> {
+    let headers: Vec<(&str, &str)> = workspace
+        .map(|ws| vec![("x-cube-workspace", ws)])
+        .unwrap_or_default();
+    let answer = call(
+        &env.router,
+        Method::GET,
+        "/cube/v1/meta",
+        Some(token),
+        &headers,
+        None,
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let body = answer.json();
+    let mut names: Vec<String> = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == cube)
+        .flat_map(|c| c[kind].as_array().cloned().unwrap_or_default())
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+db_test!(
+    meta_hides_blocked_members_and_what_depends_on_them,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        let ws = Some(d.w1.as_str());
+        let before = meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await;
+        assert!(
+            before.contains(&"a_orders.margin_pct".to_string()),
+            "{before:?}"
+        );
+        // `a_view` exposes `a_orders.status` as `a_view.status`.
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({ "blockedMembers": ["a_orders.margin", "a_orders.status"] }),
+        )
+        .await;
+        let dims = meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await;
+        assert_eq!(dims, ["a_orders.region"]);
+        assert_eq!(
+            meta_members(env, &d.s.bia, ws, "a_orders", "measures").await,
+            ["a_orders.count"]
+        );
+        assert_eq!(
+            meta_members(env, &d.s.bia, ws, "a_view", "dimensions").await,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            meta_members(env, &d.s.bia, ws, "a_view", "measures").await,
+            ["a_view.count"]
+        );
+        // caio has no restricted rule: nothing is hidden.
+        assert_eq!(
+            meta_members(env, &d.s.caio, ws, "a_orders", "dimensions").await,
+            before
+        );
+    }
+);
+
+db_test!(
+    meta_without_a_workspace_hides_members_blocked_anywhere,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({ "blockedMembers": ["a_orders.margin"] }),
+        )
+        .await;
+        let dims = meta_members(env, &d.s.bia, None, "a_orders", "dimensions").await;
+        assert!(!dims.contains(&"a_orders.margin".to_string()), "{dims:?}");
+        assert!(
+            !dims.contains(&"a_orders.margin_pct".to_string()),
+            "{dims:?}"
+        );
+        assert!(dims.contains(&"a_orders.region".to_string()), "{dims:?}");
+    }
+);
+
+db_test!(row_filters_do_not_change_the_meta, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let ws = Some(d.w1.as_str());
+    let before = meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await;
+    restricted_rule(
+        &d,
+        &d.w1,
+        "bia",
+        json!({
+            "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "attribute": "region" }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        meta_members(env, &d.s.bia, ws, "a_orders", "dimensions").await,
+        before
+    );
+});

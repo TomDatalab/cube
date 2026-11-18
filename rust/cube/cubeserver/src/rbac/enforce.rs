@@ -194,14 +194,21 @@ async fn restrictions_of(
 
 /// What `/v1/meta` may show: with a workspace, as a query; without one, the
 /// connections the user can query through any workspace (or manages) whose
-/// row belongs to an organization the user can view.
-async fn meta_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiError> {
+/// row belongs to an organization the user can view. Also the user's
+/// restrictions (none for a platform admin): with a workspace those of its
+/// rules, without one those of every rule of the user.
+async fn meta_access(
+    rbac: &Rbac,
+    ctx: &RequestContext,
+) -> Result<(Access, Option<Effective>), ApiError> {
     let user = user_of(ctx)?;
     if ctx.platform_admin {
-        return Ok(Access::All);
+        return Ok((Access::All, None));
     }
     if ctx.workspace.is_some() {
-        return Ok(query_access(rbac, ctx).await?.0);
+        let (access, workspace) = query_access(rbac, ctx).await?;
+        let effective = restrictions_of(rbac, user, workspace).await?;
+        return Ok((access, Some(effective)));
     }
     let names = rbac
         .authz
@@ -222,12 +229,13 @@ async fn meta_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiErr
         .map_err(authz_error)?
         .into_iter()
         .collect();
-    Ok(Access::Only(
+    let access = Access::Only(
         rows.into_iter()
             .filter(|row| organizations.contains(&row.organization_id.to_string()))
             .map(|row| row.name)
             .collect(),
-    ))
+    );
+    Ok((access, Some(restrictions_of(rbac, user, None).await?)))
 }
 
 /// Every member and cube name a normalized query reads, typed so nothing is
@@ -526,11 +534,15 @@ impl RbacMetaService {
     }
 
     /// Drops from `meta.cubes` every cube or view with a data source outside
-    /// `access`; one the model cannot place is dropped too.
-    fn filter(&self, access: &Access, mut meta: Value) -> Result<Value, ApiError> {
-        let Access::Only(allowed) = access else {
-            return Ok(meta);
-        };
+    /// `access`; one the model cannot place is dropped too. Their measures,
+    /// dimensions and segments lose the members `effective` blocks, and
+    /// those built on one.
+    fn filter(
+        &self,
+        access: &Access,
+        effective: Option<&Effective>,
+        mut meta: Value,
+    ) -> Result<Value, ApiError> {
         let Some(cubes) = meta.get_mut("cubes").and_then(Value::as_array_mut) else {
             return Ok(meta);
         };
@@ -538,7 +550,7 @@ impl RbacMetaService {
             return Ok(meta);
         }
         let sources = self.sources.as_ref().ok_or_else(no_snapshot)?;
-        {
+        if let Access::Only(allowed) = access {
             cubes.retain(|cube| {
                 let Some(name) = cube.get("name").and_then(Value::as_str) else {
                     return false;
@@ -547,6 +559,23 @@ impl RbacMetaService {
                 !of_cube.is_empty() && of_cube.is_subset(allowed)
             });
         }
+        if let Some(effective) = effective.filter(|e| !e.blocked.is_empty()) {
+            for cube in cubes.iter_mut() {
+                for kind in ["measures", "dimensions", "segments"] {
+                    let Some(members) = cube.get_mut(kind).and_then(Value::as_array_mut) else {
+                        continue;
+                    };
+                    members.retain(|member| {
+                        let Some(name) = member.get("name").and_then(Value::as_str) else {
+                            return true;
+                        };
+                        effective
+                            .blocked_dependency(sources.graph(), name)
+                            .is_none()
+                    });
+                }
+            }
+        }
         Ok(meta)
     }
 }
@@ -554,9 +583,9 @@ impl RbacMetaService {
 #[async_trait]
 impl MetaService for RbacMetaService {
     async fn meta(&self, ctx: &RequestContext, only_views: bool) -> Result<Value, ApiError> {
-        let access = meta_access(&self.rbac, ctx).await?;
+        let (access, effective) = meta_access(&self.rbac, ctx).await?;
         let meta = self.inner.meta(ctx, only_views).await?;
-        self.filter(&access, meta)
+        self.filter(&access, effective.as_ref(), meta)
     }
 
     async fn meta_extended(
@@ -564,9 +593,9 @@ impl MetaService for RbacMetaService {
         ctx: &RequestContext,
         only_views: bool,
     ) -> Result<Value, ApiError> {
-        let access = meta_access(&self.rbac, ctx).await?;
+        let (access, effective) = meta_access(&self.rbac, ctx).await?;
         let meta = self.inner.meta_extended(ctx, only_views).await?;
-        self.filter(&access, meta)
+        self.filter(&access, effective.as_ref(), meta)
     }
 }
 
