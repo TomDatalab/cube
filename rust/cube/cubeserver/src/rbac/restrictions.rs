@@ -1,10 +1,13 @@
 //! Data restrictions of an organization role: columns it blocks and row
 //! filters driven by user attributes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use cubequery::types::{FilterOperator, NormalizedFilter, NormalizedFilterLeaf, NormalizedQuery};
 use serde::{Deserialize, Serialize};
 
+use super::dependencies::{Dep, MemberGraph};
+use super::enforce::members_of;
 use crate::error::ApiError;
 
 const MAX_ROW_FILTERS: usize = 50;
@@ -153,10 +156,207 @@ pub fn validated_attributes(attributes: Attributes) -> Result<Attributes, ApiErr
     Ok(attributes)
 }
 
+/// What holds for a user in a workspace (or, for the meta without a
+/// workspace, in all of them): every role's restrictions together.
+#[derive(Debug, Clone, Default)]
+pub struct Effective {
+    pub row_filters: Vec<RowFilter>,
+    pub blocked: BTreeSet<String>,
+    pub attributes: Attributes,
+}
+
+/// The cube part of `cube.member`.
+fn cube_of(member: &str) -> &str {
+    member.split('.').next().unwrap_or(member)
+}
+
+/// `cube.member` of a name that may carry a granularity, resolved to the
+/// cube member a view member points at.
+fn resolved<'a>(graph: &'a MemberGraph, name: &'a str) -> &'a str {
+    let two = match name.match_indices('.').nth(1) {
+        Some((idx, _)) => &name[..idx],
+        None => name,
+    };
+    graph.source_member(two).unwrap_or(two)
+}
+
+impl Effective {
+    /// Rule B: filters of every role apply together (AND), blocked members
+    /// add up.
+    pub fn combine<'a>(
+        roles: impl IntoIterator<Item = &'a Restrictions>,
+        attributes: Attributes,
+    ) -> Effective {
+        let mut effective = Effective {
+            attributes,
+            ..Effective::default()
+        };
+        for role in roles {
+            effective
+                .row_filters
+                .extend(role.row_filters.iter().cloned());
+            effective
+                .blocked
+                .extend(role.blocked_members.iter().cloned());
+        }
+        effective
+    }
+
+    /// No filter and no blocked member.
+    pub fn is_empty(&self) -> bool {
+        self.row_filters.is_empty() && self.blocked.is_empty()
+    }
+
+    /// The first blocked member in the closure of `name` (the member itself
+    /// first), where `Dep::Cube(c)` hits any blocked member of `c`. Cubes
+    /// only joined through by a view do not count.
+    pub fn blocked_dependency(&self, graph: &MemberGraph, name: &str) -> Option<String> {
+        if self.blocked.is_empty() {
+            return None;
+        }
+        let blocked: Vec<(&str, &str)> = self
+            .blocked
+            .iter()
+            .map(|b| (b.as_str(), graph.source_member(b).unwrap_or(b)))
+            .collect();
+        let deps = graph.closure(name);
+        let own = resolved(graph, name);
+        if deps.contains(&Dep::Member(own.to_string())) {
+            if let Some((b, _)) = blocked.iter().find(|(_, source)| *source == own) {
+                return Some(b.to_string());
+            }
+        }
+        deps.iter().find_map(|dep| {
+            let hit = match dep {
+                Dep::Member(member) => blocked.iter().find(|(_, source)| source == member),
+                Dep::Cube(cube) => blocked.iter().find(|(_, source)| cube_of(source) == cube),
+                Dep::Joined(_) => None,
+            };
+            hit.map(|(b, _)| b.to_string())
+        })
+    }
+}
+
+/// Applies `effective` to one query: 403 when it names a blocked member, or
+/// one built on a blocked member; otherwise the row filters of every cube it
+/// reads are ANDed to its filters (the user's are never rewritten). A filter
+/// that cannot be applied safely is a 403, never skipped.
+pub fn restrict_query(
+    mut query: NormalizedQuery,
+    effective: &Effective,
+    graph: &MemberGraph,
+) -> Result<NormalizedQuery, ApiError> {
+    if effective.is_empty() {
+        return Ok(query);
+    }
+    let names = members_of(&query)?;
+
+    for blocked in &effective.blocked {
+        if graph.source_member(blocked).is_none() {
+            tracing::warn!("Blocked member {blocked} is not in the data model; ignored");
+        }
+    }
+    for name in &names {
+        if let Some(b) = effective.blocked_dependency(graph, name) {
+            let message = if resolved(graph, &b) == resolved(graph, name) {
+                format!("Permission denied: {b} is not available to you")
+            } else {
+                format!("Permission denied: {name} depends on {b}, which is not available to you")
+            };
+            return Err(ApiError::forbidden(message));
+        }
+    }
+    if effective.row_filters.is_empty() {
+        return Ok(query);
+    }
+
+    let read_cubes: BTreeSet<String> = names
+        .iter()
+        .flat_map(|name| graph.closure(name))
+        .map(|dep| dep.cube().to_string())
+        .collect();
+    let direct = names.iter().any(|name| !graph.is_view(cube_of(name)));
+    let views: BTreeSet<&str> = names
+        .iter()
+        .map(|name| cube_of(name))
+        .filter(|first| graph.is_view(first))
+        .collect();
+
+    let mut leaves = Vec::new();
+    for filter in &effective.row_filters {
+        let cube = cube_of(&filter.member);
+        if !read_cubes.contains(cube) {
+            continue;
+        }
+        let Some(member) = graph.source_member(&filter.member) else {
+            return Err(ApiError::forbidden(format!(
+                "Permission denied: a restriction of yours filters on {}, which the model no longer has",
+                filter.member
+            )));
+        };
+        let values = match (&filter.values, &filter.attribute) {
+            (Some(values), _) if !values.is_empty() => values.clone(),
+            (None, Some(attribute)) => match effective.attributes.get(attribute) {
+                Some(values) if !values.is_empty() => values.clone(),
+                _ => {
+                    return Err(ApiError::forbidden(format!(
+                        "Permission denied: you have no {attribute} attribute, which {cube} needs"
+                    )))
+                }
+            },
+            // Validation never stores this; still, no values, no query.
+            _ => {
+                return Err(ApiError::forbidden(format!(
+                    "Permission denied: a restriction of yours on {member} has no values"
+                )))
+            }
+        };
+        let operator = match filter.operator {
+            RowOperator::Equals => FilterOperator::Equals,
+            RowOperator::NotEquals => FilterOperator::NotEquals,
+        };
+        let leaf = |member: &str| {
+            NormalizedFilter::Leaf(NormalizedFilterLeaf {
+                member: member.to_string(),
+                operator,
+                values: Some(values.iter().cloned().map(Some).collect()),
+            })
+        };
+
+        if direct {
+            leaves.push(leaf(member));
+        }
+        let mut through_view = false;
+        for view in views
+            .iter()
+            .filter(|view| graph.view_includes_cube(view, cube))
+        {
+            through_view = true;
+            match graph.view_member_for(view, member) {
+                Some(view_member) => leaves.push(leaf(view_member)),
+                None => {
+                    return Err(ApiError::forbidden(format!(
+                        "Permission denied: view {view} does not expose {member}, which filters your rows"
+                    )))
+                }
+            }
+        }
+        // Read only through a dependency: the cube member itself; the
+        // planner joins it in or fails, both safe.
+        if !direct && !through_view {
+            leaves.push(leaf(member));
+        }
+    }
+    query.filters.extend(leaves);
+    Ok(query)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cubequery::types::{FilterOperator, NormalizedFilter, NormalizedFilterLeaf};
     use serde_json::{json, Value};
+    use std::collections::BTreeSet;
 
     fn parse(v: Value) -> Result<Restrictions, serde_json::Error> {
         serde_json::from_value(v)
@@ -292,5 +492,334 @@ mod tests {
         let many: Attributes = (0..51).map(|i| (format!("a{i}"), vec![])).collect();
         assert!(validated_attributes(many).is_err());
         assert!(validated_attributes(Attributes::from([("Bad".to_string(), vec![])])).is_err());
+    }
+
+    // ---- applying restrictions to queries ----
+
+    const MODEL: &str = r#"
+cubes:
+  - name: a_orders
+    sql_table: orders
+    joins:
+      - name: b_orders
+        sql: "{CUBE}.id = {b_orders}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+      - name: region
+        sql: region
+        type: string
+      - name: margin
+        sql: margin
+        type: number
+      - name: margin_pct
+        sql: "{margin} * 100"
+        type: number
+      - name: created_at
+        sql: created_at
+        type: time
+    measures:
+      - name: count
+        type: count
+    segments:
+      - name: open
+        sql: "{CUBE}.status = 'open'"
+
+  - name: b_orders
+    sql_table: orders
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+    measures:
+      - name: count
+        type: count
+
+views:
+  - name: a_view
+    cubes:
+      - join_path: a_orders
+        includes: [count, status]
+"#;
+
+    fn model_graph() -> MemberGraph {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model.yml"), MODEL).unwrap();
+        let model = cubemodel::ModelLoader::with_context(cubemodel::TemplateContext::default())
+            .load_dir_with(dir.path())
+            .unwrap();
+        MemberGraph::build(&model)
+    }
+
+    fn query(v: Value) -> NormalizedQuery {
+        let (_, mut queries) =
+            cubequery::get_normalized_queries(&v, false, None, &cubequery::QueryConfig::default())
+                .unwrap();
+        queries.remove(0)
+    }
+
+    fn blocking(members: &[&str]) -> Effective {
+        Effective::combine(
+            [&Restrictions {
+                row_filters: vec![],
+                blocked_members: members.iter().map(|m| m.to_string()).collect(),
+            }],
+            Attributes::new(),
+        )
+    }
+
+    fn filtering(filters: Vec<RowFilter>, attributes: &[(&str, &[&str])]) -> Effective {
+        Effective::combine(
+            [&Restrictions {
+                row_filters: filters,
+                blocked_members: vec![],
+            }],
+            attributes
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+                .collect(),
+        )
+    }
+
+    fn leaf(member: &str, operator: FilterOperator, values: &[&str]) -> NormalizedFilter {
+        NormalizedFilter::Leaf(NormalizedFilterLeaf {
+            member: member.into(),
+            operator,
+            values: Some(values.iter().map(|v| Some(v.to_string())).collect()),
+        })
+    }
+
+    fn by_region() -> RowFilter {
+        filter("a_orders.region", Some("region"), None)
+    }
+
+    fn refused(result: Result<NormalizedQuery, ApiError>) -> String {
+        let err = result.unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN, "{err:?}");
+        err.body.error
+    }
+
+    #[test]
+    fn no_restrictions_leave_the_query_untouched() {
+        let graph = model_graph();
+        let q = query(json!({
+            "measures": ["a_orders.count"],
+            "dimensions": ["a_orders.margin"],
+            "filters": [{ "member": "a_orders.status", "operator": "equals", "values": ["x"] }]
+        }));
+        let effective = Effective::default();
+        assert!(effective.is_empty());
+        assert_eq!(restrict_query(q.clone(), &effective, &graph).unwrap(), q);
+    }
+
+    #[test]
+    fn a_blocked_member_is_refused_wherever_the_query_names_it() {
+        let graph = model_graph();
+        let effective = blocking(&["a_orders.margin"]);
+        for q in [
+            json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.margin"] }),
+            json!({ "measures": ["a_orders.count"], "filters": [{ "or": [
+                { "member": "a_orders.status", "operator": "set" },
+                { "member": "a_orders.margin", "operator": "gt", "values": ["1"] }
+            ] }] }),
+            json!({ "measures": ["a_orders.count"], "order": [["a_orders.margin", "asc"]] }),
+            json!({ "measures": ["a_orders.count"], "segments": ["a_orders.margin"] }),
+            json!({ "measures": ["a_orders.count"],
+                "timeDimensions": [{ "dimension": "a_orders.margin", "granularity": "day" }] }),
+        ] {
+            let message = refused(restrict_query(query(q.clone()), &effective, &graph));
+            assert_eq!(
+                message, "Permission denied: a_orders.margin is not available to you",
+                "{q}"
+            );
+        }
+        // Other members of the same cube still run.
+        let q = query(json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.status"] }));
+        assert_eq!(restrict_query(q.clone(), &effective, &graph).unwrap(), q);
+    }
+
+    #[test]
+    fn a_member_built_on_a_blocked_one_is_refused() {
+        let graph = model_graph();
+        let effective = blocking(&["a_orders.margin"]);
+        let q = query(json!({ "dimensions": ["a_orders.margin_pct"] }));
+        assert_eq!(
+            refused(restrict_query(q, &effective, &graph)),
+            "Permission denied: a_orders.margin_pct depends on a_orders.margin, which is not available to you"
+        );
+        // Through a view, the blocked member is the view member's own.
+        let effective = blocking(&["a_orders.status"]);
+        let q = query(json!({ "dimensions": ["a_view.status"] }));
+        assert_eq!(
+            refused(restrict_query(q, &effective, &graph)),
+            "Permission denied: a_orders.status is not available to you"
+        );
+    }
+
+    #[test]
+    fn a_row_filter_uses_the_users_attribute() {
+        let graph = model_graph();
+        let effective = filtering(vec![by_region()], &[("region", &["Sul", "Sudeste"])]);
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        let restricted = restrict_query(q, &effective, &graph).unwrap();
+        assert_eq!(
+            restricted.filters,
+            vec![leaf(
+                "a_orders.region",
+                FilterOperator::Equals,
+                &["Sul", "Sudeste"]
+            )]
+        );
+    }
+
+    #[test]
+    fn fixed_values_and_not_equals() {
+        let graph = model_graph();
+        let mut fixed = filter("a_orders.status", None, Some(vec!["internal", "test"]));
+        fixed.operator = RowOperator::NotEquals;
+        let effective = filtering(vec![fixed], &[]);
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        let restricted = restrict_query(q, &effective, &graph).unwrap();
+        assert_eq!(
+            restricted.filters,
+            vec![leaf(
+                "a_orders.status",
+                FilterOperator::NotEquals,
+                &["internal", "test"]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_missing_or_empty_attribute_is_refused() {
+        let graph = model_graph();
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        for attributes in [&[][..], &[("region", &[][..])][..]] {
+            let effective = filtering(vec![by_region()], attributes);
+            assert_eq!(
+                refused(restrict_query(q.clone(), &effective, &graph)),
+                "Permission denied: you have no region attribute, which a_orders needs"
+            );
+        }
+    }
+
+    #[test]
+    fn filters_only_apply_to_cubes_the_query_reads() {
+        let graph = model_graph();
+        let effective = filtering(vec![filter("b_orders.status", None, Some(vec!["x"]))], &[]);
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        assert_eq!(restrict_query(q.clone(), &effective, &graph).unwrap(), q);
+        // A query of b_orders gets it.
+        let q = query(json!({ "measures": ["b_orders.count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("b_orders.status", FilterOperator::Equals, &["x"])]
+        );
+    }
+
+    #[test]
+    fn injected_filters_are_anded_outside_the_users_or() {
+        let graph = model_graph();
+        let effective = filtering(vec![by_region()], &[("region", &["Sul"])]);
+        let q = query(json!({
+            "measures": ["a_orders.count"],
+            "filters": [{ "or": [
+                { "member": "a_orders.status", "operator": "equals", "values": ["a"] },
+                { "member": "a_orders.status", "operator": "equals", "values": ["b"] }
+            ] }]
+        }));
+        let users = q.filters.clone();
+        assert!(matches!(users[..], [NormalizedFilter::Or(_)]));
+        let restricted = restrict_query(q, &effective, &graph).unwrap();
+        assert_eq!(
+            restricted.filters,
+            vec![
+                users[0].clone(),
+                leaf("a_orders.region", FilterOperator::Equals, &["Sul"])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_view_without_the_filtered_member_is_refused() {
+        let graph = model_graph();
+        let effective = filtering(vec![by_region()], &[("region", &["Sul"])]);
+        let q = query(json!({ "measures": ["a_view.count"] }));
+        assert_eq!(
+            refused(restrict_query(q, &effective, &graph)),
+            "Permission denied: view a_view does not expose a_orders.region, which filters your rows"
+        );
+    }
+
+    #[test]
+    fn a_view_exposing_the_member_is_filtered_through_it() {
+        let graph = model_graph();
+        let effective = filtering(
+            vec![filter("a_orders.status", None, Some(vec!["open"]))],
+            &[],
+        );
+        let q = query(json!({ "measures": ["a_view.count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("a_view.status", FilterOperator::Equals, &["open"])]
+        );
+    }
+
+    #[test]
+    fn filters_from_several_roles_all_apply() {
+        let graph = model_graph();
+        let first = Restrictions {
+            row_filters: vec![by_region()],
+            blocked_members: vec!["a_orders.margin".into()],
+        };
+        let second = Restrictions {
+            row_filters: vec![filter("a_orders.status", None, Some(vec!["open"]))],
+            blocked_members: vec!["a_orders.id".into(), "a_orders.margin".into()],
+        };
+        let effective = Effective::combine(
+            [&first, &second],
+            Attributes::from([("region".to_string(), vec!["Sul".to_string()])]),
+        );
+        assert_eq!(effective.row_filters.len(), 2);
+        assert_eq!(
+            effective.blocked,
+            BTreeSet::from(["a_orders.id".to_string(), "a_orders.margin".to_string()])
+        );
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![
+                leaf("a_orders.region", FilterOperator::Equals, &["Sul"]),
+                leaf("a_orders.status", FilterOperator::Equals, &["open"])
+            ]
+        );
+        for blocked in ["a_orders.id", "a_orders.margin"] {
+            let q = query(json!({ "dimensions": [blocked] }));
+            assert!(restrict_query(q, &effective, &graph).is_err(), "{blocked}");
+        }
+    }
+
+    #[test]
+    fn a_filter_on_a_member_the_model_lost_is_refused() {
+        let graph = model_graph();
+        let effective = filtering(vec![filter("a_orders.gone", None, Some(vec!["x"]))], &[]);
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        assert_eq!(
+            refused(restrict_query(q, &effective, &graph)),
+            "Permission denied: a restriction of yours filters on a_orders.gone, which the model no longer has"
+        );
+        // A blocked member the model lost blocks nothing.
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        assert!(restrict_query(q, &blocking(&["a_orders.gone"]), &graph).is_ok());
     }
 }

@@ -36,8 +36,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::handlers::connections::released_connections;
+use super::handlers::organizations::user_ref;
 use super::handlers::workspaces::workspace_ref;
-use super::{authz_error, unauthenticated, unavailable, Rbac};
+use super::restrictions::{restrict_query, Effective};
+use super::{authz_error, unauthenticated, unavailable, Rbac, RelationshipFilter};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::planner_adapter::DataSources;
@@ -98,14 +100,89 @@ async fn workspace_with(
     Ok(workspace.to_string())
 }
 
-/// Data access of a query: `workspace#query` and the workspace's releases.
-async fn query_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiError> {
+/// Data access of a query: `workspace#query` and the workspace's releases,
+/// with the workspace (`None` for a platform admin, who is not checked).
+async fn query_access(
+    rbac: &Rbac,
+    ctx: &RequestContext,
+) -> Result<(Access, Option<Uuid>), ApiError> {
     user_of(ctx)?;
     if ctx.platform_admin {
-        return Ok(Access::All);
+        return Ok((Access::All, None));
     }
     let workspace = workspace_with(rbac, ctx, "query").await?;
-    Ok(Access::Only(released_connections(rbac, &workspace).await?))
+    // `workspace_with` only answers a workspace that parses.
+    let id = workspace.parse::<Uuid>().ok();
+    Ok((
+        Access::Only(released_connections(rbac, &workspace).await?),
+        id,
+    ))
+}
+
+/// The restrictions of `user`: the roles of the organization on the rules
+/// the user is a member of (`rule#member` in SpiceDB, checked against the
+/// rule rows and, with `workspace`, only that workspace's), with the user's
+/// attributes. `workspace: None` takes every rule of the user (the meta
+/// without a workspace). Never cached: a change holds on the next query.
+async fn restrictions_of(
+    rbac: &Rbac,
+    user: &str,
+    workspace: Option<Uuid>,
+) -> Result<Effective, ApiError> {
+    let rule_ids: Vec<Uuid> = rbac
+        .authz
+        .read(&RelationshipFilter {
+            kind: "rule",
+            id: None,
+            relation: Some("member"),
+            subject: Some(user_ref(user)),
+        })
+        .await
+        .map_err(authz_error)?
+        .iter()
+        .filter_map(|r| r.resource.id.parse().ok())
+        .collect();
+    let store_failed = |e| {
+        tracing::error!("RBAC store failed: {e}");
+        unavailable()
+    };
+    let rules = if rule_ids.is_empty() {
+        Vec::new()
+    } else {
+        rbac.store
+            .rules_by_ids(&rule_ids)
+            .await
+            .map_err(store_failed)?
+    };
+    let role_ids: BTreeSet<Uuid> = rules
+        .iter()
+        .filter(|rule| workspace.is_none_or(|ws| rule.workspace_id == ws))
+        .filter_map(|rule| rule.role_id)
+        .collect();
+    let role_ids: Vec<Uuid> = role_ids.into_iter().collect();
+    let roles = if role_ids.is_empty() {
+        Vec::new()
+    } else {
+        rbac.store
+            .roles_by_ids(&role_ids)
+            .await
+            .map_err(store_failed)?
+    };
+    // A rule's role is kept by a foreign key; should one still be missing,
+    // its restrictions are unknown, so nothing runs.
+    if roles.len() != role_ids.len() {
+        tracing::error!("A rule of {user} names a role the RBAC store does not have");
+        return Err(unavailable());
+    }
+    let attributes = rbac
+        .store
+        .user_attributes(user)
+        .await
+        .map_err(store_failed)?;
+    Ok(Effective::combine(
+        roles.iter().map(|role| &role.restrictions),
+        attributes,
+    ))
 }
 
 /// What `/v1/meta` may show: with a workspace, as a query; without one, the
@@ -117,7 +194,7 @@ async fn meta_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiErr
         return Ok(Access::All);
     }
     if ctx.workspace.is_some() {
-        return query_access(rbac, ctx).await;
+        return Ok(query_access(rbac, ctx).await?.0);
     }
     let names = rbac
         .authz
@@ -150,7 +227,7 @@ async fn meta_access(rbac: &Rbac, ctx: &RequestContext) -> Result<Access, ApiErr
 /// skipped: measures, dimensions, segments, time dimensions, filters (nested
 /// `and`/`or` included), order and join hints. Member expressions and
 /// subquery joins carry SQL the model does not describe, so they are refused.
-fn members_of(query: &NormalizedQuery) -> Result<Vec<String>, ApiError> {
+pub(super) fn members_of(query: &NormalizedQuery) -> Result<Vec<String>, ApiError> {
     fn named(out: &mut Vec<String>, members: &[QueryMember]) -> Result<(), ApiError> {
         for member in members {
             match member {
@@ -335,18 +412,43 @@ impl RbacQueryService {
         Self { inner, rbac }
     }
 
+    /// The request as it may run: checked against the workspace's data
+    /// sources, then restricted by the user's roles there. Platform admins
+    /// pass unchanged.
     async fn authorize(
         &self,
         ctx: &RequestContext,
-        request: &NormalizedRequest,
-    ) -> Result<(), ApiError> {
-        let access = query_access(&self.rbac, ctx).await?;
+        request: NormalizedRequest,
+    ) -> Result<NormalizedRequest, ApiError> {
+        let (access, workspace) = query_access(&self.rbac, ctx).await?;
         if matches!(access, Access::All) {
-            return Ok(());
+            return Ok(request);
         }
         // The planner's own snapshot: checked and run with the same one.
         let sources = self.inner.data_sources().ok_or_else(no_snapshot)?;
-        check_queries(&sources, &access, &request.queries)
+        check_queries(&sources, &access, &request.queries)?;
+        let Some(workspace) = workspace else {
+            // `query_access` names the workspace of everyone it limits.
+            return Err(unavailable());
+        };
+        let effective = restrictions_of(&self.rbac, user_of(ctx)?, Some(workspace)).await?;
+        if effective.is_empty() {
+            return Ok(request);
+        }
+        let NormalizedRequest {
+            query_type,
+            queries,
+            pivot_query,
+        } = request;
+        let queries = queries
+            .into_iter()
+            .map(|query| restrict_query(query, &effective, sources.graph()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(NormalizedRequest {
+            query_type,
+            queries,
+            pivot_query,
+        })
     }
 }
 
@@ -361,7 +463,7 @@ impl QueryService for RbacQueryService {
         ctx: &RequestContext,
         request: NormalizedRequest,
     ) -> Result<Value, ApiError> {
-        self.authorize(ctx, &request).await?;
+        let request = self.authorize(ctx, request).await?;
         let _running = self.rbac.running.start(&ctx.request_id, user_of(ctx)?);
         self.inner.load(ctx, request).await
     }
@@ -371,7 +473,7 @@ impl QueryService for RbacQueryService {
         ctx: &RequestContext,
         request: NormalizedRequest,
     ) -> Result<Value, ApiError> {
-        self.authorize(ctx, &request).await?;
+        let request = self.authorize(ctx, request).await?;
         self.inner.sql(ctx, request).await
     }
 
@@ -380,7 +482,7 @@ impl QueryService for RbacQueryService {
         ctx: &RequestContext,
         request: NormalizedRequest,
     ) -> Result<Value, ApiError> {
-        self.authorize(ctx, &request).await?;
+        let request = self.authorize(ctx, request).await?;
         self.inner.dry_run(ctx, request).await
     }
 

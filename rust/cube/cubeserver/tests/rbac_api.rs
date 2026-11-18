@@ -2558,6 +2558,15 @@ cubes:
       - name: status
         sql: status
         type: string
+      - name: region
+        sql: region
+        type: string
+      - name: margin
+        sql: margin
+        type: number
+      - name: margin_pct
+        sql: "{margin} * 100"
+        type: number
     measures:
       - name: count
         type: count
@@ -2605,6 +2614,12 @@ views:
       - join_path: a_orders.b_orders
         prefix: true
         includes: [status]
+
+  # a_orders without `region`.
+  - name: a_view
+    cubes:
+      - join_path: a_orders
+        includes: [count, status]
 "#;
 
 /// Answers every query with no rows and keeps what it was asked. Its
@@ -3299,7 +3314,10 @@ db_test!(meta_shows_only_released_cubes, |store| {
     let env = &d.s.env;
     assert_eq!(
         meta_cubes(env, &d.s.bia, Some(&d.w1)).await,
-        (StatusCode::OK, vec!["a_orders".to_string()])
+        (
+            StatusCode::OK,
+            vec!["a_orders".to_string(), "a_view".to_string()]
+        )
     );
     assert_eq!(
         meta_cubes(env, &d.s.ana, Some(&d.w2)).await,
@@ -3311,11 +3329,14 @@ db_test!(meta_shows_only_released_cubes, |store| {
     // Without a workspace: the connections the user can query somewhere.
     assert_eq!(
         meta_cubes(env, &d.s.bia, None).await,
-        (StatusCode::OK, vec!["a_orders".to_string()])
+        (
+            StatusCode::OK,
+            vec!["a_orders".to_string(), "a_view".to_string()]
+        )
     );
     assert_eq!(
         meta_cubes(env, &d.s.ana, None).await.1,
-        ["a_orders", "b_orders", "b_view", "mixed_view"]
+        ["a_orders", "a_view", "b_orders", "b_view", "mixed_view"]
     );
     // A workspace the user is not in shows nothing of it.
     let (status, cubes) = meta_cubes(env, &d.s.bia, Some(&d.w2)).await;
@@ -3326,6 +3347,7 @@ db_test!(meta_shows_only_released_cubes, |store| {
         meta_cubes(env, &d.s.admin, None).await.1,
         [
             "a_orders",
+            "a_view",
             "b_orders",
             "b_view",
             "c_orders",
@@ -3609,7 +3631,7 @@ db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
         .unwrap_err();
     assert_eq!(err.status, StatusCode::FORBIDDEN);
     let cubes = meta.meta(&ctx, false).await.unwrap();
-    assert_eq!(cubes["cubes"].as_array().unwrap().len(), 1, "{cubes}");
+    assert_eq!(cubes["cubes"].as_array().unwrap().len(), 2, "{cubes}");
 
     env.authz.set_failing(true);
     let err = query
@@ -3860,7 +3882,7 @@ db_test!(
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             meta_cubes(env, &d.s.ana, Some(&w3)).await.1,
-            ["a_orders", "b_orders", "b_view", "mixed_view"]
+            ["a_orders", "a_view", "b_orders", "b_view", "mixed_view"]
         );
     }
 );
@@ -3885,7 +3907,7 @@ db_test!(the_default_data_source_must_be_released_too, |store| {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1,
-        ["a_orders", "plain_orders"]
+        ["a_orders", "a_view", "plain_orders"]
     );
 });
 
@@ -3901,8 +3923,14 @@ db_test!(
         // c_sqlite belongs to B, but a stale relationship releases it to A's W1.
         grant_connection(env, "c_sqlite", &org_b, &[&d.w1]).await;
 
-        assert_eq!(meta_cubes(env, &d.s.bia, None).await.1, ["a_orders"]);
-        assert_eq!(meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1, ["a_orders"]);
+        assert_eq!(
+            meta_cubes(env, &d.s.bia, None).await.1,
+            ["a_orders", "a_view"]
+        );
+        assert_eq!(
+            meta_cubes(env, &d.s.bia, Some(&d.w1)).await.1,
+            ["a_orders", "a_view"]
+        );
         // B's owner sees it.
         assert_eq!(meta_cubes(env, &dan, None).await.1, ["c_orders"]);
     }
@@ -3954,7 +3982,7 @@ db_test!(meta_extended_is_filtered_too, |store| {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["a_orders"]);
+    assert_eq!(names, ["a_orders", "a_view"]);
 });
 
 db_test!(a_query_service_without_a_snapshot_is_503, |store| {
@@ -4078,7 +4106,10 @@ db_test!(the_check_follows_the_planner_not_the_files, |store| {
     let (status, body) = sql("a_orders.count").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(sql("b_orders.count").await.0, StatusCode::FORBIDDEN);
-    assert_eq!(meta_cubes(env, &s.bia, Some(&w1)).await.1, ["a_orders"]);
+    assert_eq!(
+        meta_cubes(env, &s.bia, Some(&w1)).await.1,
+        ["a_orders", "a_view"]
+    );
 
     // After the reload both move together.
     assert!(registry.reload_all().await.is_empty());
@@ -5520,3 +5551,279 @@ db_test!(
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 );
+
+// ---- role restrictions on queries ----
+
+/// A role of organization A with `restrictions`, on a rule in `ws` whose
+/// only member is `user`.
+async fn restricted_rule(d: &DataScenario, ws: &str, user: &str, restrictions: Value) -> String {
+    let env = &d.s.env;
+    let (status, role) = create_role(
+        env,
+        &d.s.ana,
+        &d.s.org_a,
+        json!({ "name": "Restricted", "permissions": ["view", "query"], "restrictions": restrictions }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{role}");
+    let (status, rule) = create_rule(
+        env,
+        &d.s.ana,
+        ws,
+        json!({ "description": "Restricted", "type": "t", "roleId": role["id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rule}");
+    let rule = rule["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        rule_member(env, &d.s.ana, Method::PUT, &rule, user).await,
+        StatusCode::OK
+    );
+    rule
+}
+
+fn by_region() -> Value {
+    json!({
+        "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "attribute": "region" }],
+        "blockedMembers": ["a_orders.margin"]
+    })
+}
+
+fn region_leaf(values: &[&str]) -> Value {
+    json!({ "member": "a_orders.region", "operator": "equals", "values": values })
+}
+
+/// The filters of the last query that reached the planner.
+fn last_filters(d: &DataScenario) -> Value {
+    d.queries.seen().last().unwrap()["filters"].clone()
+}
+
+db_test!(
+    a_restricted_role_filters_the_rows_that_reach_the_planner,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        restricted_rule(&d, &d.w1, "bia", by_region()).await;
+        let (status, _) = set_attributes(
+            env,
+            &d.s.admin,
+            "bia",
+            json!({ "attributes": { "region": ["Sul"] } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = load_in(
+            env,
+            &d.s.bia,
+            Some(&d.w1),
+            json!({
+                "measures": ["a_orders.count"],
+                "filters": [{ "member": "a_orders.status", "operator": "equals", "values": ["x"] }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            last_filters(&d),
+            json!([
+                { "member": "a_orders.status", "operator": "equals", "values": ["x"] },
+                region_leaf(&["Sul"])
+            ])
+        );
+
+        // Without the attribute, nothing runs.
+        set_attributes(env, &d.s.admin, "bia", json!({ "attributes": {} })).await;
+        let before = d.queries.seen().len();
+        let (status, body) = load_in(
+            env,
+            &d.s.bia,
+            Some(&d.w1),
+            json!({ "measures": ["a_orders.count"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["error"],
+            "Permission denied: you have no region attribute, which a_orders needs"
+        );
+        assert_eq!(d.queries.seen().len(), before);
+    }
+);
+
+db_test!(a_restricted_role_blocks_members, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.margin"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["error"],
+        "Permission denied: a_orders.margin is not available to you"
+    );
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "dimensions": ["a_orders.margin_pct"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["error"],
+        "Permission denied: a_orders.margin_pct depends on a_orders.margin, which is not available to you"
+    );
+    assert!(d.queries.seen().is_empty());
+});
+
+db_test!(restrictions_apply_even_with_an_unrestricted_role, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    // bia is also a `viewer` of W1 (from `data_scenario`): rule B.
+    restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([region_leaf(&["Sul"])]));
+    // caio, an editor without the restricted rule, is not filtered.
+    let (status, body) = load_in(
+        env,
+        &d.s.caio,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+});
+
+db_test!(platform_admins_are_not_restricted, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(&d, &d.w1, ADMIN, by_region()).await;
+    let query = json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.margin"] });
+    let (status, body) = load_in(env, &d.s.admin, Some(&d.w1), query).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+});
+
+db_test!(restrictions_stay_in_their_workspace, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(
+        &d,
+        &d.w1,
+        "bia",
+        json!({
+            "rowFilters": [{ "member": "b_orders.status", "operator": "equals", "values": ["open"] }],
+            "blockedMembers": ["b_orders.id"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        set_role(env, &d.s.ana, &d.w2, "bia", "viewer").await,
+        StatusCode::OK
+    );
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w2),
+        json!({ "measures": ["b_orders.count"], "dimensions": ["b_orders.id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(last_filters(&d), json!([]));
+});
+
+db_test!(
+    changing_attributes_takes_effect_on_the_next_query,
+    |store| {
+        let d = data_scenario(store).await;
+        let env = &d.s.env;
+        restricted_rule(&d, &d.w1, "bia", by_region()).await;
+        let query = json!({ "measures": ["a_orders.count"] });
+        set_attributes(
+            env,
+            &d.s.admin,
+            "bia",
+            json!({ "attributes": { "region": ["Sul"] } }),
+        )
+        .await;
+        let (status, _) = load_in(env, &d.s.bia, Some(&d.w1), query.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last_filters(&d), json!([region_leaf(&["Sul"])]));
+        set_attributes(
+            env,
+            &d.s.admin,
+            "bia",
+            json!({ "attributes": { "region": ["Norte"] } }),
+        )
+        .await;
+        let (status, _) = load_in(env, &d.s.bia, Some(&d.w1), query).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last_filters(&d), json!([region_leaf(&["Norte"])]));
+    }
+);
+
+db_test!(restrictions_apply_on_sql_and_dry_run, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    for path in ["/cube/v1/sql", "/cube/v1/dry-run"] {
+        let before = d.queries.seen().len();
+        let answer = call(
+            &env.router,
+            Method::POST,
+            path,
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": { "measures": ["a_orders.count"] } })),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "{path} {}", answer.json());
+        assert_eq!(d.queries.seen().len(), before + 1, "{path}");
+        assert_eq!(last_filters(&d), json!([region_leaf(&["Sul"])]), "{path}");
+        let answer = call(
+            &env.router,
+            Method::POST,
+            path,
+            Some(&d.s.bia),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": { "dimensions": ["a_orders.margin"] } })),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(d.queries.seen().len(), before + 1, "{path}");
+    }
+});
