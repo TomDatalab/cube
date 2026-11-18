@@ -3,6 +3,7 @@
 pub mod access;
 pub mod authz;
 pub mod config;
+pub mod dependencies;
 pub mod enforce;
 pub mod fake;
 pub mod handlers;

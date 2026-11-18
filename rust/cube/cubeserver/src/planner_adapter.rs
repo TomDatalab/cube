@@ -24,6 +24,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 
 use crate::error::ApiError;
+use crate::rbac::dependencies::MemberGraph;
 use crate::services::{NormalizedRequest, QueryService, RequestContext};
 
 /// The planned statement of one query, in a form that can cross threads.
@@ -427,6 +428,8 @@ pub struct DataSources {
     members: HashMap<String, String>,
     /// Cube name → data source, for a query that names a cube but no member.
     cubes: HashMap<String, String>,
+    /// What each member reads, for the role restrictions.
+    graph: MemberGraph,
 }
 
 impl DataSources {
@@ -451,7 +454,13 @@ impl DataSources {
         Ok(Self {
             members: cubesqlbridge::member_to_data_source(&model),
             cubes,
+            graph: MemberGraph::build(&model),
         })
+    }
+
+    /// The member dependency graph of the same model.
+    pub fn graph(&self) -> &MemberGraph {
+        &self.graph
     }
 
     /// The data source one member (`cube.member`, optionally followed by a
@@ -684,6 +693,15 @@ views:
 
     fn of(query: Value) -> Result<Option<String>, PlanFailure> {
         sources().of_query(&query_members(&query))
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_member_graph_of_its_model() {
+        let sources = sources();
+        assert_eq!(
+            sources.graph().source_member("activity.kind"),
+            Some("events.kind")
+        );
     }
 
     #[test]
