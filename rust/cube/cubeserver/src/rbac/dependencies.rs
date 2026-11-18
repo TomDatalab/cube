@@ -38,8 +38,9 @@ pub struct MemberGraph {
     /// Cube (not view) name → its dimensions, measures and segments as
     /// `cube.member`, in declaration order.
     cube_members: BTreeMap<String, Vec<String>>,
-    /// Cube dimensions (`cube.member`), which may carry a granularity.
-    dimensions: HashSet<String>,
+    /// Time dimensions (`cube.member`), the only members that may carry a
+    /// granularity.
+    time_dimensions: HashSet<String>,
     /// View names.
     views: BTreeSet<String>,
     /// `cube.member` → what it references directly (itself excluded).
@@ -105,8 +106,12 @@ impl MemberGraph {
             for member in &members {
                 graph.direct.insert(member.clone(), BTreeSet::new());
             }
-            for name in cube.dimensions.keys() {
-                graph.dimensions.insert(format!("{}.{name}", cube.name));
+            for (name, dimension) in &cube.dimensions {
+                if dimension.member_type.as_deref() == Some("time") {
+                    graph
+                        .time_dimensions
+                        .insert(format!("{}.{name}", cube.name));
+                }
             }
             graph.cube_members.insert(cube.name.clone(), members);
         }
@@ -395,12 +400,14 @@ impl MemberGraph {
             let part = parts[index];
             let rest = parts.len() - index - 1;
             let member = format!("{current}.{part}");
-            if self.emit_member(&member, deps) {
-                let source = self.source_member(&member).unwrap_or_default();
-                let allowed = usize::from(self.dimensions.contains(source));
-                if rest > allowed {
-                    self.emit_whole(&current, deps);
-                }
+            // As `try_resolve_as_member`: a member takes no further part,
+            // except a time dimension, which takes one granularity. When it
+            // cannot take the rest, the part is tried as a cube name.
+            let takes_rest = self.source_member(&member).is_some_and(|source| {
+                rest == 0 || (rest == 1 && self.time_dimensions.contains(source))
+            });
+            if takes_rest {
+                self.emit_member(&member, deps);
                 return;
             }
             if part == "CUBE" || part == "TABLE" {
@@ -918,5 +925,95 @@ views:
         ));
         let deps = graph.closure("orders.count_prior_year");
         assert!(deps.contains(&member("orders.created_at")), "{deps:?}");
+    }
+
+    #[test]
+    fn a_member_that_cannot_take_the_rest_falls_back_to_the_cube_name() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: customers
+        sql: customer_name
+        type: string
+      - name: created_at
+        sql: created_at
+        type: time
+      - name: via_dimension
+        sql: "{customers.cpf}"
+        type: string
+      - name: day
+        sql: "{created_at.day}"
+        type: time
+      - name: too_long
+        sql: "{created_at.day.x}"
+        type: time
+    measures:
+      - name: customers_count
+        type: count
+"#,
+        ));
+        assert_eq!(
+            graph.closure("orders.via_dimension"),
+            BTreeSet::from([member("orders.via_dimension"), member("customers.cpf")])
+        );
+        assert_eq!(
+            graph.closure("orders.day"),
+            BTreeSet::from([member("orders.day"), member("orders.created_at")])
+        );
+        // `created_at` is not a cube: nothing places the path, so the cube.
+        assert_eq!(
+            graph.closure("orders.too_long"),
+            BTreeSet::from([member("orders.too_long"), cube("orders")])
+        );
+    }
+
+    #[test]
+    fn a_measure_named_like_a_cube_falls_back_to_the_cube() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    measures:
+      - name: customers
+        type: count
+      - name: via_measure
+        sql: "{customers.segment}"
+        type: number
+"#,
+        ));
+        assert_eq!(
+            graph.closure("orders.via_measure"),
+            BTreeSet::from([member("orders.via_measure"), member("customers.segment")])
+        );
+    }
+
+    #[test]
+    fn a_time_dimension_named_like_a_cube_falls_through_with_two_extra_parts() {
+        let graph = graph(&with_customers(
+            r#"
+  - name: orders
+    sql_table: orders
+    dimensions:
+      - name: customers
+        sql: customer_at
+        type: time
+      - name: day
+        sql: "{customers.day}"
+        type: time
+      - name: through
+        sql: "{customers.created_at.day}"
+        type: time
+"#,
+        ));
+        assert_eq!(
+            graph.closure("orders.day"),
+            BTreeSet::from([member("orders.day"), member("orders.customers")])
+        );
+        assert_eq!(
+            graph.closure("orders.through"),
+            BTreeSet::from([member("orders.through"), member("customers.created_at")])
+        );
     }
 }
