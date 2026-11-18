@@ -237,15 +237,53 @@ impl Effective {
     }
 }
 
-/// The cubes the planner may join for a query reading `read_cubes`, to a
-/// fixed point: the cubes on the join paths between them, and, for each
-/// row filter on one of those, what its member reads. An injected filter is
-/// a join hint the planner may root its join at, so the paths out of it
-/// count too.
+/// The members `restrict_query` injects for a row filter on `member` (of
+/// `cube`): the cube member when the query names a cube member (`direct`)
+/// or reads `cube` through no view of it, and the view member of each
+/// queried view that includes `cube`. `Err(view)` when such a view does not
+/// expose `member`.
+fn leaf_members<'a>(
+    graph: &'a MemberGraph,
+    member: &'a str,
+    cube: &str,
+    direct: bool,
+    views: &BTreeSet<&str>,
+) -> Result<Vec<&'a str>, String> {
+    let mut members = Vec::new();
+    if direct {
+        members.push(member);
+    }
+    let mut through_view = false;
+    for view in views
+        .iter()
+        .filter(|view| graph.view_includes_cube(view, cube))
+    {
+        through_view = true;
+        match graph.view_member_for(view, member) {
+            Some(view_member) => members.push(view_member),
+            None => return Err(view.to_string()),
+        }
+    }
+    // Read only through a dependency: the cube member itself; the planner
+    // joins it in or fails, both safe.
+    if !direct && !through_view {
+        members.push(member);
+    }
+    Ok(members)
+}
+
+/// The cubes the planner may join for a query reading `cubes`, to a fixed
+/// point: the cubes on the join paths between them, and, for each row
+/// filter on one of those, everything the members injected for it read or
+/// join (a view member joins its view's join path). An injected filter is a
+/// join hint the planner may root its join at, so the paths out of it count
+/// too.
 fn joined_cubes(
     mut cubes: BTreeSet<String>,
     effective: &Effective,
     graph: &MemberGraph,
+    direct: bool,
+    views: &BTreeSet<&str>,
 ) -> BTreeSet<String> {
     loop {
         let mut next = graph.cubes_between(&cubes);
@@ -253,13 +291,14 @@ fn joined_cubes(
             let Some(member) = graph.source_member(&filter.member) else {
                 continue;
             };
-            if next.contains(cube_of(member)) {
-                next.extend(
-                    graph
-                        .closure(member)
-                        .iter()
-                        .map(|dep| dep.cube().to_string()),
-                );
+            let cube = cube_of(member);
+            if !next.contains(cube) {
+                continue;
+            }
+            // A view that does not expose it is a 403 later.
+            let leaves = leaf_members(graph, member, cube, direct, views).unwrap_or_default();
+            for name in std::iter::once(member).chain(leaves) {
+                next.extend(graph.closure(name).iter().map(|dep| dep.cube().to_string()));
             }
         }
         if next == cubes {
@@ -274,12 +313,22 @@ fn joined_cubes(
 /// reads are ANDed to its filters (the user's are never rewritten). A filter
 /// that cannot be applied safely is a 403, never skipped.
 pub fn restrict_query(
-    mut query: NormalizedQuery,
+    query: NormalizedQuery,
     effective: &Effective,
     graph: &MemberGraph,
 ) -> Result<NormalizedQuery, ApiError> {
+    restrict_query_covering(query, effective, graph).map(|(query, _)| query)
+}
+
+/// As [`restrict_query`], with the cubes whose row filters it injected.
+pub fn restrict_query_covering(
+    mut query: NormalizedQuery,
+    effective: &Effective,
+    graph: &MemberGraph,
+) -> Result<(NormalizedQuery, BTreeSet<String>), ApiError> {
+    let mut covered = BTreeSet::new();
     if effective.is_empty() {
-        return Ok(query);
+        return Ok((query, covered));
     }
     let names = members_of(&query)?;
 
@@ -299,7 +348,7 @@ pub fn restrict_query(
         }
     }
     if effective.row_filters.is_empty() {
-        return Ok(query);
+        return Ok((query, covered));
     }
 
     let read_cubes: BTreeSet<String> = names
@@ -307,14 +356,14 @@ pub fn restrict_query(
         .flat_map(|name| graph.closure(name))
         .map(|dep| dep.cube().to_string())
         .collect();
-    let read_cubes = joined_cubes(read_cubes, effective, graph);
-    let opaque = graph.opaque_reads(&names);
     let direct = names.iter().any(|name| !graph.is_view(cube_of(name)));
     let views: BTreeSet<&str> = names
         .iter()
         .map(|name| cube_of(name))
         .filter(|first| graph.is_view(first))
         .collect();
+    let read_cubes = joined_cubes(read_cubes, effective, graph, direct, &views);
+    let opaque = graph.opaque_reads(&names);
 
     let mut leaves = Vec::new();
     for filter in &effective.row_filters {
@@ -381,32 +430,41 @@ pub fn restrict_query(
             })
         };
 
-        if direct {
-            leaves.push(leaf(member));
-        }
-        let mut through_view = false;
-        for view in views
-            .iter()
-            .filter(|view| graph.view_includes_cube(view, cube))
-        {
-            through_view = true;
-            match graph.view_member_for(view, member) {
-                Some(view_member) => leaves.push(leaf(view_member)),
-                None => {
-                    return Err(ApiError::forbidden(format!(
-                        "Permission denied: view {view} does not expose {member}, which filters your rows"
-                    )))
-                }
-            }
-        }
-        // Read only through a dependency: the cube member itself; the
-        // planner joins it in or fails, both safe.
-        if !direct && !through_view {
-            leaves.push(leaf(member));
-        }
+        let members = leaf_members(graph, member, cube, direct, &views).map_err(|view| {
+            ApiError::forbidden(format!(
+                "Permission denied: view {view} does not expose {member}, which filters your rows"
+            ))
+        })?;
+        leaves.extend(members.into_iter().map(leaf));
+        covered.insert(cube.to_string());
     }
     query.filters.extend(leaves);
-    Ok(query)
+    Ok((query, covered))
+}
+
+/// The planner's word on a restricted query: every cube it `joined` that a
+/// row filter of `effective` is on must be one `covered` (its filter was
+/// injected). Otherwise 403: the prediction missed a cube, and the query
+/// would read it unfiltered.
+pub fn check_joined_cubes(
+    effective: &Effective,
+    graph: &MemberGraph,
+    covered: &BTreeSet<String>,
+    joined: &BTreeSet<String>,
+) -> Result<(), ApiError> {
+    for filter in &effective.row_filters {
+        let cube = cube_of(
+            graph
+                .source_member(&filter.member)
+                .unwrap_or(&filter.member),
+        );
+        if joined.contains(cube) && !covered.contains(cube) {
+            return Err(ApiError::forbidden(format!(
+                "Permission denied: your row filter on {cube} could not be applied to this query"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1303,6 +1361,131 @@ cubes:
                 leaf("x.region", FilterOperator::Equals, &["Sul"]),
                 leaf("z.region", FilterOperator::Equals, &["Norte"]),
             ]
+        );
+    }
+
+    /// A→B→C and A→C. The view reaches c through a.b.c, so a view member
+    /// of c makes the planner join b.
+    const VIEW_PATH_MODEL: &str = r#"
+cubes:
+  - name: a
+    sql_table: a
+    joins:
+      - name: b
+        sql: "{CUBE}.b_id = {b}.id"
+        relationship: many_to_one
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: label
+        sql: "{c.name}"
+        type: string
+      - name: via_b
+        sql: "{b.c.name}"
+        type: string
+  - name: b
+    sql_table: b
+    joins:
+      - name: c
+        sql: "{CUBE}.c_id = {c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: c
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: region
+        sql: region
+        type: string
+views:
+  - name: v
+    cubes:
+      - join_path: a
+        includes: [name, label]
+      - join_path: a.b.c
+        includes: [region]
+"#;
+
+    #[test]
+    fn cubes_the_view_path_of_an_injected_leaf_joins_are_filtered() {
+        let graph = graph_of(VIEW_PATH_MODEL);
+        let effective = filtering(
+            vec![
+                filter("a.label", None, Some(vec!["x"])),
+                filter("c.region", None, Some(vec!["Sul"])),
+                filter("b.region", None, Some(vec!["Norte"])),
+            ],
+            &[],
+        );
+        let q = query(json!({ "dimensions": ["v.name"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![
+                leaf("v.label", FilterOperator::Equals, &["x"]),
+                leaf("v.region", FilterOperator::Equals, &["Sul"]),
+                leaf("b.region", FilterOperator::Equals, &["Norte"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn cubes_a_dotted_reference_joins_through_are_filtered() {
+        let graph = graph_of(VIEW_PATH_MODEL);
+        let effective = filtering(vec![filter("b.region", None, Some(vec!["Norte"]))], &[]);
+        let q = query(json!({ "dimensions": ["a.via_b"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("b.region", FilterOperator::Equals, &["Norte"])]
+        );
+    }
+
+    #[test]
+    fn a_joined_cube_whose_filter_was_not_injected_is_refused() {
+        let graph = graph_of(VIEW_PATH_MODEL);
+        let effective = filtering(
+            vec![
+                filter("v.region", None, Some(vec!["Sul"])),
+                filter("b.region", None, Some(vec!["Norte"])),
+            ],
+            &[],
+        );
+        let set = |cubes: &[&str]| cubes.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>();
+        // A view member's filter is on its source cube.
+        assert!(check_joined_cubes(&effective, &graph, &set(&["c"]), &set(&["a", "c"])).is_ok());
+        assert!(check_joined_cubes(
+            &effective,
+            &graph,
+            &set(&["b", "c"]),
+            &set(&["a", "b", "c"])
+        )
+        .is_ok());
+        let err = check_joined_cubes(&effective, &graph, &set(&["c"]), &set(&["a", "b", "c"]))
+            .unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.body.error,
+            "Permission denied: your row filter on b could not be applied to this query"
         );
     }
 }

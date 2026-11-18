@@ -137,6 +137,17 @@ pub trait QueryService: Send + Sync + Debug {
         ))
     }
 
+    /// The cubes the planner joins for each query of `request`, in order:
+    /// planned, never run. `None` when this service cannot tell, and RBAC
+    /// then refuses any query a row filter applies to.
+    async fn joined_cubes(
+        &self,
+        _ctx: &RequestContext,
+        _request: &NormalizedRequest,
+    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
+        Ok(None)
+    }
+
     /// `DELETE /v1/running-query/:requestId` — cancels the running query of a
     /// request and reports whether anything was cancelled.
     async fn cancel_query(

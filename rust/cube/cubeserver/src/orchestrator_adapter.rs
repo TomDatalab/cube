@@ -299,6 +299,15 @@ impl QueryService for OrchestratedQueryService {
         ))
     }
 
+    /// `load` runs what the same planner plans, so its cubes are these.
+    async fn joined_cubes(
+        &self,
+        ctx: &RequestContext,
+        request: &NormalizedRequest,
+    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
+        self.planner.joined_cubes(ctx, request).await
+    }
+
     async fn sql(
         &self,
         ctx: &RequestContext,

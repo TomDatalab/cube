@@ -687,6 +687,9 @@ impl MemberGraph {
 
         let parts: Vec<&str> = reference.split('.').map(str::trim).collect();
         let mut current = cube.to_string();
+        // The cubes the path walks onto: the planner joins them as one
+        // `Vector` hint (`{b.c.name}` joins b, not only c).
+        let mut walked: Vec<String> = Vec::new();
         // Still on the cube the reference is written in, by CUBE or TABLE.
         let mut own = true;
         let mut index = 0;
@@ -702,6 +705,7 @@ impl MemberGraph {
             });
             if takes_rest {
                 self.emit_member(&member, deps);
+                joined_through(&walked, cube, &current, deps);
                 return Resolved::Done;
             }
             if part == "CUBE" || part == "TABLE" {
@@ -710,16 +714,21 @@ impl MemberGraph {
             }
             if self.is_cube_or_view(part) {
                 current = part.to_string();
+                if !self.is_view(part) {
+                    walked.push(current.clone());
+                }
                 own = false;
                 index += 1;
                 continue;
             }
             // The cube's SQL as a subselect, as the planner's `__sql_fn`.
             if rest == 0 && (part == "__sql_fn" || part.starts_with("sql(")) {
+                joined_through(&walked, cube, &current, deps);
                 return Resolved::Table(current);
             }
             break;
         }
+        joined_through(&walked, cube, &current, deps);
         if index == parts.len() {
             // Ran out on a cube name (`{CUBE}`, `{customers}`,
             // `{customers.CUBE}`).
@@ -758,6 +767,16 @@ impl MemberGraph {
             found = true;
         }
         found
+    }
+}
+
+/// `Joined` for each cube a dotted path walked through, other than the
+/// cube it is written in and the one it ends on.
+fn joined_through(walked: &[String], from: &str, to: &str, deps: &mut BTreeSet<Dep>) {
+    for cube in walked {
+        if cube != from && cube != to {
+            deps.insert(Dep::Joined(cube.clone()));
+        }
     }
 }
 
@@ -1162,6 +1181,49 @@ views:
             graph.closure("orders.column"),
             BTreeSet::from([member("orders.column")])
         );
+    }
+
+    #[test]
+    fn a_dotted_reference_joins_the_cubes_on_its_path() {
+        // The planner turns `{b.c.name}` into the join hint [b, c], so it
+        // joins b; `{CUBE.b.c}` (a cube name) does the same.
+        let graph = graph(
+            r#"
+cubes:
+  - name: a
+    sql_table: a
+    dimensions:
+      - name: label
+        sql: "{b.c.name}"
+        type: string
+      - name: tag
+        sql: "{CUBE.b.c}.name"
+        type: string
+  - name: b
+    sql_table: b
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+  - name: c
+    sql_table: c
+    dimensions:
+      - name: name
+        sql: name
+        type: string
+"#,
+        );
+        assert_eq!(
+            graph.closure("a.label"),
+            BTreeSet::from([
+                member("a.label"),
+                member("c.name"),
+                Dep::Joined("b".to_string())
+            ])
+        );
+        let tag = graph.closure("a.tag");
+        assert!(tag.contains(&Dep::Joined("b".to_string())), "{tag:?}");
     }
 
     #[test]

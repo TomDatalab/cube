@@ -87,6 +87,8 @@ pub struct PlannedStatement {
     /// The data source the query's cubes declare, `None` when they declare
     /// none and the query runs on the caller's default one.
     pub data_source: Option<String>,
+    /// Every cube the plan reads ([`cubeplanner::PlannedSql::cubes`]).
+    pub cubes: Vec<String>,
 }
 
 struct Job {
@@ -239,6 +241,7 @@ impl PlannerPool {
                             params: planned.param_strings(),
                             alias_name_to_member: planned.alias_name_to_member.clone(),
                             data_source,
+                            cubes: planned.cubes.clone(),
                         })
                         .map_err(PlanFailure::from_planner)
                 });
@@ -363,6 +366,52 @@ impl PlannerQueryService {
             .await
     }
 
+    /// Plans one normalized query of a request.
+    async fn plan_statement(
+        &self,
+        ctx: &RequestContext,
+        normalized: &cubequery::types::NormalizedQuery,
+    ) -> Result<PlannedStatement, ApiError> {
+        // Both shapes are the camelCase JSON of the REST API.
+        let mut value = serde_json::to_value(normalized).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode the normalized query: {e}"),
+            )
+        })?;
+
+        // `remapToQueryAdapterFormat` mirrors `limit` into `rowLimit`, but
+        // the planner treats `rowLimit` as an alias of `limit`, so sending
+        // both is a duplicate field. They hold the same value here.
+        if let Some(object) = value.as_object_mut() {
+            if object.contains_key("limit") {
+                object.remove("rowLimit");
+            }
+        }
+        let members = query_members(&value);
+        let query = PlannerQuery::from_value(value)
+            .map_err(|e| Self::api_error(PlanFailure::from_planner(e)))?;
+
+        self.pool
+            .plan(query, members, ctx.security_context.clone())
+            .await
+            .map_err(Self::api_error)
+    }
+
+    /// The cubes each query of `request` joins, as planned.
+    pub async fn planned_cubes(
+        &self,
+        ctx: &RequestContext,
+        request: &NormalizedRequest,
+    ) -> Result<Vec<BTreeSet<String>>, ApiError> {
+        let mut cubes = Vec::with_capacity(request.queries.len());
+        for normalized in &request.queries {
+            let statement = self.plan_statement(ctx, normalized).await?;
+            cubes.push(statement.cubes.into_iter().collect());
+        }
+        Ok(cubes)
+    }
+
     async fn plan_all(
         &self,
         ctx: &RequestContext,
@@ -371,31 +420,7 @@ impl PlannerQueryService {
         let mut planned = Vec::with_capacity(request.queries.len());
 
         for normalized in &request.queries {
-            // Both shapes are the camelCase JSON of the REST API.
-            let mut value = serde_json::to_value(normalized).map_err(|e| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to encode the normalized query: {e}"),
-                )
-            })?;
-
-            // `remapToQueryAdapterFormat` mirrors `limit` into `rowLimit`, but
-            // the planner treats `rowLimit` as an alias of `limit`, so sending
-            // both is a duplicate field. They hold the same value here.
-            if let Some(object) = value.as_object_mut() {
-                if object.contains_key("limit") {
-                    object.remove("rowLimit");
-                }
-            }
-            let members = query_members(&value);
-            let query = PlannerQuery::from_value(value)
-                .map_err(|e| Self::api_error(PlanFailure::from_planner(e)))?;
-
-            let statement = self
-                .pool
-                .plan(query, members, ctx.security_context.clone())
-                .await
-                .map_err(Self::api_error)?;
+            let statement = self.plan_statement(ctx, normalized).await?;
 
             planned.push(PlannedQuery {
                 sql: statement.sql,
@@ -607,6 +632,14 @@ fn query_members(query: &Value) -> Vec<String> {
 impl QueryService for PlannerQueryService {
     fn data_sources(&self) -> Option<Arc<DataSources>> {
         Some(self.pool.data_sources())
+    }
+
+    async fn joined_cubes(
+        &self,
+        ctx: &RequestContext,
+        request: &NormalizedRequest,
+    ) -> Result<Option<Vec<BTreeSet<String>>>, ApiError> {
+        self.planned_cubes(ctx, request).await.map(Some)
     }
 
     async fn sql(

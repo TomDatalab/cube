@@ -2,6 +2,7 @@ use super::planners::multi_stage::PlanningScope;
 use super::planners::QueryPlanner;
 use super::state::State;
 use super::QueryProperties;
+use crate::logical_plan::collect_cube_names_from_node;
 use crate::logical_plan::OriginalSqlCollector;
 use crate::logical_plan::PreAggregationOptimizer;
 use crate::logical_plan::PreAggregationUsage;
@@ -32,6 +33,16 @@ impl TopLevelPlanner {
     }
 
     pub fn plan(&self) -> Result<(String, Vec<PreAggregationUsage>), CubeError> {
+        let (sql, usages, _) = self.plan_with_cube_names()?;
+        Ok((sql, usages))
+    }
+
+    /// As [`Self::plan`], with the name of every cube the logical plan reads
+    /// (join roots, joined cubes, subqueries and CTEs), taken before a
+    /// pre-aggregation replaces any of them.
+    pub fn plan_with_cube_names(
+        &self,
+    ) -> Result<(String, Vec<PreAggregationUsage>, Vec<String>), CubeError> {
         let query_planner = QueryPlanner::new(self.request.clone(), self.query_tools.clone());
         let mut scope = PlanningScope::new();
         let query = query_planner.plan(&mut scope)?;
@@ -41,6 +52,7 @@ impl TopLevelPlanner {
                 .query(query)
                 .build(),
         );
+        let cube_names = collect_cube_names_from_node(&logical_plan)?;
 
         let (optimized_plan, usages) = self.try_pre_aggregations(logical_plan.clone())?;
 
@@ -50,7 +62,7 @@ impl TopLevelPlanner {
         // refresh path doesn't provide (and which non-generated-time-series dialects can't
         // build without one). The pre-agg's own load SQL is built separately on the JS side.
         if self.request.is_pre_aggregations_match_only() {
-            return Ok((String::new(), usages));
+            return Ok((String::new(), usages, cube_names));
         }
 
         // Ordering is load-bearing: merging is only safe once rollups have been
@@ -92,7 +104,7 @@ impl TopLevelPlanner {
 
         let sql = physical_plan.to_sql(&templates)?;
 
-        Ok((sql, usages))
+        Ok((sql, usages, cube_names))
     }
 
     fn try_pre_aggregations(

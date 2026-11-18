@@ -2669,6 +2669,15 @@ impl QueryService for RecordingQuery {
         Some(self.sources.clone())
     }
 
+    /// Plans nothing, so it joins nothing.
+    async fn joined_cubes(
+        &self,
+        _: &RequestContext,
+        request: &NormalizedRequest,
+    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
+        Ok(Some(vec![Default::default(); request.queries.len()]))
+    }
+
     async fn load(
         &self,
         _: &RequestContext,
@@ -6635,3 +6644,328 @@ db_test!(organization_model_members_list_only_its_cubes, |store| {
     let answer = call(&env.router, Method::GET, &path, Some(&d.s.bia), &[], None).await;
     assert_eq!(answer.status, StatusCode::FORBIDDEN);
 });
+
+/// A→B→C and A→C, on `a_sqlite`. The view `a_v` reaches `a_c` through
+/// a_a.a_b.a_c, so a view member of `a_c` makes the planner join `a_b`.
+/// `a_a.via_b` reads `{a_b.a_c.name}`, which joins `a_b` too.
+const VIEW_PATH_PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_a
+    data_source: a_sqlite
+    sql_table: a
+    joins:
+      - name: a_b
+        sql: "{CUBE}.b_id = {a_b}.id"
+        relationship: many_to_one
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: label
+        sql: "{a_c.name}"
+        type: string
+      - name: via_b
+        sql: "{a_b.a_c.name}"
+        type: string
+  - name: a_b
+    data_source: a_sqlite
+    sql_table: b
+    joins:
+      - name: a_c
+        sql: "{CUBE}.c_id = {a_c}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+  - name: a_c
+    data_source: a_sqlite
+    sql_table: c
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: region
+        sql: region
+        type: string
+views:
+  - name: a_v
+    cubes:
+      - join_path: a_a
+        includes: [name, label]
+      - join_path: a_a.a_b.a_c
+        includes: [region]
+"#;
+
+/// Every filtered cube of `cubes` the SQL joins carries its filter.
+fn assert_filtered_where_joined(sql: &str, cubes: &[&str]) {
+    for cube in cubes {
+        if sql.contains(&format!("AS \"{cube}\"")) {
+            assert!(sql.contains(&format!("\"{cube}\".region = ?")), "{sql}");
+        }
+    }
+}
+
+db_test!(
+    the_planner_filters_the_cubes_the_view_path_of_an_injected_leaf_joins,
+    |store| {
+        let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_a.label", "operator": "equals", "values": ["x"] },
+                    { "member": "a_c.region", "operator": "equals", "values": ["Sul"] },
+                    { "member": "a_b.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(&d, json!({ "dimensions": ["a_v.name"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The view leaf on a_c.region joins a_b through the view's path.
+        assert!(sql.contains("AS \"a_b\""), "{sql}");
+        assert_filtered_where_joined(&sql, &["a_b", "a_c"]);
+    }
+);
+
+db_test!(
+    the_planner_filters_the_cubes_a_dotted_reference_joins_through,
+    |store| {
+        let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_b.region", "operator": "equals", "values": ["Norte"] }
+                ]
+            }),
+        )
+        .await;
+        let (status, sql, body) = planned_sql(&d, json!({ "dimensions": ["a_a.via_b"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(sql.contains("AS \"a_b\""), "{sql}");
+        assert_filtered_where_joined(&sql, &["a_b"]);
+    }
+);
+
+/// The real planner, asked for one more dimension than RBAC saw: it joins
+/// a cube the prediction did not, as a gap in the prediction would.
+#[derive(Debug)]
+struct JoinsMore {
+    planner: PlannerQueryService,
+    extra: &'static str,
+}
+
+impl JoinsMore {
+    fn widened(&self, mut request: NormalizedRequest) -> NormalizedRequest {
+        for query in &mut request.queries {
+            query
+                .dimensions
+                .push(cubequery::types::QueryMember::Name(self.extra.to_string()));
+        }
+        request
+    }
+}
+
+#[async_trait]
+impl QueryService for JoinsMore {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        QueryService::data_sources(&self.planner)
+    }
+
+    async fn joined_cubes(
+        &self,
+        ctx: &RequestContext,
+        request: &NormalizedRequest,
+    ) -> Result<Option<Vec<std::collections::BTreeSet<String>>>, ApiError> {
+        self.planner
+            .joined_cubes(ctx, &self.widened(request.clone()))
+            .await
+    }
+
+    async fn sql(
+        &self,
+        ctx: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        self.planner.sql(ctx, self.widened(request)).await
+    }
+
+    async fn dry_run(
+        &self,
+        ctx: &RequestContext,
+        request: NormalizedRequest,
+    ) -> Result<Value, ApiError> {
+        self.planner.dry_run(ctx, self.widened(request)).await
+    }
+
+    async fn load(&self, _: &RequestContext, _: NormalizedRequest) -> Result<Value, ApiError> {
+        // What the planner would run; reaching it at all is the leak.
+        Ok(json!({ "data": [] }))
+    }
+}
+
+db_test!(
+    a_cube_the_planner_joins_without_its_row_filter_is_refused,
+    |store| {
+        let d = data_scenario_on(store, VIEW_PATH_PLANNER_MODEL, true).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [
+                    { "member": "a_c.region", "operator": "equals", "values": ["Sul"] }
+                ]
+            }),
+        )
+        .await;
+        let model = d._dir.path().join("model");
+        let planner = PlannerQueryService::load_with_dialects(
+            &model,
+            cubeplanner::Dialect::Postgres,
+            [("a_sqlite".to_string(), cubeplanner::Dialect::Sqlite)]
+                .into_iter()
+                .collect(),
+            1,
+            cubemodel::TemplateContext::default(),
+        )
+        .unwrap();
+        let service = cubeserver::rbac::enforce::RbacQueryService::new(
+            Arc::new(JoinsMore {
+                planner,
+                extra: "a_c.name",
+            }),
+            d.s.env.rbac.clone(),
+        );
+        let ctx = |user: &str| RequestContext {
+            request_id: "req-guard".into(),
+            user: Some(user.into()),
+            workspace: Some(d.w1.clone()),
+            ..RequestContext::default()
+        };
+        let request = || {
+            let value = json!({ "dimensions": ["a_a.name"] });
+            let (query_type, queries) = cubequery::get_normalized_queries(
+                &value,
+                false,
+                None,
+                &cubequery::QueryConfig::default(),
+            )
+            .unwrap();
+            let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+            }
+        };
+        let message =
+            "Permission denied: your row filter on a_c could not be applied to this query";
+        let sql = service.sql(&ctx("bia"), request()).await;
+        assert_eq!(
+            sql.as_ref().map_err(|e| e.status),
+            Err(StatusCode::FORBIDDEN),
+            "{sql:?}"
+        );
+        assert_eq!(sql.unwrap_err().body.error, message);
+        let dry_run = service.dry_run(&ctx("bia"), request()).await;
+        assert_eq!(
+            dry_run.map_err(|e| e.status).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let load = service.load(&ctx("bia"), request()).await;
+        assert_eq!(
+            load.map_err(|e| e.status).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        // caio has no row filter: the same widened query plans, and joins a_c.
+        let caio = service.sql(&ctx("caio"), request()).await.unwrap();
+        assert!(caio.to_string().contains("AS \\\"a_c\\\""), "{caio}");
+    }
+);
+
+/// A query service with a snapshot that cannot say what a query joins.
+#[derive(Debug)]
+struct Unreporting {
+    sources: Arc<DataSources>,
+}
+
+#[async_trait]
+impl QueryService for Unreporting {
+    fn data_sources(&self) -> Option<Arc<DataSources>> {
+        Some(self.sources.clone())
+    }
+
+    async fn sql(&self, _: &RequestContext, _: NormalizedRequest) -> Result<Value, ApiError> {
+        Ok(json!({ "sql": { "sql": ["SELECT 1", []] } }))
+    }
+}
+
+db_test!(
+    a_row_filter_is_unavailable_when_the_planner_cannot_report_its_joins,
+    |store| {
+        let d = data_scenario(store).await;
+        restricted_rule(
+            &d,
+            &d.w1,
+            "bia",
+            json!({
+                "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "values": ["Sul"] }]
+            }),
+        )
+        .await;
+        let service = cubeserver::rbac::enforce::RbacQueryService::new(
+            Arc::new(Unreporting {
+                sources: d.queries.data_sources().unwrap(),
+            }),
+            d.s.env.rbac.clone(),
+        );
+        let ctx = |user: &str| RequestContext {
+            request_id: "req-unreporting".into(),
+            user: Some(user.into()),
+            workspace: Some(d.w1.clone()),
+            ..RequestContext::default()
+        };
+        let request = || {
+            let value = json!({ "measures": ["a_orders.count"] });
+            let (query_type, queries) = cubequery::get_normalized_queries(
+                &value,
+                false,
+                None,
+                &cubequery::QueryConfig::default(),
+            )
+            .unwrap();
+            let pivot_query = cubequery::get_pivot_query(query_type, &queries).unwrap();
+            NormalizedRequest {
+                query_type,
+                queries,
+                pivot_query,
+            }
+        };
+        let err = service.sql(&ctx("bia"), request()).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        // No row filter, nothing to check.
+        assert!(service.sql(&ctx("caio"), request()).await.is_ok());
+    }
+);
