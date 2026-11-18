@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use cubeauth::AuthConfig;
 use cubeserver::auth_adapter::CubeAuthService;
-use cubeserver::planner_adapter::DataSources;
+use cubeserver::planner_adapter::{DataSources, PlannerQueryService};
 use cubeserver::rbac::config::{check_rbac_compatible, RbacConfig};
 use cubeserver::rbac::enforce::WORKSPACE_REQUIRED;
 use cubeserver::rbac::identity::{hash_password, verify_password};
@@ -2710,6 +2710,12 @@ struct DataScenario {
 /// whose model has `a_orders` (on `a_sqlite`), `b_orders` and `b_view` (on
 /// `b_sqlite`), and a query service that records what reaches it.
 async fn data_scenario(store: Store) -> DataScenario {
+    data_scenario_on(store, DATA_MODEL, false).await
+}
+
+/// As [`data_scenario`], with the `model` given and, with `planner`, the
+/// real planner (Tesseract) behind the RBAC checks instead of the recorder.
+async fn data_scenario_on(store: Store, data_model: &str, planner: bool) -> DataScenario {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("cube.yml");
     std::fs::write(
@@ -2720,7 +2726,7 @@ async fn data_scenario(store: Store) -> DataScenario {
     std::fs::write(dir.path().join(".env"), "PORT=4000\n").unwrap();
     let model = dir.path().join("model");
     std::fs::create_dir(&model).unwrap();
-    std::fs::write(model.join("model.yml"), DATA_MODEL).unwrap();
+    std::fs::write(model.join("model.yml"), data_model).unwrap();
     let server = ServerConfig {
         config_file: Some(file),
         schema_path: model.to_string_lossy().into_owned(),
@@ -2735,7 +2741,23 @@ async fn data_scenario(store: Store) -> DataScenario {
             .expect("rbac starts"),
     );
     let mut state = state_with(Some(rbac.clone()), server);
-    state.query = queries.clone();
+    state.query = if planner {
+        Arc::new(
+            PlannerQueryService::load_with_dialects(
+                &model,
+                cubeplanner::Dialect::Postgres,
+                ["a_sqlite", "b_sqlite", "c_sqlite"]
+                    .into_iter()
+                    .map(|name| (name.to_string(), cubeplanner::Dialect::Sqlite))
+                    .collect(),
+                1,
+                cubemodel::TemplateContext::default(),
+            )
+            .expect("the model plans"),
+        )
+    } else {
+        queries.clone()
+    };
     state.meta = Arc::new(cubeserver::meta_adapter::ModelMetaService::load(&model, false).unwrap());
     let env = Env {
         router: build_app(state.clone()),
@@ -5962,6 +5984,199 @@ db_test!(a_rule_member_that_is_not_a_uuid_is_503, |store| {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(d.queries.seen().is_empty());
 });
+
+// ---- restrictions through the real planner ----
+
+const PLANNER_MODEL: &str = r#"
+cubes:
+  - name: a_orders
+    data_source: a_sqlite
+    sql_table: orders
+    joins:
+      - name: a_buyers
+        sql: "{CUBE}.buyer_id = {a_buyers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: region
+        sql: region
+        type: string
+      - name: status
+        sql: status
+        type: string
+    measures:
+      - name: count
+        type: count
+
+  - name: a_buyers
+    data_source: a_sqlite
+    sql_table: buyers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: order_count
+        sql: "{a_orders.count}"
+        type: number
+        sub_query: true
+      - name: propagated_count
+        sql: "{a_orders.count}"
+        type: number
+        sub_query: true
+        propagate_filters_to_sub_query: true
+
+views:
+  # Exposes the filtered member.
+  - name: regional
+    cubes:
+      - join_path: a_orders
+        includes: [count, region]
+
+  # Reads a_orders only to join through it to a_buyers.
+  - name: buyers_by_order
+    cubes:
+      - join_path: a_orders.a_buyers
+        includes: [name]
+"#;
+
+/// The SQL the real planner generates for `query` as bia in W1, and its
+/// parameters.
+async fn planned_sql(d: &DataScenario, query: Value) -> (StatusCode, String, Value) {
+    let answer = call(
+        &d.s.env.router,
+        Method::POST,
+        "/cube/v1/sql",
+        Some(&d.s.bia),
+        &[("x-cube-workspace", &d.w1)],
+        Some(json!({ "query": query })),
+    )
+    .await;
+    let body = answer.json();
+    let sql = body["sql"]["sql"][0]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    (answer.status, sql, body)
+}
+
+/// bia, in W1, may read only the Sul rows of a_orders.
+async fn planner_scenario(store: Store) -> DataScenario {
+    let d = data_scenario_on(store, PLANNER_MODEL, true).await;
+    restricted_rule(
+        &d,
+        &d.w1,
+        "bia",
+        json!({
+            "rowFilters": [{ "member": "a_orders.region", "operator": "equals", "attribute": "region" }]
+        }),
+    )
+    .await;
+    let (status, _) = set_attributes(
+        &d.s.env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    d
+}
+
+/// The planned SQL filters `region` by the Sul parameter.
+fn filters_by_region(sql: &str, body: &Value) {
+    assert!(
+        sql.contains("\"region\"") || sql.contains(".region"),
+        "{sql}"
+    );
+    assert!(sql.to_lowercase().contains("where"), "{sql}");
+    assert_eq!(body["sql"]["sql"][1], json!(["Sul"]), "{body}");
+}
+
+db_test!(the_planner_applies_a_row_filter_on_a_cube, |store| {
+    let d = planner_scenario(store).await;
+    let (status, sql, body) = planned_sql(
+        &d,
+        json!({ "measures": ["a_orders.count"], "dimensions": ["a_orders.status"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    filters_by_region(&sql, &body);
+});
+
+db_test!(
+    the_planner_applies_a_row_filter_through_a_view_that_exposes_it,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, sql, body) = planned_sql(&d, json!({ "measures": ["regional.count"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        filters_by_region(&sql, &body);
+    }
+);
+
+db_test!(
+    the_planner_applies_a_row_filter_on_a_cube_a_view_joins_through,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, sql, body) =
+            planned_sql(&d, json!({ "dimensions": ["buyers_by_order.name"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        filters_by_region(&sql, &body);
+        assert!(sql.contains("orders"), "{sql}");
+    }
+);
+
+db_test!(
+    the_planner_propagates_a_row_filter_into_a_sub_query_that_asks_for_it,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, sql, body) =
+            planned_sql(&d, json!({ "dimensions": ["a_buyers.propagated_count"] })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Once in the subquery, once outside it.
+        let subquery = sql
+            .split("LEFT JOIN (")
+            .nth(1)
+            .and_then(|rest| rest.split(") AS").next())
+            .unwrap_or_else(|| panic!("no subquery in {sql}"));
+        assert!(subquery.contains("\"a_orders\".region = ?"), "{sql}");
+        assert_eq!(sql.matches("region = ?").count(), 2, "{sql}");
+        assert_eq!(body["sql"]["sql"][1], json!(["Sul", "Sul"]), "{body}");
+    }
+);
+
+db_test!(
+    the_planner_never_sees_a_row_filter_it_cannot_apply_in_a_sub_query,
+    |store| {
+        let d = planner_scenario(store).await;
+        let (status, _, body) =
+            planned_sql(&d, json!({ "dimensions": ["a_buyers.order_count"] })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["error"],
+            "Permission denied: your row filter on a_orders cannot be applied inside a_buyers.order_count"
+        );
+        // Without the restriction the same query plans: the refusal is ours.
+        let answer = call(
+            &d.s.env.router,
+            Method::POST,
+            "/cube/v1/sql",
+            Some(&d.s.caio),
+            &[("x-cube-workspace", &d.w1)],
+            Some(json!({ "query": { "dimensions": ["a_buyers.order_count"] } })),
+        )
+        .await;
+        let body = answer.json();
+        assert_eq!(answer.status, StatusCode::OK, "{body}");
+        assert!(body["sql"]["sql"][0].is_string(), "{body}");
+    }
+);
 
 /// The names of the `kind` members (`measures`, `dimensions`, `segments`)
 /// of `cube` in the meta (empty when the cube is not listed).
