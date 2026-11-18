@@ -129,7 +129,7 @@ async fn restrictions_of(
     user: &str,
     workspace: Option<Uuid>,
 ) -> Result<Effective, ApiError> {
-    let rule_ids: Vec<Uuid> = rbac
+    let rule_ids: BTreeSet<Uuid> = rbac
         .authz
         .read(&RelationshipFilter {
             kind: "rule",
@@ -142,6 +142,7 @@ async fn restrictions_of(
         .iter()
         .filter_map(|r| r.resource.id.parse().ok())
         .collect();
+    let rule_ids: Vec<Uuid> = rule_ids.into_iter().collect();
     let store_failed = |e| {
         tracing::error!("RBAC store failed: {e}");
         unavailable()
@@ -154,6 +155,12 @@ async fn restrictions_of(
             .await
             .map_err(store_failed)?
     };
+    // A rule SpiceDB still names may still grant access; without its row
+    // its role, and so its restrictions, are unknown: nothing runs.
+    if rules.len() != rule_ids.len() {
+        tracing::error!("A rule of {user} in SpiceDB has no row in the RBAC store");
+        return Err(unavailable());
+    }
     let role_ids: BTreeSet<Uuid> = rules
         .iter()
         .filter(|rule| workspace.is_none_or(|ws| rule.workspace_id == ws))

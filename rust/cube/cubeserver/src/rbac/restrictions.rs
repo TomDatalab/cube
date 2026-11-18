@@ -284,11 +284,14 @@ pub fn restrict_query(
 
     let mut leaves = Vec::new();
     for filter in &effective.row_filters {
-        let cube = cube_of(&filter.member);
+        // A view member stands for the cube member it shows: the filter is
+        // that cube member's from here on.
+        let source = graph.source_member(&filter.member);
+        let cube = cube_of(source.unwrap_or(&filter.member));
         if !read_cubes.contains(cube) {
             continue;
         }
-        let Some(member) = graph.source_member(&filter.member) else {
+        let Some(member) = source else {
             return Err(ApiError::forbidden(format!(
                 "Permission denied: a restriction of yours filters on {}, which the model no longer has",
                 filter.member
@@ -821,5 +824,21 @@ views:
         // A blocked member the model lost blocks nothing.
         let q = query(json!({ "measures": ["a_orders.count"] }));
         assert!(restrict_query(q, &blocking(&["a_orders.gone"]), &graph).is_ok());
+    }
+
+    #[test]
+    fn a_filter_named_through_a_view_filters_its_source_cube() {
+        let graph = model_graph();
+        let effective = filtering(vec![filter("a_view.status", None, Some(vec!["open"]))], &[]);
+        let q = query(json!({ "measures": ["a_orders.count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("a_orders.status", FilterOperator::Equals, &["open"])]
+        );
+        let q = query(json!({ "measures": ["a_view.count"] }));
+        assert_eq!(
+            restrict_query(q, &effective, &graph).unwrap().filters,
+            vec![leaf("a_view.status", FilterOperator::Equals, &["open"])]
+        );
     }
 }

@@ -5827,3 +5827,32 @@ db_test!(restrictions_apply_on_sql_and_dry_run, |store| {
         assert_eq!(d.queries.seen().len(), before + 1, "{path}");
     }
 });
+
+db_test!(a_rule_missing_from_the_store_is_503, |store| {
+    let d = data_scenario(store).await;
+    let env = &d.s.env;
+    let rule = restricted_rule(&d, &d.w1, "bia", by_region()).await;
+    set_attributes(
+        env,
+        &d.s.admin,
+        "bia",
+        json!({ "attributes": { "region": ["Sul"] } }),
+    )
+    .await;
+    // The row goes, SpiceDB keeps the rule: its restrictions are unknown.
+    assert!(env
+        .rbac
+        .store
+        .delete_rule(rule.parse().unwrap())
+        .await
+        .unwrap());
+    let (status, body) = load_in(
+        env,
+        &d.s.bia,
+        Some(&d.w1),
+        json!({ "measures": ["a_orders.count"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(d.queries.seen().is_empty());
+});
