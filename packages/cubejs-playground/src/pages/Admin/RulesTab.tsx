@@ -288,9 +288,9 @@ export function RulesTab({ api }: Props) {
             layout="vertical"
             requiredMark={false}
             onFinish={save}
-            onValuesChange={(changed) => {
-              if ('workspaceId' in changed) {
-                workspaceChanged(changed.workspaceId);
+            onValuesChange={(values) => {
+              if ('workspaceId' in values) {
+                workspaceChanged(values.workspaceId);
               }
             }}
           >
