@@ -94,6 +94,25 @@ export type ModelCube = {
   segments: ModelMember[];
 };
 
+// The name of a user attribute: the server's rule, checked here for an inline message.
+export const ATTRIBUTE_NAME = /^[a-z0-9_]{1,64}$/;
+
+// Form pairs -> Attributes. Throws on a repeated name. The map has no
+// prototype, so names like `constructor` or `__proto__` are plain keys.
+export function attributesFromPairs(pairs: { name?: string; values?: string[] }[]): Attributes {
+  const attributes: Attributes = Object.create(null);
+  for (const { name, values } of pairs) {
+    const key = (name || '').trim();
+    if (Object.prototype.hasOwnProperty.call(attributes, key)) {
+      throw new Error(`The attribute ${key} is listed twice`);
+    }
+    Object.defineProperty(attributes, key, {
+      value: values || [], enumerable: true, writable: true, configurable: true,
+    });
+  }
+  return attributes;
+}
+
 // "2 filters · 3 blocked"; "" when the role restricts nothing.
 export function restrictionSummary(r: Restrictions): string {
   const parts: string[] = [];

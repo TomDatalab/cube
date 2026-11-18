@@ -3,7 +3,9 @@ import {
   Button, Form, Input, Radio, Select, Space, Typography,
 } from 'antd';
 
-import { ModelCube, Restrictions, RowFilter } from './api';
+import {
+  ATTRIBUTE_NAME, ModelCube, Restrictions, RowFilter,
+} from './api';
 
 // A row filter as the form edits it: `source` picks which of `attribute` and
 // `values` is kept on save.
@@ -108,9 +110,12 @@ export function RestrictionsFields({ cubes }: Props) {
                     <Form.Item
                       name={[field.name, 'attribute']}
                       style={{ marginBottom: 0 }}
-                      rules={[{ required: true, whitespace: true, message: 'Name the attribute' }]}
+                      rules={[
+                        { required: true, message: 'Name the attribute' },
+                        { pattern: ATTRIBUTE_NAME, message: 'a-z, 0-9 and _, up to 64' },
+                      ]}
                     >
-                      <Input placeholder="Attribute name, e.g. region" autoComplete="off" />
+                      <Input placeholder="Attribute name, e.g. region" maxLength={64} autoComplete="off" />
                     </Form.Item>
                   ) : (
                     <Form.Item

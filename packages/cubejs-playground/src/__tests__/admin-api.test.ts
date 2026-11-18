@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  adminApi, assignableDataSources, restrictionSummary, withImplied,
+  adminApi, assignableDataSources, attributesFromPairs, restrictionSummary, withImplied,
 } from '../pages/Admin/api';
 
 function answer(status: number, body: unknown) {
@@ -275,5 +275,16 @@ describe('the Admin page API client', () => {
     expect(restrictionSummary({ rowFilters: [f], blockedMembers: ['a'] })).toBe('1 filter · 1 blocked');
     expect(restrictionSummary({ rowFilters: [], blockedMembers: ['a'] })).toBe('1 blocked');
     expect(restrictionSummary({ rowFilters: [], blockedMembers: [] })).toBe('');
+  });
+
+  it('builds attributes from pairs, with own-property duplicate checks', () => {
+    const a = attributesFromPairs([
+      { name: 'constructor', values: ['x'] },
+      { name: ' toString ', values: ['y'] },
+      { name: '__proto__', values: ['z'] },
+    ]);
+    expect(JSON.parse(JSON.stringify(a))).toEqual({ constructor: ['x'], toString: ['y'], ['__proto__']: ['z'] });
+    expect(Object.keys(a)).toEqual(['constructor', 'toString', '__proto__']);
+    expect(() => attributesFromPairs([{ name: 'r', values: [] }, { name: 'r ', values: [] }])).toThrow('twice');
   });
 });

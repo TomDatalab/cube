@@ -5,7 +5,9 @@ import {
 import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
-import { AdminApi, Attributes, User } from './api';
+import {
+  AdminApi, ATTRIBUTE_NAME, attributesFromPairs, User,
+} from './api';
 
 type Props = {
   api: AdminApi;
@@ -21,6 +23,9 @@ export function AttributesModal({ api, user, onClose }: Props) {
   const isMounted = useIsMounted();
   const [form] = Form.useForm<{ pairs: Pair[] }>();
   const [loading, setLoading] = useState(false);
+  // Saving replaces the whole set, so it waits for a successful load.
+  const [loaded, setLoaded] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,6 +34,7 @@ export function AttributesModal({ api, user, onClose }: Props) {
       return;
     }
     setError(null);
+    setLoaded(false);
     setLoading(true);
     form.setFieldsValue({ pairs: [] });
     api.userAttributes(user.id).then((attributes) => {
@@ -36,6 +42,7 @@ export function AttributesModal({ api, user, onClose }: Props) {
         form.setFieldsValue({
           pairs: Object.entries(attributes).map(([name, values]) => ({ name, values })),
         });
+        setLoaded(true);
       }
     }).catch((e: any) => {
       if (isMounted()) {
@@ -46,17 +53,15 @@ export function AttributesModal({ api, user, onClose }: Props) {
         setLoading(false);
       }
     });
-  }, [api, user]);
+  }, [api, user, attempt]);
 
   async function save({ pairs }: { pairs?: Pair[] }) {
-    const attributes: Attributes = {};
-    for (const { name, values } of pairs || []) {
-      const key = (name || '').trim();
-      if (key in attributes) {
-        setError(`The attribute ${key} is listed twice`);
-        return;
-      }
-      attributes[key] = values || [];
+    let attributes;
+    try {
+      attributes = attributesFromPairs(pairs || []);
+    } catch (e: any) {
+      setError(e.message);
+      return;
     }
     setSaving(true);
     setError(null);
@@ -79,14 +84,22 @@ export function AttributesModal({ api, user, onClose }: Props) {
       onOk={() => form.submit()}
       okText="Save"
       confirmLoading={saving}
-      okButtonProps={{ disabled: loading }}
+      okButtonProps={{ disabled: !loaded }}
       destroyOnClose
     >
       <Typography.Paragraph type="secondary">
         Role row filters can match a member against one of these by name.
       </Typography.Paragraph>
       {loading ? <Spin style={{ display: 'block', margin: '8px auto' }} /> : null}
-      <div style={{ display: loading ? 'none' : undefined }}>
+      {!loaded && error ? (
+        <Alert
+          type="error"
+          message={error}
+          showIcon
+          action={<Button size="small" onClick={() => setAttempt(attempt + 1)}>Retry</Button>}
+        />
+      ) : null}
+      <div style={{ display: loaded ? undefined : 'none' }}>
         <Form form={form} layout="vertical" requiredMark={false} onFinish={save}>
           <Form.List name="pairs">
             {(fields, { add, remove }) => (
@@ -95,9 +108,12 @@ export function AttributesModal({ api, user, onClose }: Props) {
                   <Space key={field.key} align="start" style={{ display: 'flex' }}>
                     <Form.Item
                       name={[field.name, 'name']}
-                      rules={[{ required: true, whitespace: true, message: 'Name the attribute' }]}
+                      rules={[
+                        { required: true, message: 'Name the attribute' },
+                        { pattern: ATTRIBUTE_NAME, message: 'a-z, 0-9 and _, up to 64' },
+                      ]}
                     >
-                      <Input placeholder="Name, e.g. region" autoComplete="off" style={{ width: 160 }} />
+                      <Input placeholder="Name, e.g. region" maxLength={64} autoComplete="off" style={{ width: 160 }} />
                     </Form.Item>
                     <Form.Item
                       name={[field.name, 'values']}
@@ -125,7 +141,7 @@ export function AttributesModal({ api, user, onClose }: Props) {
               </>
             )}
           </Form.List>
-          {error ? <Alert type="error" message={error} showIcon style={{ marginTop: 16 }} /> : null}
+          {loaded && error ? <Alert type="error" message={error} showIcon style={{ marginTop: 16 }} /> : null}
         </Form>
       </div>
     </Modal>
