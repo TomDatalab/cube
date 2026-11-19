@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, Connection, DataSource, Organization, PAGE_SIZE, Workspace,
+  AdminApi, Connection, DataSource, moveTargets, Organization, PAGE_SIZE, Workspace,
 } from './api';
 import { NameDialog, NameValues } from './NameDialog';
 import { RemoteSelect, userOptions } from './RemoteSelect';
@@ -128,6 +128,9 @@ function OrganizationCard({
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [owner, setOwner] = useState<string | undefined>();
   const [dataSource, setDataSource] = useState<string | undefined>();
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  // The organization each connection is about to move to.
+  const [moveTo, setMoveTo] = useState<Record<string, string | undefined>>({});
 
   async function loadWorkspaces() {
     try {
@@ -142,13 +145,16 @@ function OrganizationCard({
 
   async function loadConnections() {
     try {
-      const [loaded, sources] = await Promise.all([
+      const [loaded, sources, orgs] = await Promise.all([
         api.connections(org.id),
         api.assignableDataSources(),
+        api.organizations(),
       ]);
       if (isMounted()) {
         setConnections(loaded);
         setDataSources(sources);
+        setOrganizations(orgs);
+        setMoveTo({});
       }
     } catch (e: any) {
       message.error(e.message);
@@ -222,30 +228,41 @@ function OrganizationCard({
 
       <Typography.Text strong>Connections</Typography.Text>
       <div>
-        {connections.length ? connections.map((c) => (
-          <Space key={c.name} style={{ marginRight: 16 }}>
-            <Typography.Text code>{c.name}</Typography.Text>
-            {c.origin === 'assigned' ? (
-              <>
+        {connections.length ? connections.map((c) => {
+          const target = organizations.find((o) => o.id === moveTo[c.name]);
+          return (
+            <Space key={c.name} style={{ marginRight: 16, marginBottom: 8 }}>
+              <Typography.Text code>{c.name}</Typography.Text>
+              {c.origin === 'assigned' ? (
                 <Tag title="Assigned by a platform admin: the organization uses and releases it, only platform admins edit or delete it">
                   assigned
                 </Tag>
-                <Popconfirm
-                  title={`Unassign ${c.name} from ${org.name}? Its releases to the organization's workspaces are withdrawn; the data source stays.`}
-                  onConfirm={() => act(
-                    () => api.unassignConnection(c.name),
-                    `${c.name} no longer belongs to ${org.name}`,
-                    loadConnections
-                  )}
-                >
-                  <Button size="small" danger>Unassign</Button>
-                </Popconfirm>
-              </>
-            ) : (
-              <Tag title="Created by the organization: its owners edit and delete it">created</Tag>
-            )}
-          </Space>
-        )) : <Typography.Text type="secondary">None yet.</Typography.Text>}
+              ) : (
+                <Tag title="Created by the organization: its owners edit and delete it">created</Tag>
+              )}
+              <Select
+                size="small"
+                placeholder="Move to…"
+                aria-label={`Move ${c.name} to`}
+                style={{ width: 160 }}
+                value={moveTo[c.name]}
+                onChange={(v: string) => setMoveTo({ ...moveTo, [c.name]: v })}
+                options={moveTargets(organizations, org.id).map((o) => ({ value: o.id, label: o.name }))}
+              />
+              <Popconfirm
+                title={`Move ${c.name} to ${target?.name}? Its releases to ${org.name}'s workspaces are withdrawn.`}
+                disabled={!target}
+                onConfirm={() => act(
+                  () => api.moveConnection(c.name, target!.id),
+                  `${c.name} belongs to ${target!.name}`,
+                  loadConnections
+                )}
+              >
+                <Button size="small" disabled={!target}>Move</Button>
+              </Popconfirm>
+            </Space>
+          );
+        }) : <Typography.Text type="secondary">None yet.</Typography.Text>}
       </div>
       <Space style={{ marginTop: 8, marginBottom: 16 }}>
         <Select

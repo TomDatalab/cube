@@ -10,6 +10,7 @@ import {
   message,
   Popconfirm,
   Row,
+  Select,
   Space,
   Table,
   Tag,
@@ -26,7 +27,9 @@ import {
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { usePlaygroundContext } from '../../hooks';
 import { onUnauthorized } from '../../shared/auth';
+import { adminApi, ownerLabel, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
@@ -59,6 +62,8 @@ type DataSource = {
   user?: string | null;
   hasPassword?: boolean;
   active: boolean;
+  // With RBAC on: the organization that owns it, `null` for none (Platform).
+  organization?: { id: string; name: string } | null;
 };
 
 type TestState = { loading?: boolean; ok?: boolean; error?: string };
@@ -126,6 +131,9 @@ function SettingControl({ setting, ...props }: { setting: Setting; [prop: string
 }
 
 export function DataSourcesPage() {
+  const { basePath = '', rbac = false } = usePlaygroundContext() || {};
+  // With RBAC on every new data source belongs to an organization.
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [connectors, setConnectors] = useState<string[]>([]);
   const [editable, setEditable] = useState(false);
@@ -167,6 +175,15 @@ export function DataSourcesPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!rbac) {
+      return;
+    }
+    adminApi(basePath).organizations()
+      .then(setOrganizations)
+      .catch((e: any) => message.error(e.message));
+  }, [rbac, basePath]);
 
   async function testExisting(name: string) {
     setTests((t) => ({ ...t, [name]: { loading: true } }));
@@ -242,7 +259,11 @@ export function DataSourcesPage() {
         })
         : await request('playground/data-sources', {
           method: 'POST',
-          body: JSON.stringify({ name: values.name, variables: variables(values) }),
+          body: JSON.stringify({
+            name: values.name,
+            variables: variables(values),
+            ...(rbac ? { organizationId: values.organizationId } : {}),
+          }),
         });
       const verb = editing ? 'updated' : 'saved';
       closeForm();
@@ -321,6 +342,18 @@ export function DataSourcesPage() {
         </Space>
       ),
     },
+    ...(rbac ? [{
+      title: 'Owner',
+      key: 'owner',
+      filters: [
+        ...organizations.map((o) => ({ text: o.name, value: o.name })),
+        { text: 'Platform', value: 'Platform' },
+      ],
+      onFilter: (value: string | number | boolean, ds: DataSource) => ownerLabel(ds) === value,
+      render: (_: unknown, ds: DataSource) => (ds.organization
+        ? ownerLabel(ds)
+        : <Tag title="Without an organization: for platform admins only">Platform</Tag>),
+    }] : []),
     {
       title: 'Host',
       key: 'host',
@@ -490,6 +523,23 @@ export function DataSourcesPage() {
             >
               <Input placeholder="sales" disabled={!!editing} />
             </Form.Item>
+
+            {rbac && !editing ? (
+              <Form.Item
+                label="Organization"
+                name="organizationId"
+                extra="The organization that owns the data source. Its owners release it to their workspaces; only platform admins edit or delete it."
+                rules={[{ required: true, message: 'Choose the organization that owns the data source' }]}
+              >
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="Organization"
+                  aria-label="Organization"
+                  options={organizations.map((o) => ({ value: o.id, label: o.name }))}
+                />
+              </Form.Item>
+            ) : null}
 
             {db.settings.map((setting) => (setting.type === 'base64upload' ? (
               <Form.Item key={setting.env} label={setting.title}>
