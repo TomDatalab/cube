@@ -83,7 +83,7 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
         .map(|(name, _)| name.as_str())
         .collect();
 
-    let data_sources: Vec<Value> = match &state.config.config_file {
+    let mut data_sources: Vec<Value> = match &state.config.config_file {
         Some(path) => load(path, &env_with_file(&path.with_file_name(".env")))?
             .data_sources
             .values()
@@ -112,6 +112,20 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
             .map(|(name, db_type)| json!({ "name": name, "type": db_type, "active": true }))
             .collect(),
     };
+
+    // With RBAC on, the organization that owns each one; `null` for none
+    // ("Platform").
+    if let Some(rbac) = state.rbac.as_deref() {
+        let owners = crate::rbac::handlers::connections::owners(rbac).await?;
+        for ds in &mut data_sources {
+            let owner = ds["name"]
+                .as_str()
+                .and_then(|name| owners.get(name))
+                .cloned()
+                .unwrap_or(Value::Null);
+            ds["organization"] = owner;
+        }
+    }
 
     let connectors: Vec<String> = super::connectors::connectors(&[])
         .into_iter()

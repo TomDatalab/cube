@@ -17,7 +17,7 @@
 //!
 //! A connection the caller can neither query nor manage answers 404.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
@@ -128,6 +128,29 @@ pub async fn released_connections(
         .into_iter()
         .filter(|c| c.organization_id == ws.organization_id)
         .map(|c| c.name)
+        .collect())
+}
+
+/// The organization holding each connection, as `{id, name}` by connection
+/// name; a data source missing here has none ("Platform"). 503 when the
+/// RBAC database cannot answer.
+pub(crate) async fn owners(rbac: &Rbac) -> Result<BTreeMap<String, Value>, ApiError> {
+    let rows = rbac.store.all_connections().await.map_err(read_error)?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.organization_id).collect();
+    let names: BTreeMap<Uuid, String> = rbac
+        .store
+        .organizations_by_ids(&ids)
+        .await
+        .map_err(read_error)?
+        .into_iter()
+        .map(|o| (o.id, o.name))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let name = names.get(&r.organization_id).cloned();
+            (r.name, json!({ "id": r.organization_id, "name": name }))
+        })
         .collect())
 }
 

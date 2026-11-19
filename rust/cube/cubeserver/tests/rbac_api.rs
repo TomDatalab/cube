@@ -7218,3 +7218,37 @@ db_test!(org_create_refuses_an_organization_in_the_body, |store| {
     assert_eq!(body["error"], "organizationId comes from the path");
     assert!(!yml_names(&dir, "x"));
 });
+
+db_test!(data_sources_list_shows_the_owner, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(
+        assign(env, &s.admin, "shared", &s.org_a).await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let of = |name: &str| {
+        body["dataSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|ds| ds["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} not listed: {body}"))
+    };
+    assert_eq!(
+        of("shared")["organization"],
+        json!({ "id": s.org_a, "name": "A" })
+    );
+    assert_eq!(of("default")["organization"], Value::Null);
+    assert!(of("default").as_object().unwrap().contains_key("organization"));
+});
