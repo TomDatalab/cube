@@ -196,6 +196,11 @@ pub async fn test(
 pub struct CreateRequest {
     pub(crate) name: String,
     variables: BTreeMap<String, String>,
+    /// With RBAC on, the organization that owns the new data source:
+    /// required on the platform routes, refused on an organization's own
+    /// (`/v1/organizations/{id}/connections`). Ignored with RBAC off.
+    #[serde(rename = "organizationId", default)]
+    pub(crate) organization_id: Option<String>,
 }
 
 /// `POST /playground/data-sources`
@@ -522,17 +527,18 @@ pub async fn v1_delete(
     .await
 }
 
-/// `POST /playground/data-sources`, and [`v1_create`]'s work: with RBAC on, a
-/// name an organization still holds a connection row for is refused, so the
-/// new source cannot inherit that row's grants.
+/// `POST /playground/data-sources`, and [`v1_create`]'s work: with RBAC on,
+/// the new source belongs to the organization the request names
+/// ([`create_for_platform`](crate::rbac::handlers::connections::create_for_platform)).
 pub async fn create_unless_tracked(
     State(state): State<AppState>,
-    request: Json<CreateRequest>,
+    Json(request): Json<CreateRequest>,
 ) -> Result<Response, ApiError> {
     if let Some(rbac) = state.rbac.as_deref() {
-        crate::rbac::handlers::connections::refuse_tracked_name(rbac, &request.name).await?;
+        return crate::rbac::handlers::connections::create_for_platform(&state, rbac, request)
+            .await;
     }
-    create(State(state.clone()), request)
+    create(State(state.clone()), Json(request))
         .await
         .map(IntoResponse::into_response)
 }

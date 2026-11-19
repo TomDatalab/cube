@@ -256,10 +256,28 @@ pub async fn create(
     let (rbac, user) = caller(&state, &ctx)?;
     let org = visible_organization(rbac, &id, "manage_connections", user).await?;
     let request = body(request)?;
+    if request.organization_id.is_some() {
+        return Err(ApiError::bad_request("organizationId comes from the path"));
+    }
+    let response = create_owned(&state, rbac, org.id, ConnectionOrigin::Created, request).await?;
+    Ok((StatusCode::CREATED, response).into_response())
+}
+
+/// Adds the data source of `request` as a connection of `org`. The row and
+/// `connection#organization` are written first, so the data source never
+/// exists without its organization; both are undone when it cannot be
+/// added. Answers what [`data_sources::create`] answers.
+pub(crate) async fn create_owned(
+    state: &AppState,
+    rbac: &Rbac,
+    org: Uuid,
+    origin: ConnectionOrigin,
+    request: CreateRequest,
+) -> Result<Response, ApiError> {
     let name = request.name.trim().to_string();
     data_sources::validate_name(&name)?;
     // A data source without an organization is not taken over.
-    if data_source_types(&state).contains_key(&name) {
+    if data_source_types(state).contains_key(&name) {
         return Err(ApiError::bad_request(format!(
             "A data source named {name} already exists"
         )));
@@ -271,10 +289,10 @@ pub async fn create(
         .transaction()
         .await
         .map_err(|e| store_error(e, conflict))?;
-    tx.create_connection(&name, org.id, ConnectionOrigin::Created)
+    tx.create_connection(&name, org, origin)
         .await
         .map_err(|e| store_error(e, conflict))?;
-    let relationship = organization_relationship(&name, org.id);
+    let relationship = organization_relationship(&name, org);
     rbac.authz
         .touch(std::slice::from_ref(&relationship))
         .await
@@ -298,7 +316,33 @@ pub async fn create(
         undo().await;
         return Err(store_error(e, conflict));
     }
-    Ok((StatusCode::CREATED, response).into_response())
+    Ok(response)
+}
+
+/// `POST /v1/data-sources` and `POST /playground/data-sources` with RBAC
+/// on: platform admins add a data source for the organization
+/// `organizationId` names (`origin: assigned`). Without one, 400: every new
+/// data source belongs to an organization. A name a `connections` row still
+/// holds is refused first (409), so it cannot inherit that row's grants.
+pub(crate) async fn create_for_platform(
+    state: &AppState,
+    rbac: &Rbac,
+    request: CreateRequest,
+) -> Result<Response, ApiError> {
+    refuse_tracked_name(rbac, &request.name).await?;
+    let Some(id) = request.organization_id.as_deref() else {
+        return Err(ApiError::bad_request(
+            "Choose the organization that owns the data source",
+        ));
+    };
+    let org_id = resource_id(id, "organization")?;
+    let org = rbac
+        .store
+        .organization(org_id)
+        .await
+        .map_err(read_error)?
+        .ok_or_else(|| ApiError::not_found("organization not found"))?;
+    create_owned(state, rbac, org.id, ConnectionOrigin::Assigned, request).await
 }
 
 /// The body of `PUT /v1/data-sources/{name}`: `connection#manage` on a

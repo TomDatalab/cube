@@ -2404,6 +2404,8 @@ db_test!(a_recreated_data_source_inherits_no_grant, |store| {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(env.rbac.store.connection("x").await.unwrap().is_none());
     let database = dir.path().join("x2.db");
+    // Recreated for another organization: nothing of A's carries over.
+    let org_b = create_org(env, &s.admin, "B", "caio").await;
     let (status, body) = send(
         &env.router,
         Method::POST,
@@ -2411,6 +2413,7 @@ db_test!(a_recreated_data_source_inherits_no_grant, |store| {
         Some(&s.admin),
         Some(json!({
             "name": "x",
+            "organizationId": org_b,
             "variables": {
                 "CUBEJS_DB_TYPE": "sqlite",
                 "CUBEJS_DB_NAME": database.to_string_lossy(),
@@ -6973,3 +6976,212 @@ db_test!(
         assert!(service.sql(&ctx("caio"), request()).await.is_ok());
     }
 );
+
+/// `POST {path}` as a platform admin: a SQLite data source in `dir`, with
+/// `organization` as `organizationId` when given.
+async fn platform_create(
+    env: &Env,
+    token: &str,
+    path: &str,
+    name: &str,
+    organization: Option<&str>,
+    dir: &tempfile::TempDir,
+) -> (StatusCode, Value) {
+    let mut body = json!({
+        "name": name,
+        "variables": {
+            "CUBEJS_DB_TYPE": "sqlite",
+            "CUBEJS_DB_NAME": dir.path().join(format!("{name}.db")).to_string_lossy(),
+        }
+    });
+    if let Some(org) = organization {
+        body["organizationId"] = json!(org);
+    }
+    if path.starts_with("/playground") {
+        playground(&env.router, Method::POST, path, Some(token), Some(body)).await
+    } else {
+        send(&env.router, Method::POST, path, Some(token), Some(body)).await
+    }
+}
+
+fn yml_names(dir: &tempfile::TempDir, name: &str) -> bool {
+    std::fs::read_to_string(dir.path().join("cube.yml"))
+        .unwrap()
+        .contains(&format!("  {name}:"))
+}
+
+db_test!(platform_create_needs_an_organization, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let path = "/cube/v1/data-sources";
+    let (status, body) = platform_create(env, &s.admin, path, "x", None, &dir).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"],
+        "Choose the organization that owns the data source"
+    );
+    let unknown = uuid::Uuid::new_v4().to_string();
+    let (status, body) = platform_create(env, &s.admin, path, "x", Some(&unknown), &dir).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = platform_create(env, &s.admin, path, "x", Some("x"), &dir).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(!yml_names(&dir, "x"));
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+});
+
+async fn assert_assigned_to(env: &Env, s: &Scenario, name: &str) {
+    let row = env.rbac.store.connection(name).await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), s.org_a);
+    assert_eq!(row.origin, ConnectionOrigin::Assigned);
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let listed = list["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("{name} not listed: {list}"));
+    assert_eq!(listed["origin"], "assigned");
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/connections/{name}"),
+        Some(&s.ana),
+        Some(json!({ "variables": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+db_test!(platform_create_assigns_the_organization, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = platform_create(
+        env,
+        &s.admin,
+        "/cube/v1/data-sources",
+        "x",
+        Some(&s.org_a),
+        &dir,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(yml_names(&dir, "x"));
+    assert_assigned_to(env, &s, "x").await;
+});
+
+db_test!(playground_create_assigns_the_organization, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    let env = &s.env;
+    let (status, body) = platform_create(
+        env,
+        &s.admin,
+        "/playground/data-sources",
+        "x",
+        None,
+        &dir,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = platform_create(
+        env,
+        &s.admin,
+        "/playground/data-sources",
+        "x",
+        Some(&s.org_a),
+        &dir,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_assigned_to(env, &s, "x").await;
+});
+
+db_test!(a_failed_platform_create_leaves_no_row, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // SpiceDB refuses the write: nothing is added.
+    env.authz.set_failing_writes(true);
+    let (status, _) = platform_create(
+        env,
+        &s.admin,
+        "/cube/v1/data-sources",
+        "x",
+        Some(&s.org_a),
+        &dir,
+    )
+    .await;
+    env.authz.set_failing_writes(false);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+    assert!(!yml_names(&dir, "x"));
+
+    // The connection does not connect: the row and the relationship go.
+    let (status, _) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "broken",
+            "organizationId": s.org_a,
+            "variables": {
+                "CUBEJS_DB_TYPE": "postgres",
+                "CUBEJS_DB_HOST": "127.0.0.1",
+                "CUBEJS_DB_PORT": "1",
+                "CUBEJS_DB_NAME": "x",
+                "CUBEJS_DB_USER": "x",
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(env.rbac.store.connection("broken").await.unwrap().is_none());
+    let organization = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "connection",
+            id: Some("broken".into()),
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(organization.is_empty(), "{organization:?}");
+    assert!(!yml_names(&dir, "broken"));
+});
+
+db_test!(org_create_refuses_an_organization_in_the_body, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        Some(json!({
+            "name": "x",
+            "organizationId": s.org_a,
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": dir.path().join("x.db").to_string_lossy(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "organizationId comes from the path");
+    assert!(!yml_names(&dir, "x"));
+});
