@@ -633,11 +633,30 @@ db_test!(
             .create_connection("x", a.id, ConnectionOrigin::Created)
             .await
             .unwrap();
-        assert!(store.move_connection("x", b.id).await.unwrap());
+        assert!(store.move_connection("x", a.id, b.id).await.unwrap());
         let row = store.connection("x").await.unwrap().unwrap();
         assert_eq!(row.organization_id, b.id);
         assert_eq!(row.origin, ConnectionOrigin::Assigned);
-        assert!(!store.move_connection("nope", b.id).await.unwrap());
+        assert!(!store.move_connection("nope", a.id, b.id).await.unwrap());
         assert!(store.delete_organization(a.id).await.unwrap());
+    }
+);
+
+db_test!(
+    a_move_from_an_organization_it_left_changes_nothing,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let a = store.create_organization("a", "ann").await.unwrap();
+        let b = store.create_organization("b", "ann").await.unwrap();
+        let c = store.create_organization("c", "ann").await.unwrap();
+        store
+            .create_connection("x", a.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
+        // Another move took it to B first: the one from A to C finds nothing.
+        assert!(store.move_connection("x", a.id, b.id).await.unwrap());
+        assert!(!store.move_connection("x", a.id, c.id).await.unwrap());
+        let row = store.connection("x").await.unwrap().unwrap();
+        assert_eq!(row.organization_id, b.id);
     }
 );

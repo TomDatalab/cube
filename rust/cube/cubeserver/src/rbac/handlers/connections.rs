@@ -559,11 +559,13 @@ async fn move_connection(rbac: &Rbac, name: &str, from: Uuid, to: Uuid) -> Resul
         .await
         .map_err(|e| store_error(e, conflict))?;
     if !tx
-        .move_connection(name, to)
+        .move_connection(name, from, to)
         .await
         .map_err(|e| store_error(e, conflict))?
     {
-        return Err(not_found());
+        // Moved or deleted since it was read: its relationships are not
+        // the ones read above.
+        return Err(ApiError::new(StatusCode::CONFLICT, conflict));
     }
     rbac.authz
         .write(&updates, &[])
