@@ -6,12 +6,14 @@
 //! organization (a `connections` row and `connection#organization`). The
 //! organization's admins edit it with the data-source handlers and release
 //! it to the organization's workspaces (`connection#workspace`). A data
-//! source without an organization is for platform admins only.
+//! source without an organization ("Platform": `default` and those from
+//! before organizations owned every new one) is for platform admins only.
 //!
 //! A connection the organization created (`origin: created`) is edited and
 //! deleted by the organization's owners; a data source a platform admin
 //! assigned to it (`origin: assigned`) is only used and released by them:
-//! editing or deleting it is for platform admins, who can also unassign it.
+//! editing or deleting it is for platform admins, who can also move it to
+//! another organization (never back to none).
 //!
 //! A connection the caller can neither query nor manage answers 404.
 
@@ -437,9 +439,12 @@ pub(crate) async fn refuse_tracked_name(rbac: &Rbac, name: &str) -> Result<(), A
 }
 
 /// `{organizationId}`: platform admins. Assigns a data source of
-/// `cube.yml` to an organization (`origin: assigned`). `default` is never
-/// assigned (400); one that already belongs to another organization must be
-/// unassigned first (409). Assigning it again to its organization is a no-op.
+/// `cube.yml` to an organization (`origin: assigned`), or moves a
+/// connection another organization holds there: its releases to that
+/// organization's workspaces are withdrawn and it becomes `assigned` (its new
+/// organization did not create it). A connection never goes back to having
+/// no organization. `default` is never assigned (400). Assigning it again to
+/// its organization is a no-op.
 pub async fn assign_organization(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -474,10 +479,10 @@ pub async fn assign_organization(
     let relationship = organization_relationship(&name, org.id);
     let conflict = "The connection changed concurrently; try again";
     match row {
-        Some(row) if row.organization_id != org.id => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "The connection belongs to another organization; unassign it first",
-        )),
+        Some(row) if row.organization_id != org.id => {
+            move_connection(rbac, &name, row.organization_id, org.id).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
         Some(_) => {
             // Already this organization's: repair the relationship only.
             rbac.authz
@@ -511,44 +516,47 @@ pub async fn assign_organization(
     }
 }
 
-/// Platform admins: takes the connection away from its organization. All
-/// its relationships (the organization and the releases to workspaces) go
-/// in one SpiceDB call, and the `connections` row with them; the data source
-/// stays in `cube.yml`, for platform admins only. 404 for a data source
-/// without an organization.
-pub async fn unassign_organization(
-    State(state): State<AppState>,
-    Extension(ctx): Extension<RequestContext>,
-    Path(name): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let (rbac, _) = caller(&state, &ctx)?;
-    require_platform_admin(&ctx, "unassign connections from organizations")?;
-    connection_name(&name)?;
+/// Moves the connection `name` from organization `from` to `to`: the row
+/// changes in a transaction, and one atomic SpiceDB write drops every
+/// release and the old `connection#organization` and adds the new one. A
+/// failed SpiceDB write rolls the row back; a failed commit writes the
+/// relationships back.
+async fn move_connection(rbac: &Rbac, name: &str, from: Uuid, to: Uuid) -> Result<(), ApiError> {
     let conflict = "The connection changed concurrently; try again";
+    let releases = releases_of(rbac, name).await?;
+    let old = organization_relationship(name, from);
+    let new = organization_relationship(name, to);
+    let mut updates: Vec<Update> = releases.iter().cloned().map(Update::Delete).collect();
+    updates.push(Update::Delete(old.clone()));
+    updates.push(Update::Touch(new.clone()));
+
     let tx = rbac
         .store
         .transaction()
         .await
         .map_err(|e| store_error(e, conflict))?;
     if !tx
-        .delete_connection(&name)
+        .move_connection(name, to)
         .await
         .map_err(|e| store_error(e, conflict))?
     {
         return Err(not_found());
     }
     rbac.authz
-        .delete_matching(&RelationshipFilter {
-            kind: "connection",
-            id: Some(name.clone()),
-            relation: None,
-            subject: None,
-        })
+        .write(&updates, &[])
         .await
-        // Dropping `tx` rolls the row delete back.
+        // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;
-    tx.commit().await.map_err(|e| store_error(e, conflict))?;
-    Ok(StatusCode::NO_CONTENT)
+    if let Err(e) = tx.commit().await {
+        let mut undo: Vec<Update> = releases.into_iter().map(Update::Touch).collect();
+        undo.push(Update::Touch(old));
+        undo.push(Update::Delete(new));
+        if let Err(err) = rbac.authz.write(&undo, &[]).await {
+            tracing::error!(connection = %name, "Cannot undo the move of the connection: {err}");
+        }
+        return Err(store_error(e, conflict));
+    }
+    Ok(())
 }
 
 fn require_platform_admin(ctx: &RequestContext, what: &str) -> Result<(), ApiError> {
