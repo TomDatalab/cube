@@ -660,3 +660,70 @@ db_test!(
         assert_eq!(row.organization_id, b.id);
     }
 );
+
+db_test!(data_sources_put_get_list_delete, |store, _url| {
+    let settings: std::collections::BTreeMap<String, String> =
+        [("CUBEJS_DB_HOST".to_string(), "h".to_string())].into();
+    let id = store
+        .put_data_source("zeta", "postgres", &settings, Some(b"sealed"))
+        .await
+        .unwrap();
+    store
+        .put_data_source("alpha", "sqlite", &Default::default(), None)
+        .await
+        .unwrap();
+
+    let row = store.data_source("zeta").await.unwrap().unwrap();
+    assert_eq!(row.id, id);
+    assert_eq!(row.db_type, "postgres");
+    assert_eq!(row.settings, settings);
+    assert_eq!(row.secrets.as_deref(), Some(&b"sealed"[..]));
+    assert!(store.data_source("nobody").await.unwrap().is_none());
+
+    // Putting it again replaces the settings and keeps the id.
+    let other: std::collections::BTreeMap<String, String> =
+        [("CUBEJS_DB_HOST".to_string(), "h2".to_string())].into();
+    let again = store
+        .put_data_source("zeta", "postgres", &other, None)
+        .await
+        .unwrap();
+    assert_eq!(again, id);
+    let row = store.data_source("zeta").await.unwrap().unwrap();
+    assert_eq!(row.settings, other);
+    assert!(row.secrets.is_none());
+
+    let names: Vec<String> = store
+        .data_sources()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, ["alpha", "zeta"]);
+
+    assert!(store.delete_data_source("zeta").await.unwrap());
+    assert!(!store.delete_data_source("zeta").await.unwrap());
+});
+
+db_test!(
+    delete_connection_of_requires_the_organization,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let a = store.create_organization("a", "ann").await.unwrap();
+        let b = store.create_organization("b", "ann").await.unwrap();
+        store
+            .create_connection("c1", a.id, ConnectionOrigin::Assigned)
+            .await
+            .unwrap();
+
+        let tx = store.transaction().await.unwrap();
+        assert!(!tx.delete_connection_of("c1", b.id).await.unwrap());
+        tx.commit().await.unwrap();
+        assert!(store.connection("c1").await.unwrap().is_some());
+
+        let tx = store.transaction().await.unwrap();
+        assert!(tx.delete_connection_of("c1", a.id).await.unwrap());
+        tx.commit().await.unwrap();
+        assert!(store.connection("c1").await.unwrap().is_none());
+    }
+);

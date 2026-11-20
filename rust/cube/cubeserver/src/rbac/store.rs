@@ -1,6 +1,8 @@
 //! Postgres (`cube_app`) storage for users, organizations, workspaces,
 //! connections and objects. Roles and grants live in SpiceDB, not here.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use tokio_postgres::error::SqlState;
@@ -241,6 +243,31 @@ pub struct ConnectionRow {
 }
 
 const CONNECTION_COLS: &str = "name, organization_id, origin";
+
+/// A data source's settings as RBAC keeps them: the plain `CUBEJS_DB_*`
+/// variables (without `CUBEJS_DB_TYPE`, which is `db_type`) and the secret
+/// ones sealed (see [`super::secrets`]).
+#[derive(Debug, Clone)]
+pub struct DataSourceRow {
+    pub id: Uuid,
+    pub name: String,
+    pub db_type: String,
+    pub settings: BTreeMap<String, String>,
+    pub secrets: Option<Vec<u8>>,
+}
+
+const DATA_SOURCE_COLS: &str = "id, name, db_type, settings, secrets";
+
+fn data_source_from(r: &Row) -> DataSourceRow {
+    let settings: serde_json::Value = r.get(3);
+    DataSourceRow {
+        id: r.get(0),
+        name: r.get(1),
+        db_type: r.get(2),
+        settings: serde_json::from_value(settings).unwrap_or_default(),
+        secrets: r.get(4),
+    }
+}
 
 fn connection_from(r: &Row) -> ConnectionRow {
     ConnectionRow {
@@ -483,6 +510,22 @@ mod q {
             > 0)
     }
 
+    /// Takes the connection out of organization `org`. `false` when there is
+    /// no such row: it is in another organization by now, or none.
+    pub async fn delete_connection_of(
+        c: &tokio_postgres::Client,
+        name: &str,
+        org: Uuid,
+    ) -> Result<bool, StoreError> {
+        Ok(c
+            .execute(
+                "DELETE FROM connections WHERE name = $1 AND organization_id = $2",
+                &[&name, &org],
+            )
+            .await?
+            > 0)
+    }
+
     pub async fn delete_connection(
         c: &tokio_postgres::Client,
         name: &str,
@@ -696,6 +739,12 @@ macro_rules! shared_creates {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
             q::move_connection(c, name, from, to).await
+        }
+        /// See [`q::delete_connection_of`].
+        pub async fn delete_connection_of(&self, name: &str, org: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_connection_of(c, name, org).await
         }
         pub async fn delete_connection(&self, name: &str) -> Result<bool, StoreError> {
             let guard = $conn(self).await?;
@@ -1252,6 +1301,48 @@ impl Store {
             .await?
             .get(0);
         Ok(Page { items, total })
+    }
+
+    // data sources
+    pub async fn data_sources(&self) -> Result<Vec<DataSourceRow>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {DATA_SOURCE_COLS} FROM data_sources ORDER BY name");
+        Ok(c.query(&sql, &[]).await?.iter().map(data_source_from).collect())
+    }
+
+    pub async fn data_source(&self, name: &str) -> Result<Option<DataSourceRow>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {DATA_SOURCE_COLS} FROM data_sources WHERE name = $1");
+        Ok(c.query_opt(&sql, &[&name]).await?.as_ref().map(data_source_from))
+    }
+
+    /// Adds data source `name`, or replaces its settings keeping its id.
+    pub async fn put_data_source(
+        &self,
+        name: &str,
+        db_type: &str,
+        settings: &BTreeMap<String, String>,
+        secrets: Option<&[u8]>,
+    ) -> Result<Uuid, StoreError> {
+        let c = self.conn().await?;
+        let settings = serde_json::to_value(settings).map_err(|e| StoreError::Db(e.to_string()))?;
+        let row = c
+            .query_one(
+                "INSERT INTO data_sources (name, db_type, settings, secrets) VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (name) DO UPDATE SET db_type = EXCLUDED.db_type, \
+                 settings = EXCLUDED.settings, secrets = EXCLUDED.secrets, updated_at = now() \
+                 RETURNING id",
+                &[&name, &db_type, &settings, &secrets],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    pub async fn delete_data_source(&self, name: &str) -> Result<bool, StoreError> {
+        let c = self.conn().await?;
+        Ok(c.execute("DELETE FROM data_sources WHERE name = $1", &[&name])
+            .await?
+            > 0)
     }
 
     // connections
