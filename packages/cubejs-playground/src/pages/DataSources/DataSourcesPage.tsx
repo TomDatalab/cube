@@ -391,7 +391,7 @@ export function DataSourcesPage() {
       title: 'Type',
       dataIndex: 'type',
       key: 'type',
-      width: rbac ? 56 : undefined,
+      width: rbac ? 68 : undefined,
       render: (type: string) => (rbac ? (
         <Tooltip title={databaseOf(type)?.title || type}>
           <span><DatabaseLogo db={databaseOf(type)} size={20} /></span>
