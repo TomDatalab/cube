@@ -115,7 +115,43 @@ impl ModelIndex {
     }
 }
 
-type CacheKey = (Option<SystemTime>, u64);
+/// Newest mtime, a hash of the file names (a delete or a move changes no
+/// file's mtime) and the policy generation.
+type CacheKey = (Option<SystemTime>, u64, u64);
+
+fn files_hash(model_path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut names = Vec::new();
+    let mut sources = Vec::new();
+    collect_names(model_path, model_path, &mut sources);
+    names.extend(sources);
+    names.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    names.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn collect_names(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_names(root, &path, out);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yml") | Some("yaml")
+        ) {
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+}
 
 /// The index, rebuilt when the newest file changes or the policy does.
 #[derive(Default)]
@@ -133,6 +169,7 @@ impl ModelIndexCache {
     pub fn get(&self, model_path: &Path) -> Result<Arc<ModelIndex>, ModelError> {
         let key = (
             crate::meta_adapter::newest_mtime(model_path),
+            files_hash(model_path),
             current_policy().map(|p| p.generation).unwrap_or(0),
         );
         let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());

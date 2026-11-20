@@ -246,6 +246,7 @@ tree_test!(tree_groups_by_folder, |store| {
     env.write("digital/a.yml", CUBE_A);
     env.write("on/b.yml", CUBE_B);
     env.write("_platform/u.yml", CUBE_U);
+    env.write("orders.yml", CUBE_U);
     install_policy(&[("digital", &["sofiadb"]), ("on", &[])], &["default"]);
 
     let (status, body, _) = get(&env, &admin, "/playground/tree").await;
@@ -260,6 +261,9 @@ tree_test!(tree_groups_by_folder, |store| {
     assert_eq!(by("on")["errors"], 1);
     assert_eq!(by("_platform")["name"], "Platform");
     assert_eq!(by("_platform")["counts"]["cubes"], 1);
+    // The root-level file is shown under `_platform`, with its rejection.
+    assert_eq!(by("_platform")["counts"]["files"], 2);
+    assert_eq!(by("_platform")["errors"], 1);
     // `_platform` closes the list and is not counted.
     assert_eq!(orgs.last().unwrap()["slug"], "_platform");
     assert_eq!(body["total"], 2);
@@ -272,6 +276,21 @@ tree_test!(tree_groups_by_folder, |store| {
     );
     assert_eq!(body["files"], json!([{ "fileName": "on/b.yml" }]));
     assert_eq!(body["cubes"], json!([]));
+
+    let (status, body, _) = get(&env, &admin, "/playground/tree/_platform").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let files: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"orders.yml") && files.contains(&"_platform/u.yml"), "{body}");
+    assert!(
+        body["errors"].as_array().unwrap().iter().any(|e| e["file"] == "orders.yml"
+            && e["message"] == "the folder / does not belong to any organization"),
+        "{body}"
+    );
 
     let (_, body, _) = get(&env, &admin, "/playground/tree/digital").await;
     assert_eq!(body["cubes"][0]["name"], "a");
@@ -307,6 +326,11 @@ tree_test!(tree_search_and_paging, |store| {
     let (_, body, _) = get(&env, &admin, "/playground/tree?limit=1&offset=1").await;
     assert_eq!(body["organizations"].as_array().unwrap().len(), 1, "{body}");
     assert_eq!(body["organizations"][0]["slug"], "on");
+    assert_eq!(body["total"], 3);
+
+    // The limit stops at 200 and the request still answers.
+    let (status, body, _) = get(&env, &admin, "/playground/tree?limit=100000").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["total"], 3);
 });
 

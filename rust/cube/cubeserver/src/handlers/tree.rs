@@ -19,6 +19,7 @@ use crate::rbac::store::Search;
 /// The one node of the tree when RBAC is off.
 const MODEL_NODE: &str = "_model";
 const DEFAULT_LIMIT: i64 = 50;
+const MAX_LIMIT: i64 = 200;
 
 #[derive(Debug, Deserialize)]
 pub struct TreeQuery {
@@ -36,10 +37,24 @@ async fn index(state: &AppState) -> Result<std::sync::Arc<ModelIndex>, ApiError>
         .map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
+/// Whether something owned by `o` shows under the node of `node`. What no
+/// organization owns shows under `_platform`, so the admin sees why it is
+/// refused.
+fn belongs(node: &Owner, o: &Owner) -> bool {
+    match node {
+        Owner::Platform => matches!(o, Owner::Platform | Owner::Unowned(_)),
+        _ => node == o,
+    }
+}
+
+fn clamp_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(DEFAULT_LIMIT).clamp(0, MAX_LIMIT)
+}
+
 fn counts(index: &ModelIndex, owner: &Owner, connections: usize) -> (Value, usize) {
-    let errors = index.rejected.iter().filter(|(o, _)| o == owner).count();
-    let cubes = index.cubes.iter().filter(|c| &c.owner == owner).count();
-    let files = index.files.iter().filter(|f| &f.owner == owner).count();
+    let errors = index.rejected.iter().filter(|(o, _)| belongs(owner, o)).count();
+    let cubes = index.cubes.iter().filter(|c| belongs(owner, &c.owner)).count();
+    let files = index.files.iter().filter(|f| belongs(owner, &f.owner)).count();
     (
         json!({ "cubes": cubes, "files": files, "connections": connections }),
         errors,
@@ -63,7 +78,7 @@ pub async fn list(
     };
 
     let q = query.q.filter(|q| !q.is_empty());
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).max(0);
+    let limit = clamp_limit(query.limit);
     let offset = query.offset.unwrap_or(0).max(0);
     let search = Search {
         q: q.clone(),
@@ -154,7 +169,7 @@ pub async fn detail(
     let (owner, sources) = resolve(&state, &slug).await?;
     let index = index(&state).await?;
     // `None`: no policy, everything is in the one node.
-    let mine = |o: &Owner| owner.as_ref().is_none_or(|owner| owner == o);
+    let mine = |o: &Owner| owner.as_ref().is_none_or(|owner| belongs(owner, o));
 
     let cubes: Vec<Value> = index
         .cubes
@@ -239,4 +254,17 @@ pub async fn file(
         "content": content,
         "absPath": abs.to_string_lossy(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_limit_defaults_to_50_and_stops_at_200() {
+        assert_eq!(clamp_limit(None), 50);
+        assert_eq!(clamp_limit(Some(100_000)), 200);
+        assert_eq!(clamp_limit(Some(-3)), 0);
+        assert_eq!(clamp_limit(Some(7)), 7);
+    }
 }
