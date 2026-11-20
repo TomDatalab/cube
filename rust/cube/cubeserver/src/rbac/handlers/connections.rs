@@ -342,6 +342,7 @@ pub(crate) async fn create_owned(
         return Err(store_error(e, conflict));
     }
     tracing::info!(data_source = %name, "data source added for an organization (RBAC)");
+    crate::rbac::ownership::refresh_after_commit(state).await;
     let restarting = data_sources::restart_if_enabled(state, Vec::new(), Vec::new());
     Ok(Json(json!({ "name": name, "restarting": restarting })).into_response())
 }
@@ -441,6 +442,7 @@ pub(crate) async fn delete_with_grants(
             .delete_connection(name)
             .await
             .map_err(|e| store_error(e, "Conflict"))?;
+        crate::rbac::ownership::refresh_after_commit(state).await;
     }
     Ok(response)
 }
@@ -549,7 +551,7 @@ pub async fn assign_organization(
 /// new owner rejects are logged with where their files should go; the tree
 /// shows them as the organization's `errors`.
 async fn policy_changed(state: &AppState, name: &str, destination: &str) -> Result<(), ApiError> {
-    let rejections = crate::rbac::ownership::refresh_policy(state).await?;
+    let rejections = crate::rbac::ownership::refresh_after_commit(state).await;
     crate::rbac::ownership::warn_rejections(name, destination, &rejections);
     Ok(())
 }

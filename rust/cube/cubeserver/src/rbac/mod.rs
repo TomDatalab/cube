@@ -53,6 +53,10 @@ pub struct Rbac {
     /// The data sources `cube.yml` and RBAC declare, for the ownership
     /// policy: those no connection claims belong to the platform.
     data_source_names: std::sync::RwLock<Vec<String>>,
+    /// Serializes policy refreshes, so an older policy never replaces a newer.
+    pub(crate) refresh_lock: tokio::sync::Mutex<()>,
+    /// A background retry of a failed refresh is running.
+    pub(crate) refresh_retrying: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -109,6 +113,8 @@ impl Rbac {
             hashing,
             running: Default::default(),
             data_source_names: Default::default(),
+            refresh_lock: Default::default(),
+            refresh_retrying: Default::default(),
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)

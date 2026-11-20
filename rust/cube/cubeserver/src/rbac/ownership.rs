@@ -66,6 +66,9 @@ pub async fn build_policy(
 /// returns what the model index now rejects.
 pub async fn refresh_policy(state: &AppState) -> Result<Vec<Rejection>, ApiError> {
     let rbac = state.rbac.as_deref().ok_or_else(ApiError::internal)?;
+    // Build, install and reload as one step: two refreshes in flight could
+    // otherwise install an older policy over a newer one.
+    let _serial = rbac.refresh_lock.lock().await;
     let policy = build_policy(&rbac.store, &rbac.data_source_names())
         .await
         .map_err(|e| {
@@ -101,4 +104,43 @@ pub fn warn_rejections(connection: &str, destination: &str, rejections: &[Reject
             r.file
         );
     }
+}
+
+/// [`refresh_policy`] after the database already changed: a failure must not
+/// fail the request (the change is committed and a retry of it would not
+/// heal). It is logged and retried in the background, with backoff, until it
+/// succeeds; at most one retry task runs at a time.
+pub async fn refresh_after_commit(state: &AppState) -> Vec<Rejection> {
+    match refresh_policy(state).await {
+        Ok(rejections) => rejections,
+        Err(e) => {
+            tracing::error!(
+                "Cannot refresh the ownership policy after a change: {}; retrying in the background",
+                e.body.error
+            );
+            spawn_retry(state.clone());
+            Vec::new()
+        }
+    }
+}
+
+fn spawn_retry(state: AppState) {
+    let Some(rbac) = state.rbac.clone() else {
+        return;
+    };
+    if rbac.refresh_retrying.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut delay = std::time::Duration::from_secs(1);
+        for _ in 0..12 {
+            tokio::time::sleep(delay).await;
+            if refresh_policy(&state).await.is_ok() {
+                tracing::info!("The ownership policy is refreshed");
+                break;
+            }
+            delay = (delay * 2).min(std::time::Duration::from_secs(30));
+        }
+        rbac.refresh_retrying.store(false, Ordering::SeqCst);
+    });
 }
