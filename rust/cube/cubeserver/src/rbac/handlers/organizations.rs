@@ -103,31 +103,38 @@ pub async fn create(
         ));
     }
 
-    let slug = match &request.slug {
-        Some(s) => {
-            validate_slug(s).map_err(ApiError::bad_request)?;
-            s.clone()
-        }
-        None => {
-            let base = slugify(&name);
-            let used = rbac
-                .store
-                .slugs_like(&base)
-                .await
-                .map_err(|e| store_error(e, "Conflict"))?;
-            unique_slug(&base, &|s| used.iter().any(|u| u == s))
+    // An explicit slug that is taken is a 409. A derived one is recomputed
+    // and retried when a concurrent create took it first.
+    if let Some(s) = &request.slug {
+        validate_slug(s).map_err(ApiError::bad_request)?;
+    }
+    let base = slugify(&name);
+    let mut attempt = 0;
+    let (tx, org) = loop {
+        attempt += 1;
+        let slug = match &request.slug {
+            Some(s) => s.clone(),
+            None => {
+                let used = rbac
+                    .store
+                    .slugs_like(&base)
+                    .await
+                    .map_err(|e| store_error(e, "Conflict"))?;
+                unique_slug(&base, &|s| used.iter().any(|u| u == s))
+            }
+        };
+        let tx = rbac
+            .store
+            .transaction()
+            .await
+            .map_err(|e| store_error(e, "Conflict"))?;
+        match tx.create_organization(&name, &slug, user).await {
+            Ok(org) => break (tx, org),
+            Err(StoreError::Conflict(c))
+                if request.slug.is_none() && attempt < 5 && c.contains("organizations_slug") => {}
+            Err(e) => return Err(store_error(e, "Conflict")),
         }
     };
-
-    let tx = rbac
-        .store
-        .transaction()
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?;
-    let org = tx
-        .create_organization(&name, &slug, user)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?;
     let resource = organization_ref(org.id);
     rbac.authz
         .touch(&[

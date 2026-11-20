@@ -80,8 +80,8 @@ db_test!(
     workspace_names_are_unique_per_organization,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let o1 = store.create_organization("o1", "ann").await.unwrap();
-        let o2 = store.create_organization("o2", "ann").await.unwrap();
+        let o1 = store.create_organization("o1", "o1", "ann").await.unwrap();
+        let o2 = store.create_organization("o2", "o2", "ann").await.unwrap();
         store.create_workspace(o1.id, "w", "ann").await.unwrap();
         assert!(matches!(
             store.create_workspace(o1.id, "w", "ann").await,
@@ -116,7 +116,7 @@ db_test!(
     object_update_with_a_stale_version_conflicts,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let o = store.create_organization("o", "ann").await.unwrap();
+        let o = store.create_organization("o", "o", "ann").await.unwrap();
         let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
         let obj = store
             .create_object(&NewObject {
@@ -154,7 +154,7 @@ db_test!(
 
 db_test!(deleting_a_workspace_deletes_its_objects, |store, _url| {
     store.create_user(&user("ann")).await.unwrap();
-    let o = store.create_organization("o", "ann").await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
     let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
     let obj = store
         .create_object(&NewObject {
@@ -176,7 +176,7 @@ db_test!(a_rolled_back_transaction_leaves_nothing, |store, url| {
     store.create_user(&user("ann")).await.unwrap();
 
     let tx = store.transaction().await.unwrap();
-    let o = tx.create_organization("o", "ann").await.unwrap();
+    let o = tx.create_organization("o", "o", "ann").await.unwrap();
     tx.create_workspace(o.id, "w", "ann").await.unwrap();
     tx.rollback().await.unwrap();
     assert!(store
@@ -188,14 +188,14 @@ db_test!(a_rolled_back_transaction_leaves_nothing, |store, url| {
     // Dropping without commit also rolls back. The pool has a single
     // connection, so a leaked open transaction would be reused below.
     let tx = store.transaction().await.unwrap();
-    let o2 = tx.create_organization("o2", "ann").await.unwrap();
+    let o2 = tx.create_organization("o2", "o2", "ann").await.unwrap();
     drop(tx);
     assert!(store
         .organizations_by_ids(&[o2.id])
         .await
         .unwrap()
         .is_empty());
-    let o4 = store.create_organization("o4", "ann").await.unwrap();
+    let o4 = store.create_organization("o4", "o4", "ann").await.unwrap();
     // Visible to a fresh connection only if committed, and no connection may
     // be left idle inside a transaction.
     let fresh = connect(&url).await;
@@ -220,14 +220,14 @@ db_test!(a_rolled_back_transaction_leaves_nothing, |store, url| {
     assert_eq!(idle, 0);
 
     let tx = store.transaction().await.unwrap();
-    let o3 = tx.create_organization("o3", "ann").await.unwrap();
+    let o3 = tx.create_organization("o3", "o3", "ann").await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(store.organizations_by_ids(&[o3.id]).await.unwrap().len(), 1);
 });
 
 db_test!(delete_organization_in_use_conflicts, |store, _url| {
     store.create_user(&user("ann")).await.unwrap();
-    let o = store.create_organization("o", "ann").await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
     let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
     assert!(matches!(
         store.delete_organization(o.id).await,
@@ -241,7 +241,7 @@ db_test!(
     renaming_a_workspace_to_an_existing_name_conflicts,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let o = store.create_organization("o", "ann").await.unwrap();
+        let o = store.create_organization("o", "o", "ann").await.unwrap();
         store.create_workspace(o.id, "a", "ann").await.unwrap();
         let b = store.create_workspace(o.id, "b", "ann").await.unwrap();
         assert!(matches!(
@@ -264,7 +264,7 @@ db_test!(
     connection_origin_migrates_old_rows_as_assigned,
     |store, url| {
         store.create_user(&user("ann")).await.unwrap();
-        let o = store.create_organization("o", "ann").await.unwrap();
+        let o = store.create_organization("o", "o", "ann").await.unwrap();
         store
             .create_connection("made", o.id, ConnectionOrigin::Created)
             .await
@@ -306,7 +306,7 @@ db_test!(
     a_delete_in_a_rolled_back_transaction_is_undone,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let o = store.create_organization("o", "ann").await.unwrap();
+        let o = store.create_organization("o", "o", "ann").await.unwrap();
         let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
         store
             .create_connection("c", o.id, ConnectionOrigin::Assigned)
@@ -414,8 +414,8 @@ db_test!(search_pages_report_the_full_total, |store, _url| {
 
 db_test!(search_organizations_by_name_or_id_prefix, |store, _url| {
     store.create_user(&user("ann")).await.unwrap();
-    let a = store.create_organization("Alpha", "ann").await.unwrap();
-    store.create_organization("Beta", "ann").await.unwrap();
+    let a = store.create_organization("Alpha", "alpha", "ann").await.unwrap();
+    store.create_organization("Beta", "beta", "ann").await.unwrap();
     let prefix = a.id.to_string()[..8].to_uppercase();
     let page = store
         .search_organizations(None, &search(Some(&prefix), None, 0))
@@ -445,8 +445,8 @@ db_test!(
     search_workspaces_matches_the_organization_name,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let on = store.create_organization("ON", "ann").await.unwrap();
-        let digital = store.create_organization("Digital", "ann").await.unwrap();
+        let on = store.create_organization("ON", "on", "ann").await.unwrap();
+        let digital = store.create_organization("Digital", "digital", "ann").await.unwrap();
         store
             .create_workspace(on.id, "Vendas", "ann")
             .await
@@ -493,8 +493,8 @@ db_test!(
     search_workspaces_keeps_same_named_organizations_apart,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let one = store.create_organization("Same", "ann").await.unwrap();
-        let two = store.create_organization("Same", "ann").await.unwrap();
+        let one = store.create_organization("Same", "same", "ann").await.unwrap();
+        let two = store.create_organization("Same", "same-2", "ann").await.unwrap();
         for org in [&one, &two] {
             for name in ["a", "z"] {
                 store.create_workspace(org.id, name, "ann").await.unwrap();
@@ -522,8 +522,8 @@ db_test!(
     all_connections_lists_every_tracked_connection,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let o1 = store.create_organization("o1", "ann").await.unwrap();
-        let o2 = store.create_organization("o2", "ann").await.unwrap();
+        let o1 = store.create_organization("o1", "o1", "ann").await.unwrap();
+        let o2 = store.create_organization("o2", "o2", "ann").await.unwrap();
         store
             .create_connection("c2", o2.id, ConnectionOrigin::Assigned)
             .await
@@ -542,7 +542,7 @@ db_test!(
 
 db_test!(role_restrictions_round_trip, |store, _url| {
     store.create_user(&user("ann")).await.unwrap();
-    let o = store.create_organization("o", "ann").await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
     let restrictions = Restrictions {
         row_filters: vec![
             RowFilter {
@@ -627,8 +627,8 @@ db_test!(
     moving_a_connection_changes_its_organization_and_origin,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let a = store.create_organization("a", "ann").await.unwrap();
-        let b = store.create_organization("b", "ann").await.unwrap();
+        let a = store.create_organization("a", "a", "ann").await.unwrap();
+        let b = store.create_organization("b", "b", "ann").await.unwrap();
         store
             .create_connection("x", a.id, ConnectionOrigin::Created)
             .await
@@ -646,9 +646,9 @@ db_test!(
     a_move_from_an_organization_it_left_changes_nothing,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let a = store.create_organization("a", "ann").await.unwrap();
-        let b = store.create_organization("b", "ann").await.unwrap();
-        let c = store.create_organization("c", "ann").await.unwrap();
+        let a = store.create_organization("a", "a", "ann").await.unwrap();
+        let b = store.create_organization("b", "b", "ann").await.unwrap();
+        let c = store.create_organization("c", "c", "ann").await.unwrap();
         store
             .create_connection("x", a.id, ConnectionOrigin::Created)
             .await
@@ -709,8 +709,8 @@ db_test!(
     delete_connection_of_requires_the_organization,
     |store, _url| {
         store.create_user(&user("ann")).await.unwrap();
-        let a = store.create_organization("a", "ann").await.unwrap();
-        let b = store.create_organization("b", "ann").await.unwrap();
+        let a = store.create_organization("a", "a", "ann").await.unwrap();
+        let b = store.create_organization("b", "b", "ann").await.unwrap();
         store
             .create_connection("c1", a.id, ConnectionOrigin::Assigned)
             .await
@@ -966,4 +966,13 @@ db_test!(import_keeps_global_knobs_out_of_default, |store, _url| {
     let row = store.data_source("default").await.unwrap().unwrap();
     assert!(!row.settings.contains_key("CUBEJS_DB_QUERY_TIMEOUT"), "{:?}", row.settings);
     assert_eq!(row.settings.get("CUBEJS_DB_HOST").map(String::as_str), Some("127.0.0.1"));
+});
+
+db_test!(a_taken_slug_conflicts_on_the_slug_index, |store, _url| {
+    store.create_user(&user("ann")).await.unwrap();
+    store.create_organization("A", "same", "ann").await.unwrap();
+    match store.create_organization("B", "same", "ann").await {
+        Err(StoreError::Conflict(c)) => assert!(c.contains("organizations_slug"), "{c}"),
+        other => panic!("expected a slug conflict, got {other:?}"),
+    }
 });
