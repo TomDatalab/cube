@@ -120,3 +120,17 @@ CREATE TABLE IF NOT EXISTS user_attributes (
     values text[] NOT NULL,
     PRIMARY KEY (user_id, name)
 );
+
+-- Every data source's settings, with or without an organization (with
+-- RBAC on they are kept here, not in cube.yml/.env). `settings` holds the
+-- plain `CUBEJS_DB_*` variables; `secrets` the secret ones as a JSON
+-- object sealed with AES-256-GCM under CUBE_RBAC_SECRET_KEY.
+CREATE TABLE IF NOT EXISTS data_sources (
+    id uuid UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+    name text PRIMARY KEY,
+    db_type text NOT NULL,
+    settings jsonb NOT NULL DEFAULT '{}',
+    secrets bytea,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  adminApi, assignableDataSources, attributesFromPairs, restrictionSummary, withImplied,
+  adminApi, assignableDataSources, attributesFromPairs, moveTargets, ownerLabel,
+  restrictionSummary, withImplied,
 } from '../pages/Admin/api';
 
 function answer(status: number, body: unknown) {
@@ -171,15 +172,29 @@ describe('the Admin page API client', () => {
     )).toEqual([{ name: 'a', type: null }]);
   });
 
-  it('unassigns a connection from its organization', async () => {
+  it('moves a connection to another organization', async () => {
     fetchMock.mockReturnValueOnce(answer(204, null));
 
-    await adminApi('/cube').unassignConnection('sales/eu');
+    await adminApi('/cube').moveConnection('sales/eu', 'o2');
 
     const { url, init } = lastCall();
     expect(url).toBe('/cube/v1/connections/sales%2Feu/organization');
-    expect(init.method).toBe('DELETE');
-    expect(init.body).toBeUndefined();
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ organizationId: 'o2' });
+  });
+
+  it('labels a data source by its owner', () => {
+    expect(ownerLabel({ organization: { id: 'o1', name: 'ON' } })).toBe('ON');
+    expect(ownerLabel({ organization: null })).toBe('Platform');
+    expect(ownerLabel({})).toBe('Platform');
+  });
+
+  it('offers every other organization to move to, by name', () => {
+    const org = (id: string, name: string) => ({
+      id, name, createdAt: '', createdBy: null,
+    });
+    expect(moveTargets([org('o1', 'ON'), org('o2', 'Digital'), org('o3', 'Agro')], 'o1'))
+      .toEqual([org('o3', 'Agro'), org('o2', 'Digital')]);
   });
 
   it('searches rules by workspace', async () => {

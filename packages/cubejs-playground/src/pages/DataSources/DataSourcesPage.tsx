@@ -10,6 +10,7 @@ import {
   message,
   Popconfirm,
   Row,
+  Select,
   Space,
   Table,
   Tag,
@@ -17,19 +18,25 @@ import {
   Typography,
 } from 'antd';
 import {
+  ApiOutlined,
   ArrowLeftOutlined,
   CheckCircleFilled,
   DatabaseOutlined,
   DeleteOutlined,
   EditOutlined,
+  HolderOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { usePlaygroundContext } from '../../hooks';
 import { onUnauthorized } from '../../shared/auth';
+import { adminApi, ownerLabel, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
+import { connectionLabel, DATA_SOURCE_DRAG_TYPE, deleteConfirmation } from './organizationDrop';
+import { OrganizationDropPanel } from './OrganizationDropPanel';
 import { Content, Header } from '../components/Ui';
 
 const { Title, Text, Paragraph } = Typography;
@@ -51,6 +58,8 @@ type Database = {
 };
 
 type DataSource = {
+  // With RBAC on, the id RBAC gave it.
+  id?: string | null;
   name: string;
   type: string;
   host?: string | null;
@@ -59,6 +68,10 @@ type DataSource = {
   user?: string | null;
   hasPassword?: boolean;
   active: boolean;
+  // With RBAC on, why its stored settings cannot be read.
+  error?: string;
+  // With RBAC on: the organization that owns it, `null` for none (Platform).
+  organization?: { id: string; name: string } | null;
 };
 
 type TestState = { loading?: boolean; ok?: boolean; error?: string };
@@ -126,6 +139,10 @@ function SettingControl({ setting, ...props }: { setting: Setting; [prop: string
 }
 
 export function DataSourcesPage() {
+  const { basePath = '', rbac = false } = usePlaygroundContext() || {};
+  const api = useMemo(() => adminApi(basePath), [basePath]);
+  // With RBAC on every new data source belongs to an organization.
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [connectors, setConnectors] = useState<string[]>([]);
   const [editable, setEditable] = useState(false);
@@ -167,6 +184,15 @@ export function DataSourcesPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!rbac) {
+      return;
+    }
+    api.organizations()
+      .then(setOrganizations)
+      .catch((e: any) => message.error(e.message));
+  }, [rbac, api]);
 
   async function testExisting(name: string) {
     setTests((t) => ({ ...t, [name]: { loading: true } }));
@@ -242,7 +268,11 @@ export function DataSourcesPage() {
         })
         : await request('playground/data-sources', {
           method: 'POST',
-          body: JSON.stringify({ name: values.name, variables: variables(values) }),
+          body: JSON.stringify({
+            name: values.name,
+            variables: variables(values),
+            ...(rbac ? { organizationId: values.organizationId } : {}),
+          }),
         });
       const verb = editing ? 'updated' : 'saved';
       closeForm();
@@ -303,96 +333,174 @@ export function DataSourcesPage() {
     form.resetFields();
   }
 
+  // With RBAC on, rows drag onto an organization of the side panel; never
+  // `default`, which stays Platform.
+  const draggable = (ds: DataSource) => rbac && ds.name !== 'default' && !restarting;
+
+  function statusTag(ds: DataSource) {
+    if (ds.error) {
+      return (
+        <Tooltip title={ds.error}>
+          <Tag color="red">Unreadable</Tag>
+        </Tooltip>
+      );
+    }
+    if (!ds.active) {
+      return <Tag color="orange">Restart pending</Tag>;
+    }
+    const test = tests[ds.name];
+    if (test?.ok) {
+      return <Tag color="green">Connected</Tag>;
+    }
+    if (test?.error) {
+      return (
+        <Tooltip title={test.error}>
+          <Tag color="red">Failed</Tag>
+        </Tooltip>
+      );
+    }
+    return <Tag>Not tested</Tag>;
+  }
+
   const columns = [
+    ...(rbac ? [{
+      key: 'drag',
+      width: 32,
+      render: (_: unknown, ds: DataSource) => (draggable(ds) ? (
+        <HolderOutlined title="Drag onto an organization" style={{ color: 'var(--pg-muted, #a1a1b5)' }} />
+      ) : null),
+    }] : []),
     {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',
-      render: (name: string) => <Text strong>{name}</Text>,
+      width: rbac ? 190 : undefined,
+      render: (name: string, ds: DataSource) => (
+        <div style={{ minWidth: 0 }}>
+          <Text strong>{name}</Text>
+          {rbac ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {statusTag(ds)}
+              {ds.id ? (
+              <Text
+                type="secondary"
+                copyable={{ text: ds.id, tooltips: ['Copy id', 'Copied'] }}
+                style={{ fontFamily: 'monospace', fontSize: 11 }}
+                title={ds.id}
+              >
+                {ds.id.slice(0, 8)}
+              </Text>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ),
     },
     {
       title: 'Type',
       dataIndex: 'type',
       key: 'type',
-      render: (type: string) => (
+      width: rbac ? 68 : undefined,
+      render: (type: string) => (rbac ? (
+        <Tooltip title={databaseOf(type)?.title || type}>
+          <span><DatabaseLogo db={databaseOf(type)} size={20} /></span>
+        </Tooltip>
+      ) : (
         <Space>
           <DatabaseLogo db={databaseOf(type)} size={20} />
           {databaseOf(type)?.title || type}
         </Space>
-      ),
+      )),
     },
-    {
-      title: 'Host',
-      key: 'host',
-      render: (_: unknown, ds: DataSource) => (ds.host ? `${ds.host}${ds.port ? `:${ds.port}` : ''}` : '—'),
-    },
-    {
-      title: 'Database',
-      dataIndex: 'database',
-      key: 'database',
-      render: (v?: string | null) => v || '—',
-    },
-    {
-      title: 'User',
-      dataIndex: 'user',
-      key: 'user',
-      render: (v?: string | null) => v || '—',
-    },
-    {
+    ...(rbac ? [{
+      title: 'Owner',
+      key: 'owner',
+      width: 100,
+      filters: [
+        ...organizations.map((o) => ({ text: o.name, value: o.name })),
+        { text: 'Platform', value: 'Platform' },
+      ],
+      onFilter: (value: string | number | boolean, ds: DataSource) => ownerLabel(ds) === value,
+      render: (_: unknown, ds: DataSource) => (ds.organization
+        ? ownerLabel(ds)
+        : <Tag title="Without an organization: for platform admins only">Platform</Tag>),
+    }] : []),
+    ...(rbac ? [{
+      title: 'Connection',
+      key: 'connection',
+      ellipsis: true,
+      render: (_: unknown, ds: DataSource) => {
+        const label = connectionLabel(ds);
+        return <span title={label}>{label}</span>;
+      },
+    }] : [
+      {
+        title: 'Host',
+        key: 'host',
+        render: (_: unknown, ds: DataSource) => (ds.host ? `${ds.host}${ds.port ? `:${ds.port}` : ''}` : '—'),
+      },
+      {
+        title: 'Database',
+        dataIndex: 'database',
+        key: 'database',
+        render: (v?: string | null) => v || '—',
+      },
+      {
+        title: 'User',
+        dataIndex: 'user',
+        key: 'user',
+        render: (v?: string | null) => v || '—',
+      },
+    ]),
+    ...(rbac ? [] : [{
       title: 'Status',
       key: 'status',
-      render: (_: unknown, ds: DataSource) => {
-        if (!ds.active) {
-          return <Tag color="orange">Restart pending</Tag>;
-        }
-        const test = tests[ds.name];
-        if (test?.ok) {
-          return <Tag color="green">Connected</Tag>;
-        }
-        if (test?.error) {
-          return (
-            <Tooltip title={test.error}>
-              <Tag color="red">Failed</Tag>
-            </Tooltip>
-          );
-        }
-        return <Tag>Not tested</Tag>;
-      },
-    },
+      render: (_: unknown, ds: DataSource) => statusTag(ds),
+    }]),
     {
       title: '',
       key: 'actions',
       align: 'right' as const,
+      // With RBAC the table shares the row with the organizations: the
+      // actions are icons, in a column of their own width.
+      ...(rbac ? { width: 100 } : {}),
       render: (_: unknown, ds: DataSource) => (
-        <Space>
-          <Button
-            size="small"
-            disabled={!ds.active}
-            loading={tests[ds.name]?.loading}
-            onClick={() => testExisting(ds.name)}
-          >
-            Test connection
-          </Button>
+        <Space size={rbac ? 4 : 8}>
+          <Tooltip title={rbac ? 'Test connection' : undefined}>
+            <Button
+              size="small"
+              icon={rbac ? <ApiOutlined /> : undefined}
+              aria-label="Test connection"
+              disabled={!ds.active}
+              loading={tests[ds.name]?.loading}
+              onClick={() => testExisting(ds.name)}
+            >
+              {rbac ? null : 'Test connection'}
+            </Button>
+          </Tooltip>
           {editable ? (
             <>
-              <Button
-                size="small"
-                icon={<EditOutlined />}
-                data-testid={`data-source-edit-${ds.name}`}
-                disabled={!!restarting}
-                onClick={() => startEdit(ds)}
-              >
-                Edit
-              </Button>
+              <Tooltip title={rbac ? 'Edit' : undefined}>
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  aria-label="Edit"
+                  data-testid={`data-source-edit-${ds.name}`}
+                  disabled={!!restarting || !!ds.error}
+                  onClick={() => startEdit(ds)}
+                >
+                  {rbac ? null : 'Edit'}
+                </Button>
+              </Tooltip>
               {ds.name === 'default' ? (
                 <Tooltip title="The default data source cannot be deleted">
-                  <Button size="small" danger icon={<DeleteOutlined />} disabled>
-                    Delete
+                  <Button size="small" danger icon={<DeleteOutlined />} aria-label="Delete" disabled>
+                    {rbac ? null : 'Delete'}
                   </Button>
                 </Tooltip>
               ) : (
                 <Popconfirm
-                  title={`Delete data source ${ds.name}? Its settings are removed from cube.yml and .env.`}
+                  title={deleteConfirmation(ds.name, rbac)}
                   okText="Delete"
                   okButtonProps={{ danger: true }}
                   onConfirm={() => remove(ds.name)}
@@ -401,11 +509,13 @@ export function DataSourcesPage() {
                     size="small"
                     danger
                     icon={<DeleteOutlined />}
+                    aria-label="Delete"
+                    title={rbac ? 'Delete' : undefined}
                     data-testid={`data-source-delete-${ds.name}`}
                     loading={deleting === ds.name}
                     disabled={!!restarting}
                   >
-                    Delete
+                    {rbac ? null : 'Delete'}
                   </Button>
                 </Popconfirm>
               )}
@@ -491,6 +601,23 @@ export function DataSourcesPage() {
               <Input placeholder="sales" disabled={!!editing} />
             </Form.Item>
 
+            {rbac && !editing ? (
+              <Form.Item
+                label="Organization"
+                name="organizationId"
+                extra="The organization that owns the data source. Its owners release it to their workspaces; only platform admins edit or delete it."
+                rules={[{ required: true, message: 'Choose the organization that owns the data source' }]}
+              >
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="Organization"
+                  aria-label="Organization"
+                  options={organizations.map((o) => ({ value: o.id, label: o.name }))}
+                />
+              </Form.Item>
+            ) : null}
+
             {db.settings.map((setting) => (setting.type === 'base64upload' ? (
               <Form.Item key={setting.env} label={setting.title}>
                 <Base64Upload
@@ -549,16 +676,25 @@ export function DataSourcesPage() {
             description={editing ? (
               <>
                 The connection is tested with the new settings first and saved only if it
-                works. Each setting is changed where it is read from: the variable{' '}
-                <Text code>cube.yml</Text> names for it, or <Text code>.env</Text>. The server
-                restarts to load it, which takes a few seconds.
+                works. {rbac ? (
+                  <>Its settings are saved in RBAC, the password encrypted.</>
+                ) : (
+                  <>
+                    Each setting is changed where it is read from: the variable{' '}
+                    <Text code>cube.yml</Text> names for it, or <Text code>.env</Text>.
+                  </>
+                )} The server restarts to load it, which takes a few seconds.
               </>
             ) : (
               <>
-                The connection is tested first and saved only if it works. The data source is
-                added to <Text code>cube.yml</Text>, its settings (password included) go to{' '}
-                <Text code>.env</Text>, and the server restarts to load it, which takes a few
-                seconds. Then point cubes at it with <Text code>data_source: &lt;name&gt;</Text>,
+                The connection is tested first and saved only if it works. {rbac ? (
+                  <>Its settings are saved in RBAC, the password encrypted,</>
+                ) : (
+                  <>
+                    The data source is added to <Text code>cube.yml</Text>, its settings (password
+                    included) go to <Text code>.env</Text>,
+                  </>
+                )} and the server restarts to load it, which takes a few seconds. Then point cubes at it with <Text code>data_source: &lt;name&gt;</Text>,
                 or generate them from the Data Model page.
               </>
             )}
@@ -618,13 +754,41 @@ export function DataSourcesPage() {
           </Card>
         ) : null}
 
-        <Table
-          rowKey="name"
-          loading={loading}
-          dataSource={dataSources}
-          columns={columns}
-          pagination={false}
-        />
+        <Row gutter={[24, 24]}>
+          <Col xs={24} xl={rbac ? 15 : 24}>
+            <Table<DataSource>
+              rowKey="name"
+              loading={loading}
+              dataSource={dataSources}
+              columns={columns}
+              pagination={false}
+              // Fixed widths, the Connection column takes the rest and ends
+              // in an ellipsis: no sideways scrolling.
+              tableLayout={rbac ? 'fixed' : undefined}
+              onRow={(ds) => (draggable(ds) ? {
+                draggable: true,
+                onDragStart: (e) => {
+                  e.dataTransfer.setData(DATA_SOURCE_DRAG_TYPE, ds.name);
+                  e.dataTransfer.effectAllowed = 'move';
+                },
+                style: { cursor: 'grab' },
+              } : {})}
+            />
+          </Col>
+          {rbac ? (
+            // Beside the table, as Admin → Users; below it on narrow screens.
+            <Col xs={24} xl={9}>
+              <Title level={5}>Organizations</Title>
+              <OrganizationDropPanel
+                api={api}
+                organizations={organizations}
+                dataSources={dataSources}
+                onChanged={load}
+                disabled={!!restarting}
+              />
+            </Col>
+          ) : null}
+        </Row>
       </Content>
     </Layout>
   );

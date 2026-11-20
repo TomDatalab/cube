@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod authz;
+pub mod bootstrap;
 pub mod config;
 pub mod dependencies;
 pub mod enforce;
@@ -9,6 +10,8 @@ pub mod fake;
 pub mod handlers;
 pub mod identity;
 pub mod restrictions;
+pub mod data_sources;
+pub mod secrets;
 pub mod store;
 
 use std::sync::Arc;

@@ -226,3 +226,62 @@ impl DataSourceSpec {
         })
     }
 }
+
+/// Data source `name` from its settings as `CUBEJS_DB_*` variables (the
+/// ones `default` reads; `CUBEJS_DB_TYPE` included), as RBAC keeps them.
+pub fn data_source_from_variables(
+    name: &str,
+    variables: &std::collections::BTreeMap<String, String>,
+) -> Result<DataSource> {
+    let mut env = Env::new();
+    for (var, value) in variables {
+        env.set(key_by_data_source(var, name), value.clone());
+    }
+    DataSourceSpec::default().resolve(name, &env, Path::new("RBAC data_sources"))
+}
+
+#[cfg(test)]
+mod from_variables_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn data_source_from_variables_resolves_fields() {
+        let ds = data_source_from_variables(
+            "sofiadb",
+            &vars(&[
+                ("CUBEJS_DB_TYPE", "clickhouse"),
+                ("CUBEJS_DB_HOST", "h"),
+                ("CUBEJS_DB_PORT", "8201"),
+                ("CUBEJS_DB_USER", "u"),
+                ("CUBEJS_DB_PASS", "p"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(ds.name, "sofiadb");
+        assert_eq!(ds.db_type, "clickhouse");
+        assert_eq!(ds.host.as_deref(), Some("h"));
+        assert_eq!(ds.port, Some(8201));
+        assert_eq!(ds.user.as_deref(), Some("u"));
+        assert_eq!(ds.password.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn data_source_from_variables_for_default() {
+        let ds = data_source_from_variables(
+            "default",
+            &vars(&[("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_NAME", "analytics")]),
+        )
+        .unwrap();
+        assert_eq!(ds.database.as_deref(), Some("analytics"));
+    }
+
+    #[test]
+    fn data_source_from_variables_unknown_type_errs() {
+        assert!(data_source_from_variables("x", &vars(&[("CUBEJS_DB_TYPE", "nope")])).is_err());
+    }
+}

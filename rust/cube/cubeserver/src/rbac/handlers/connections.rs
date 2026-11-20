@@ -6,16 +6,18 @@
 //! organization (a `connections` row and `connection#organization`). The
 //! organization's admins edit it with the data-source handlers and release
 //! it to the organization's workspaces (`connection#workspace`). A data
-//! source without an organization is for platform admins only.
+//! source without an organization ("Platform": `default` and those from
+//! before organizations owned every new one) is for platform admins only.
 //!
 //! A connection the organization created (`origin: created`) is edited and
 //! deleted by the organization's owners; a data source a platform admin
 //! assigned to it (`origin: assigned`) is only used and released by them:
-//! editing or deleting it is for platform admins, who can also unassign it.
+//! editing or deleting it is for platform admins, who can also move it to
+//! another organization or take it back to Platform (no organization).
 //!
 //! A connection the caller can neither query nor manage answers 404.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
@@ -32,6 +34,7 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::{self, data_source_types, CreateRequest, UpdateRequest};
+use crate::handlers::data_sources_rbac;
 use crate::rbac::store::{ConnectionOrigin, ConnectionRow, StoreError, Workspace};
 use crate::rbac::{
     authz_error, unavailable, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter,
@@ -129,6 +132,29 @@ pub async fn released_connections(
         .collect())
 }
 
+/// The organization holding each connection, as `{id, name}` by connection
+/// name; a data source missing here has none ("Platform"). 503 when the
+/// RBAC database cannot answer.
+pub(crate) async fn owners(rbac: &Rbac) -> Result<BTreeMap<String, Value>, ApiError> {
+    let rows = rbac.store.all_connections().await.map_err(read_error)?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.organization_id).collect();
+    let names: BTreeMap<Uuid, String> = rbac
+        .store
+        .organizations_by_ids(&ids)
+        .await
+        .map_err(read_error)?
+        .into_iter()
+        .map(|o| (o.id, o.name))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let name = names.get(&r.organization_id).cloned();
+            (r.name, json!({ "id": r.organization_id, "name": name }))
+        })
+        .collect())
+}
+
 /// The workspaces `name` is released to, as relationships.
 async fn releases_of(rbac: &Rbac, name: &str) -> Result<Vec<Relationship>, ApiError> {
     rbac.authz
@@ -194,7 +220,7 @@ pub async fn list(
         .connections_of_organization(org.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let types = data_source_types(&state);
+    let types = data_source_types(&state).await?;
     let mut connections = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut workspaces: Vec<String> = releases_of(rbac, &row.name)
@@ -256,25 +282,51 @@ pub async fn create(
     let (rbac, user) = caller(&state, &ctx)?;
     let org = visible_organization(rbac, &id, "manage_connections", user).await?;
     let request = body(request)?;
-    let name = request.name.trim().to_string();
-    data_sources::validate_name(&name)?;
+    if request.organization_id.is_some() {
+        return Err(ApiError::bad_request("organizationId comes from the path"));
+    }
+    let response = create_owned(&state, rbac, org.id, ConnectionOrigin::Created, request).await?;
+    Ok((StatusCode::CREATED, response).into_response())
+}
+
+/// Adds the data source of `request` as a connection of `org`. The row and
+/// `connection#organization` are written first, so the data source never
+/// exists without its organization; both are undone when it cannot be
+/// added. Answers what [`data_sources::create`] answers.
+pub(crate) async fn create_owned(
+    state: &AppState,
+    rbac: &Rbac,
+    org: Uuid,
+    origin: ConnectionOrigin,
+    request: CreateRequest,
+) -> Result<Response, ApiError> {
+    let _guard = data_sources::WRITE.lock().await;
+    let (name, variables) = data_sources::validated(&request)?;
     // A data source without an organization is not taken over.
-    if data_source_types(&state).contains_key(&name) {
+    if data_source_types(state).await?.contains_key(&name) {
         return Err(ApiError::bad_request(format!(
             "A data source named {name} already exists"
         )));
     }
+    data_sources_rbac::prepare_create(state, rbac, &name, &variables).await?;
+    let row = crate::rbac::data_sources::sealed(&rbac.config.secret_key, &name, &variables)
+        .map_err(ApiError::bad_request)?;
 
+    // The settings and the organization are written in one transaction:
+    // the data source never exists without its organization.
     let conflict = "A connection with this name already exists";
     let tx = rbac
         .store
         .transaction()
         .await
         .map_err(|e| store_error(e, conflict))?;
-    tx.create_connection(&name, org.id, ConnectionOrigin::Created)
+    tx.create_connection(&name, org, origin)
         .await
         .map_err(|e| store_error(e, conflict))?;
-    let relationship = organization_relationship(&name, org.id);
+    tx.put_data_source(&name, &row.db_type, &row.settings, row.secrets.as_deref())
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+    let relationship = organization_relationship(&name, org);
     rbac.authz
         .touch(std::slice::from_ref(&relationship))
         .await
@@ -285,20 +337,39 @@ pub async fn create(
             tracing::error!(connection = %name, "Cannot undo connection#organization: {e}");
         }
     };
-    let response = match data_sources::create(State(state.clone()), Json(request)).await {
-        Ok(response) => response.into_response(),
-        Err(e) => {
-            undo().await;
-            return Err(e);
-        }
-    };
     if let Err(e) = tx.commit().await {
-        // The data source stays, without an organization: platform admins
-        // can assign it.
         undo().await;
         return Err(store_error(e, conflict));
     }
-    Ok((StatusCode::CREATED, response).into_response())
+    tracing::info!(data_source = %name, "data source added for an organization (RBAC)");
+    let restarting = data_sources::restart_if_enabled(state, Vec::new(), Vec::new());
+    Ok(Json(json!({ "name": name, "restarting": restarting })).into_response())
+}
+
+/// `POST /v1/data-sources` and `POST /playground/data-sources` with RBAC
+/// on: platform admins add a data source for the organization
+/// `organizationId` names (`origin: assigned`). Without one, 400: every new
+/// data source belongs to an organization. A name a `connections` row still
+/// holds is refused first (409), so it cannot inherit that row's grants.
+pub(crate) async fn create_for_platform(
+    state: &AppState,
+    rbac: &Rbac,
+    request: CreateRequest,
+) -> Result<Response, ApiError> {
+    refuse_tracked_name(rbac, &request.name).await?;
+    let Some(id) = request.organization_id.as_deref() else {
+        return Err(ApiError::bad_request(
+            "Choose the organization that owns the data source",
+        ));
+    };
+    let org_id = resource_id(id, "organization")?;
+    let org = rbac
+        .store
+        .organization(org_id)
+        .await
+        .map_err(read_error)?
+        .ok_or_else(|| ApiError::not_found("organization not found"))?;
+    create_owned(state, rbac, org.id, ConnectionOrigin::Assigned, request).await
 }
 
 /// The body of `PUT /v1/data-sources/{name}`: `connection#manage` on a
@@ -393,9 +464,12 @@ pub(crate) async fn refuse_tracked_name(rbac: &Rbac, name: &str) -> Result<(), A
 }
 
 /// `{organizationId}`: platform admins. Assigns a data source of
-/// `cube.yml` to an organization (`origin: assigned`). `default` is never
-/// assigned (400); one that already belongs to another organization must be
-/// unassigned first (409). Assigning it again to its organization is a no-op.
+/// `cube.yml` to an organization (`origin: assigned`), or moves a
+/// connection another organization holds there: its releases to that
+/// organization's workspaces are withdrawn and it becomes `assigned` (its new
+/// organization did not create it). [`unassign_organization`] takes it back
+/// to Platform. `default` is never assigned (400). Assigning it again to its
+/// organization is a no-op.
 pub async fn assign_organization(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -418,7 +492,7 @@ pub async fn assign_organization(
         .await
         .map_err(|e| store_error(e, "Conflict"))?
         .ok_or_else(|| ApiError::not_found("organization not found"))?;
-    if !data_source_types(&state).contains_key(&name) {
+    if !data_source_types(&state).await?.contains_key(&name) {
         return Err(not_found());
     }
 
@@ -430,10 +504,10 @@ pub async fn assign_organization(
     let relationship = organization_relationship(&name, org.id);
     let conflict = "The connection changed concurrently; try again";
     match row {
-        Some(row) if row.organization_id != org.id => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "The connection belongs to another organization; unassign it first",
-        )),
+        Some(row) if row.organization_id != org.id => {
+            move_connection(rbac, &name, row.organization_id, org.id).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
         Some(_) => {
             // Already this organization's: repair the relationship only.
             rbac.authz
@@ -467,43 +541,130 @@ pub async fn assign_organization(
     }
 }
 
-/// Platform admins: takes the connection away from its organization. All
-/// its relationships (the organization and the releases to workspaces) go
-/// in one SpiceDB call, and the `connections` row with them; the data source
-/// stays in `cube.yml`, for platform admins only. 404 for a data source
-/// without an organization.
-pub async fn unassign_organization(
-    State(state): State<AppState>,
-    Extension(ctx): Extension<RequestContext>,
-    Path(name): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let (rbac, _) = caller(&state, &ctx)?;
-    require_platform_admin(&ctx, "unassign connections from organizations")?;
-    connection_name(&name)?;
+/// Moves the connection `name` from organization `from` to `to`: the row
+/// changes in a transaction, and one atomic SpiceDB write drops every
+/// release and the old `connection#organization` and adds the new one. A
+/// failed SpiceDB write rolls the row back; a failed commit writes the
+/// relationships back.
+async fn move_connection(rbac: &Rbac, name: &str, from: Uuid, to: Uuid) -> Result<(), ApiError> {
     let conflict = "The connection changed concurrently; try again";
+    let releases = releases_of(rbac, name).await?;
+    let old = organization_relationship(name, from);
+    let new = organization_relationship(name, to);
+    let mut updates: Vec<Update> = releases.iter().cloned().map(Update::Delete).collect();
+    updates.push(Update::Delete(old.clone()));
+    updates.push(Update::Touch(new.clone()));
+
     let tx = rbac
         .store
         .transaction()
         .await
         .map_err(|e| store_error(e, conflict))?;
     if !tx
-        .delete_connection(&name)
+        .move_connection(name, from, to)
         .await
         .map_err(|e| store_error(e, conflict))?
     {
-        return Err(not_found());
+        // Moved or deleted since it was read: its relationships are not
+        // the ones read above.
+        return Err(ApiError::new(StatusCode::CONFLICT, conflict));
     }
     rbac.authz
-        .delete_matching(&RelationshipFilter {
-            kind: "connection",
-            id: Some(name.clone()),
-            relation: None,
-            subject: None,
-        })
+        .write(&updates, &[])
         .await
-        // Dropping `tx` rolls the row delete back.
+        // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;
-    tx.commit().await.map_err(|e| store_error(e, conflict))?;
+    if let Err(e) = tx.commit().await {
+        let mut undo: Vec<Update> = releases.into_iter().map(Update::Touch).collect();
+        undo.push(Update::Touch(old));
+        undo.push(Update::Delete(new));
+        if let Err(err) = rbac.authz.write(&undo, &[]).await {
+            tracing::error!(connection = %name, "Cannot undo the move of the connection: {err}");
+        }
+        return Err(store_error(e, conflict));
+    }
+    Ok(())
+}
+
+/// `DELETE /v1/connections/{name}/organization` → 204: platform admins
+/// take a connection out of its organization, back to Platform. Its row is
+/// locked for the whole change, so a move waits. SpiceDB loses
+/// `connection#organization` and the releases to the organization's
+/// workspaces in one write; a release written while the releases were read
+/// cannot be after that write (a release requires `connection#organization`),
+/// so the releases read again after it are the late ones, and they go too.
+/// A failed SpiceDB write leaves everything; a failed commit writes the
+/// relationships back. `default` is 400; a connection without an
+/// organization (or none at all) 404.
+pub async fn unassign_organization(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let (rbac, _) = caller(&state, &ctx)?;
+    require_platform_admin(&ctx, "take connections out of organizations")?;
+    connection_name(&name)?;
+    if name == "default" {
+        return Err(ApiError::bad_request(
+            "The default data source always belongs to the platform",
+        ));
+    }
+    let conflict = "The connection changed concurrently; try again";
+    let tx = rbac
+        .store
+        .transaction()
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+    let row = tx
+        .lock_connection(&name)
+        .await
+        .map_err(|e| store_error(e, conflict))?
+        .ok_or_else(|| ApiError::not_found("This connection belongs to no organization"))?;
+    tx.delete_connection_of(&name, row.organization_id)
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+
+    let owner = organization_relationship(&name, row.organization_id);
+    let mut withdrawn = releases_of(rbac, &name).await?;
+    let mut updates: Vec<Update> = withdrawn.iter().cloned().map(Update::Delete).collect();
+    updates.push(Update::Delete(owner.clone()));
+    rbac.authz
+        .write(&updates, &[])
+        // Dropping `tx` rolls the row back.
+        .await
+        .map_err(authz_error)?;
+    let undo = |withdrawn: Vec<Relationship>| {
+        let mut undo: Vec<Update> = withdrawn.into_iter().map(Update::Touch).collect();
+        undo.push(Update::Touch(owner.clone()));
+        undo
+    };
+    let late = match releases_of(rbac, &name).await {
+        Ok(late) => late,
+        Err(e) => {
+            if let Err(err) = rbac.authz.write(&undo(withdrawn), &[]).await {
+                tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
+            }
+            return Err(e);
+        }
+    };
+    if !late.is_empty() {
+        let updates: Vec<Update> = late.iter().cloned().map(Update::Delete).collect();
+        let written = rbac.authz.write(&updates, &[]).await;
+        withdrawn.extend(late);
+        if let Err(e) = written {
+            if let Err(err) = rbac.authz.write(&undo(withdrawn), &[]).await {
+                tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
+            }
+            return Err(authz_error(e));
+        }
+    }
+    if let Err(e) = tx.commit().await {
+        if let Err(err) = rbac.authz.write(&undo(withdrawn), &[]).await {
+            tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
+        }
+        return Err(store_error(e, conflict));
+    }
+    tracing::info!(connection = %name, "connection taken back to Platform");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -585,7 +746,7 @@ pub async fn of_workspace(
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let ws = visible_workspace(rbac, &id, "view", user).await?;
-    let types = data_source_types(&state);
+    let types = data_source_types(&state).await?;
     let connections: Vec<Value> = released_connections(rbac, &ws.id.to_string())
         .await?
         .into_iter()

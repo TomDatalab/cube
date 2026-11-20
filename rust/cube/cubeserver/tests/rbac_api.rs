@@ -75,6 +75,10 @@ fn rbac_config(failure_delay: Duration) -> RbacConfig {
         failure_delay,
         max_concurrent_hashes: 4,
         hash_queue_wait: Duration::from_secs(2),
+        secret_key: cubeserver::rbac::secrets::SecretKey::from_base64(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        .unwrap(),
     }
 }
 
@@ -1777,8 +1781,11 @@ db_test!(org_owner_adds_a_connection_and_releases_it, |store| {
     let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["name"], "x");
+    // Kept in RBAC, not in the files.
+    let row = env.rbac.store.data_source("x").await.unwrap().unwrap();
+    assert_eq!(row.db_type, "sqlite");
     let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
-    assert!(yml.contains("  x:\n    type: sqlite\n"), "{yml}");
+    assert!(!yml.contains("  x:"), "{yml}");
     // The same name again, as `POST /v1/data-sources` answers it.
     let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -1854,8 +1861,7 @@ db_test!(org_owner_adds_a_connection_and_releases_it, |store| {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
-    assert!(!yml.contains("  x:"), "{yml}");
+    assert!(env.rbac.store.data_source("x").await.unwrap().is_none());
     assert!(env.rbac.store.connection("x").await.unwrap().is_none());
     assert!(released(env, &w1).await.is_empty());
     let connection = ObjectRef::new("connection", "x");
@@ -1944,18 +1950,6 @@ async fn assign(env: &Env, token: &str, name: &str, org: &str) -> StatusCode {
     .0
 }
 
-async fn unassign(env: &Env, token: &str, name: &str) -> StatusCode {
-    send(
-        &env.router,
-        Method::DELETE,
-        &format!("/cube/v1/connections/{name}/organization"),
-        Some(token),
-        None,
-    )
-    .await
-    .0
-}
-
 db_test!(assigning_an_existing_data_source_to_an_org, |store| {
     let dir = tempfile::tempdir().unwrap();
     let s = connections_scenario(store, &dir).await;
@@ -2025,19 +2019,8 @@ db_test!(assigning_an_existing_data_source_to_an_org, |store| {
         StatusCode::NO_CONTENT
     );
 
-    // Owned by A: another organization gets it only after an unassign.
+    // Owned by A: assigning it to B moves it there.
     let org_b = create_org(env, &s.admin, "B", "bia").await;
-    assert_eq!(
-        assign(env, &s.admin, "shared", &org_b).await,
-        StatusCode::CONFLICT
-    );
-    assert_eq!(released(env, &w1).await, ["shared"]);
-    let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
-    assert_eq!(row.organization_id.to_string(), s.org_a);
-    assert_eq!(
-        unassign(env, &s.admin, "shared").await,
-        StatusCode::NO_CONTENT
-    );
     assert_eq!(
         assign(env, &s.admin, "shared", &org_b).await,
         StatusCode::NO_CONTENT
@@ -2129,7 +2112,7 @@ db_test!(
     }
 );
 
-db_test!(unassigning_frees_the_connection_and_the_org, |store| {
+db_test!(moving_a_connection_withdraws_its_releases, |store| {
     let dir = tempfile::tempdir().unwrap();
     let s = connections_scenario(store, &dir).await;
     let env = &s.env;
@@ -2140,62 +2123,53 @@ db_test!(unassigning_frees_the_connection_and_the_org, |store| {
         StatusCode::NO_CONTENT
     );
     let wb = workspace_id(env, &bia, &org_b, "WB").await;
-    assert_eq!(
-        release(env, &bia, Method::PUT, &wb, "shared").await,
-        StatusCode::NO_CONTENT
-    );
+    let wb2 = workspace_id(env, &bia, &org_b, "WB2").await;
+    for ws in [&wb, &wb2] {
+        assert_eq!(
+            release(env, &bia, Method::PUT, ws, "shared").await,
+            StatusCode::NO_CONTENT
+        );
+    }
 
-    // Platform admins only; a data source without an organization is 404.
-    assert_eq!(unassign(env, &bia, "shared").await, StatusCode::FORBIDDEN);
+    // Platform admins only; `default` never moves; an unknown name is 404.
     assert_eq!(
-        unassign(env, &s.admin, "default").await,
+        assign(env, &bia, "shared", &s.org_a).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        assign(env, &s.admin, "default", &s.org_a).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        assign(env, &s.admin, "nope", &s.org_a).await,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(unassign(env, &s.admin, "nope").await, StatusCode::NOT_FOUND);
-
-    let delete_org = || async {
-        send(
-            &env.router,
-            Method::DELETE,
-            &format!("/cube/v1/organizations/{org_b}"),
-            Some(&bia),
-            None,
-        )
-        .await
-        .0
-    };
-    let (status, _) = send(
-        &env.router,
-        Method::DELETE,
-        &format!("/cube/v1/workspaces/{wb}"),
-        Some(&bia),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    // The connection still holds B.
-    assert_eq!(delete_org().await, StatusCode::BAD_REQUEST);
-
-    let wb2 = workspace_id(env, &bia, &org_b, "WB2").await;
+    // To its own organization: nothing changes.
     assert_eq!(
-        release(env, &bia, Method::PUT, &wb2, "shared").await,
+        assign(env, &s.admin, "shared", &org_b).await,
         StatusCode::NO_CONTENT
     );
-    // A failing SpiceDB write keeps the row: nothing changed.
+    assert_eq!(released(env, &wb).await, ["shared"]);
+
+    // A failing SpiceDB write keeps it where it was.
     env.authz.set_failing_writes(true);
     assert_eq!(
-        unassign(env, &s.admin, "shared").await,
+        assign(env, &s.admin, "shared", &s.org_a).await,
         StatusCode::SERVICE_UNAVAILABLE
     );
     env.authz.set_failing_writes(false);
-    assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
+    let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), org_b);
+    assert_eq!(released(env, &wb).await, ["shared"]);
     assert_eq!(released(env, &wb2).await, ["shared"]);
 
     assert_eq!(
-        unassign(env, &s.admin, "shared").await,
+        assign(env, &s.admin, "shared", &s.org_a).await,
         StatusCode::NO_CONTENT
     );
-    assert!(env.rbac.store.connection("shared").await.unwrap().is_none());
+    let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), s.org_a);
+    assert!(released(env, &wb).await.is_empty());
     assert!(released(env, &wb2).await.is_empty());
     let all = env
         .authz
@@ -2207,21 +2181,65 @@ db_test!(unassigning_frees_the_connection_and_the_org, |store| {
         })
         .await
         .unwrap();
-    assert!(all.is_empty(), "{all:?}");
-    // The data source stays in cube.yml.
-    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
-    assert!(yml.contains("  shared:"), "{yml}");
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].relation, "organization");
+    assert_eq!(all[0].subject.id, s.org_a);
 
+    // B holds no connection any more: once its workspaces go, it can go.
+    for ws in [&wb, &wb2] {
+        let (status, _) = send(
+            &env.router,
+            Method::DELETE,
+            &format!("/cube/v1/workspaces/{ws}"),
+            Some(&bia),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
     let (status, _) = send(
         &env.router,
         Method::DELETE,
-        &format!("/cube/v1/workspaces/{wb2}"),
+        &format!("/cube/v1/organizations/{org_b}"),
         Some(&bia),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(delete_org().await, StatusCode::NO_CONTENT);
+});
+
+db_test!(moving_a_created_connection_makes_it_assigned, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = add_connection(env, &s.ana, &s.org_a, "x", &dir).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(
+        release(env, &s.ana, Method::PUT, &w1, "x").await,
+        StatusCode::NO_CONTENT
+    );
+    let org_b = create_org(env, &s.admin, "B", "bia").await;
+    let bia = login_token(&env.router, "bia", "bia-password-1").await;
+    assert_eq!(
+        assign(env, &s.admin, "x", &org_b).await,
+        StatusCode::NO_CONTENT
+    );
+    let row = env.rbac.store.connection("x").await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), org_b);
+    assert_eq!(row.origin, ConnectionOrigin::Assigned);
+    assert!(released(env, &w1).await.is_empty());
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/connections/x",
+        Some(&bia),
+        Some(json!({ "variables": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let connection = ObjectRef::new("connection", "x");
+    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
 });
 
 db_test!(data_sources_routes_are_admin_only_with_rbac, |store| {
@@ -2404,6 +2422,8 @@ db_test!(a_recreated_data_source_inherits_no_grant, |store| {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(env.rbac.store.connection("x").await.unwrap().is_none());
     let database = dir.path().join("x2.db");
+    // Recreated for another organization: nothing of A's carries over.
+    let org_b = create_org(env, &s.admin, "B", "caio").await;
     let (status, body) = send(
         &env.router,
         Method::POST,
@@ -2411,6 +2431,7 @@ db_test!(a_recreated_data_source_inherits_no_grant, |store| {
         Some(&s.admin),
         Some(json!({
             "name": "x",
+            "organizationId": org_b,
             "variables": {
                 "CUBEJS_DB_TYPE": "sqlite",
                 "CUBEJS_DB_NAME": database.to_string_lossy(),
@@ -6973,3 +6994,488 @@ db_test!(
         assert!(service.sql(&ctx("caio"), request()).await.is_ok());
     }
 );
+
+/// `POST {path}` as a platform admin: a SQLite data source in `dir`, with
+/// `organization` as `organizationId` when given.
+async fn platform_create(
+    env: &Env,
+    token: &str,
+    path: &str,
+    name: &str,
+    organization: Option<&str>,
+    dir: &tempfile::TempDir,
+) -> (StatusCode, Value) {
+    let mut body = json!({
+        "name": name,
+        "variables": {
+            "CUBEJS_DB_TYPE": "sqlite",
+            "CUBEJS_DB_NAME": dir.path().join(format!("{name}.db")).to_string_lossy(),
+        }
+    });
+    if let Some(org) = organization {
+        body["organizationId"] = json!(org);
+    }
+    if path.starts_with("/playground") {
+        playground(&env.router, Method::POST, path, Some(token), Some(body)).await
+    } else {
+        send(&env.router, Method::POST, path, Some(token), Some(body)).await
+    }
+}
+
+/// Whether data source `name` exists: in RBAC, where a new one goes, or
+/// in `cube.yml`.
+async fn stored(env: &Env, dir: &tempfile::TempDir, name: &str) -> bool {
+    env.rbac.store.data_source(name).await.unwrap().is_some()
+        || std::fs::read_to_string(dir.path().join("cube.yml"))
+            .unwrap()
+            .contains(&format!("  {name}:"))
+}
+
+db_test!(platform_create_needs_an_organization, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let path = "/cube/v1/data-sources";
+    let (status, body) = platform_create(env, &s.admin, path, "x", None, &dir).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"],
+        "Choose the organization that owns the data source"
+    );
+    let unknown = uuid::Uuid::new_v4().to_string();
+    let (status, body) = platform_create(env, &s.admin, path, "x", Some(&unknown), &dir).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = platform_create(env, &s.admin, path, "x", Some("x"), &dir).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(!stored(env, &dir, "x").await);
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+});
+
+async fn assert_assigned_to(env: &Env, s: &Scenario, name: &str) {
+    let row = env.rbac.store.connection(name).await.unwrap().unwrap();
+    assert_eq!(row.organization_id.to_string(), s.org_a);
+    assert_eq!(row.origin, ConnectionOrigin::Assigned);
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let listed = list["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("{name} not listed: {list}"));
+    assert_eq!(listed["origin"], "assigned");
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/connections/{name}"),
+        Some(&s.ana),
+        Some(json!({ "variables": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+db_test!(platform_create_assigns_the_organization, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = platform_create(
+        env,
+        &s.admin,
+        "/cube/v1/data-sources",
+        "x",
+        Some(&s.org_a),
+        &dir,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stored(env, &dir, "x").await);
+    assert_assigned_to(env, &s, "x").await;
+});
+
+db_test!(playground_create_assigns_the_organization, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    let env = &s.env;
+    let (status, body) = platform_create(
+        env,
+        &s.admin,
+        "/playground/data-sources",
+        "x",
+        None,
+        &dir,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = platform_create(
+        env,
+        &s.admin,
+        "/playground/data-sources",
+        "x",
+        Some(&s.org_a),
+        &dir,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_assigned_to(env, &s, "x").await;
+});
+
+db_test!(a_failed_platform_create_leaves_no_row, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // SpiceDB refuses the write: nothing is added.
+    env.authz.set_failing_writes(true);
+    let (status, _) = platform_create(
+        env,
+        &s.admin,
+        "/cube/v1/data-sources",
+        "x",
+        Some(&s.org_a),
+        &dir,
+    )
+    .await;
+    env.authz.set_failing_writes(false);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(env.rbac.store.connection("x").await.unwrap().is_none());
+    assert!(!stored(env, &dir, "x").await);
+
+    // The connection does not connect: the row and the relationship go.
+    let (status, _) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "broken",
+            "organizationId": s.org_a,
+            "variables": {
+                "CUBEJS_DB_TYPE": "postgres",
+                "CUBEJS_DB_HOST": "127.0.0.1",
+                "CUBEJS_DB_PORT": "1",
+                "CUBEJS_DB_NAME": "x",
+                "CUBEJS_DB_USER": "x",
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(env.rbac.store.connection("broken").await.unwrap().is_none());
+    let organization = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "connection",
+            id: Some("broken".into()),
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(organization.is_empty(), "{organization:?}");
+    assert!(!stored(env, &dir, "broken").await);
+});
+
+db_test!(org_create_refuses_an_organization_in_the_body, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{}/connections", s.org_a),
+        Some(&s.ana),
+        Some(json!({
+            "name": "x",
+            "organizationId": s.org_a,
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": dir.path().join("x.db").to_string_lossy(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "organizationId comes from the path");
+    assert!(!stored(env, &dir, "x").await);
+});
+
+db_test!(data_sources_list_shows_the_owner, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(
+        assign(env, &s.admin, "shared", &s.org_a).await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/data-sources",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let of = |name: &str| {
+        body["dataSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|ds| ds["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} not listed: {body}"))
+    };
+    assert_eq!(
+        of("shared")["organization"],
+        json!({ "id": s.org_a, "name": "A" })
+    );
+    assert_eq!(of("default")["organization"], Value::Null);
+    assert!(of("default").as_object().unwrap().contains_key("organization"));
+});
+
+db_test!(rbac_data_sources_live_in_rbac_not_in_the_files, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = scenario_with(store, playground_server(&dir)).await;
+    let env = &s.env;
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    let dot_env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    let database = dir.path().join("s.db").to_string_lossy().into_owned();
+
+    // Created: in RBAC, with an id, the password sealed; files untouched.
+    let (status, body) = playground(
+        &env.router,
+        Method::POST,
+        "/playground/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "s",
+            "organizationId": s.org_a,
+            "variables": {
+                "CUBEJS_DB_TYPE": "sqlite",
+                "CUBEJS_DB_NAME": database,
+                "CUBEJS_DB_PASS": "s-password",
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = env.rbac.store.data_source("s").await.unwrap().unwrap();
+    assert_eq!(row.settings.get("CUBEJS_DB_NAME"), Some(&database));
+    assert!(!row.settings.contains_key("CUBEJS_DB_PASS"));
+    assert!(row.secrets.is_some());
+    assert_eq!(std::fs::read_to_string(dir.path().join("cube.yml")).unwrap(), yml);
+    assert_eq!(std::fs::read_to_string(dir.path().join(".env")).unwrap(), dot_env);
+
+    // Listed with its id, next to the file's `default` (no id).
+    let (status, body) = playground(&env.router, Method::GET, "/playground/data-sources", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = body["dataSources"].as_array().unwrap();
+    let entry = listed.iter().find(|d| d["name"] == "s").expect("s listed");
+    assert_eq!(entry["id"], json!(row.id.to_string()), "{body}");
+    assert_eq!(entry["type"], "sqlite");
+    assert_eq!(entry["database"], json!(database));
+    assert_eq!(entry["hasPassword"], true);
+    assert_eq!(entry["organization"]["id"], json!(s.org_a));
+    assert!(listed.iter().any(|d| d["name"] == "default"), "{body}");
+
+    // Read back without the secret.
+    let (status, body) = playground(&env.router, Method::GET, "/playground/data-sources/s", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.to_string().contains("s-password"), "{body}");
+    assert_eq!(body["hasPassword"], true, "{body}");
+    assert_eq!(body["variables"]["CUBEJS_DB_NAME"], json!(database));
+
+    // An edit with the password left empty keeps it.
+    let other = dir.path().join("s2.db").to_string_lossy().into_owned();
+    let (status, body) = playground(
+        &env.router,
+        Method::PUT,
+        "/playground/data-sources/s",
+        Some(&s.admin),
+        Some(json!({ "variables": { "CUBEJS_DB_NAME": other, "CUBEJS_DB_PASS": "" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let key = env.rbac.config.secret_key.clone();
+    let stored = cubeserver::rbac::data_sources::load(&env.rbac.store, &key, "s").await.unwrap().unwrap();
+    assert_eq!(stored.variables.get("CUBEJS_DB_NAME"), Some(&other));
+    assert_eq!(stored.variables.get("CUBEJS_DB_PASS").map(String::as_str), Some("s-password"));
+    assert_eq!(row.id, stored.id);
+    assert_eq!(std::fs::read_to_string(dir.path().join("cube.yml")).unwrap(), yml);
+
+    // The same name again is refused.
+    let (status, body) = playground(
+        &env.router,
+        Method::POST,
+        "/playground/data-sources",
+        Some(&s.admin),
+        Some(json!({
+            "name": "s",
+            "organizationId": s.org_a,
+            "variables": { "CUBEJS_DB_TYPE": "sqlite", "CUBEJS_DB_NAME": database }
+        })),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+
+    // Deleted: gone from RBAC, files still untouched.
+    let (status, body) = playground(&env.router, Method::DELETE, "/playground/data-sources/s", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.data_source("s").await.unwrap().is_none());
+    assert_eq!(std::fs::read_to_string(dir.path().join("cube.yml")).unwrap(), yml);
+    let (status, _) = playground(&env.router, Method::GET, "/playground/data-sources/s", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+async fn unassign(env: &Env, token: &str, name: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/connections/{name}/organization"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+db_test!(unassign_returns_a_connection_to_platform, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    assert_eq!(release(env, &s.ana, Method::PUT, &w1, "shared").await, StatusCode::NO_CONTENT);
+    assert_eq!(released(env, &w1).await, ["shared"]);
+
+    let (status, body) = unassign(env, &s.admin, "shared").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(env.rbac.store.connection("shared").await.unwrap().is_none());
+    assert!(released(env, &w1).await.is_empty());
+    let connection = ObjectRef::new("connection", "shared");
+    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+    assert!(!env.authz.check(&connection, "query", "ana").await.unwrap());
+
+    // Platform again: it can be assigned anew.
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
+});
+
+db_test!(unassign_is_for_platform_admins, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    let (status, body) = unassign(env, &s.ana, "shared").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
+});
+
+db_test!(unassign_default_or_unknown, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    let (status, body) = unassign(env, &s.admin, "default").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // Platform already, or no such data source.
+    let (status, body) = unassign(env, &s.admin, "shared").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = unassign(env, &s.admin, "nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+});
+
+db_test!(a_failed_spicedb_write_unassigns_nothing, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    env.authz.set_failing_writes(true);
+    let (status, _) = unassign(env, &s.admin, "shared").await;
+    env.authz.set_failing_writes(false);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
+    let connection = ObjectRef::new("connection", "shared");
+    assert!(env.authz.check(&connection, "manage", "ana").await.unwrap());
+});
+
+db_test!(unassign_withdraws_a_release_written_while_it_ran, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let w2 = workspace_id(env, &s.ana, &s.org_a, "W2").await;
+    assert_eq!(release(env, &s.ana, Method::PUT, &w1, "shared").await, StatusCode::NO_CONTENT);
+    // A release to W2 lands right after the unassignment read the releases.
+    env.authz.add_after_next_read(vec![Relationship {
+        resource: ObjectRef::new("connection", "shared"),
+        relation: "workspace",
+        subject: ObjectRef::new("workspace", w2.clone()),
+    }]);
+
+    let (status, body) = unassign(env, &s.admin, "shared").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(released(env, &w1).await.is_empty());
+    assert!(released(env, &w2).await.is_empty(), "the late release dangles");
+
+    // Given to the organization again, it is released nowhere.
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    assert!(released(env, &w2).await.is_empty());
+});
+
+db_test!(a_damaged_data_source_does_not_break_the_listings, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // Secrets no key opens (sealed under another key, or damaged).
+    env.rbac
+        .store
+        .put_data_source("broken", "postgres", &Default::default(), Some(b"not sealed by this key"))
+        .await
+        .unwrap();
+
+    let (status, body) = send(&env.router, Method::GET, "/cube/v1/data-sources", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = body["dataSources"].as_array().unwrap();
+    let broken = list.iter().find(|d| d["name"] == "broken").expect("broken is listed");
+    assert_eq!(broken["type"], "postgres");
+    assert!(broken["error"].as_str().is_some_and(|e| !e.is_empty()), "{broken}");
+    assert!(list.iter().any(|d| d["name"] == "shared"), "{body}");
+
+    // What only needs the names and types does not decrypt at all.
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let (status, body) = workspace_connections(env, &s.ana, &w1).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+
+    // As the listing advises, it can be deleted.
+    let (status, body) = send(&env.router, Method::DELETE, "/cube/v1/data-sources/broken", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.data_source("broken").await.unwrap().is_none());
+});
+
+db_test!(deleting_a_data_source_the_file_also_declares_removes_it_there, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // `shared` moved into RBAC (edited) while cube.yml still declares it.
+    let vars = [("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_HOST", "db2")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let key = env.rbac.config.secret_key.clone();
+    cubeserver::rbac::data_sources::save(&env.rbac.store, &key, "shared", &vars).await.unwrap();
+
+    let (status, body) = send(&env.router, Method::DELETE, "/cube/v1/data-sources/shared", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.data_source("shared").await.unwrap().is_none());
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(!yml.contains("  shared:"), "{yml}");
+});

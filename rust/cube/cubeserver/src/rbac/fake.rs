@@ -76,6 +76,7 @@ pub struct FakeAuthz {
     relationships: Mutex<Vec<Relationship>>,
     failing: AtomicBool,
     failing_writes: AtomicBool,
+    after_next_read: Mutex<Vec<Relationship>>,
 }
 
 impl FakeAuthz {
@@ -91,6 +92,12 @@ impl FakeAuthz {
     /// passed.
     pub fn set_failing_writes(&self, failing: bool) {
         self.failing_writes.store(failing, Ordering::SeqCst);
+    }
+
+    /// Adds `relationships` right after the next read answers: a write
+    /// another request made between a read and the writes it informed.
+    pub fn add_after_next_read(&self, relationships: Vec<Relationship>) {
+        *self.after_next_read.lock().unwrap() = relationships;
     }
 
     fn write_guard(&self) -> Result<(), AuthzError> {
@@ -210,12 +217,18 @@ impl Authz for FakeAuthz {
 
     async fn read(&self, filter: &RelationshipFilter) -> Result<Vec<Relationship>, AuthzError> {
         self.guard()?;
-        let rels = self.relationships.lock().unwrap();
-        Ok(rels
+        let mut rels = self.relationships.lock().unwrap();
+        let found = rels
             .iter()
             .filter(|r| matches(filter, r))
             .cloned()
-            .collect())
+            .collect();
+        for r in std::mem::take(&mut *self.after_next_read.lock().unwrap()) {
+            if !rels.contains(&r) {
+                rels.push(r);
+            }
+        }
+        Ok(found)
     }
 
     async fn touch(&self, relationships: &[Relationship]) -> Result<(), AuthzError> {

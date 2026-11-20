@@ -622,3 +622,348 @@ db_test!(deleting_a_user_deletes_their_attributes, |store, url| {
         .get(0);
     assert_eq!(left, 0);
 });
+
+db_test!(
+    moving_a_connection_changes_its_organization_and_origin,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let a = store.create_organization("a", "ann").await.unwrap();
+        let b = store.create_organization("b", "ann").await.unwrap();
+        store
+            .create_connection("x", a.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
+        assert!(store.move_connection("x", a.id, b.id).await.unwrap());
+        let row = store.connection("x").await.unwrap().unwrap();
+        assert_eq!(row.organization_id, b.id);
+        assert_eq!(row.origin, ConnectionOrigin::Assigned);
+        assert!(!store.move_connection("nope", a.id, b.id).await.unwrap());
+        assert!(store.delete_organization(a.id).await.unwrap());
+    }
+);
+
+db_test!(
+    a_move_from_an_organization_it_left_changes_nothing,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let a = store.create_organization("a", "ann").await.unwrap();
+        let b = store.create_organization("b", "ann").await.unwrap();
+        let c = store.create_organization("c", "ann").await.unwrap();
+        store
+            .create_connection("x", a.id, ConnectionOrigin::Created)
+            .await
+            .unwrap();
+        // Another move took it to B first: the one from A to C finds nothing.
+        assert!(store.move_connection("x", a.id, b.id).await.unwrap());
+        assert!(!store.move_connection("x", a.id, c.id).await.unwrap());
+        let row = store.connection("x").await.unwrap().unwrap();
+        assert_eq!(row.organization_id, b.id);
+    }
+);
+
+db_test!(data_sources_put_get_list_delete, |store, _url| {
+    let settings: std::collections::BTreeMap<String, String> =
+        [("CUBEJS_DB_HOST".to_string(), "h".to_string())].into();
+    let id = store
+        .put_data_source("zeta", "postgres", &settings, Some(b"sealed"))
+        .await
+        .unwrap();
+    store
+        .put_data_source("alpha", "sqlite", &Default::default(), None)
+        .await
+        .unwrap();
+
+    let row = store.data_source("zeta").await.unwrap().unwrap();
+    assert_eq!(row.id, id);
+    assert_eq!(row.db_type, "postgres");
+    assert_eq!(row.settings, settings);
+    assert_eq!(row.secrets.as_deref(), Some(&b"sealed"[..]));
+    assert!(store.data_source("nobody").await.unwrap().is_none());
+
+    // Putting it again replaces the settings and keeps the id.
+    let other: std::collections::BTreeMap<String, String> =
+        [("CUBEJS_DB_HOST".to_string(), "h2".to_string())].into();
+    let again = store
+        .put_data_source("zeta", "postgres", &other, None)
+        .await
+        .unwrap();
+    assert_eq!(again, id);
+    let row = store.data_source("zeta").await.unwrap().unwrap();
+    assert_eq!(row.settings, other);
+    assert!(row.secrets.is_none());
+
+    let names: Vec<String> = store
+        .data_sources()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, ["alpha", "zeta"]);
+
+    assert!(store.delete_data_source("zeta").await.unwrap());
+    assert!(!store.delete_data_source("zeta").await.unwrap());
+});
+
+db_test!(
+    delete_connection_of_requires_the_organization,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let a = store.create_organization("a", "ann").await.unwrap();
+        let b = store.create_organization("b", "ann").await.unwrap();
+        store
+            .create_connection("c1", a.id, ConnectionOrigin::Assigned)
+            .await
+            .unwrap();
+
+        let tx = store.transaction().await.unwrap();
+        assert!(!tx.delete_connection_of("c1", b.id).await.unwrap());
+        tx.commit().await.unwrap();
+        assert!(store.connection("c1").await.unwrap().is_some());
+
+        let tx = store.transaction().await.unwrap();
+        assert!(tx.delete_connection_of("c1", a.id).await.unwrap());
+        tx.commit().await.unwrap();
+        assert!(store.connection("c1").await.unwrap().is_none());
+    }
+);
+
+db_test!(save_then_load_decrypts, |store, url| {
+    use base64::Engine;
+    use cubeserver::rbac::data_sources::{load, load_all, save};
+    use cubeserver::rbac::secrets::SecretKey;
+    let key = SecretKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([7u8; 32]))
+        .unwrap();
+    let vars: std::collections::BTreeMap<String, String> = [
+        ("CUBEJS_DB_TYPE", "postgres"),
+        ("CUBEJS_DB_HOST", "h"),
+        ("CUBEJS_DB_PASS", "very-secret-pw"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let id = save(&store, &key, "sales", &vars).await.unwrap();
+    let got = load(&store, &key, "sales").await.unwrap().unwrap();
+    assert_eq!(got.id, id);
+    assert_eq!(got.variables, vars);
+    assert_eq!(load_all(&store, &key).await.unwrap(), vec![got]);
+    assert!(load(&store, &key, "nobody").await.unwrap().is_none());
+
+    // The password is not in the database in the clear.
+    let c = connect(&url).await;
+    let row = c
+        .query_one(
+            "SELECT settings::text, encode(secrets, 'escape') FROM data_sources WHERE name = 'sales'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let settings: String = row.get(0);
+    let secrets: String = row.get(1);
+    assert!(!settings.contains("very-secret-pw") && !secrets.contains("very-secret-pw"));
+    assert!(settings.contains("CUBEJS_DB_HOST"));
+
+    // Without CUBEJS_DB_TYPE it is refused.
+    let mut untyped = vars.clone();
+    untyped.remove("CUBEJS_DB_TYPE");
+    assert!(save(&store, &key, "x", &untyped).await.is_err());
+});
+
+fn pg_vars(password: &str) -> std::collections::BTreeMap<String, String> {
+    [("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_HOST", "h"), ("CUBEJS_DB_PASS", password)]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+db_test!(a_secret_opens_only_for_its_own_data_source, |store, url| {
+    use cubeserver::rbac::data_sources::{load, save};
+    let key = bootstrap_support::key();
+    save(&store, &key, "a", &pg_vars("a-password")).await.unwrap();
+    save(&store, &key, "b", &pg_vars("b-password")).await.unwrap();
+    // a's sealed secrets copied onto b.
+    let c = connect(&url).await;
+    c.execute(
+        "UPDATE data_sources SET secrets = (SELECT secrets FROM data_sources WHERE name = 'a') WHERE name = 'b'",
+        &[],
+    )
+    .await
+    .unwrap();
+    let err = load(&store, &key, "b").await.unwrap_err();
+    assert!(err.contains('b'), "{err}");
+    assert!(load(&store, &key, "a").await.is_ok());
+});
+
+db_test!(secrets_sealed_before_the_binding_are_resealed_at_start, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    use cubeserver::rbac::data_sources::load;
+    // As the first release sealed them: no associated data.
+    let secret = serde_json::to_vec(&std::collections::BTreeMap::from([(
+        "CUBEJS_DB_PASS".to_string(),
+        "old-password".to_string(),
+    )]))
+    .unwrap();
+    let settings = std::collections::BTreeMap::from([("CUBEJS_DB_HOST".to_string(), "h".to_string())]);
+    store
+        .put_data_source("old", "postgres", &settings, Some(&key().seal(&secret, b"")))
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cube.yml"), "version: 1\nmodel_path: model\n").unwrap();
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &cubeconfig::Env::new()).unwrap();
+
+    let report = data_sources_from_rbac(&store, &key(), &mut config, None, &cubeconfig::Env::new())
+        .await
+        .unwrap();
+    assert_eq!(report.loaded, 1);
+    let stored = load(&store, &key(), "old").await.unwrap().unwrap();
+    assert_eq!(stored.variables.get("CUBEJS_DB_PASS").map(String::as_str), Some("old-password"));
+    let row = store.data_source("old").await.unwrap().unwrap();
+    assert!(key().open(row.secrets.as_deref().unwrap(), b"").is_err(), "still sealed the old way");
+});
+
+db_test!(damaged_settings_are_an_error_not_an_empty_data_source, |store, url| {
+    use cubeserver::rbac::data_sources::{load, load_each, save};
+    let key = bootstrap_support::key();
+    save(&store, &key, "bad", &pg_vars("p")).await.unwrap();
+    save(&store, &key, "good", &pg_vars("p")).await.unwrap();
+    let c = connect(&url).await;
+    c.execute("UPDATE data_sources SET settings = '[1, 2]' WHERE name = 'bad'", &[])
+        .await
+        .unwrap();
+    let err = load(&store, &key, "bad").await.unwrap_err();
+    assert!(err.contains("bad"), "{err}");
+    // One at a time, the good one still loads.
+    let each = load_each(&store, &key).await.unwrap();
+    assert_eq!(each.len(), 2);
+    assert!(each.iter().any(|r| matches!(r, Ok(ds) if ds.name == "good")));
+    assert!(each.iter().any(|r| matches!(r, Err(e) if e.name == "bad" && e.db_type == "postgres")));
+});
+
+mod bootstrap_support {
+    use base64::Engine;
+    use cubeserver::rbac::secrets::SecretKey;
+
+    pub fn key() -> SecretKey {
+        SecretKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])).unwrap()
+    }
+
+    pub const CUBE_YML: &str = "version: 1\nmodel_path: model\n\ndata_sources:\n  default:\n    type: postgres\n    host: 127.0.0.1\n    database: analytics\n    password: pg-secret\n\n  # Added from the Playground.\n  extra:\n    type: sqlite\n\nscheduled_refresh:\n  enabled: false\n";
+    pub const DOT_ENV: &str = "PORT=4000\n# extra\nCUBEJS_DS_EXTRA_DB_NAME=/tmp/x.db\n";
+
+    /// A deployment directory with `cube.yml` and `.env`.
+    pub fn deployment() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cube.yml"), CUBE_YML).unwrap();
+        std::fs::write(dir.path().join(".env"), DOT_ENV).unwrap();
+        dir
+    }
+
+    pub fn env_of(dir: &std::path::Path) -> cubeconfig::Env {
+        let mut env = cubeconfig::Env::new();
+        env.set("CUBEJS_DS_EXTRA_DB_NAME", "/tmp/x.db");
+        // A global knob, not a setting of `default`.
+        env.set("CUBEJS_DB_QUERY_TIMEOUT", "30");
+        let _ = dir;
+        env
+    }
+}
+
+db_test!(import_moves_file_data_sources_into_rbac, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+
+    let report = data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env)
+        .await
+        .unwrap();
+    assert_eq!(report.imported, ["default", "extra"]);
+    assert_eq!(report.loaded, 2);
+
+    let names: Vec<String> = store.data_sources().await.unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, ["default", "extra"]);
+    let yml = std::fs::read_to_string(&file).unwrap();
+    assert!(!yml.contains("extra:") && !yml.contains("pg-secret"), "{yml}");
+    assert!(yml.contains("scheduled_refresh"), "{yml}");
+    let dot_env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert!(!dot_env.contains("CUBEJS_DS_EXTRA_"), "{dot_env}");
+    assert!(dot_env.contains("PORT=4000"));
+    let backups: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".bak-"))
+        .collect();
+    assert!(backups.iter().any(|n| n.starts_with("cube.yml.bak-")), "{backups:?}");
+    assert!(backups.iter().any(|n| n.starts_with(".env.bak-")), "{backups:?}");
+
+    assert_eq!(config.data_sources["extra"].database.as_deref(), Some("/tmp/x.db"));
+    assert_eq!(config.data_sources["default"].password.as_deref(), Some("pg-secret"));
+    assert_eq!(report.env.get("CUBEJS_DS_EXTRA_DB_NAME").map(String::as_str), Some("/tmp/x.db"));
+    assert_eq!(report.env.get("CUBEJS_DB_PASS").map(String::as_str), Some("pg-secret"));
+});
+
+db_test!(import_is_idempotent, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+    data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env).await.unwrap();
+    let yml = std::fs::read_to_string(&file).unwrap();
+
+    // The stripped cube.yml loads, with no data source of its own.
+    let mut again = cubeconfig::CubeConfig::load_declared(dir.path(), &cubeconfig::Env::new()).unwrap();
+    assert!(again.data_sources.is_empty());
+    let report = data_sources_from_rbac(&store, &key(), &mut again, Some(&file), &cubeconfig::Env::new())
+        .await
+        .unwrap();
+    assert!(report.imported.is_empty());
+    assert_eq!(report.loaded, 2);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), yml);
+    assert_eq!(again.data_sources["extra"].database.as_deref(), Some("/tmp/x.db"));
+});
+
+db_test!(a_partial_strip_is_finished_on_the_next_start, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    use cubeserver::rbac::data_sources::save;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    // RBAC already holds both (an earlier start imported them), but the
+    // files were never stripped.
+    for (name, vars) in [
+        ("default", vec![("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_HOST", "127.0.0.1")]),
+        ("extra", vec![("CUBEJS_DB_TYPE", "sqlite"), ("CUBEJS_DB_NAME", "/tmp/x.db")]),
+    ] {
+        let vars = vars.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        save(&store, &key(), name, &vars).await.unwrap();
+    }
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+    let report = data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env)
+        .await
+        .unwrap();
+    assert!(report.imported.is_empty());
+    let yml = std::fs::read_to_string(&file).unwrap();
+    assert!(!yml.contains("extra:") && !yml.contains("pg-secret"), "{yml}");
+    let dot_env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert!(!dot_env.contains("CUBEJS_DS_EXTRA_"), "{dot_env}");
+});
+
+db_test!(import_keeps_global_knobs_out_of_default, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+    data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env).await.unwrap();
+    let row = store.data_source("default").await.unwrap().unwrap();
+    assert!(!row.settings.contains_key("CUBEJS_DB_QUERY_TIMEOUT"), "{:?}", row.settings);
+    assert_eq!(row.settings.get("CUBEJS_DB_HOST").map(String::as_str), Some("127.0.0.1"));
+});

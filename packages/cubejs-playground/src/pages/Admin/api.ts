@@ -179,6 +179,17 @@ export type DataSource = { name: string; type: string | null };
 
 // The data sources a platform admin can assign to an organization: never
 // `default`, and none that already belongs to an organization.
+// The owner of a data source as the Data Source page lists it: its
+// organization's name, or `Platform` for one without an organization.
+export function ownerLabel(ds: { organization?: { id: string; name: string } | null }): string {
+  return ds.organization?.name || 'Platform';
+}
+
+// The organizations a connection of `current` can move to, by name.
+export function moveTargets(orgs: Organization[], current: string): Organization[] {
+  return orgs.filter((o) => o.id !== current).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function assignableDataSources(sources: DataSource[], owned: Iterable<string>): DataSource[] {
   const taken = new Set(owned);
   return sources.filter((ds) => ds.name !== 'default' && !taken.has(ds.name));
@@ -370,10 +381,15 @@ export function adminApi(basePath: string) {
     assignConnection: (name: string, org: string) => call(
       'PUT', `/v1/connections/${id(name)}/organization`, { organizationId: org }
     ),
-    // Takes the connection away from its organization, with every release
-    // to its workspaces; the data source itself stays.
+    // Takes the connection out of its organization (back to Platform);
+    // its releases to that organization's workspaces are withdrawn.
     unassignConnection: (name: string) => call(
       'DELETE', `/v1/connections/${id(name)}/organization`
+    ),
+    // Moves the connection to another organization; its releases to the
+    // old one's workspaces are withdrawn.
+    moveConnection: (name: string, org: string) => call(
+      'PUT', `/v1/connections/${id(name)}/organization`, { organizationId: org }
     ),
     release: (ws: string, name: string) => call(
       'PUT', `/v1/workspaces/${id(ws)}/connections/${id(name)}`
