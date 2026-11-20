@@ -15,6 +15,7 @@ use super::{body, caller, existing_user, resource_id, resource_name, store_error
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
+use crate::rbac::slug::{slugify, unique_slug, validate_slug};
 use crate::rbac::store::{Organization, StoreError};
 use crate::rbac::{
     authz_error, platform, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter, Update,
@@ -25,6 +26,7 @@ use crate::services::RequestContext;
 #[serde(deny_unknown_fields)]
 pub struct CreateOrganization {
     name: String,
+    slug: Option<String>,
     owner: String,
 }
 
@@ -46,6 +48,7 @@ fn view(org: &Organization) -> Value {
     json!({
         "id": org.id,
         "name": org.name,
+        "slug": org.slug,
         "createdAt": org.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "createdBy": org.created_by,
     })
@@ -100,13 +103,29 @@ pub async fn create(
         ));
     }
 
+    let slug = match &request.slug {
+        Some(s) => {
+            validate_slug(s).map_err(ApiError::bad_request)?;
+            s.clone()
+        }
+        None => {
+            let base = slugify(&name);
+            let used = rbac
+                .store
+                .slugs_like(&base)
+                .await
+                .map_err(|e| store_error(e, "Conflict"))?;
+            unique_slug(&base, &|s| used.iter().any(|u| u == s))
+        }
+    };
+
     let tx = rbac
         .store
         .transaction()
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     let org = tx
-        .create_organization(&name, user)
+        .create_organization(&name, &slug, user)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     let resource = organization_ref(org.id);

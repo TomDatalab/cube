@@ -588,6 +588,7 @@ mod tests {
         Organization {
             id: O,
             name: "Acme".into(),
+            slug: "acme".into(),
             created_at: Utc::now(),
             created_by: "x".into(),
         }

@@ -7479,3 +7479,91 @@ db_test!(deleting_a_data_source_the_file_also_declares_removes_it_there, |store|
     let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
     assert!(!yml.contains("  shared:"), "{yml}");
 });
+
+async fn post_org(env: &Env, token: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/organizations",
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+db_test!(organizations_get_a_slug, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let token = login_token(&env.router, ADMIN, ADMIN_PASSWORD).await;
+    let (status, body) = post_org(&env, &token, json!({ "name": "Digital", "owner": ADMIN })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["slug"], "digital");
+    let (_, body) = post_org(&env, &token, json!({ "name": "Digital", "owner": ADMIN })).await;
+    assert_eq!(body["slug"], "digital-2");
+    let (status, body) = post_org(
+        &env,
+        &token,
+        json!({ "name": "X", "slug": "_platform", "owner": ADMIN }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = post_org(
+        &env,
+        &token,
+        json!({ "name": "On", "slug": "on", "owner": ADMIN }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["slug"], "on");
+    let (status, body) = post_org(
+        &env,
+        &token,
+        json!({ "name": "On again", "slug": "on", "owner": ADMIN }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+});
+
+db_test!(renaming_keeps_the_slug, |store| {
+    let env = env(store, Duration::ZERO).await;
+    let token = login_token(&env.router, ADMIN, ADMIN_PASSWORD).await;
+    let org = create_org(&env, &token, "Digital", ADMIN).await;
+    let (status, body) = send(
+        &env.router,
+        Method::PATCH,
+        &format!("/cube/v1/organizations/{org}"),
+        Some(&token),
+        Some(json!({ "name": "Outro" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "Outro");
+    assert_eq!(body["slug"], "digital");
+});
+
+#[tokio::test]
+async fn backfill_fills_existing_rows() {
+    let Some(db) = TestDb::create().await else {
+        return;
+    };
+    let store = db.store.clone();
+    let raw = support::connect(&support::with_db(&db.admin_url, &db.name)).await;
+    let result = tokio::spawn(async move {
+        raw.execute(
+            "INSERT INTO organizations (id, name, created_by, created_at) \
+             VALUES (gen_random_uuid(), 'Digital', 'x', now() - interval '1 day'), \
+                    (gen_random_uuid(), 'Digital', 'x', now())",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.backfill_slugs().await.unwrap(), 2);
+        // The oldest keeps the bare slug.
+        let first = store.organization_by_slug("digital").await.unwrap().unwrap();
+        let second = store.organization_by_slug("digital-2").await.unwrap().unwrap();
+        assert!(first.created_at < second.created_at);
+        assert_eq!(store.backfill_slugs().await.unwrap(), 0);
+    })
+    .await;
+    db.drop_db().await;
+    result.unwrap();
+}

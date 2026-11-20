@@ -12,6 +12,7 @@ pub mod identity;
 pub mod restrictions;
 pub mod data_sources;
 pub mod secrets;
+pub mod slug;
 pub mod store;
 
 use std::sync::Arc;
@@ -70,6 +71,10 @@ impl Rbac {
         let store = Store::connect(&config.db_url)
             .await
             .map_err(|e| format!("Cannot open the RBAC database (CUBE_APP_DB_URL): {e}"))?;
+        store
+            .backfill_slugs()
+            .await
+            .map_err(|e| format!("Cannot fill the organization slugs: {e}"))?;
         Self::with_parts(authz, store, config).await
     }
 
