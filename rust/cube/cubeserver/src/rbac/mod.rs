@@ -56,7 +56,7 @@ pub struct Rbac {
     /// Serializes policy refreshes, so an older policy never replaces a newer.
     pub(crate) refresh_lock: tokio::sync::Mutex<()>,
     /// A background retry of a failed refresh is running.
-    pub(crate) refresh_retrying: std::sync::atomic::AtomicBool,
+    pub(crate) refresh_retry: Arc<ownership::RetryState>,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -114,7 +114,7 @@ impl Rbac {
             running: Default::default(),
             data_source_names: Default::default(),
             refresh_lock: Default::default(),
-            refresh_retrying: Default::default(),
+            refresh_retry: Default::default(),
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)

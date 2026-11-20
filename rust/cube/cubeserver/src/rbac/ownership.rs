@@ -124,23 +124,135 @@ pub async fn refresh_after_commit(state: &AppState) -> Vec<Rejection> {
     }
 }
 
-fn spawn_retry(state: AppState) {
-    let Some(rbac) = state.rbac.clone() else {
-        return;
-    };
-    if rbac.refresh_retrying.swap(true, Ordering::SeqCst) {
-        return;
+/// Pending work of the background retry: how many refreshes were asked for,
+/// and whether a task is serving them.
+#[derive(Debug, Default)]
+pub struct RetryState {
+    requested: AtomicU64,
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl RetryState {
+    /// Records that a refresh is owed. `true` when the caller must start the
+    /// task (none is running).
+    fn request(&self) -> bool {
+        self.requested.fetch_add(1, Ordering::SeqCst);
+        !self.running.swap(true, Ordering::SeqCst)
     }
-    tokio::spawn(async move {
-        let mut delay = std::time::Duration::from_secs(1);
-        for _ in 0..12 {
+}
+
+/// Clears `running` when dropped, panic included.
+struct ClearOnDrop<'a>(&'a RetryState);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.running.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Serves the requests: tries `refresh` with backoff until it succeeds (or
+/// `tries` run out), then starts over if a request came in meanwhile.
+async fn drive<F, Fut>(state: &RetryState, mut refresh: F, first_delay: std::time::Duration, tries: u32)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    loop {
+        // Every request up to here is satisfied by an attempt started after.
+        let target = state.requested.load(Ordering::SeqCst);
+        let guard = ClearOnDrop(state);
+        let mut delay = first_delay;
+        for _ in 0..tries {
             tokio::time::sleep(delay).await;
-            if refresh_policy(&state).await.is_ok() {
-                tracing::info!("The ownership policy is refreshed");
+            if refresh().await {
                 break;
             }
             delay = (delay * 2).min(std::time::Duration::from_secs(30));
         }
-        rbac.refresh_retrying.store(false, Ordering::SeqCst);
+        // Clear the flag first, then look for a request that raced the exit:
+        // a requester either sees the flag cleared (and starts its own task)
+        // or bumped the counter before this check.
+        drop(guard);
+        if state.requested.load(Ordering::SeqCst) == target || state.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+    }
+}
+
+fn spawn_retry(state: AppState) {
+    let Some(rbac) = state.rbac.clone() else {
+        return;
+    };
+    let retry = rbac.refresh_retry.clone();
+    if !retry.request() {
+        return;
+    }
+    tokio::spawn(async move {
+        drive(
+            &retry,
+            || {
+                let state = state.clone();
+                async move {
+                    let ok = refresh_policy(&state).await.is_ok();
+                    if ok {
+                        tracing::info!("The ownership policy is refreshed");
+                    }
+                    ok
+                }
+            },
+            std::time::Duration::from_secs(1),
+            12,
+        )
+        .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_request_during_the_last_attempt_is_not_lost() {
+        let state = Arc::new(RetryState::default());
+        assert!(state.request());
+        // Only one task at a time.
+        assert!(!state.request());
+
+        let calls = AtomicU64::new(0);
+        let s = state.clone();
+        drive(
+            &state,
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                let s = s.clone();
+                async move {
+                    // A new failure is reported while the first attempt runs.
+                    if n == 0 {
+                        assert!(!s.request());
+                    }
+                    true
+                }
+            },
+            std::time::Duration::from_millis(1),
+            3,
+        )
+        .await;
+        // The second request got its own attempt, and the flag is free.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(state.request());
+    }
+
+    #[tokio::test]
+    async fn a_panic_does_not_leave_the_flag_set() {
+        let state = Arc::new(RetryState::default());
+        assert!(state.request());
+        let s = state.clone();
+        let result = tokio::spawn(async move {
+            drive(&s, || async { panic!("boom") }, std::time::Duration::from_millis(1), 1).await
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(state.request());
+    }
 }
