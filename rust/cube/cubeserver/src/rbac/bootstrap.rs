@@ -12,6 +12,7 @@ use cubeconfig::{data_source_from_variables, CubeConfig, Env};
 use super::data_sources::{load_all, save};
 use super::secrets::SecretKey;
 use super::store::Store;
+use crate::orchestrator_adapter::MANAGED_FIELDS;
 use crate::handlers::data_sources::{
     current_variables, env_keys, env_with_file, header, own_setting, remove_from_config, update_env,
     write_atomically,
@@ -69,13 +70,13 @@ pub async fn data_sources_from_rbac(
         if !stored.contains(name) {
             let variables = current_variables(cube_config, name, env)
                 .map_err(|e| format!("data source {name}: {}", e.body.error))?;
-            candidates.push((name.clone(), variables));
+            candidates.push((name.clone(), own_settings(name, variables)));
         }
     }
     if !stored.contains("default") && !cube_config.data_sources.contains_key("default") {
         if let Ok(from_env) = CubeConfig::from_env_with(env) {
             if let Ok(variables) = current_variables(&from_env, "default", env) {
-                candidates.push(("default".to_string(), variables));
+                candidates.push(("default".to_string(), own_settings("default", variables)));
             }
         }
     }
@@ -86,9 +87,12 @@ pub async fn data_sources_from_rbac(
         report.imported.push(name.clone());
     }
 
-    // The files no longer declare what RBAC now holds.
-    if let Some(file) = config_file.filter(|_| !report.imported.is_empty()) {
-        strip_files(file, cube_config, &report.imported)?;
+    // The files no longer declare what RBAC now holds: everything they
+    // declare is in RBAC by now. Done on every start, so a strip an earlier
+    // start could not finish is finished.
+    let declared: Vec<String> = cube_config.data_sources.keys().cloned().collect();
+    if let Some(file) = config_file.filter(|_| !declared.is_empty()) {
+        strip_files(file, cube_config, &declared)?;
     }
 
     let mut loaded = load_all(store, key).await?;
@@ -110,6 +114,16 @@ pub async fn data_sources_from_rbac(
     Ok(report)
 }
 
+/// What of `variables` belongs to data source `name` alone: for `default`,
+/// whose variables are the global `CUBEJS_DB_*`, only the settings the Data
+/// Source page manages (not tuning knobs like `CUBEJS_DB_QUERY_TIMEOUT`).
+fn own_settings(name: &str, mut variables: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if name == "default" {
+        variables.retain(|var, _| MANAGED_FIELDS.contains(&var.as_str()));
+    }
+    variables
+}
+
 /// Backs up `cube.yml` and `.env`, then takes `names` out of both: their
 /// blocks from `cube.yml`, their own `CUBEJS_DS_<NAME>_*` lines from `.env`.
 /// Variables a block only refers to (`{ env: SOFIADB_HOST }`, `default`'s
@@ -117,6 +131,16 @@ pub async fn data_sources_from_rbac(
 fn strip_files(file: &Path, cube_config: &CubeConfig, names: &[String]) -> Result<(), String> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let env_file = file.with_file_name(".env");
+    let sources: Vec<&str> = cube_config.data_sources.keys().map(String::as_str).collect();
+    let env_lines = |name: &str| -> Vec<String> {
+        if name == "default" {
+            return Vec::new();
+        }
+        env_keys(&env_file)
+            .into_iter()
+            .filter(|k| own_setting(k, name, &sources).is_some())
+            .collect()
+    };
     let backup = |path: &Path| -> Result<(), String> {
         if path.exists() {
             let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -126,27 +150,35 @@ fn strip_files(file: &Path, cube_config: &CubeConfig, names: &[String]) -> Resul
         }
         Ok(())
     };
-    backup(file)?;
-    backup(&env_file)?;
 
-    let mut text = std::fs::read_to_string(file)
+    let original = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let mut text = original.clone();
     for name in names {
-        if let Some(updated) = remove_from_config(&text, name) {
-            text = updated;
+        match remove_from_config(&text, name) {
+            Some(updated) => text = updated,
+            None => eprintln!(
+                "⚠️  data source {name} is in RBAC but its block in {} could not be taken out; remove it by hand",
+                file.display()
+            ),
         }
     }
-    write_atomically(file, &text).map_err(|e| e.body.error)?;
+    let env_changes: Vec<(&String, Vec<String>)> = names
+        .iter()
+        .map(|name| (name, env_lines(name)))
+        .filter(|(_, lines)| !lines.is_empty())
+        .collect();
+    if text == original && env_changes.is_empty() {
+        return Ok(());
+    }
 
-    let sources: Vec<&str> = cube_config.data_sources.keys().map(String::as_str).collect();
-    for name in names.iter().filter(|n| n.as_str() != "default") {
-        let remove: Vec<String> = env_keys(&env_file)
-            .into_iter()
-            .filter(|k| own_setting(k, name, &sources).is_some())
-            .collect();
-        if !remove.is_empty() {
-            update_env(&env_file, &[], &remove, &header(name), true).map_err(|e| e.body.error)?;
-        }
+    backup(file)?;
+    backup(&env_file)?;
+    if text != original {
+        write_atomically(file, &text).map_err(|e| e.body.error)?;
+    }
+    for (name, remove) in env_changes {
+        update_env(&env_file, &[], &remove, &header(name), true).map_err(|e| e.body.error)?;
     }
     Ok(())
 }

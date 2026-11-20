@@ -335,6 +335,24 @@ export function DataSourcesPage() {
   // `default`, which stays Platform.
   const draggable = (ds: DataSource) => rbac && ds.name !== 'default' && !restarting;
 
+  function statusTag(ds: DataSource) {
+    if (!ds.active) {
+      return <Tag color="orange">Restart pending</Tag>;
+    }
+    const test = tests[ds.name];
+    if (test?.ok) {
+      return <Tag color="green">Connected</Tag>;
+    }
+    if (test?.error) {
+      return (
+        <Tooltip title={test.error}>
+          <Tag color="red">Failed</Tag>
+        </Tooltip>
+      );
+    }
+    return <Tag>Not tested</Tag>;
+  }
+
   const columns = [
     ...(rbac ? [{
       key: 'drag',
@@ -347,12 +365,14 @@ export function DataSourcesPage() {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',
-      width: rbac ? 210 : undefined,
+      width: rbac ? 190 : undefined,
       render: (name: string, ds: DataSource) => (
         <div style={{ minWidth: 0 }}>
           <Text strong>{name}</Text>
-          {ds.id ? (
-            <div>
+          {rbac ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {statusTag(ds)}
+              {ds.id ? (
               <Text
                 type="secondary"
                 copyable={{ text: ds.id, tooltips: ['Copy id', 'Copied'] }}
@@ -361,6 +381,7 @@ export function DataSourcesPage() {
               >
                 {ds.id.slice(0, 8)}
               </Text>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -370,18 +391,22 @@ export function DataSourcesPage() {
       title: 'Type',
       dataIndex: 'type',
       key: 'type',
-      width: rbac ? 130 : undefined,
-      render: (type: string) => (
+      width: rbac ? 56 : undefined,
+      render: (type: string) => (rbac ? (
+        <Tooltip title={databaseOf(type)?.title || type}>
+          <span><DatabaseLogo db={databaseOf(type)} size={20} /></span>
+        </Tooltip>
+      ) : (
         <Space>
           <DatabaseLogo db={databaseOf(type)} size={20} />
           {databaseOf(type)?.title || type}
         </Space>
-      ),
+      )),
     },
     ...(rbac ? [{
       title: 'Owner',
       key: 'owner',
-      width: 110,
+      width: 100,
       filters: [
         ...organizations.map((o) => ({ text: o.name, value: o.name })),
         { text: 'Platform', value: 'Platform' },
@@ -418,35 +443,18 @@ export function DataSourcesPage() {
         render: (v?: string | null) => v || '—',
       },
     ]),
-    {
+    ...(rbac ? [] : [{
       title: 'Status',
       key: 'status',
-      width: rbac ? 110 : undefined,
-      render: (_: unknown, ds: DataSource) => {
-        if (!ds.active) {
-          return <Tag color="orange">Restart pending</Tag>;
-        }
-        const test = tests[ds.name];
-        if (test?.ok) {
-          return <Tag color="green">Connected</Tag>;
-        }
-        if (test?.error) {
-          return (
-            <Tooltip title={test.error}>
-              <Tag color="red">Failed</Tag>
-            </Tooltip>
-          );
-        }
-        return <Tag>Not tested</Tag>;
-      },
-    },
+      render: (_: unknown, ds: DataSource) => statusTag(ds),
+    }]),
     {
       title: '',
       key: 'actions',
       align: 'right' as const,
       // With RBAC the table shares the row with the organizations: the
       // actions are icons, in a column of their own width.
-      ...(rbac ? { width: 112 } : {}),
+      ...(rbac ? { width: 100 } : {}),
       render: (_: unknown, ds: DataSource) => (
         <Space size={rbac ? 4 : 8}>
           <Tooltip title={rbac ? 'Test connection' : undefined}>
@@ -728,7 +736,7 @@ export function DataSourcesPage() {
           </Card>
         ) : null}
 
-        <Row gutter={24}>
+        <Row gutter={[24, 24]}>
           <Col xs={24} xl={rbac ? 15 : 24}>
             <Table<DataSource>
               rowKey="name"
@@ -750,6 +758,7 @@ export function DataSourcesPage() {
             />
           </Col>
           {rbac ? (
+            // Beside the table, as Admin → Users; below it on narrow screens.
             <Col xs={24} xl={9}>
               <Title level={5}>Organizations</Title>
               <OrganizationDropPanel

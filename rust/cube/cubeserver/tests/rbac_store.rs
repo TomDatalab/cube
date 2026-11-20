@@ -791,6 +791,8 @@ mod bootstrap_support {
     pub fn env_of(dir: &std::path::Path) -> cubeconfig::Env {
         let mut env = cubeconfig::Env::new();
         env.set("CUBEJS_DS_EXTRA_DB_NAME", "/tmp/x.db");
+        // A global knob, not a setting of `default`.
+        env.set("CUBEJS_DB_QUERY_TIMEOUT", "30");
         let _ = dir;
         env
     }
@@ -852,4 +854,44 @@ db_test!(import_is_idempotent, |store, _url| {
     assert_eq!(report.loaded, 2);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), yml);
     assert_eq!(again.data_sources["extra"].database.as_deref(), Some("/tmp/x.db"));
+});
+
+db_test!(a_partial_strip_is_finished_on_the_next_start, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    use cubeserver::rbac::data_sources::save;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    // RBAC already holds both (an earlier start imported them), but the
+    // files were never stripped.
+    for (name, vars) in [
+        ("default", vec![("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_HOST", "127.0.0.1")]),
+        ("extra", vec![("CUBEJS_DB_TYPE", "sqlite"), ("CUBEJS_DB_NAME", "/tmp/x.db")]),
+    ] {
+        let vars = vars.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        save(&store, &key(), name, &vars).await.unwrap();
+    }
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+    let report = data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env)
+        .await
+        .unwrap();
+    assert!(report.imported.is_empty());
+    let yml = std::fs::read_to_string(&file).unwrap();
+    assert!(!yml.contains("extra:") && !yml.contains("pg-secret"), "{yml}");
+    let dot_env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert!(!dot_env.contains("CUBEJS_DS_EXTRA_"), "{dot_env}");
+});
+
+db_test!(import_keeps_global_knobs_out_of_default, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+    data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env).await.unwrap();
+    let row = store.data_source("default").await.unwrap().unwrap();
+    assert!(!row.settings.contains_key("CUBEJS_DB_QUERY_TIMEOUT"), "{:?}", row.settings);
+    assert_eq!(row.settings.get("CUBEJS_DB_HOST").map(String::as_str), Some("127.0.0.1"));
 });

@@ -7404,3 +7404,22 @@ db_test!(a_failed_spicedb_write_unassigns_nothing, |store| {
     let connection = ObjectRef::new("connection", "shared");
     assert!(env.authz.check(&connection, "manage", "ana").await.unwrap());
 });
+
+db_test!(deleting_a_data_source_the_file_also_declares_removes_it_there, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // `shared` moved into RBAC (edited) while cube.yml still declares it.
+    let vars = [("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_HOST", "db2")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let key = env.rbac.config.secret_key.clone();
+    cubeserver::rbac::data_sources::save(&env.rbac.store, &key, "shared", &vars).await.unwrap();
+
+    let (status, body) = send(&env.router, Method::DELETE, "/cube/v1/data-sources/shared", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.data_source("shared").await.unwrap().is_none());
+    let yml = std::fs::read_to_string(dir.path().join("cube.yml")).unwrap();
+    assert!(!yml.contains("  shared:"), "{yml}");
+});

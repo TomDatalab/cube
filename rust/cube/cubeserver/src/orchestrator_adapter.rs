@@ -112,6 +112,28 @@ impl EnvSource for DeclaredEnv {
     }
 }
 
+/// The settings of a data source the Data Source form edits, as `default`
+/// names them.
+pub const MANAGED_FIELDS: &[&str] = &[
+    "CUBEJS_DB_TYPE",
+    "CUBEJS_DB_URL",
+    "CUBEJS_DB_HOST",
+    "CUBEJS_DB_PORT",
+    "CUBEJS_DB_NAME",
+    "CUBEJS_DB_SCHEMA",
+    "CUBEJS_DB_USER",
+    "CUBEJS_DB_PASS",
+    "CUBEJS_DB_SSL",
+];
+
+fn managed(d: &DeclaredDataSources, key: &str) -> bool {
+    d.db_types.keys().any(|name| {
+        MANAGED_FIELDS
+            .iter()
+            .any(|field| key_by_data_source(field, name) == key)
+    })
+}
+
 fn declared_lookup(
     declared: Option<&DeclaredDataSources>,
     key: &str,
@@ -124,6 +146,11 @@ fn declared_lookup(
     let wins = key == "CUBEJS_DATASOURCES" || declared.is_some_and(|d| d.authoritative);
     if wins && value.is_some() {
         return value;
+    }
+    // A setting the Data Source page manages is RBAC's alone: one it
+    // cleared must not come back from a `.env` line.
+    if declared.is_some_and(|d| d.authoritative && managed(d, key)) {
+        return None;
     }
     process(key).or(value)
 }
@@ -412,7 +439,7 @@ mod declared_lookup_tests {
                 ("CUBEJS_DATASOURCES".to_string(), "default".to_string()),
             ]
             .into(),
-            db_types: HashMap::new(),
+            db_types: [("default".to_string(), "postgres".to_string())].into(),
             authoritative,
         }
     }
@@ -422,6 +449,7 @@ mod declared_lookup_tests {
             "CUBEJS_DB_PASS" => Some("from-dotenv".into()),
             "CUBEJS_DB_QUERY_TIMEOUT" => Some("30".into()),
             "CUBEJS_DATASOURCES" => Some("default,old".into()),
+            "CUBEJS_DB_SCHEMA" => Some("left-in-dotenv".into()),
             _ => None,
         }
     }
@@ -440,5 +468,15 @@ mod declared_lookup_tests {
         let d = declared(false);
         assert_eq!(declared_lookup(Some(&d), "CUBEJS_DB_PASS", process).as_deref(), Some("from-dotenv"));
         assert_eq!(declared_lookup(Some(&d), "CUBEJS_DATASOURCES", process).as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn with_rbac_a_field_rbac_lacks_is_not_taken_from_the_environment() {
+        // Cleared in the Playground: RBAC has no schema for `default`.
+        let d = declared(true);
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DB_SCHEMA", process), None);
+        // Without RBAC the environment still provides it.
+        let d = declared(false);
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DB_SCHEMA", process).as_deref(), Some("left-in-dotenv"));
     }
 }

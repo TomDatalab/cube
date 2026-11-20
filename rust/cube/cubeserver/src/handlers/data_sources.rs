@@ -439,7 +439,11 @@ pub async fn delete(
     if in_rbac {
         let rbac = state.rbac.as_deref().expect("in_rbac implies RBAC");
         if let Some(body) = super::data_sources_rbac::delete(&state, rbac, &name).await? {
-            return Ok(Json(body));
+            // A file that still declares it would bring it back on the next
+            // start: it goes there too.
+            if !in_file {
+                return Ok(Json(body));
+            }
         }
     }
 

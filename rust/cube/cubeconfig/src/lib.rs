@@ -268,7 +268,9 @@ impl CubeConfig {
         // Data source names: declared in the file, plus anything
         // CUBEJS_DATASOURCES adds. `default` is always implied.
         let mut names: Vec<String> = spec.data_sources.keys().cloned().collect();
-        if let Some(raw) = env.get("CUBEJS_DATASOURCES") {
+        // Only where the configuration comes from here: with RBAC the list
+        // is RBAC's, and a stale variable must not name what moved there.
+        if let Some(raw) = env.get("CUBEJS_DATASOURCES").filter(|_| imply_default) {
             for name in crate::env::parse_list(raw) {
                 if !names.contains(&name) {
                     names.push(name);
@@ -417,6 +419,18 @@ mod declared_only_tests {
         std::fs::write(dir.join("cube.yml"), "version: 1\ndata_sources:\n  extra:\n    type: sqlite\n").unwrap();
         let config = CubeConfig::load_declared(&dir, &Env::new()).unwrap();
         assert_eq!(config.data_sources.keys().collect::<Vec<_>>(), ["extra"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_declared_ignores_cubejs_datasources() {
+        let dir = std::env::temp_dir().join(format!("cubeconfig-declared-ds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cube.yml"), "version: 1\ndata_sources: {}\n").unwrap();
+        // `x` is named but its settings are gone (moved into RBAC).
+        let env = Env::new().with("CUBEJS_DATASOURCES", "default,x");
+        let config = CubeConfig::load_declared(&dir, &env).unwrap();
+        assert!(config.data_sources.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
