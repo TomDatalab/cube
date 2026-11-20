@@ -33,7 +33,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub use crate::api::{Api, ApiScope, Cors};
-pub use crate::data_source::{DataSource, DataSourceSpec, KNOWN_DB_TYPES};
+pub use crate::data_source::{data_source_from_variables, DataSource, DataSourceSpec, KNOWN_DB_TYPES};
 pub use crate::env::{ConfigValue, Env};
 pub use crate::error::{ConfigError, Origin, Result};
 pub use crate::scheduled_refresh::{RefreshContextSpec, ScheduledRefresh};

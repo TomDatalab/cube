@@ -9,6 +9,7 @@ pub mod fake;
 pub mod handlers;
 pub mod identity;
 pub mod restrictions;
+pub mod data_sources;
 pub mod secrets;
 pub mod store;
 

@@ -840,12 +840,12 @@ fn own_setting<'a>(key: &'a str, name: &str, sources: &[&str]) -> Option<&'a str
 /// A setting the edit form is not sent, so an empty field keeps it: one
 /// whose name says it is a password, key, token or credentials, or a URL
 /// (`CUBEJS_DB_URL`, `CUBEJS_DB_DATABRICKS_URL`, ...) carrying one.
-fn kept_if_empty(var: &str, current: &BTreeMap<String, String>) -> bool {
+pub(crate) fn kept_if_empty(var: &str, current: &BTreeMap<String, String>) -> bool {
     is_secret(var)
         || (var.ends_with("_URL") && current.get(var).is_some_and(|url| without_password(url).1))
 }
 
-fn is_secret(var: &str) -> bool {
+pub(crate) fn is_secret(var: &str) -> bool {
     let var = var.to_ascii_uppercase();
     [
         "PASS",

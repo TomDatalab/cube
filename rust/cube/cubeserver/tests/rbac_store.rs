@@ -727,3 +727,44 @@ db_test!(
         assert!(store.connection("c1").await.unwrap().is_none());
     }
 );
+
+db_test!(save_then_load_decrypts, |store, url| {
+    use base64::Engine;
+    use cubeserver::rbac::data_sources::{load, load_all, save};
+    use cubeserver::rbac::secrets::SecretKey;
+    let key = SecretKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([7u8; 32]))
+        .unwrap();
+    let vars: std::collections::BTreeMap<String, String> = [
+        ("CUBEJS_DB_TYPE", "postgres"),
+        ("CUBEJS_DB_HOST", "h"),
+        ("CUBEJS_DB_PASS", "very-secret-pw"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let id = save(&store, &key, "sales", &vars).await.unwrap();
+    let got = load(&store, &key, "sales").await.unwrap().unwrap();
+    assert_eq!(got.id, id);
+    assert_eq!(got.variables, vars);
+    assert_eq!(load_all(&store, &key).await.unwrap(), vec![got]);
+    assert!(load(&store, &key, "nobody").await.unwrap().is_none());
+
+    // The password is not in the database in the clear.
+    let c = connect(&url).await;
+    let row = c
+        .query_one(
+            "SELECT settings::text, encode(secrets, 'escape') FROM data_sources WHERE name = 'sales'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let settings: String = row.get(0);
+    let secrets: String = row.get(1);
+    assert!(!settings.contains("very-secret-pw") && !secrets.contains("very-secret-pw"));
+    assert!(settings.contains("CUBEJS_DB_HOST"));
+
+    // Without CUBEJS_DB_TYPE it is refused.
+    let mut untyped = vars.clone();
+    untyped.remove("CUBEJS_DB_TYPE");
+    assert!(save(&store, &key, "x", &untyped).await.is_err());
+});
