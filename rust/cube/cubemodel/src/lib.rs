@@ -58,6 +58,7 @@ pub mod loader;
 pub mod meta;
 pub mod model;
 pub mod naming;
+pub mod ownership;
 pub mod validate;
 pub mod views;
 pub mod yaml;
@@ -70,3 +71,4 @@ pub use model::{
     CubeDef, DataModel, Dimension, EvaluatedFolder, EvaluatedHierarchy, Granularity, Hierarchy,
     IncludedMember, Join, Measure, PreAggregation, Segment,
 };
+pub use ownership::{Owner, OwnershipPolicy, Rejection};

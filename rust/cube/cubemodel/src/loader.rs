@@ -193,6 +193,16 @@ impl ModelLoader {
 
         resolve_extends(&mut model, &mut reporter);
 
+        if let Some(policy) = crate::ownership::current_policy() {
+            model.rejected = crate::ownership::apply(&mut model, &policy);
+            for r in &model.rejected {
+                eprintln!(
+                    "cubemodel: rejected cube {} in {}: {}",
+                    r.cube, r.file, r.message
+                );
+            }
+        }
+
         if self.validate {
             validate::validate_model(&model, &mut reporter);
         }

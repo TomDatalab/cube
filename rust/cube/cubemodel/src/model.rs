@@ -58,6 +58,8 @@ fn de_string_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Err
 pub struct DataModel {
     pub cubes: Members<CubeDef>,
     pub views: Members<CubeDef>,
+    /// Cubes dropped by the ownership policy.
+    pub rejected: Vec<crate::ownership::Rejection>,
 }
 
 impl DataModel {
