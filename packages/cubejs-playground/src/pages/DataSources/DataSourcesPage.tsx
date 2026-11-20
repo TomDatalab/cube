@@ -35,7 +35,7 @@ import { adminApi, ownerLabel, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
-import { connectionLabel, DATA_SOURCE_DRAG_TYPE } from './organizationDrop';
+import { connectionLabel, DATA_SOURCE_DRAG_TYPE, deleteConfirmation } from './organizationDrop';
 import { OrganizationDropPanel } from './OrganizationDropPanel';
 import { Content, Header } from '../components/Ui';
 
@@ -68,6 +68,8 @@ type DataSource = {
   user?: string | null;
   hasPassword?: boolean;
   active: boolean;
+  // With RBAC on, why its stored settings cannot be read.
+  error?: string;
   // With RBAC on: the organization that owns it, `null` for none (Platform).
   organization?: { id: string; name: string } | null;
 };
@@ -336,6 +338,13 @@ export function DataSourcesPage() {
   const draggable = (ds: DataSource) => rbac && ds.name !== 'default' && !restarting;
 
   function statusTag(ds: DataSource) {
+    if (ds.error) {
+      return (
+        <Tooltip title={ds.error}>
+          <Tag color="red">Unreadable</Tag>
+        </Tooltip>
+      );
+    }
     if (!ds.active) {
       return <Tag color="orange">Restart pending</Tag>;
     }
@@ -477,7 +486,7 @@ export function DataSourcesPage() {
                   icon={<EditOutlined />}
                   aria-label="Edit"
                   data-testid={`data-source-edit-${ds.name}`}
-                  disabled={!!restarting}
+                  disabled={!!restarting || !!ds.error}
                   onClick={() => startEdit(ds)}
                 >
                   {rbac ? null : 'Edit'}
@@ -491,7 +500,7 @@ export function DataSourcesPage() {
                 </Tooltip>
               ) : (
                 <Popconfirm
-                  title={`Delete data source ${ds.name}? Its settings are removed from cube.yml and .env.`}
+                  title={deleteConfirmation(ds.name, rbac)}
                   okText="Delete"
                   okButtonProps={{ danger: true }}
                   onConfirm={() => remove(ds.name)}
@@ -667,16 +676,25 @@ export function DataSourcesPage() {
             description={editing ? (
               <>
                 The connection is tested with the new settings first and saved only if it
-                works. Each setting is changed where it is read from: the variable{' '}
-                <Text code>cube.yml</Text> names for it, or <Text code>.env</Text>. The server
-                restarts to load it, which takes a few seconds.
+                works. {rbac ? (
+                  <>Its settings are saved in RBAC, the password encrypted.</>
+                ) : (
+                  <>
+                    Each setting is changed where it is read from: the variable{' '}
+                    <Text code>cube.yml</Text> names for it, or <Text code>.env</Text>.
+                  </>
+                )} The server restarts to load it, which takes a few seconds.
               </>
             ) : (
               <>
-                The connection is tested first and saved only if it works. The data source is
-                added to <Text code>cube.yml</Text>, its settings (password included) go to{' '}
-                <Text code>.env</Text>, and the server restarts to load it, which takes a few
-                seconds. Then point cubes at it with <Text code>data_source: &lt;name&gt;</Text>,
+                The connection is tested first and saved only if it works. {rbac ? (
+                  <>Its settings are saved in RBAC, the password encrypted,</>
+                ) : (
+                  <>
+                    The data source is added to <Text code>cube.yml</Text>, its settings (password
+                    included) go to <Text code>.env</Text>,
+                  </>
+                )} and the server restarts to load it, which takes a few seconds. Then point cubes at it with <Text code>data_source: &lt;name&gt;</Text>,
                 or generate them from the Data Model page.
               </>
             )}
@@ -766,6 +784,7 @@ export function DataSourcesPage() {
                 organizations={organizations}
                 dataSources={dataSources}
                 onChanged={load}
+                disabled={!!restarting}
               />
             </Col>
           ) : null}

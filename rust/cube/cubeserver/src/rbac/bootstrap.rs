@@ -9,7 +9,7 @@ use std::path::Path;
 use cubeconfig::data_source::key_by_data_source;
 use cubeconfig::{data_source_from_variables, CubeConfig, Env};
 
-use super::data_sources::{load_all, save};
+use super::data_sources::{load_all, reseal_unbound, save};
 use super::secrets::SecretKey;
 use super::store::Store;
 use crate::orchestrator_adapter::MANAGED_FIELDS;
@@ -18,7 +18,7 @@ use crate::handlers::data_sources::{
     write_atomically,
 };
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ImportReport {
     /// Data sources copied from the files this time.
     pub imported: Vec<String>,
@@ -27,6 +27,44 @@ pub struct ImportReport {
     /// Every stored setting as the variable a driver reads
     /// (`CUBEJS_DS_<NAME>_*`, `CUBEJS_DB_*` for `default`).
     pub env: HashMap<String, String>,
+}
+
+/// `env`'s names only: its values (passwords) never reach a log.
+impl std::fmt::Debug for ImportReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut env: Vec<&String> = self.env.keys().collect();
+        env.sort();
+        f.debug_struct("ImportReport")
+            .field("imported", &self.imported)
+            .field("loaded", &self.loaded)
+            .field("env", &env)
+            .finish()
+    }
+}
+
+/// The variables of the process environment RBAC supersedes: the ones it
+/// holds a value for (`report.env`) and the settings the Data Source page
+/// manages of every stored data source (which never fall back to the
+/// environment). They are dropped from the environment so a password
+/// moved into RBAC does not stay readable in `/proc/<pid>/environ`.
+pub fn superseded_env(
+    report: &ImportReport,
+    names: &[String],
+    present: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let managed = names
+        .iter()
+        .flat_map(|name| MANAGED_FIELDS.iter().map(move |field| key_by_data_source(field, name)));
+    let mut keys: Vec<String> = report
+        .env
+        .keys()
+        .cloned()
+        .chain(managed)
+        .filter(|key| present(key))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 /// At start-up: [`data_sources_from_rbac`] with the deployment's
@@ -54,6 +92,11 @@ pub async fn data_sources_from_rbac(
     env: &Env,
 ) -> Result<ImportReport, String> {
     let mut report = ImportReport::default();
+
+    // Secrets sealed before they were bound to their row.
+    for name in reseal_unbound(store, key).await? {
+        eprintln!("🔑 data source {name}: its secrets were sealed again, bound to it");
+    }
 
     // What the files declare and RBAC does not have yet, plus `default`
     // from the `CUBEJS_DB_*` variables when nothing declares it (an
@@ -181,4 +224,52 @@ fn strip_files(file: &Path, cube_config: &CubeConfig, names: &[String]) -> Resul
         update_env(&env_file, &[], &remove, &header(name), true).map_err(|e| e.body.error)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report() -> ImportReport {
+        ImportReport {
+            imported: vec![],
+            loaded: 2,
+            env: [
+                ("CUBEJS_DB_PASS".to_string(), "pg-secret".to_string()),
+                ("CUBEJS_DS_EXTRA_DB_NAME".to_string(), "/tmp/x.db".to_string()),
+                ("CUBEJS_DS_EXTRA_DB_SSL_CA".to_string(), "ca".to_string()),
+            ]
+            .into(),
+        }
+    }
+
+    #[test]
+    fn debug_shows_no_value() {
+        let shown = format!("{:?}", report());
+        assert!(shown.contains("CUBEJS_DB_PASS") && !shown.contains("pg-secret"), "{shown}");
+    }
+
+    #[test]
+    fn superseded_env_is_what_rbac_holds_or_manages_and_the_process_has() {
+        let process = [
+            "CUBEJS_DB_PASS",
+            "CUBEJS_DB_USER",
+            "CUBEJS_DS_EXTRA_DB_PASS",
+            "CUBEJS_DS_EXTRA_DB_SSL_CA",
+            "CUBEJS_DB_QUERY_TIMEOUT",
+            "CUBEJS_DS_GONE_DB_PASS",
+            "SOFIADB_PASSWORD",
+        ];
+        let names = vec!["default".to_string(), "extra".to_string()];
+        let keys = superseded_env(&report(), &names, |k| process.contains(&k));
+        assert_eq!(
+            keys,
+            [
+                "CUBEJS_DB_PASS",
+                "CUBEJS_DB_USER",
+                "CUBEJS_DS_EXTRA_DB_PASS",
+                "CUBEJS_DS_EXTRA_DB_SSL_CA",
+            ]
+        );
+    }
 }

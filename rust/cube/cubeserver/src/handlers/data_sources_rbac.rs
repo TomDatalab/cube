@@ -14,7 +14,7 @@ use super::data_sources::{
 };
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::rbac::data_sources::{load as load_stored, load_all, save, StoredDataSource};
+use crate::rbac::data_sources::{load as load_stored, load_each, save, StoredDataSource, Unreadable};
 use crate::rbac::Rbac;
 
 fn unavailable(e: String) -> ApiError {
@@ -25,11 +25,43 @@ fn unavailable(e: String) -> ApiError {
     )
 }
 
-/// Every data source RBAC holds.
-pub(crate) async fn stored(rbac: &Rbac) -> Result<Vec<StoredDataSource>, ApiError> {
-    load_all(&rbac.store, &rbac.config.secret_key)
+/// Every data source RBAC holds, each read on its own: one that cannot be
+/// read does not hide the others.
+pub(crate) async fn stored(
+    rbac: &Rbac,
+) -> Result<Vec<Result<StoredDataSource, Unreadable>>, ApiError> {
+    let each = load_each(&rbac.store, &rbac.config.secret_key)
         .await
-        .map_err(unavailable)
+        .map_err(unavailable)?;
+    for unreadable in each.iter().filter_map(|r| r.as_ref().err()) {
+        tracing::error!("RBAC data sources: {}", unreadable.error);
+    }
+    Ok(each)
+}
+
+/// Every data source RBAC holds, by name, with its type: read without
+/// opening any secret.
+pub(crate) async fn types(rbac: &Rbac) -> Result<BTreeMap<String, String>, ApiError> {
+    Ok(rbac
+        .store
+        .data_sources()
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .into_iter()
+        .map(|row| (row.name, row.db_type))
+        .collect())
+}
+
+/// A data source RBAC holds but cannot read, as the listing shows it.
+pub(crate) fn listed_unreadable(ds: &Unreadable) -> Value {
+    json!({
+        "id": ds.id,
+        "name": ds.name,
+        "type": ds.db_type,
+        "active": false,
+        "error": "Its settings cannot be read: CUBE_RBAC_SECRET_KEY is not the key they were \
+                  saved with, or the row is damaged. Delete it and add it again.",
+    })
 }
 
 /// `name`'s settings and whether RBAC holds them (`false`: only `cube.yml`
@@ -93,21 +125,6 @@ pub(crate) fn without_secrets(name: &str, mut variables: BTreeMap<String, String
     })
 }
 
-/// `POST`: `variables` already cleaned and validated by the caller.
-pub(crate) async fn create(
-    state: &AppState,
-    rbac: &Rbac,
-    name: &str,
-    variables: &BTreeMap<String, String>,
-) -> Result<Value, ApiError> {
-    prepare_create(state, rbac, name, variables).await?;
-    save(&rbac.store, &rbac.config.secret_key, name, variables)
-        .await
-        .map_err(unavailable)?;
-    tracing::info!(data_source = %name, "data source added (RBAC)");
-    Ok(json!({ "name": name, "restarting": restart_if_enabled(state, Vec::new(), Vec::new()) }))
-}
-
 /// What a new data source must pass before it is written: a free name, and
 /// a connection that works (one that does not is one /readyz would report
 /// as down from the moment the server restarts).
@@ -156,11 +173,36 @@ pub(crate) async fn update(
     Ok(json!({ "name": name, "restarting": restart_if_enabled(state, Vec::new(), remove) }))
 }
 
+/// Whether RBAC holds `name`, readable or not.
+pub(crate) async fn holds(rbac: &Rbac, name: &str) -> Result<bool, ApiError> {
+    Ok(rbac
+        .store
+        .data_source(name)
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .is_some())
+}
+
 /// `DELETE` of a data source RBAC holds (the caller checked `default` and
 /// the cubes using it). `false` when RBAC does not hold it.
 pub(crate) async fn delete(state: &AppState, rbac: &Rbac, name: &str) -> Result<Option<Value>, ApiError> {
-    let Some((current, true)) = current(state, rbac, name).await? else {
+    let Some(row) = rbac
+        .store
+        .data_source(name)
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+    else {
         return Ok(None);
+    };
+    // One whose secrets cannot be opened is deleted all the same; its
+    // plain settings say what leaves the environment.
+    let current = match load_stored(&rbac.store, &rbac.config.secret_key, name).await {
+        Ok(Some(ds)) => ds.variables,
+        _ => {
+            let mut plain = row.settings;
+            plain.insert("CUBEJS_DB_TYPE".to_string(), row.db_type);
+            plain
+        }
     };
     rbac.store
         .delete_data_source(name)

@@ -769,6 +769,78 @@ db_test!(save_then_load_decrypts, |store, url| {
     assert!(save(&store, &key, "x", &untyped).await.is_err());
 });
 
+fn pg_vars(password: &str) -> std::collections::BTreeMap<String, String> {
+    [("CUBEJS_DB_TYPE", "postgres"), ("CUBEJS_DB_HOST", "h"), ("CUBEJS_DB_PASS", password)]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+db_test!(a_secret_opens_only_for_its_own_data_source, |store, url| {
+    use cubeserver::rbac::data_sources::{load, save};
+    let key = bootstrap_support::key();
+    save(&store, &key, "a", &pg_vars("a-password")).await.unwrap();
+    save(&store, &key, "b", &pg_vars("b-password")).await.unwrap();
+    // a's sealed secrets copied onto b.
+    let c = connect(&url).await;
+    c.execute(
+        "UPDATE data_sources SET secrets = (SELECT secrets FROM data_sources WHERE name = 'a') WHERE name = 'b'",
+        &[],
+    )
+    .await
+    .unwrap();
+    let err = load(&store, &key, "b").await.unwrap_err();
+    assert!(err.contains('b'), "{err}");
+    assert!(load(&store, &key, "a").await.is_ok());
+});
+
+db_test!(secrets_sealed_before_the_binding_are_resealed_at_start, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    use cubeserver::rbac::data_sources::load;
+    // As the first release sealed them: no associated data.
+    let secret = serde_json::to_vec(&std::collections::BTreeMap::from([(
+        "CUBEJS_DB_PASS".to_string(),
+        "old-password".to_string(),
+    )]))
+    .unwrap();
+    let settings = std::collections::BTreeMap::from([("CUBEJS_DB_HOST".to_string(), "h".to_string())]);
+    store
+        .put_data_source("old", "postgres", &settings, Some(&key().seal(&secret, b"")))
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cube.yml"), "version: 1\nmodel_path: model\n").unwrap();
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &cubeconfig::Env::new()).unwrap();
+
+    let report = data_sources_from_rbac(&store, &key(), &mut config, None, &cubeconfig::Env::new())
+        .await
+        .unwrap();
+    assert_eq!(report.loaded, 1);
+    let stored = load(&store, &key(), "old").await.unwrap().unwrap();
+    assert_eq!(stored.variables.get("CUBEJS_DB_PASS").map(String::as_str), Some("old-password"));
+    let row = store.data_source("old").await.unwrap().unwrap();
+    assert!(key().open(row.secrets.as_deref().unwrap(), b"").is_err(), "still sealed the old way");
+});
+
+db_test!(damaged_settings_are_an_error_not_an_empty_data_source, |store, url| {
+    use cubeserver::rbac::data_sources::{load, load_each, save};
+    let key = bootstrap_support::key();
+    save(&store, &key, "bad", &pg_vars("p")).await.unwrap();
+    save(&store, &key, "good", &pg_vars("p")).await.unwrap();
+    let c = connect(&url).await;
+    c.execute("UPDATE data_sources SET settings = '[1, 2]' WHERE name = 'bad'", &[])
+        .await
+        .unwrap();
+    let err = load(&store, &key, "bad").await.unwrap_err();
+    assert!(err.contains("bad"), "{err}");
+    // One at a time, the good one still loads.
+    let each = load_each(&store, &key).await.unwrap();
+    assert_eq!(each.len(), 2);
+    assert!(each.iter().any(|r| matches!(r, Ok(ds) if ds.name == "good")));
+    assert!(each.iter().any(|r| matches!(r, Err(e) if e.name == "bad" && e.db_type == "postgres")));
+});
+
 mod bootstrap_support {
     use base64::Engine;
     use cubeserver::rbac::secrets::SecretKey;

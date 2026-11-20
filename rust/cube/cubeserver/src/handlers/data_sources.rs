@@ -117,11 +117,17 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
     // same name; each has an id.
     if let Some(rbac) = state.rbac.as_deref() {
         for ds in super::data_sources_rbac::stored(rbac).await? {
-            let entry = super::data_sources_rbac::listed(
-                &ds,
-                active.is_empty() || active.contains(&ds.name.as_str()),
-            );
-            match data_sources.iter_mut().find(|d| d["name"] == ds.name.as_str()) {
+            let (name, entry) = match &ds {
+                Ok(ds) => (
+                    ds.name.as_str(),
+                    super::data_sources_rbac::listed(
+                        ds,
+                        active.is_empty() || active.contains(&ds.name.as_str()),
+                    ),
+                ),
+                Err(ds) => (ds.name.as_str(), super::data_sources_rbac::listed_unreadable(ds)),
+            };
+            match data_sources.iter_mut().find(|d| d["name"] == name) {
                 Some(existing) => *existing = entry,
                 None => data_sources.push(entry),
             }
@@ -253,7 +259,8 @@ pub struct CreateRequest {
     pub(crate) organization_id: Option<String>,
 }
 
-/// `POST /playground/data-sources`
+/// `POST /playground/data-sources` with RBAC off (with it on,
+/// [`create_unless_tracked`] creates the data source in RBAC).
 pub async fn create(
     State(state): State<AppState>,
     Json(request): Json<CreateRequest>,
@@ -263,11 +270,6 @@ pub async fn create(
     let (name, variables) = validated(&request)?;
     let db_type = variables["CUBEJS_DB_TYPE"].clone();
 
-    if let Some(rbac) = state.rbac.as_deref() {
-        return super::data_sources_rbac::create(&state, rbac, &name, &variables)
-            .await
-            .map(Json);
-    }
     let paths = paths(&state)?;
     let current = std::fs::read_to_string(&paths.config).map_err(io_error)?;
     if load(&paths.config, &env_with_file(&paths.env))?
@@ -426,9 +428,7 @@ pub async fn delete(
         .as_ref()
         .is_some_and(|config| config.data_sources.contains_key(&name));
     let in_rbac = match state.rbac.as_deref() {
-        Some(rbac) => super::data_sources_rbac::current(&state, rbac, &name)
-            .await?
-            .is_some_and(|(_, stored)| stored),
+        Some(rbac) => super::data_sources_rbac::holds(rbac, &name).await?,
         None => false,
     };
     if !in_file && !in_rbac {
@@ -827,18 +827,13 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
     })))
 }
 
-/// Each data source's type, by name: as `cube.yml` has them now, or as the
-/// server started with when there is no file or it cannot be read.
 /// Every data source by name, with its type: the file's (or the running
 /// configuration's), and with RBAC on the ones it holds. 503 when RBAC
 /// cannot be read.
 pub(crate) async fn data_source_types(state: &AppState) -> Result<BTreeMap<String, String>, ApiError> {
     let mut types = file_data_source_types(state);
     if let Some(rbac) = state.rbac.as_deref() {
-        for ds in super::data_sources_rbac::stored(rbac).await? {
-            let db_type = ds.variables.get("CUBEJS_DB_TYPE").cloned().unwrap_or_default();
-            types.insert(ds.name, db_type);
-        }
+        types.extend(super::data_sources_rbac::types(rbac).await?);
     }
     Ok(types)
 }
@@ -1495,24 +1490,32 @@ fn restart_soon(set: Vec<(String, String)>, remove: Vec<String>) {
             .take()
             .unwrap_or_default();
 
-        use std::os::unix::process::CommandExt;
-        let mut args = std::env::args_os();
-        // argv[0] rather than /proc/self/exe: a rebuilt binary leaves the
-        // running one's path ending in " (deleted)".
-        let program = args
-            .next()
-            .filter(|p| Path::new(p).components().count() > 1)
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_exe().ok())
-            .unwrap_or_else(|| PathBuf::from("cube-server"));
-        let mut command = std::process::Command::new(&program);
-        command.args(args).envs(set);
-        for key in remove {
-            command.env_remove(key);
-        }
-        let error = command.exec();
+        let (program, error) = exec_self(set, remove);
         tracing::error!(error = %error, program = %program.display(), "cannot restart; restart the server by hand");
     });
+}
+
+/// Replaces this process with a fresh copy of itself, same arguments, with
+/// `set` added to its environment and `remove` taken out. Returns only when
+/// that fails: the program it tried and why.
+pub fn exec_self(set: Vec<(String, String)>, remove: Vec<String>) -> (PathBuf, std::io::Error) {
+    use std::os::unix::process::CommandExt;
+    let mut args = std::env::args_os();
+    // argv[0] rather than /proc/self/exe: a rebuilt binary leaves the
+    // running one's path ending in " (deleted)".
+    let program = args
+        .next()
+        .filter(|p| Path::new(p).components().count() > 1)
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| PathBuf::from("cube-server"));
+    let mut command = std::process::Command::new(&program);
+    command.args(args).envs(set);
+    for key in remove {
+        command.env_remove(key);
+    }
+    let error = command.exec();
+    (program, error)
 }
 
 fn io_error(e: std::io::Error) -> ApiError {

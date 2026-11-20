@@ -59,3 +59,22 @@ export function connectionLabel(ds: Located): string {
   }
   return located || database || '—';
 }
+
+// Whether a data source's tag can be dragged: never `default`, and not
+// while a drop is being saved (or the server restarts after one).
+export function canDrag(ds: { name: string }, busy: boolean): boolean {
+  return ds.name !== 'default' && !busy;
+}
+
+// Whether a dragleave from `zone` to `to` really leaves it: moving onto one
+// of its own tags is not, so the highlight does not flicker.
+export function leavesZone(zone: Node, to: Node | null): boolean {
+  return !to || !zone.contains(to);
+}
+
+// The delete confirmation: with RBAC the settings live in its database.
+export function deleteConfirmation(name: string, rbac: boolean): string {
+  return rbac
+    ? `Delete data source ${name}? Its settings, password included, are removed from RBAC.`
+    : `Delete data source ${name}? Its settings are removed from cube.yml and .env.`;
+}

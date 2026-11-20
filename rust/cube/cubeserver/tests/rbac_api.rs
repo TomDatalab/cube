@@ -7405,6 +7405,62 @@ db_test!(a_failed_spicedb_write_unassigns_nothing, |store| {
     assert!(env.authz.check(&connection, "manage", "ana").await.unwrap());
 });
 
+db_test!(unassign_withdraws_a_release_written_while_it_ran, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let w2 = workspace_id(env, &s.ana, &s.org_a, "W2").await;
+    assert_eq!(release(env, &s.ana, Method::PUT, &w1, "shared").await, StatusCode::NO_CONTENT);
+    // A release to W2 lands right after the unassignment read the releases.
+    env.authz.add_after_next_read(vec![Relationship {
+        resource: ObjectRef::new("connection", "shared"),
+        relation: "workspace",
+        subject: ObjectRef::new("workspace", w2.clone()),
+    }]);
+
+    let (status, body) = unassign(env, &s.admin, "shared").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(released(env, &w1).await.is_empty());
+    assert!(released(env, &w2).await.is_empty(), "the late release dangles");
+
+    // Given to the organization again, it is released nowhere.
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+    assert!(released(env, &w2).await.is_empty());
+});
+
+db_test!(a_damaged_data_source_does_not_break_the_listings, |store| {
+    let dir = tempfile::tempdir().unwrap();
+    let s = connections_scenario(store, &dir).await;
+    let env = &s.env;
+    // Secrets no key opens (sealed under another key, or damaged).
+    env.rbac
+        .store
+        .put_data_source("broken", "postgres", &Default::default(), Some(b"not sealed by this key"))
+        .await
+        .unwrap();
+
+    let (status, body) = send(&env.router, Method::GET, "/cube/v1/data-sources", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = body["dataSources"].as_array().unwrap();
+    let broken = list.iter().find(|d| d["name"] == "broken").expect("broken is listed");
+    assert_eq!(broken["type"], "postgres");
+    assert!(broken["error"].as_str().is_some_and(|e| !e.is_empty()), "{broken}");
+    assert!(list.iter().any(|d| d["name"] == "shared"), "{body}");
+
+    // What only needs the names and types does not decrypt at all.
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let (status, body) = workspace_connections(env, &s.ana, &w1).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
+
+    // As the listing advises, it can be deleted.
+    let (status, body) = send(&env.router, Method::DELETE, "/cube/v1/data-sources/broken", Some(&s.admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.rbac.store.data_source("broken").await.unwrap().is_none());
+});
+
 db_test!(deleting_a_data_source_the_file_also_declares_removes_it_there, |store| {
     let dir = tempfile::tempdir().unwrap();
     let s = connections_scenario(store, &dir).await;

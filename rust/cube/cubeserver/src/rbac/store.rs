@@ -254,18 +254,25 @@ pub struct DataSourceRow {
     pub db_type: String,
     pub settings: BTreeMap<String, String>,
     pub secrets: Option<Vec<u8>>,
+    /// Why `settings` could not be read (they are empty then).
+    pub damaged: Option<String>,
 }
 
 const DATA_SOURCE_COLS: &str = "id, name, db_type, settings, secrets";
 
 fn data_source_from(r: &Row) -> DataSourceRow {
     let settings: serde_json::Value = r.get(3);
+    let (settings, damaged) = match serde_json::from_value(settings) {
+        Ok(settings) => (settings, None),
+        Err(e) => (BTreeMap::new(), Some(format!("its settings cannot be read: {e}"))),
+    };
     DataSourceRow {
         id: r.get(0),
         name: r.get(1),
         db_type: r.get(2),
-        settings: serde_json::from_value(settings).unwrap_or_default(),
+        settings,
         secrets: r.get(4),
+        damaged,
     }
 }
 
@@ -532,6 +539,16 @@ mod q {
         Ok(row.get(0))
     }
 
+    /// The connection's row, locked until the transaction ends: a move or
+    /// another unassignment of it waits.
+    pub async fn lock_connection(
+        c: &tokio_postgres::Client,
+        name: &str,
+    ) -> Result<Option<ConnectionRow>, StoreError> {
+        let sql = format!("SELECT {CONNECTION_COLS} FROM connections WHERE name = $1 FOR UPDATE");
+        Ok(c.query_opt(&sql, &[&name]).await?.as_ref().map(connection_from))
+    }
+
     /// Takes the connection out of organization `org`. `false` when there is
     /// no such row: it is in another organization by now, or none.
     pub async fn delete_connection_of(
@@ -775,6 +792,11 @@ macro_rules! shared_creates {
             q::put_data_source(c, name, db_type, settings, secrets).await
         }
         /// See [`q::delete_connection_of`].
+        pub async fn lock_connection(&self, name: &str) -> Result<Option<ConnectionRow>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::lock_connection(c, name).await
+        }
         pub async fn delete_connection_of(&self, name: &str, org: Uuid) -> Result<bool, StoreError> {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;

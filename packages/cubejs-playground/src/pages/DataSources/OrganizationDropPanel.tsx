@@ -2,7 +2,9 @@ import { Empty, Input, message, Modal, Tag, Typography } from 'antd';
 import { CSSProperties, DragEvent, ReactNode, useMemo, useState } from 'react';
 
 import { AdminApi, Organization } from '../Admin/api';
-import { DATA_SOURCE_DRAG_TYPE, dropAction, sourcesByOrganization } from './organizationDrop';
+import {
+  canDrag, DATA_SOURCE_DRAG_TYPE, dropAction, leavesZone, sourcesByOrganization,
+} from './organizationDrop';
 
 type Owned = { name: string; organization?: { id: string; name: string } | null };
 
@@ -12,6 +14,8 @@ type Props = {
   dataSources: Owned[];
   // Called after a drop here changed a data source's organization.
   onChanged: () => Promise<void> | void;
+  // Nothing can be dropped or removed meanwhile (the server restarts).
+  disabled?: boolean;
 };
 
 // The drop target that stands for "no organization".
@@ -36,11 +40,13 @@ function startDrag(e: DragEvent, name: string) {
 // removed with its ×) leaves its organization. Moving and leaving ask first,
 // since the old organization's workspace releases are withdrawn.
 export function OrganizationDropPanel({
-  api, organizations, dataSources, onChanged,
+  api, organizations, dataSources, onChanged, disabled = false,
 }: Props) {
   const [q, setQ] = useState('');
   const [target, setTarget] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [saving, setBusy] = useState<string | null>(null);
+  // A zone's key while its drop is saved; any truthy value blocks drags.
+  const busy = saving || (disabled ? 'disabled' : null);
 
   const owned = useMemo(() => sourcesByOrganization(dataSources), [dataSources]);
   const platform = useMemo(
@@ -57,7 +63,7 @@ export function OrganizationDropPanel({
   }, [organizations, q]);
 
   function dragOver(e: DragEvent, zone: string) {
-    if (e.dataTransfer.types.includes(DATA_SOURCE_DRAG_TYPE)) {
+    if (!busy && e.dataTransfer.types.includes(DATA_SOURCE_DRAG_TYPE)) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       setTarget(zone);
@@ -106,6 +112,9 @@ export function OrganizationDropPanel({
   async function drop(e: DragEvent, org: Organization | null) {
     e.preventDefault();
     setTarget(null);
+    if (busy) {
+      return;
+    }
     const name = e.dataTransfer.getData(DATA_SOURCE_DRAG_TYPE);
     const ds = dataSources.find((d) => d.name === name);
     if (!ds) {
@@ -139,7 +148,11 @@ export function OrganizationDropPanel({
         data-organization={org ? org.id : 'platform'}
         data-testid={`data-source-org-${org ? org.id : 'platform'}`}
         onDragOver={(e) => dragOver(e, key)}
-        onDragLeave={() => setTarget((t) => (t === key ? null : t))}
+        onDragLeave={(e) => {
+          if (leavesZone(e.currentTarget, e.relatedTarget as Node | null)) {
+            setTarget((t) => (t === key ? null : t));
+          }
+        }}
         onDrop={(e) => drop(e, org)}
         style={zoneStyle(target === key, busy === key)}
       >
@@ -152,15 +165,15 @@ export function OrganizationDropPanel({
           {list.length ? list.map((ds) => (
             <Tag
               key={ds.name}
-              draggable={ds.name !== 'default'}
+              draggable={canDrag(ds, !!busy)}
               onDragStart={(e) => startDrag(e, ds.name)}
-              closable={!!org}
+              closable={!!org && !busy}
               onClose={(e) => {
                 // The tag stays until the server agrees.
                 e.preventDefault();
                 confirmUnassign(ds);
               }}
-              style={{ marginBottom: 4, cursor: ds.name !== 'default' ? 'grab' : undefined }}
+              style={{ marginBottom: 4, cursor: canDrag(ds, !!busy) ? 'grab' : undefined }}
             >
               {ds.name}
             </Tag>

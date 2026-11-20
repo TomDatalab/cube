@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { connectionLabel, dropAction, sourcesByOrganization } from '../pages/DataSources/organizationDrop';
+import {
+  canDrag, connectionLabel, deleteConfirmation, dropAction, leavesZone, sourcesByOrganization,
+} from '../pages/DataSources/organizationDrop';
 
 const on = { id: 'o1', name: 'ON' };
 const digital = { id: 'o2', name: 'Digital' };
@@ -69,5 +71,32 @@ describe('connectionLabel', () => {
   it('is a dash when there is nothing', () => {
     expect(connectionLabel({})).toBe('—');
     expect(connectionLabel({ host: null, database: null })).toBe('—');
+  });
+});
+
+describe('canDrag', () => {
+  it('lets a data source be dragged only while nothing is being saved', () => {
+    expect(canDrag({ name: 'sofiadb' }, false)).toBe(true);
+    expect(canDrag({ name: 'sofiadb' }, true)).toBe(false);
+    expect(canDrag({ name: 'default' }, false)).toBe(false);
+  });
+});
+
+describe('leavesZone', () => {
+  it('is a leave only when the pointer goes outside the zone', () => {
+    const zone = document.createElement('div');
+    const tag = document.createElement('span');
+    zone.appendChild(tag);
+    const outside = document.createElement('div');
+    expect(leavesZone(zone, tag)).toBe(false);
+    expect(leavesZone(zone, outside)).toBe(true);
+    expect(leavesZone(zone, null)).toBe(true);
+  });
+});
+
+describe('deleteConfirmation', () => {
+  it('says where the settings are removed from', () => {
+    expect(deleteConfirmation('sales', true)).toBe('Delete data source sales? Its settings, password included, are removed from RBAC.');
+    expect(deleteConfirmation('sales', false)).toBe('Delete data source sales? Its settings are removed from cube.yml and .env.');
   });
 });

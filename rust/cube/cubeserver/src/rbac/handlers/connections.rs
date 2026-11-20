@@ -587,12 +587,15 @@ async fn move_connection(rbac: &Rbac, name: &str, from: Uuid, to: Uuid) -> Resul
 }
 
 /// `DELETE /v1/connections/{name}/organization` → 204: platform admins
-/// take a connection out of its organization, back to Platform. Its releases
-/// to that organization's workspaces are withdrawn with
-/// `connection#organization`, in one SpiceDB write; a failed write leaves
-/// the row, a failed commit writes the relationships back. `default` is 400;
-/// a connection without an organization (or none at all) 404; 409 when it
-/// moved between the read and the write.
+/// take a connection out of its organization, back to Platform. Its row is
+/// locked for the whole change, so a move waits. SpiceDB loses
+/// `connection#organization` and the releases to the organization's
+/// workspaces in one write; a release written while the releases were read
+/// cannot be after that write (a release requires `connection#organization`),
+/// so the releases read again after it are the late ones, and they go too.
+/// A failed SpiceDB write leaves everything; a failed commit writes the
+/// relationships back. `default` is 400; a connection without an
+/// organization (or none at all) 404.
 pub async fn unassign_organization(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -606,40 +609,57 @@ pub async fn unassign_organization(
             "The default data source always belongs to the platform",
         ));
     }
-    let row = rbac
-        .store
-        .connection(&name)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(|| ApiError::not_found("This connection belongs to no organization"))?;
-
     let conflict = "The connection changed concurrently; try again";
-    let releases = releases_of(rbac, &name).await?;
-    let owner = organization_relationship(&name, row.organization_id);
-    let mut updates: Vec<Update> = releases.iter().cloned().map(Update::Delete).collect();
-    updates.push(Update::Delete(owner.clone()));
-
     let tx = rbac
         .store
         .transaction()
         .await
         .map_err(|e| store_error(e, conflict))?;
-    if !tx
-        .delete_connection_of(&name, row.organization_id)
+    let row = tx
+        .lock_connection(&name)
         .await
         .map_err(|e| store_error(e, conflict))?
-    {
-        return Err(ApiError::new(StatusCode::CONFLICT, conflict));
-    }
+        .ok_or_else(|| ApiError::not_found("This connection belongs to no organization"))?;
+    tx.delete_connection_of(&name, row.organization_id)
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+
+    let owner = organization_relationship(&name, row.organization_id);
+    let mut withdrawn = releases_of(rbac, &name).await?;
+    let mut updates: Vec<Update> = withdrawn.iter().cloned().map(Update::Delete).collect();
+    updates.push(Update::Delete(owner.clone()));
     rbac.authz
         .write(&updates, &[])
-        .await
         // Dropping `tx` rolls the row back.
+        .await
         .map_err(authz_error)?;
+    let undo = |withdrawn: Vec<Relationship>| {
+        let mut undo: Vec<Update> = withdrawn.into_iter().map(Update::Touch).collect();
+        undo.push(Update::Touch(owner.clone()));
+        undo
+    };
+    let late = match releases_of(rbac, &name).await {
+        Ok(late) => late,
+        Err(e) => {
+            if let Err(err) = rbac.authz.write(&undo(withdrawn), &[]).await {
+                tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
+            }
+            return Err(e);
+        }
+    };
+    if !late.is_empty() {
+        let updates: Vec<Update> = late.iter().cloned().map(Update::Delete).collect();
+        let written = rbac.authz.write(&updates, &[]).await;
+        withdrawn.extend(late);
+        if let Err(e) = written {
+            if let Err(err) = rbac.authz.write(&undo(withdrawn), &[]).await {
+                tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
+            }
+            return Err(authz_error(e));
+        }
+    }
     if let Err(e) = tx.commit().await {
-        let mut undo: Vec<Update> = releases.into_iter().map(Update::Touch).collect();
-        undo.push(Update::Touch(owner));
-        if let Err(err) = rbac.authz.write(&undo, &[]).await {
+        if let Err(err) = rbac.authz.write(&undo(withdrawn), &[]).await {
             tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
         }
         return Err(store_error(e, conflict));

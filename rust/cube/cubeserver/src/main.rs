@@ -102,6 +102,26 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         format!(" (imported from the files: {})", report.imported.join(", "))
                     };
                     println!("🔑 {} data source(s) from RBAC{imported}", report.loaded);
+                    // A password RBAC now holds must not stay readable in
+                    // this process's environment (`/proc/<pid>/environ`):
+                    // start again without those variables. They are gone
+                    // the second time, so this happens once.
+                    let names: Vec<String> = cube_config.data_sources.keys().cloned().collect();
+                    let superseded = cubeserver::rbac::bootstrap::superseded_env(&report, &names, |key| {
+                        std::env::var_os(key).is_some()
+                    });
+                    if !superseded.is_empty() {
+                        println!(
+                            "🔑 starting again without {} connection variable(s) RBAC now holds",
+                            superseded.len()
+                        );
+                        let (program, error) =
+                            cubeserver::handlers::data_sources::exec_self(Vec::new(), superseded);
+                        eprintln!(
+                            "⚠️  cannot start again from {} ({error}); the connection variables stay in this process's environment",
+                            program.display()
+                        );
+                    }
                     cubeserver::orchestrator_adapter::declare_data_sources_from_rbac(
                         &cube_config,
                         report.env,
