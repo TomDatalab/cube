@@ -26,7 +26,6 @@ describe('organization tree helpers', () => {
     const org = { ...orgNodes([{
       slug: 'digital', name: 'Digital', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
     }])[0], children: detailNodes('digital', detail) };
-    org.children[0] = { ...org.children[0], key: 'org:digital:cubes' };
     const out = filterTree([org], 'FIB');
     expect(out).toHaveLength(1);
     expect(out[0].key).toBe('org:digital');
@@ -41,6 +40,11 @@ describe('organization tree helpers', () => {
       .toEqual({ kind: 'file', slug: 'digital', rest: 'digital/sofiadb/a.yml' });
     expect(parseKey('org:digital')).toEqual({ kind: 'org', slug: 'digital', rest: undefined });
     expect(parseKey('org:digital:cubes').kind).toBe('cubes');
+    expect(parseKey('datasource:digital:sofiadb'))
+      .toEqual({ kind: 'datasource', slug: 'digital', rest: 'sofiadb' });
+    expect(parseKey('schema:digital:sofiadb.dfos'))
+      .toEqual({ kind: 'schema', slug: 'digital', rest: 'sofiadb.dfos' });
+    expect(() => parseKey('bogus:x:y')).toThrow();
   });
 
   it('buildQueryUrl uses all measures or the first non-primary dimension', () => {

@@ -27,7 +27,7 @@ export type OrgDetail = {
 export type NodeKey = string;
 
 export type ParsedKey = {
-  kind: 'org' | 'cubes' | 'cube' | 'tables' | 'table' | 'files' | 'file';
+  kind: 'org' | 'cubes' | 'cube' | 'tables' | 'table' | 'files' | 'file' | 'datasource' | 'schema';
   slug: string;
   rest?: string;
 };
@@ -122,10 +122,18 @@ export function filterTree(nodes: DataNode[], term: string): DataNode[] {
   return visit(nodes);
 }
 
+const KINDS: ParsedKey['kind'][] = [
+  'org', 'cubes', 'cube', 'tables', 'table', 'files', 'file', 'datasource', 'schema',
+];
+
 export function parseKey(key: NodeKey): ParsedKey {
   const first = key.indexOf(':');
   const second = first === -1 ? -1 : key.indexOf(':', first + 1);
-  const kind = (first === -1 ? key : key.slice(0, first)) as ParsedKey['kind'];
+  const prefix = first === -1 ? key : key.slice(0, first);
+  const kind = KINDS.find((k) => k === prefix);
+  if (!kind) {
+    throw new Error(`Unknown tree node key: ${key}`);
+  }
   const slug = first === -1 ? '' : key.slice(first + 1, second === -1 ? undefined : second);
   const rest = second === -1 ? undefined : key.slice(second + 1);
 
