@@ -151,7 +151,11 @@ async fn send(
     let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header(header::HOST, "localhost:4000");
+        .header(header::HOST, "localhost:4000")
+        .header(
+            cubeserver::handlers::playground::PLAYGROUND_KEY_HEADER,
+            cubeserver::handlers::playground::playground_key(),
+        );
     if let Some(token) = token {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -472,4 +476,88 @@ tree_test!(moving_a_connection_rejects_its_cubes_without_restart, |store| {
     let (status, body, _) = get(&env, &admin, "/cube/v1/meta").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!cubes(&body).contains(&"a".to_string()), "{body}");
+});
+
+fn generate_body(tables: Value) -> Value {
+    let cols = json!([{ "name": "id", "type": "String", "attributes": ["primaryKey"] }]);
+    json!({
+        "format": "yaml",
+        "tables": tables,
+        "tablesSchema": {
+            "sofiadb.public": { "orders": cols },
+            "public": { "users": cols }
+        }
+    })
+}
+
+tree_test!(generated_cubes_go_to_the_owners_folder, |store| {
+    let env = env(store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    install_policy(&[("digital", &["sofiadb"])], &["default"]);
+
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        "/playground/generate-schema",
+        Some(&admin),
+        Some(generate_body(json!([["sofiadb.public", "orders"]]))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"][0]["fileName"], "digital/public_orders.yml");
+    assert!(env.model.path().join("digital/public_orders.yml").exists());
+    assert!(!env.model.path().join("public_orders.yml").exists());
+
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        "/playground/generate-schema",
+        Some(&admin),
+        Some(generate_body(json!([["public", "users"]]))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.model.path().join("_platform/users.yml").exists());
+});
+
+tree_test!(generate_refuses_mixed_owners, |store| {
+    let env = env(store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    install_policy(&[("digital", &["sofiadb"])], &["default"]);
+
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        "/playground/generate-schema",
+        Some(&admin),
+        Some(generate_body(json!([["public", "users"], ["sofiadb.public", "orders"]]))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "The tables belong to more than one organization");
+    assert_eq!(std::fs::read_dir(env.model.path()).unwrap().count(), 0);
+});
+
+tree_test!(files_carry_their_organization, |store| {
+    let env = env(store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    install_policy(&[("digital", &["sofiadb"])], &["default"]);
+    env.write("digital/a.yml", CUBE_A);
+    env.write("_platform/u.yml", CUBE_U);
+    env.write("stray/x.yml", CUBE_B);
+
+    let (status, body, _) = get(&env, &admin, "/playground/files").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let org = |name: &str| {
+        body["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["fileName"] == name)
+            .unwrap()["organization"]
+            .clone()
+    };
+    assert_eq!(org("digital/a.yml"), "digital");
+    assert_eq!(org("_platform/u.yml"), "_platform");
+    assert_eq!(org("stray/x.yml"), Value::Null);
 });

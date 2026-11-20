@@ -169,6 +169,17 @@ async fn files(State(state): State<AppState>) -> Result<impl IntoResponse, ApiEr
 
     let mut files = Vec::new();
     collect_model_files(root, root, &mut files)?;
+    if let Some(policy) = cubemodel::ownership::current_policy() {
+        use cubemodel::ownership::{Owner, PLATFORM_FOLDER};
+        for file in &mut files {
+            let name = file["fileName"].as_str().unwrap_or_default().replace('\\', "/");
+            file["organization"] = match policy.owner_of_file(&name) {
+                Owner::Organization(slug) => json!(slug),
+                Owner::Platform => json!(PLATFORM_FOLDER),
+                Owner::Unowned(_) => Value::Null,
+            };
+        }
+    }
     files.sort_by(|a, b| a["fileName"].as_str().cmp(&b["fileName"].as_str()));
 
     Ok(Json(json!({ "files": files })))
@@ -213,6 +224,7 @@ fn collect_model_files(
             "content": std::fs::read_to_string(&path).unwrap_or_default(),
             "absPath": path.canonicalize().unwrap_or(path.clone()).to_string_lossy(),
             "readOnly": true,
+            "organization": Value::Null,
         }));
     }
 

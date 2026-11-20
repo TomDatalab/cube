@@ -208,6 +208,19 @@ async fn the_file_list_holds_the_model_and_nothing_else() {
     assert_eq!(body["files"][0]["content"], "cubes: []");
 }
 
+#[tokio::test]
+async fn files_carry_null_organization_without_rbac() {
+    let (_dir, config) = fixture();
+    let (status, body) =
+        get_json(app(config, Arc::new(TokenIssuingAuth)), "/playground/files").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for file in body["files"].as_array().unwrap() {
+        assert!(file["organization"].is_null(), "{file}");
+        assert!(file.as_object().unwrap().contains_key("organization"), "{file}");
+    }
+}
+
 /// The landing page reads an empty list as "no data model yet".
 #[tokio::test]
 async fn a_missing_model_directory_is_an_empty_list_not_an_error() {
