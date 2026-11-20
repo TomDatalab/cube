@@ -18,11 +18,13 @@ import {
   Typography,
 } from 'antd';
 import {
+  ApiOutlined,
   ArrowLeftOutlined,
   CheckCircleFilled,
   DatabaseOutlined,
   DeleteOutlined,
   EditOutlined,
+  HolderOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -33,6 +35,8 @@ import { adminApi, ownerLabel, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
+import { DATA_SOURCE_DRAG_TYPE } from './organizationDrop';
+import { OrganizationDropPanel } from './OrganizationDropPanel';
 import { Content, Header } from '../components/Ui';
 
 const { Title, Text, Paragraph } = Typography;
@@ -132,6 +136,7 @@ function SettingControl({ setting, ...props }: { setting: Setting; [prop: string
 
 export function DataSourcesPage() {
   const { basePath = '', rbac = false } = usePlaygroundContext() || {};
+  const api = useMemo(() => adminApi(basePath), [basePath]);
   // With RBAC on every new data source belongs to an organization.
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
@@ -180,10 +185,10 @@ export function DataSourcesPage() {
     if (!rbac) {
       return;
     }
-    adminApi(basePath).organizations()
+    api.organizations()
       .then(setOrganizations)
       .catch((e: any) => message.error(e.message));
-  }, [rbac, basePath]);
+  }, [rbac, api]);
 
   async function testExisting(name: string) {
     setTests((t) => ({ ...t, [name]: { loading: true } }));
@@ -324,7 +329,18 @@ export function DataSourcesPage() {
     form.resetFields();
   }
 
+  // With RBAC on, rows drag onto an organization of the side panel; never
+  // `default`, which stays Platform.
+  const draggable = (ds: DataSource) => rbac && ds.name !== 'default' && !restarting;
+
   const columns = [
+    ...(rbac ? [{
+      key: 'drag',
+      width: 32,
+      render: (_: unknown, ds: DataSource) => (draggable(ds) ? (
+        <HolderOutlined title="Drag onto an organization" style={{ color: 'var(--pg-muted, #a1a1b5)' }} />
+      ) : null),
+    }] : []),
     {
       title: 'Name',
       dataIndex: 'name',
@@ -396,31 +412,41 @@ export function DataSourcesPage() {
       title: '',
       key: 'actions',
       align: 'right' as const,
+      // With RBAC the table shares the row with the organizations: the
+      // actions stay in view, as icons, while the other columns scroll.
+      ...(rbac ? { fixed: 'right' as const } : {}),
       render: (_: unknown, ds: DataSource) => (
-        <Space>
-          <Button
-            size="small"
-            disabled={!ds.active}
-            loading={tests[ds.name]?.loading}
-            onClick={() => testExisting(ds.name)}
-          >
-            Test connection
-          </Button>
+        <Space size={rbac ? 4 : 8}>
+          <Tooltip title={rbac ? 'Test connection' : undefined}>
+            <Button
+              size="small"
+              icon={rbac ? <ApiOutlined /> : undefined}
+              aria-label="Test connection"
+              disabled={!ds.active}
+              loading={tests[ds.name]?.loading}
+              onClick={() => testExisting(ds.name)}
+            >
+              {rbac ? null : 'Test connection'}
+            </Button>
+          </Tooltip>
           {editable ? (
             <>
-              <Button
-                size="small"
-                icon={<EditOutlined />}
-                data-testid={`data-source-edit-${ds.name}`}
-                disabled={!!restarting}
-                onClick={() => startEdit(ds)}
-              >
-                Edit
-              </Button>
+              <Tooltip title={rbac ? 'Edit' : undefined}>
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  aria-label="Edit"
+                  data-testid={`data-source-edit-${ds.name}`}
+                  disabled={!!restarting}
+                  onClick={() => startEdit(ds)}
+                >
+                  {rbac ? null : 'Edit'}
+                </Button>
+              </Tooltip>
               {ds.name === 'default' ? (
                 <Tooltip title="The default data source cannot be deleted">
-                  <Button size="small" danger icon={<DeleteOutlined />} disabled>
-                    Delete
+                  <Button size="small" danger icon={<DeleteOutlined />} aria-label="Delete" disabled>
+                    {rbac ? null : 'Delete'}
                   </Button>
                 </Tooltip>
               ) : (
@@ -434,11 +460,13 @@ export function DataSourcesPage() {
                     size="small"
                     danger
                     icon={<DeleteOutlined />}
+                    aria-label="Delete"
+                    title={rbac ? 'Delete' : undefined}
                     data-testid={`data-source-delete-${ds.name}`}
                     loading={deleting === ds.name}
                     disabled={!!restarting}
                   >
-                    Delete
+                    {rbac ? null : 'Delete'}
                   </Button>
                 </Popconfirm>
               )}
@@ -668,13 +696,37 @@ export function DataSourcesPage() {
           </Card>
         ) : null}
 
-        <Table
-          rowKey="name"
-          loading={loading}
-          dataSource={dataSources}
-          columns={columns}
-          pagination={false}
-        />
+        <Row gutter={24}>
+          <Col xs={24} xl={rbac ? 15 : 24}>
+            <Table<DataSource>
+              rowKey="name"
+              loading={loading}
+              dataSource={dataSources}
+              columns={columns}
+              pagination={false}
+              scroll={rbac ? { x: 'max-content' } : undefined}
+              onRow={(ds) => (draggable(ds) ? {
+                draggable: true,
+                onDragStart: (e) => {
+                  e.dataTransfer.setData(DATA_SOURCE_DRAG_TYPE, ds.name);
+                  e.dataTransfer.effectAllowed = 'move';
+                },
+                style: { cursor: 'grab' },
+              } : {})}
+            />
+          </Col>
+          {rbac ? (
+            <Col xs={24} xl={9}>
+              <Title level={5}>Organizations</Title>
+              <OrganizationDropPanel
+                api={api}
+                organizations={organizations}
+                dataSources={dataSources}
+                onChanged={load}
+              />
+            </Col>
+          ) : null}
+        </Row>
       </Content>
     </Layout>
   );
