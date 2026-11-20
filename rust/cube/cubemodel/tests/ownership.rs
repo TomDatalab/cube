@@ -240,3 +240,76 @@ fn a_view_in_its_orgs_folder_without_data_source_is_kept() {
     assert!(m.views.contains_key("v"));
     assert!(m.rejected.is_empty());
 }
+
+#[test]
+fn set_policy_stamps_a_fresh_generation() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Whatever the caller puts in `generation` is replaced.
+    set_policy(Some(Arc::new(OwnershipPolicy {
+        generation: 1_000_000,
+        ..policy()
+    })));
+    let first = cubemodel::ownership::current_policy().unwrap().generation;
+    set_policy(Some(Arc::new(OwnershipPolicy {
+        generation: 0,
+        ..policy()
+    })));
+    let second = cubemodel::ownership::current_policy().unwrap().generation;
+    set_policy(None);
+    assert!(first >= 1 && first != 1_000_000, "{first}");
+    assert!(second > first, "{first} then {second}");
+}
+
+#[test]
+fn an_explicit_policy_wins_over_the_installed_one() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_policy(None);
+    let sources = vec![("on/b.yml".to_string(), cube("b", Some("sofiadb"), ""))];
+    let m = ModelLoader::new()
+        .without_validation()
+        .load_sources_with_policy(&sources, Some(&policy()))
+        .expect("model loads");
+    assert!(!m.cubes.contains_key("b"));
+    assert_eq!(m.rejected.len(), 1);
+}
+
+/// With validation on: the cubes left after a cascade never refer to a
+/// removed one, so the model loads and validation has nothing to say.
+#[test]
+fn a_cascade_leaves_a_model_that_validates() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let measures = "    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n        primary_key: true\n";
+    let joins = |to: &str| {
+        format!(
+            "{measures}    joins:\n      - name: {to}\n        sql: \"{{CUBE}}.id = {{{to}}}.id\"\n        relationship: many_to_one\n"
+        )
+    };
+    // b is on another organization's connection; a joins b, c joins a, and
+    // the view v includes c.a.b: all of them go. d stays and validates.
+    let a = cube("a", Some("sofiadb"), &joins("b"));
+    let b = cube("b", Some("on_pg"), measures);
+    let c = cube("c", Some("sofiadb"), &joins("a"));
+    let d = cube("d", Some("sofiadb"), measures);
+    let v = "views:\n  - name: v\n    cubes:\n      - join_path: c.a.b\n        includes: \"*\"\n";
+    let w = "views:\n  - name: w\n    cubes:\n      - join_path: d\n        includes: \"*\"\n";
+    let sources: Vec<(String, String)> = [
+        ("digital/a.yml", a.as_str()),
+        ("digital/b.yml", b.as_str()),
+        ("digital/c.yml", c.as_str()),
+        ("digital/d.yml", d.as_str()),
+        ("digital/v.yml", v),
+        ("digital/w.yml", w),
+    ]
+    .iter()
+    .map(|(f, s)| (f.to_string(), s.to_string()))
+    .collect();
+    set_policy(Some(Arc::new(policy())));
+    let r = ModelLoader::new().load_sources(&sources);
+    set_policy(None);
+    let m = r.expect("the model validates after the cascade");
+    let mut rejected: Vec<&str> = m.rejected.iter().map(|r| r.cube.as_str()).collect();
+    rejected.sort();
+    assert_eq!(rejected, ["a", "b", "c", "v"]);
+    assert!(m.cubes.contains_key("d"));
+    assert!(m.views.contains_key("w"));
+}

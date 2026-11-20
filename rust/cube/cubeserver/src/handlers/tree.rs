@@ -33,8 +33,16 @@ async fn index(state: &AppState) -> Result<std::sync::Arc<ModelIndex>, ApiError>
     let path = PathBuf::from(&state.config.schema_path);
     tokio::task::spawn_blocking(move || cache.get(&path))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(|e| ApiError::bad_request(e.to_string()))
+        .map_err(|e| {
+            tracing::error!("Cannot index the data model: {e}");
+            ApiError::internal()
+        })
+}
+
+/// A store failure is ours, not the caller's: 503, like the rest of RBAC.
+fn store_error(e: crate::rbac::store::StoreError) -> ApiError {
+    tracing::error!("The RBAC database cannot answer the tree: {e}");
+    crate::rbac::unavailable()
 }
 
 /// Whether something owned by `o` shows under the node of `node`. What no
@@ -52,7 +60,8 @@ fn clamp_limit(limit: Option<i64>) -> i64 {
 }
 
 fn counts(index: &ModelIndex, owner: &Owner, connections: usize) -> (Value, usize) {
-    let errors = index.rejected.iter().filter(|(o, _)| belongs(owner, o)).count();
+    let errors = index.rejected.iter().filter(|(o, _)| belongs(owner, o)).count()
+        + index.errors.len();
     let cubes = index.cubes.iter().filter(|c| belongs(owner, &c.owner)).count();
     let files = index.files.iter().filter(|f| belongs(owner, &f.owner)).count();
     (
@@ -89,7 +98,7 @@ pub async fn list(
         .store
         .search_organizations(None, &search)
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        .map_err(store_error)?;
 
     let policy = current_policy();
     let connections = |slug: &str| {
@@ -153,7 +162,7 @@ async fn resolve(state: &AppState, slug: &str) -> Result<(Option<Owner>, Vec<Str
     rbac.store
         .organization_by_slug(slug)
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .map_err(store_error)?
         .ok_or_else(unknown)?;
     let sources = policy
         .and_then(|p| p.organizations.get(slug).cloned())
@@ -195,7 +204,9 @@ pub async fn detail(
         .rejected
         .iter()
         .filter(|(o, _)| mine(o))
-        .map(|(_, r)| json!({ "file": r.file, "cube": r.cube, "message": r.message }))
+        .map(|(_, r)| r)
+        .chain(index.errors.iter())
+        .map(|r| json!({ "file": r.file, "cube": r.cube, "message": r.message }))
         .collect();
 
     // Only here, on expanding, are the databases asked for their tables.
@@ -227,12 +238,10 @@ pub async fn file(
     let (owner, _) = resolve(&state, &slug).await?;
 
     let rel = FsPath::new(&path);
+    // The files the index lists: the loader's model files.
     let clean = !path.is_empty()
         && rel.components().all(|c| matches!(c, Component::Normal(_)))
-        && matches!(
-            rel.extension().and_then(|e| e.to_str()),
-            Some("yml") | Some("yaml")
-        );
+        && cubemodel::is_model_file(rel);
     if !clean {
         return Err(ApiError::bad_request("Invalid file path"));
     }

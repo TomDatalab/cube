@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use cubemodel::ownership::{current_policy, Owner, Rejection};
+use cubemodel::ownership::{current_policy, Owner, OwnershipPolicy, Rejection};
 use cubemodel::{ModelError, ModelLoader};
 
 #[derive(Debug, Clone)]
@@ -40,49 +40,94 @@ pub struct ModelIndex {
     pub cubes: Vec<IndexedCube>,
     pub files: Vec<IndexedFile>,
     pub rejected: Vec<(Owner, Rejection)>,
+    /// Why the model did not compile (then `cubes` and `rejected` are
+    /// empty). They concern the whole model, so every node shows them.
+    pub errors: Vec<Rejection>,
 }
 
-/// The YAML files under `dir`, by path relative to `root` (the rule of
-/// `/playground/files`).
-fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(root, &path, out);
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("yml") | Some("yaml")
-        ) {
+/// The model files under `model_path` (the loader's own list:
+/// `cubemodel::model_files`), by path relative to it. A directory that cannot
+/// be read is an empty model.
+fn model_file_names(model_path: &Path) -> Vec<(String, std::path::PathBuf)> {
+    cubemodel::model_files(model_path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| {
             let name = path
-                .strip_prefix(root)
+                .strip_prefix(model_path)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            out.push((name, std::fs::read_to_string(&path).unwrap_or_default()));
+            (name, path)
+        })
+        .collect()
+}
+
+/// What a failed compile says, one entry per problem, with the file when it
+/// is known ("" otherwise) and no cube.
+fn compile_errors(error: &ModelError) -> Vec<Rejection> {
+    let entry = |file: &str, message: String| Rejection {
+        file: file.to_string(),
+        cube: String::new(),
+        message,
+    };
+    match error {
+        ModelError::Compile(items) if !items.is_empty() => items
+            .iter()
+            .map(|i| entry(i.file_name.as_deref().unwrap_or(""), i.full_message()))
+            .collect(),
+        ModelError::Template { file_name, message }
+        | ModelError::UnsupportedModelFile { file_name, message } => {
+            vec![entry(file_name, message.clone())]
         }
+        other => vec![entry("", other.to_string())],
     }
 }
 
 impl ModelIndex {
-    pub fn load(model_path: &Path) -> Result<ModelIndex, ModelError> {
-        let policy = current_policy();
-        let owner_of = |file: &str| match &policy {
+    /// The index with the policy installed now.
+    pub fn load(model_path: &Path) -> ModelIndex {
+        Self::load_with(model_path, current_policy().as_deref())
+    }
+
+    /// The index under `policy`: owners and rejections both come from it.
+    ///
+    /// A model that does not compile still lists its files by folder; the
+    /// compile errors go to [`ModelIndex::errors`] and no cube is listed.
+    pub fn load_with(model_path: &Path, policy: Option<&OwnershipPolicy>) -> ModelIndex {
+        let owner_of = |file: &str| match policy {
             Some(p) => p.owner_of_file(file),
             None => Owner::Unowned(String::new()),
         };
 
-        let mut sources = Vec::new();
-        collect(model_path, model_path, &mut sources);
-        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        let sources: Vec<(String, String)> = model_file_names(model_path)
+            .into_iter()
+            .map(|(name, path)| (name, std::fs::read_to_string(&path).unwrap_or_default()))
+            .collect();
+        let files = sources
+            .iter()
+            .map(|(name, _)| IndexedFile {
+                file_name: name.clone(),
+                owner: owner_of(name),
+            })
+            .collect();
 
         // Not validated: a file that does not validate must not hide the
-        // index. The policy is applied all the same.
-        let model = ModelLoader::new()
+        // index. The policy is applied all the same. Templates render with
+        // the default context (no tenant's `COMPILE_CONTEXT`).
+        let model = match ModelLoader::new()
             .without_validation()
-            .load_sources(&sources)?;
+            .load_sources_with_policy(&sources, policy)
+        {
+            Ok(model) => model,
+            Err(e) => {
+                return ModelIndex {
+                    files,
+                    errors: compile_errors(&e),
+                    ..ModelIndex::default()
+                }
+            }
+        };
 
         let cubes = model
             .cube_list()
@@ -117,64 +162,40 @@ impl ModelIndex {
                 },
             })
             .collect();
-        let files = sources
-            .iter()
-            .map(|(name, _)| IndexedFile {
-                file_name: name.clone(),
-                owner: owner_of(name),
-            })
-            .collect();
         let rejected = model
             .rejected
             .iter()
             .map(|r| (owner_of(&r.file), r.clone()))
             .collect();
 
-        Ok(ModelIndex {
+        ModelIndex {
             cubes,
             files,
             rejected,
-        })
-    }
-}
-
-/// Newest mtime, a hash of the file names (a delete or a move changes no
-/// file's mtime) and the policy generation.
-type CacheKey = (Option<SystemTime>, u64, u64);
-
-fn files_hash(model_path: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut names = Vec::new();
-    let mut sources = Vec::new();
-    collect_names(model_path, model_path, &mut sources);
-    names.extend(sources);
-    names.sort();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    names.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn collect_names(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_names(root, &path, out);
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("yml") | Some("yaml")
-        ) {
-            out.push(
-                path.strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+            errors: Vec::new(),
         }
     }
 }
+
+/// What a model directory looks like for change detection: its newest mtime
+/// and a hash of its model file names (a delete or a move changes no file's
+/// mtime). The tree index and the model reload loops share it, so they agree
+/// on when the model changed.
+pub type ModelStamp = (Option<SystemTime>, u64);
+
+pub fn model_stamp(model_path: &Path) -> ModelStamp {
+    use std::hash::{Hash, Hasher};
+    let names: Vec<String> = model_file_names(model_path)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    names.hash(&mut hasher);
+    (crate::meta_adapter::newest_mtime(model_path), hasher.finish())
+}
+
+/// The model's stamp and the policy generation (0: none).
+type CacheKey = (ModelStamp, u64);
 
 /// The index, rebuilt when the newest file changes or the policy does.
 #[derive(Default)]
@@ -189,20 +210,21 @@ impl std::fmt::Debug for ModelIndexCache {
 }
 
 impl ModelIndexCache {
-    pub fn get(&self, model_path: &Path) -> Result<Arc<ModelIndex>, ModelError> {
+    pub fn get(&self, model_path: &Path) -> Arc<ModelIndex> {
+        // One snapshot of the policy for the key and the index.
+        let policy = current_policy();
         let key = (
-            crate::meta_adapter::newest_mtime(model_path),
-            files_hash(model_path),
-            current_policy().map(|p| p.generation).unwrap_or(0),
+            model_stamp(model_path),
+            policy.as_ref().map_or(0, |p| p.generation),
         );
         let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((k, index)) = cached.as_ref() {
             if *k == key {
-                return Ok(index.clone());
+                return index.clone();
             }
         }
-        let index = Arc::new(ModelIndex::load(model_path)?);
+        let index = Arc::new(ModelIndex::load_with(model_path, policy.as_deref()));
         *cached = Some((key, index.clone()));
-        Ok(index)
+        index
     }
 }

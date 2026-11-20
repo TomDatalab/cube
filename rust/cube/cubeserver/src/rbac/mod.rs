@@ -57,6 +57,11 @@ pub struct Rbac {
     pub(crate) refresh_lock: tokio::sync::Mutex<()>,
     /// A background retry of a failed refresh is running.
     pub(crate) refresh_retry: Arc<ownership::RetryState>,
+    /// The folder ownership policy is in force: set by `main` when it
+    /// installs the boot policy (and by tests that want it). Off, a change to
+    /// organizations or connections never installs a policy, so a process
+    /// (a test binary) that did not ask for one keeps a model without owners.
+    ownership_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -115,6 +120,7 @@ impl Rbac {
             data_source_names: Default::default(),
             refresh_lock: Default::default(),
             refresh_retry: Default::default(),
+            ownership_enabled: Default::default(),
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)
@@ -213,6 +219,18 @@ impl Rbac {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Turns the folder ownership policy on: from now on organization and
+    /// connection changes rebuild and install it.
+    pub fn enable_ownership(&self) {
+        self.ownership_enabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn ownership_enabled(&self) -> bool {
+        self.ownership_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Test hook: the semaphore bounding concurrent hashes, so a test can

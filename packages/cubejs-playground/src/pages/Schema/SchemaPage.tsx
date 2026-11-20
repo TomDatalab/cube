@@ -158,6 +158,9 @@ export function SchemaPage({ history }: RouterProps) {
     })();
   }, [query]);
 
+  // Bumped after a Generate Data Model, so meta is fetched again.
+  const [metaVersion, setMetaVersion] = useState(0);
+
   useEffect(() => {
     if (!cubeApi) {
       return undefined;
@@ -187,7 +190,56 @@ export function SchemaPage({ history }: RouterProps) {
     return () => {
       cancelled = true;
     };
-  }, [cubeApi]);
+  }, [cubeApi, metaVersion]);
+
+  // The organizations already listed (every loaded page) and the search
+  // results, fetched again so their counts follow a change of the model.
+  const refreshOrgs = async () => {
+    const base = ++baseRequest.current;
+    try {
+      const fresh: OrgSummary[] = [];
+      const seen = new Set<string>();
+      let freshTotal = 0;
+      const wanted = Math.max(orgs.length, 1);
+      for (let offset = 0; offset < wanted; offset += PAGE_SIZE) {
+        // eslint-disable-next-line no-await-in-loop
+        const result = await fetchPage('', offset);
+        const page: OrgSummary[] = result.organizations || [];
+        freshTotal = result.total || 0;
+        page.forEach((o) => {
+          if (!seen.has(o.slug)) {
+            seen.add(o.slug);
+            fresh.push(o);
+          }
+        });
+        if (!page.length) {
+          break;
+        }
+      }
+      if (base === baseRequest.current) {
+        setOrgs(fresh);
+        setTotal(freshTotal);
+      }
+    } catch (e: any) {
+      if (base === baseRequest.current) {
+        message.error(e.message);
+      }
+    }
+    if (query) {
+      const request = ++foundRequest.current;
+      try {
+        const result = await fetchPage(query, 0);
+        if (request === foundRequest.current) {
+          setFound(result.organizations || []);
+          setFoundTotal(result.total || 0);
+        }
+      } catch (e: any) {
+        if (request === foundRequest.current) {
+          message.error(e.message);
+        }
+      }
+    }
+  };
 
   const loadDetail = useCallback((slug: string, force = false): Promise<void> => {
     const existing = detailRequests.current[slug];
@@ -370,6 +422,9 @@ export function SchemaPage({ history }: RouterProps) {
       playgroundAction('Generate Schema Success', options);
       await loadDetail(checkedSlug, true);
       setCheckedKeys([]);
+      // The new cubes show in meta and in the organizations' counts.
+      setMetaVersion((v) => v + 1);
+      refreshOrgs();
       Modal.success({
         title: 'Data model files successfully generated!',
         content:

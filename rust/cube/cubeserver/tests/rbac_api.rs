@@ -902,6 +902,9 @@ async fn scenario_from_env(env: Env) -> Scenario {
         assert_eq!(status, StatusCode::CREATED, "{body}");
     }
     let org_a = create_org(&env, &admin, "A", "ana").await;
+    // Ownership is not enabled here: an organization change installs no
+    // folder policy, so the models at the root keep loading.
+    assert!(cubemodel::ownership::current_policy().is_none());
     let ana = login_token(&env.router, "ana", "ana-password-1").await;
     let bia = login_token(&env.router, "bia", "bia-password-1").await;
     let caio = login_token(&env.router, "caio", "caio-password-1").await;
@@ -1940,7 +1943,7 @@ db_test!(workspace_members_cannot_manage_connections, |store| {
 });
 
 async fn assign(env: &Env, token: &str, name: &str, org: &str) -> StatusCode {
-    send(
+    let status = send(
         &env.router,
         Method::PUT,
         &format!("/cube/v1/connections/{name}/organization"),
@@ -1948,7 +1951,9 @@ async fn assign(env: &Env, token: &str, name: &str, org: &str) -> StatusCode {
         Some(json!({ "organizationId": org })),
     )
     .await
-    .0
+    .0;
+    assert!(cubemodel::ownership::current_policy().is_none());
+    status
 }
 
 db_test!(assigning_an_existing_data_source_to_an_org, |store| {

@@ -3,6 +3,7 @@
 //! them never breaks the rest of the model.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
@@ -17,7 +18,8 @@ pub struct OwnershipPolicy {
     pub organizations: BTreeMap<String, BTreeSet<String>>,
     /// Data sources without an organization (`default` included when it applies).
     pub platform: BTreeSet<String>,
-    /// Changes with every new policy.
+    /// Changes with every new policy: [`set_policy`] stamps it (strictly
+    /// increasing, from 1), whatever the caller put here.
     pub generation: u64,
 }
 
@@ -61,10 +63,18 @@ impl OwnershipPolicy {
 }
 
 static POLICY: RwLock<Option<Arc<OwnershipPolicy>>> = RwLock::new(None);
+/// The generation of the next installed policy. 0 is never handed out, so a
+/// cache can use it for "no policy".
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// Sets (or clears) the process-wide policy.
+/// Sets (or clears) the process-wide policy. An installed policy gets a fresh
+/// generation, greater than that of every policy installed before it.
 pub fn set_policy(policy: Option<Arc<OwnershipPolicy>>) {
-    *POLICY.write().unwrap_or_else(|e| e.into_inner()) = policy;
+    let mut slot = POLICY.write().unwrap_or_else(|e| e.into_inner());
+    *slot = policy.map(|mut p| {
+        Arc::make_mut(&mut p).generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
+        p
+    });
 }
 
 pub fn current_policy() -> Option<Arc<OwnershipPolicy>> {

@@ -14,9 +14,6 @@ use super::store::{Search, Store, StoreError};
 use crate::app::AppState;
 use crate::error::ApiError;
 
-/// Every policy gets a new number, so caches keyed on it see the change.
-static GENERATION: AtomicU64 = AtomicU64::new(1);
-
 /// The policy for the organizations and connections `store` holds.
 ///
 /// `data_source_names` are the data sources the deployment declares; those no
@@ -58,14 +55,19 @@ pub async fn build_policy(
     Ok(OwnershipPolicy {
         organizations: by_slug,
         platform,
-        generation: GENERATION.fetch_add(1, Ordering::SeqCst),
+        // `set_policy` stamps the generation when it installs the policy.
+        generation: 0,
     })
 }
 
 /// Builds the policy, installs it, recompiles the models that are live and
-/// returns what the model index now rejects.
+/// returns what the model index now rejects. A no-op (nothing rejected) when
+/// ownership is not enabled on the `Rbac` ([`super::Rbac::enable_ownership`]).
 pub async fn refresh_policy(state: &AppState) -> Result<Vec<Rejection>, ApiError> {
     let rbac = state.rbac.as_deref().ok_or_else(ApiError::internal)?;
+    if !rbac.ownership_enabled() {
+        return Ok(Vec::new());
+    }
     // Build, install and reload as one step: two refreshes in flight could
     // otherwise install an older policy over a newer one.
     let _serial = rbac.refresh_lock.lock().await;
@@ -83,13 +85,11 @@ pub async fn refresh_policy(state: &AppState) -> Result<Vec<Rejection>, ApiError
         tenants.reload_all().await;
     }
 
-    match state.model_index.get(Path::new(&state.config.schema_path)) {
-        Ok(index) => Ok(index.rejected.iter().map(|(_, r)| r.clone()).collect()),
-        Err(e) => {
-            tracing::warn!("Cannot index the data model after the policy changed: {e}");
-            Ok(Vec::new())
-        }
+    let index = state.model_index.get(Path::new(&state.config.schema_path));
+    for e in &index.errors {
+        tracing::warn!("The data model does not compile after the policy changed: {}: {}", e.file, e.message);
     }
+    Ok(index.rejected.iter().map(|(_, r)| r.clone()).collect())
 }
 
 /// Logs the files a move left in the wrong folder, as `move <file> to <dest>/`.
@@ -111,6 +111,9 @@ pub fn warn_rejections(connection: &str, destination: &str, rejections: &[Reject
 /// heal). It is logged and retried in the background, with backoff, until it
 /// succeeds; at most one retry task runs at a time.
 pub async fn refresh_after_commit(state: &AppState) -> Vec<Rejection> {
+    if !state.rbac.as_deref().is_some_and(|r| r.ownership_enabled()) {
+        return Vec::new();
+    }
     match refresh_policy(state).await {
         Ok(rejections) => rejections,
         Err(e) => {

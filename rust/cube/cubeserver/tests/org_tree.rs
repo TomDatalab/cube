@@ -89,6 +89,8 @@ async fn env_with(store: cubeserver::rbac::store::Store, real_meta: bool) -> Env
             .await
             .expect("rbac starts"),
     );
+    // As `main` does when it installs the boot policy.
+    rbac.enable_ownership();
     let config = ServerConfig {
         schema_path: model.path().to_string_lossy().into_owned(),
         data_sources: vec![("sofiadb".into(), "postgres".into())],
@@ -203,8 +205,8 @@ async fn get(env: &Env, token: &str, path: &str) -> (StatusCode, Value, String) 
     send(&env.router, Method::GET, path, Some(token), None).await
 }
 
+/// Installs a policy; `set_policy` gives it a new generation.
 fn install_policy(orgs: &[(&str, &[&str])], platform: &[&str]) {
-    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     set_policy(Some(Arc::new(OwnershipPolicy {
         organizations: orgs
             .iter()
@@ -216,7 +218,7 @@ fn install_policy(orgs: &[(&str, &[&str])], platform: &[&str]) {
             })
             .collect::<BTreeMap<_, _>>(),
         platform: platform.iter().map(|d| d.to_string()).collect(),
-        generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        generation: 0,
     })));
 }
 
@@ -242,6 +244,7 @@ macro_rules! tree_test {
 const CUBE_A: &str = "cubes:\n  - name: a\n    sql_table: t\n    data_source: sofiadb\n    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n";
 const CUBE_B: &str = "cubes:\n  - name: b\n    sql_table: t\n    data_source: sofiadb\n    measures:\n      - name: n\n        type: count\n";
 const CUBE_U: &str = "cubes:\n  - name: u\n    sql_table: t\n    data_source: default\n    measures:\n      - name: n\n        type: count\n";
+const CUBE_ORDERS: &str = "cubes:\n  - name: orders\n    sql_table: t\n    data_source: default\n    measures:\n      - name: n\n        type: count\n";
 
 tree_test!(tree_is_for_platform_admins, |store| {
     let env = env(store).await;
@@ -274,7 +277,7 @@ tree_test!(tree_groups_by_folder, |store| {
     env.write("digital/a.yml", CUBE_A);
     env.write("on/b.yml", CUBE_B);
     env.write("_platform/u.yml", CUBE_U);
-    env.write("orders.yml", CUBE_U);
+    env.write("orders.yml", CUBE_ORDERS);
     install_policy(&[("digital", &["sofiadb"]), ("on", &[])], &["default"]);
 
     let (status, body, _) = get(&env, &admin, "/playground/tree").await;
@@ -424,9 +427,12 @@ tree_test!(policy_follows_connections, |store| {
     assert_eq!(policy.organizations["on"], set(&[]));
     assert_eq!(policy.platform, set(&["default"]));
 
-    // Every policy is a new generation.
+    // Every installed policy is a new generation.
+    set_policy(Some(Arc::new(policy)));
+    let first = cubemodel::ownership::current_policy().unwrap().generation;
     let again = cubeserver::rbac::ownership::build_policy(&store, &[]).await.unwrap();
-    assert!(again.generation > policy.generation);
+    set_policy(Some(Arc::new(again)));
+    assert!(cubemodel::ownership::current_policy().unwrap().generation > first);
 });
 
 tree_test!(moving_a_connection_rejects_its_cubes_without_restart, |store| {

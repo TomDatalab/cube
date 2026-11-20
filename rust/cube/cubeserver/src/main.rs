@@ -174,7 +174,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         match cubeserver::rbac::ownership::build_policy(&rbac.store, &rbac.data_source_names())
             .await
         {
-            Ok(policy) => cubemodel::ownership::set_policy(Some(Arc::new(policy))),
+            Ok(policy) => {
+                cubemodel::ownership::set_policy(Some(Arc::new(policy)));
+                rbac.enable_ownership();
+            }
             Err(e) => {
                 eprintln!("RBAC error: cannot build the folder ownership policy: {e}");
                 std::process::exit(1);

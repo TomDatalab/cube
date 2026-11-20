@@ -109,9 +109,19 @@ export function filterTree(nodes: DataNode[], term: string): DataNode[] {
     return nodes;
   }
 
+  // The title, and the part of the key after kind and slug (a cube name, a
+  // file path, `ds.schema.table`): never the kind or the slug, so `cube` or
+  // an organization's slug does not match every node of a kind.
+  const rest = (node: DataNode) => {
+    try {
+      return parseKey(String(node.key)).rest || '';
+    } catch {
+      return '';
+    }
+  };
   const matches = (node: DataNode) => (
     (typeof node.title === 'string' && node.title.toLowerCase().includes(needle))
-    || String(node.key).toLowerCase().includes(needle)
+    || rest(node).toLowerCase().includes(needle)
   );
 
   const visit = (list: DataNode[]): DataNode[] => list.flatMap((node) => {

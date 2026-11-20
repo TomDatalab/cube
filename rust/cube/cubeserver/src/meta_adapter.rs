@@ -89,12 +89,14 @@ pub fn spawn_reload_loop(service: Arc<ModelMetaService>, interval: std::time::Du
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
-        let mut last_seen = newest_mtime(service.model_path());
+        let mut last_seen = crate::model_index::model_stamp(service.model_path());
 
         loop {
             ticker.tick().await;
 
-            let current = newest_mtime(service.model_path());
+            // Newest mtime and the set of model files: a file moved between
+            // folders keeps its mtime but changes the set.
+            let current = crate::model_index::model_stamp(service.model_path());
             if current == last_seen {
                 continue;
             }

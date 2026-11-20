@@ -35,6 +35,24 @@ describe('organization tree helpers', () => {
     expect(filterTree([org], '  ')).toEqual([org]);
   });
 
+  it('filterTree matches titles and names, never the kind or the slug of a key', () => {
+    const org = { ...orgNodes([{
+      slug: 'digital', name: 'Digital', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
+    }])[0], children: detailNodes('digital', detail) };
+    // Kinds of keys: no title holds them.
+    expect(filterTree([org], 'datasource')).toEqual([]);
+    expect(filterTree([org], 'schema:')).toEqual([]);
+    // The slug is in every key; only what names it matches (a file in its folder).
+    const out = filterTree([org], 'digital');
+    expect(out).toHaveLength(1);
+    expect(out[0].children!.map((c) => c.key)).toEqual(['files:digital']);
+    expect(out[0].children![0].children!.map((c) => c.key))
+      .toEqual(['file:digital:digital/sofiadb/a.yml']);
+    // The part of the key after the slug still matches: `ds.schema.table`.
+    const tables = filterTree([org], 'public.t1');
+    expect(tables[0].children!.map((c) => c.key)).toEqual(['tables:digital']);
+  });
+
   it('parseKey splits on the first two colons only', () => {
     expect(parseKey('file:digital:digital/sofiadb/a.yml'))
       .toEqual({ kind: 'file', slug: 'digital', rest: 'digital/sofiadb/a.yml' });
