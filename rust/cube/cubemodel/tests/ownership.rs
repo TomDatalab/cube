@@ -195,6 +195,7 @@ fn rejection_cascades_once() {
         Some(policy()),
         &[("digital/a.yml", &a), ("digital/b.yml", &b)],
     );
+    assert!(!m.cubes.contains_key("a") && !m.cubes.contains_key("b"));
     assert_eq!(
         m.rejected,
         vec![
@@ -225,5 +226,17 @@ fn the_rest_of_the_model_still_compiles() {
 fn no_policy_changes_nothing() {
     let m = load(None, &[("orders.yml", &cube("o", None, ""))]);
     assert!(m.cubes.contains_key("o"));
+    assert!(m.rejected.is_empty());
+}
+
+#[test]
+fn a_view_in_its_orgs_folder_without_data_source_is_kept() {
+    let a = cube("a", Some("sofiadb"), "");
+    let v = "views:\n  - name: v\n    cubes:\n      - join_path: a\n        includes: \"*\"\n";
+    let m = load(
+        Some(policy()),
+        &[("digital/a.yml", &a), ("digital/v.yml", v)],
+    );
+    assert!(m.views.contains_key("v"));
     assert!(m.rejected.is_empty());
 }

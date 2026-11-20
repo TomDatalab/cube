@@ -99,6 +99,9 @@ pub fn apply(model: &mut DataModel, policy: &OwnershipPolicy) -> Vec<Rejection> 
             Owner::Unowned(seg) => Some(format!(
                 "the folder {seg}/ does not belong to any organization"
             )),
+            // A view has no connection of its own: only its folder and the
+            // cubes it includes matter.
+            Owner::Organization(_) | Owner::Platform if cube.is_view => None,
             Owner::Organization(slug) => {
                 let ok = policy
                     .organizations
