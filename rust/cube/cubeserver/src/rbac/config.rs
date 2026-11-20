@@ -39,6 +39,8 @@ pub struct RbacConfig {
     pub max_concurrent_hashes: usize,
     /// Wait for a hashing slot before answering 503.
     pub hash_queue_wait: Duration,
+    /// `CUBE_RBAC_SECRET_KEY`: seals the data source secrets RBAC keeps.
+    pub secret_key: super::secrets::SecretKey,
 }
 
 /// Secrets stay out of logs and panics.
@@ -86,6 +88,9 @@ impl RbacConfig {
         let spicedb_endpoint = required("SPICEDB_ENDPOINT")?;
         let preshared_key = required("SPICEDB_PRESHARED_KEY")?;
         let db_url = required("CUBE_APP_DB_URL")?;
+        let secret_key = super::secrets::SecretKey::from_base64(&required(
+            super::secrets::SECRET_KEY_VAR,
+        )?)?;
 
         let admins: Vec<String> = var("CUBE_RBAC_ADMINS")
             .map(|list| {
@@ -118,6 +123,7 @@ impl RbacConfig {
             failure_delay: DEFAULT_FAILURE_DELAY,
             max_concurrent_hashes: default_max_concurrent_hashes(),
             hash_queue_wait: DEFAULT_HASH_QUEUE_WAIT,
+            secret_key,
         }))
     }
 }
@@ -181,6 +187,11 @@ mod tests {
         ("SPICEDB_ENDPOINT", "http://127.0.0.1:18443"),
         ("SPICEDB_PRESHARED_KEY", "key"),
         ("CUBE_APP_DB_URL", "postgres://x/cube_app"),
+        // base64 of 32 zero bytes
+        (
+            "CUBE_RBAC_SECRET_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ),
     ];
 
     #[test]
@@ -202,6 +213,7 @@ mod tests {
             "SPICEDB_ENDPOINT",
             "SPICEDB_PRESHARED_KEY",
             "CUBE_APP_DB_URL",
+            "CUBE_RBAC_SECRET_KEY",
         ] {
             let vars: Vec<_> = FULL
                 .iter()
@@ -211,6 +223,18 @@ mod tests {
             let err = RbacConfig::from_lookup(lookup(&vars)).unwrap_err();
             assert!(err.contains(missing), "{err}");
         }
+    }
+
+    #[test]
+    fn an_invalid_secret_key_is_refused() {
+        let mut vars: Vec<_> = FULL
+            .iter()
+            .copied()
+            .filter(|(k, _)| *k != "CUBE_RBAC_SECRET_KEY")
+            .collect();
+        vars.push(("CUBE_RBAC_SECRET_KEY", "dG9vIHNob3J0"));
+        let err = RbacConfig::from_lookup(lookup(&vars)).unwrap_err();
+        assert!(err.contains("CUBE_RBAC_SECRET_KEY"), "{err}");
     }
 
     #[test]

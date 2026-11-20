@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod authz;
+pub mod bootstrap;
 pub mod config;
 pub mod dependencies;
 pub mod enforce;

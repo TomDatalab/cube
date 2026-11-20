@@ -768,3 +768,88 @@ db_test!(save_then_load_decrypts, |store, url| {
     untyped.remove("CUBEJS_DB_TYPE");
     assert!(save(&store, &key, "x", &untyped).await.is_err());
 });
+
+mod bootstrap_support {
+    use base64::Engine;
+    use cubeserver::rbac::secrets::SecretKey;
+
+    pub fn key() -> SecretKey {
+        SecretKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])).unwrap()
+    }
+
+    pub const CUBE_YML: &str = "version: 1\nmodel_path: model\n\ndata_sources:\n  default:\n    type: postgres\n    host: 127.0.0.1\n    database: analytics\n    password: pg-secret\n\n  # Added from the Playground.\n  extra:\n    type: sqlite\n\nscheduled_refresh:\n  enabled: false\n";
+    pub const DOT_ENV: &str = "PORT=4000\n# extra\nCUBEJS_DS_EXTRA_DB_NAME=/tmp/x.db\n";
+
+    /// A deployment directory with `cube.yml` and `.env`.
+    pub fn deployment() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cube.yml"), CUBE_YML).unwrap();
+        std::fs::write(dir.path().join(".env"), DOT_ENV).unwrap();
+        dir
+    }
+
+    pub fn env_of(dir: &std::path::Path) -> cubeconfig::Env {
+        let mut env = cubeconfig::Env::new();
+        env.set("CUBEJS_DS_EXTRA_DB_NAME", "/tmp/x.db");
+        let _ = dir;
+        env
+    }
+}
+
+db_test!(import_moves_file_data_sources_into_rbac, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+
+    let report = data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env)
+        .await
+        .unwrap();
+    assert_eq!(report.imported, ["default", "extra"]);
+    assert_eq!(report.loaded, 2);
+
+    let names: Vec<String> = store.data_sources().await.unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, ["default", "extra"]);
+    let yml = std::fs::read_to_string(&file).unwrap();
+    assert!(!yml.contains("extra:") && !yml.contains("pg-secret"), "{yml}");
+    assert!(yml.contains("scheduled_refresh"), "{yml}");
+    let dot_env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert!(!dot_env.contains("CUBEJS_DS_EXTRA_"), "{dot_env}");
+    assert!(dot_env.contains("PORT=4000"));
+    let backups: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".bak-"))
+        .collect();
+    assert!(backups.iter().any(|n| n.starts_with("cube.yml.bak-")), "{backups:?}");
+    assert!(backups.iter().any(|n| n.starts_with(".env.bak-")), "{backups:?}");
+
+    assert_eq!(config.data_sources["extra"].database.as_deref(), Some("/tmp/x.db"));
+    assert_eq!(config.data_sources["default"].password.as_deref(), Some("pg-secret"));
+    assert_eq!(report.env.get("CUBEJS_DS_EXTRA_DB_NAME").map(String::as_str), Some("/tmp/x.db"));
+    assert_eq!(report.env.get("CUBEJS_DB_PASS").map(String::as_str), Some("pg-secret"));
+});
+
+db_test!(import_is_idempotent, |store, _url| {
+    use bootstrap_support::*;
+    use cubeserver::rbac::bootstrap::data_sources_from_rbac;
+    let dir = deployment();
+    let env = env_of(dir.path());
+    let file = dir.path().join("cube.yml");
+    let mut config = cubeconfig::CubeConfig::load_declared(dir.path(), &env).unwrap();
+    data_sources_from_rbac(&store, &key(), &mut config, Some(&file), &env).await.unwrap();
+    let yml = std::fs::read_to_string(&file).unwrap();
+
+    // The stripped cube.yml loads, with no data source of its own.
+    let mut again = cubeconfig::CubeConfig::load_declared(dir.path(), &cubeconfig::Env::new()).unwrap();
+    assert!(again.data_sources.is_empty());
+    let report = data_sources_from_rbac(&store, &key(), &mut again, Some(&file), &cubeconfig::Env::new())
+        .await
+        .unwrap();
+    assert!(report.imported.is_empty());
+    assert_eq!(report.loaded, 2);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), yml);
+    assert_eq!(again.data_sources["extra"].database.as_deref(), Some("/tmp/x.db"));
+});

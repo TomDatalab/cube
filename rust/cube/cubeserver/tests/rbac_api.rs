@@ -75,6 +75,10 @@ fn rbac_config(failure_delay: Duration) -> RbacConfig {
         failure_delay,
         max_concurrent_hashes: 4,
         hash_queue_wait: Duration::from_secs(2),
+        secret_key: cubeserver::rbac::secrets::SecretKey::from_base64(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        .unwrap(),
     }
 }
 

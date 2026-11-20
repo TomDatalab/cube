@@ -25,6 +25,10 @@ use crate::services::{NormalizedRequest, QueryService, RequestContext};
 struct DeclaredDataSources {
     env: HashMap<String, String>,
     db_types: HashMap<String, String>,
+    /// From RBAC, which is the only source of data source settings: what it
+    /// declares wins over the process environment (a `.env` line left from
+    /// before the import, say).
+    authoritative: bool,
 }
 
 static DECLARED: OnceLock<DeclaredDataSources> = OnceLock::new();
@@ -37,7 +41,24 @@ static DECLARED: OnceLock<DeclaredDataSources> = OnceLock::new();
 /// variable it stands for; a variable that is set still wins, as it does in
 /// `cube.yml` itself.
 pub fn declare_data_sources(config: &CubeConfig) {
-    let mut env = HashMap::new();
+    let declared = declared(config, HashMap::new(), false);
+    // A second call (a test, say) keeps the first; the file is read once.
+    let _ = DECLARED.set(declared);
+}
+
+/// Like [`declare_data_sources`] for the data sources RBAC holds: `extra` is
+/// every stored setting as the variable a driver reads (driver-specific ones
+/// included), and the declared values win over the process environment.
+pub fn declare_data_sources_from_rbac(config: &CubeConfig, extra: HashMap<String, String>) {
+    let _ = DECLARED.set(declared(config, extra, true));
+}
+
+fn declared(
+    config: &CubeConfig,
+    extra: HashMap<String, String>,
+    authoritative: bool,
+) -> DeclaredDataSources {
+    let mut env = extra;
     let mut db_types = HashMap::new();
 
     let names: Vec<&str> = config.data_sources.keys().map(String::as_str).collect();
@@ -70,8 +91,11 @@ pub fn declare_data_sources(config: &CubeConfig) {
         }
     }
 
-    // A second call (a test, say) keeps the first; the file is read once.
-    let _ = DECLARED.set(DeclaredDataSources { env, db_types });
+    DeclaredDataSources {
+        env,
+        db_types,
+        authoritative,
+    }
 }
 
 /// The database type `cube.yml` declares for `data_source`.
@@ -84,14 +108,24 @@ struct DeclaredEnv;
 
 impl EnvSource for DeclaredEnv {
     fn get(&self, key: &str) -> Option<String> {
-        let declared = DECLARED.get().and_then(|d| d.env.get(key).cloned());
-        // The declared list is already the union of the file and
-        // `CUBEJS_DATASOURCES`, so it wins over the variable alone.
-        if key == "CUBEJS_DATASOURCES" && declared.is_some() {
-            return declared;
-        }
-        ProcessEnv.get(key).or(declared)
+        declared_lookup(DECLARED.get(), key, |k| ProcessEnv.get(k))
     }
+}
+
+fn declared_lookup(
+    declared: Option<&DeclaredDataSources>,
+    key: &str,
+    process: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let value = declared.and_then(|d| d.env.get(key).cloned());
+    // The declared list is already the union of the file and
+    // `CUBEJS_DATASOURCES`, so it wins over the variable alone; with RBAC
+    // every declared value does.
+    let wins = key == "CUBEJS_DATASOURCES" || declared.is_some_and(|d| d.authoritative);
+    if wins && value.is_some() {
+        return value;
+    }
+    process(key).or(value)
 }
 
 /// Builds a driver per data source name, as `driverFactory` did in `cube.js`.
@@ -364,5 +398,47 @@ fn rename_result_keys(result: &mut cubeorch::api::LoadResult, aliases: &HashMap<
             .collect();
 
         *object = renamed;
+    }
+}
+
+#[cfg(test)]
+mod declared_lookup_tests {
+    use super::*;
+
+    fn declared(authoritative: bool) -> DeclaredDataSources {
+        DeclaredDataSources {
+            env: [
+                ("CUBEJS_DB_PASS".to_string(), "from-rbac".to_string()),
+                ("CUBEJS_DATASOURCES".to_string(), "default".to_string()),
+            ]
+            .into(),
+            db_types: HashMap::new(),
+            authoritative,
+        }
+    }
+
+    fn process(key: &str) -> Option<String> {
+        match key {
+            "CUBEJS_DB_PASS" => Some("from-dotenv".into()),
+            "CUBEJS_DB_QUERY_TIMEOUT" => Some("30".into()),
+            "CUBEJS_DATASOURCES" => Some("default,old".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn with_rbac_the_stored_value_wins_over_the_environment() {
+        let d = declared(true);
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DB_PASS", process).as_deref(), Some("from-rbac"));
+        // What RBAC does not hold still comes from the environment.
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DB_QUERY_TIMEOUT", process).as_deref(), Some("30"));
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DATASOURCES", process).as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn without_rbac_a_set_variable_wins_as_in_cube_yml() {
+        let d = declared(false);
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DB_PASS", process).as_deref(), Some("from-dotenv"));
+        assert_eq!(declared_lookup(Some(&d), "CUBEJS_DATASOURCES", process).as_deref(), Some("default"));
     }
 }

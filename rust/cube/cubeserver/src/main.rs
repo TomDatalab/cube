@@ -62,21 +62,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // RBAC (`CUBE_RBAC=spicedb`): when asked for, it starts or the server
+    // does not. Falling back to no RBAC would open everything up.
+    let rbac_config = match cubeserver::rbac::RbacConfig::from_env() {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("RBAC error: {message}");
+            std::process::exit(1);
+        }
+    };
+
     // `cube.yml` replaces `cube.js`; a missing file means environment-only
-    // configuration, which is what a single data source needs.
-    let cube_config =
-        match cubeconfig::CubeConfig::load_or_env(".", &cubeconfig::Env::from_process()) {
-            Ok(config) => config,
-            Err(err) => {
-                // Print the message, not the debug form: it names the file and key.
-                eprintln!("Configuration error: {err}");
-                std::process::exit(1);
-            }
-        };
+    // configuration, which is what a single data source needs. With RBAC the
+    // data sources come from its database, so the file implies none.
+    let env = cubeconfig::Env::from_process();
+    let loaded = if rbac_config.is_some() {
+        cubeconfig::CubeConfig::load_declared(".", &env)
+    } else {
+        cubeconfig::CubeConfig::load_or_env(".", &env)
+    };
+    let mut cube_config = match loaded {
+        Ok(config) => config,
+        Err(err) => {
+            // Print the message, not the debug form: it names the file and key.
+            eprintln!("Configuration error: {err}");
+            std::process::exit(1);
+        }
+    };
 
     // Drivers read `CUBEJS_*` variables; this lets them find a data source
-    // only `cube.yml` declares.
-    cubeserver::orchestrator_adapter::declare_data_sources(&cube_config);
+    // only `cube.yml` (or RBAC) declares.
+    match &rbac_config {
+        Some(rbac_config) => {
+            match cubeserver::rbac::bootstrap::load_at_startup(rbac_config, &mut cube_config).await {
+                Ok(report) => {
+                    let imported = if report.imported.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (imported from the files: {})", report.imported.join(", "))
+                    };
+                    println!("🔑 {} data source(s) from RBAC{imported}", report.loaded);
+                    cubeserver::orchestrator_adapter::declare_data_sources_from_rbac(
+                        &cube_config,
+                        report.env,
+                    );
+                }
+                Err(message) => {
+                    eprintln!("RBAC error: {message}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => cubeserver::orchestrator_adapter::declare_data_sources(&cube_config),
+    }
 
     // The environment wins over the file, so it is applied last.
     let mut config = ServerConfig::default()

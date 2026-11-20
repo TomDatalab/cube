@@ -778,7 +778,7 @@ fn read_spec(path: &Path) -> Result<CubeConfigSpec, ApiError> {
 /// A data source's settings as the `CUBEJS_DB_*` variables a driver reads:
 /// the fields `cube.yml` resolves, plus the driver-specific variables set for
 /// it alone (`CUBEJS_DS_<NAME>_DB_SNOWFLAKE_ACCOUNT`, say).
-fn current_variables(
+pub(crate) fn current_variables(
     config: &CubeConfig,
     name: &str,
     env: &Env,
@@ -827,7 +827,7 @@ fn current_variables(
 /// What follows `CUBEJS_DS_<NAME>_` in one of `name`'s own variables. A
 /// source whose name starts the same (`sales_eu` for `sales`) has variables
 /// with that prefix too, and they are not `name`'s.
-fn own_setting<'a>(key: &'a str, name: &str, sources: &[&str]) -> Option<&'a str> {
+pub(crate) fn own_setting<'a>(key: &'a str, name: &str, sources: &[&str]) -> Option<&'a str> {
     let rest = key.strip_prefix(&key_by_data_source("CUBEJS_", name))?;
     let another = sources.iter().any(|other| {
         other.len() > name.len()
@@ -1135,7 +1135,7 @@ fn add_to_config(current: &str, name: &str, db_type: &str) -> String {
 
 /// `cube.yml` without data source `name`: its entry, the comment lines right
 /// above it and one blank line before those. `None` if it is not there.
-fn remove_from_config(current: &str, name: &str) -> Option<String> {
+pub(crate) fn remove_from_config(current: &str, name: &str) -> Option<String> {
     let lines: Vec<&str> = current.lines().collect();
     let start = lines.iter().position(|l| l.trim_end() == "data_sources:")?;
     let end = section_end(&lines, start);
@@ -1190,14 +1190,14 @@ fn section_end(lines: &[&str], start: usize) -> usize {
         .unwrap_or(lines.len())
 }
 
-fn header(name: &str) -> String {
+pub(crate) fn header(name: &str) -> String {
     format!("# Data source {name}, added from the Playground")
 }
 
 /// `.env` with the process environment laid over it, the way `CubeConfig`
 /// resolves a variable: the running server, and the copy a restart re-execs,
 /// read the process value, so a `.env` line it overrides is not current.
-fn env_with_file(path: &Path) -> Env {
+pub(crate) fn env_with_file(path: &Path) -> Env {
     env_vars_with_file(path).into_iter().collect()
 }
 
@@ -1244,7 +1244,7 @@ fn env_line_key(line: &str) -> Option<&str> {
     (!key.is_empty()).then_some(key)
 }
 
-fn env_keys(path: &Path) -> Vec<String> {
+pub(crate) fn env_keys(path: &Path) -> Vec<String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -1256,7 +1256,7 @@ fn env_keys(path: &Path) -> Vec<String> {
 /// Rewrites `.env`, which `start-all.sh` sources with `set -a`: each value
 /// single-quoted so the shell takes it literally. A variable already there
 /// is changed in place; a new one is appended under `header`.
-fn update_env(
+pub(crate) fn update_env(
     path: &Path,
     set: &[(String, String)],
     remove: &[String],
@@ -1325,7 +1325,7 @@ fn restore(path: &Path, content: Option<&str>) {
     };
 }
 
-fn write_atomically(path: &Path, content: &str) -> Result<(), ApiError> {
+pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<(), ApiError> {
     let tmp: PathBuf = path.with_extension("yml.tmp");
     std::fs::write(&tmp, content).map_err(io_error)?;
     std::fs::rename(&tmp, path).map_err(io_error)

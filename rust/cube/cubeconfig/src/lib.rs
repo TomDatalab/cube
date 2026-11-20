@@ -140,7 +140,10 @@ impl CubeConfig {
 
     /// Loads one specific configuration file.
     pub fn load_file_with_env(path: impl AsRef<Path>, env: &Env) -> Result<Self> {
-        let path = path.as_ref();
+        Self::load_file_inner(path.as_ref(), env, true)
+    }
+
+    fn load_file_inner(path: &Path, env: &Env, imply_default: bool) -> Result<Self> {
         let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
             source,
@@ -150,7 +153,7 @@ impl CubeConfig {
                 path: path.to_path_buf(),
                 source,
             })?;
-        Self::from_spec(spec, env, path)
+        Self::from_spec(spec, env, path, imply_default)
     }
 
     /// Builds a configuration purely from the process environment, for
@@ -165,7 +168,7 @@ impl CubeConfig {
         let mut spec = CubeConfigSpec::default();
         spec.data_sources
             .insert("default".to_string(), DataSourceSpec::default());
-        Self::from_spec(spec, env, Path::new("<environment>"))
+        Self::from_spec(spec, env, Path::new("<environment>"), true)
     }
 
     /// Loads `dir`'s configuration file if there is one, otherwise falls back
@@ -174,6 +177,22 @@ impl CubeConfig {
         match Self::find(dir.as_ref()) {
             Ok(path) => Self::load_file_with_env(path, env),
             Err(ConfigError::NotFound { .. }) => Self::from_env_with(env),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Like [`CubeConfig::load_or_env`], but only the data sources the file
+    /// (or `CUBEJS_DATASOURCES`) declares: no `default` is implied. With RBAC
+    /// the data sources come from its database, not from here.
+    pub fn load_declared(dir: impl AsRef<Path>, env: &Env) -> Result<Self> {
+        match Self::find(dir.as_ref()) {
+            Ok(path) => Self::load_file_inner(&path, env, false),
+            Err(ConfigError::NotFound { .. }) => Self::from_spec(
+                CubeConfigSpec::default(),
+                env,
+                Path::new("<environment>"),
+                false,
+            ),
             Err(other) => Err(other),
         }
     }
@@ -196,7 +215,12 @@ impl CubeConfig {
         }
     }
 
-    fn from_spec(spec: CubeConfigSpec, env: &Env, file: &Path) -> Result<Self> {
+    fn from_spec(
+        spec: CubeConfigSpec,
+        env: &Env,
+        file: &Path,
+        imply_default: bool,
+    ) -> Result<Self> {
         if let Some(version) = spec.version {
             if version != SCHEMA_VERSION {
                 return Err(ConfigError::invalid(
@@ -251,7 +275,7 @@ impl CubeConfig {
                 }
             }
         }
-        if names.is_empty() {
+        if names.is_empty() && imply_default {
             names.push("default".to_string());
         }
 
@@ -375,5 +399,24 @@ impl CubeConfig {
             pre_aggregations_schema: self.pre_aggregations_schema.clone(),
             api_scopes: self.api.default_scopes.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod declared_only_tests {
+    use super::*;
+
+    #[test]
+    fn load_declared_implies_no_default() {
+        let dir = std::env::temp_dir().join(format!("cubeconfig-declared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cube.yml"), "version: 1\ndata_sources: {}\n").unwrap();
+        // No CUBEJS_DB_TYPE: an implied default could not resolve.
+        let config = CubeConfig::load_declared(&dir, &Env::new()).unwrap();
+        assert!(config.data_sources.is_empty());
+        std::fs::write(dir.join("cube.yml"), "version: 1\ndata_sources:\n  extra:\n    type: sqlite\n").unwrap();
+        let config = CubeConfig::load_declared(&dir, &Env::new()).unwrap();
+        assert_eq!(config.data_sources.keys().collect::<Vec<_>>(), ["extra"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
