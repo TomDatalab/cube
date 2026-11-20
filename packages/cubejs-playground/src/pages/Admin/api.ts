@@ -381,6 +381,11 @@ export function adminApi(basePath: string) {
     assignConnection: (name: string, org: string) => call(
       'PUT', `/v1/connections/${id(name)}/organization`, { organizationId: org }
     ),
+    // Takes the connection out of its organization (back to Platform);
+    // its releases to that organization's workspaces are withdrawn.
+    unassignConnection: (name: string) => call(
+      'DELETE', `/v1/connections/${id(name)}/organization`
+    ),
     // Moves the connection to another organization; its releases to the
     // old one's workspaces are withdrawn.
     moveConnection: (name: string, org: string) => call(

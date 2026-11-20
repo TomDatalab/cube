@@ -1,5 +1,5 @@
 import { Empty, Input, message, Modal, Tag, Typography } from 'antd';
-import { DragEvent, useMemo, useState } from 'react';
+import { CSSProperties, DragEvent, ReactNode, useMemo, useState } from 'react';
 
 import { AdminApi, Organization } from '../Admin/api';
 import { DATA_SOURCE_DRAG_TYPE, dropAction, sourcesByOrganization } from './organizationDrop';
@@ -14,10 +14,27 @@ type Props = {
   onChanged: () => Promise<void> | void;
 };
 
-// The organizations, each a drop target with the data sources it owns. A
-// Platform data source dropped on one is assigned to it; one of another
-// organization moves there, after a confirmation, since its releases to the
-// old organization's workspaces are withdrawn.
+// The drop target that stands for "no organization".
+const PLATFORM = '__platform__';
+
+const zoneStyle = (highlighted: boolean, busy: boolean): CSSProperties => ({
+  padding: '6px 10px',
+  borderRadius: 4,
+  border: `1px dashed ${highlighted ? 'var(--pg-accent, #7a77ff)' : 'var(--pg-line, #e8e8ec)'}`,
+  background: highlighted ? 'rgba(var(--purple-color-rgb), 0.08)' : undefined,
+  opacity: busy ? 0.6 : 1,
+});
+
+function startDrag(e: DragEvent, name: string) {
+  e.dataTransfer.setData(DATA_SOURCE_DRAG_TYPE, name);
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+// Platform, then the organizations, each a drop target with its data
+// sources. A Platform data source dropped on an organization is assigned to
+// it; one of another organization moves there; one dropped on Platform (or
+// removed with its ×) leaves its organization. Moving and leaving ask first,
+// since the old organization's workspace releases are withdrawn.
 export function OrganizationDropPanel({
   api, organizations, dataSources, onChanged,
 }: Props) {
@@ -26,6 +43,12 @@ export function OrganizationDropPanel({
   const [busy, setBusy] = useState<string | null>(null);
 
   const owned = useMemo(() => sourcesByOrganization(dataSources), [dataSources]);
+  const platform = useMemo(
+    () => dataSources
+      .filter((ds) => !ds.organization)
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [dataSources]
+  );
   const shown = useMemo(() => {
     const term = q.trim().toLowerCase();
     return [...organizations]
@@ -33,19 +56,19 @@ export function OrganizationDropPanel({
       .filter((o) => !term || o.name.toLowerCase().includes(term));
   }, [organizations, q]);
 
-  function dragOver(e: DragEvent, org: string) {
+  function dragOver(e: DragEvent, zone: string) {
     if (e.dataTransfer.types.includes(DATA_SOURCE_DRAG_TYPE)) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      setTarget(org);
+      setTarget(zone);
     }
   }
 
-  async function change(name: string, org: Organization, verb: 'assign' | 'move') {
-    setBusy(org.id);
+  async function run(zone: string, action: () => Promise<unknown>, done: string) {
+    setBusy(zone);
     try {
-      await (verb === 'assign' ? api.assignConnection(name, org.id) : api.moveConnection(name, org.id));
-      message.success(`${name} belongs to ${org.name}`);
+      await action();
+      message.success(done);
       await onChanged();
     } catch (e: any) {
       message.error(e.message);
@@ -54,18 +77,33 @@ export function OrganizationDropPanel({
     }
   }
 
-  // The workspaces of `from` the data source is released to, for the
-  // confirmation; `null` when they cannot be read.
-  async function releasedTo(name: string, from: string): Promise<number | null> {
+  // What leaving `from` withdraws, for the confirmation.
+  async function releasesNote(name: string, from: { id: string; name: string }): Promise<string> {
     try {
-      const list = await api.connections(from);
-      return list.find((c) => c.name === name)?.workspaces.length ?? 0;
+      const list = await api.connections(from.id);
+      const count = list.find((c) => c.name === name)?.workspaces.length ?? 0;
+      if (count === 0) {
+        return `It is not released to any of ${from.name}'s workspaces.`;
+      }
+      return `Its releases to ${count === 1 ? '1 workspace' : `${count} workspaces`} of ${from.name} are withdrawn.`;
     } catch {
-      return null;
+      return `Its releases to ${from.name}'s workspaces are withdrawn.`;
     }
   }
 
-  async function drop(e: DragEvent, org: Organization) {
+  async function confirmUnassign(ds: Owned) {
+    const from = ds.organization!;
+    const note = await releasesNote(ds.name, from);
+    Modal.confirm({
+      title: `Remove ${ds.name} from ${from.name}?`,
+      content: `${note} It goes back to Platform, where only platform admins use it, and can be given to another organization.`,
+      okText: 'Remove',
+      okButtonProps: { danger: true },
+      onOk: () => run(PLATFORM, () => api.unassignConnection(ds.name), `${ds.name} is back on Platform`),
+    });
+  }
+
+  async function drop(e: DragEvent, org: Organization | null) {
     e.preventDefault();
     setTarget(null);
     const name = e.dataTransfer.getData(DATA_SOURCE_DRAG_TYPE);
@@ -73,35 +111,72 @@ export function OrganizationDropPanel({
     if (!ds) {
       return;
     }
-    const action = dropAction(ds, org.id);
+    const action = dropAction(ds, org ? org.id : null);
     if (action === 'forbidden') {
       message.warning('The default data source stays Platform: it cannot belong to an organization');
     } else if (action === 'none') {
-      message.info(`${name} already belongs to ${org.name}`);
+      message.info(org ? `${name} already belongs to ${org.name}` : `${name} is already on Platform`);
+    } else if (action === 'unassign') {
+      await confirmUnassign(ds);
     } else if (action === 'assign') {
-      await change(name, org, 'assign');
+      await run(org!.id, () => api.assignConnection(name, org!.id), `${name} belongs to ${org!.name}`);
     } else {
       const from = ds.organization!;
-      const count = await releasedTo(name, from.id);
-      let releases = `Its releases to ${from.name}'s workspaces are withdrawn.`;
-      if (count === 0) {
-        releases = `It is not released to any of ${from.name}'s workspaces.`;
-      } else if (count != null) {
-        releases = `Its releases to ${count === 1 ? '1 workspace' : `${count} workspaces`} of ${from.name} are withdrawn.`;
-      }
+      const note = await releasesNote(name, from);
       Modal.confirm({
-        title: `Move ${name} from ${from.name} to ${org.name}?`,
-        content: `${releases} Only platform admins edit or delete it afterwards.`,
+        title: `Move ${name} from ${from.name} to ${org!.name}?`,
+        content: `${note} Only platform admins edit or delete it afterwards.`,
         okText: 'Move',
-        onOk: () => change(name, org, 'move'),
+        onOk: () => run(org!.id, () => api.moveConnection(name, org!.id), `${name} belongs to ${org!.name}`),
       });
     }
+  }
+
+  function zone(key: string, org: Organization | null, title: ReactNode, list: Owned[], empty: string) {
+    return (
+      <div
+        key={key}
+        data-organization={org ? org.id : 'platform'}
+        data-testid={`data-source-org-${org ? org.id : 'platform'}`}
+        onDragOver={(e) => dragOver(e, key)}
+        onDragLeave={() => setTarget((t) => (t === key ? null : t))}
+        onDrop={(e) => drop(e, org)}
+        style={zoneStyle(target === key, busy === key)}
+      >
+        {title}
+        {' '}
+        <Typography.Text type="secondary">
+          {list.length === 1 ? '(1 data source)' : `(${list.length} data sources)`}
+        </Typography.Text>
+        <div style={{ marginTop: 4 }}>
+          {list.length ? list.map((ds) => (
+            <Tag
+              key={ds.name}
+              draggable={ds.name !== 'default'}
+              onDragStart={(e) => startDrag(e, ds.name)}
+              closable={!!org}
+              onClose={(e) => {
+                // The tag stays until the server agrees.
+                e.preventDefault();
+                confirmUnassign(ds);
+              }}
+              style={{ marginBottom: 4, cursor: ds.name !== 'default' ? 'grab' : undefined }}
+            >
+              {ds.name}
+            </Tag>
+          )) : (
+            <Typography.Text type="secondary">{empty}</Typography.Text>
+          )}
+        </div>
+      </div>
+    );
   }
 
   return (
     <div>
       <Typography.Paragraph type="secondary">
-        Drag a data source onto an organization to give it to that organization.
+        Drag a data source onto an organization to give it to that organization, or onto
+        Platform to take it back.
       </Typography.Paragraph>
       <Input.Search
         allowClear
@@ -110,47 +185,27 @@ export function OrganizationDropPanel({
         onChange={(e) => setQ(e.target.value)}
         style={{ display: 'block', marginBottom: 12 }}
       />
-      {!shown.length ? (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={q ? 'No organizations match' : 'No organizations yet: create them in Admin → Organizations'}
-        />
-      ) : null}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {shown.map((org) => {
-          const list = owned[org.id] || [];
-          const highlighted = target === org.id;
-          return (
-            <div
-              key={org.id}
-              data-organization={org.id}
-              data-testid={`data-source-org-${org.id}`}
-              onDragOver={(e) => dragOver(e, org.id)}
-              onDragLeave={() => setTarget((t) => (t === org.id ? null : t))}
-              onDrop={(e) => drop(e, org)}
-              style={{
-                padding: '6px 10px',
-                borderRadius: 4,
-                border: `1px dashed ${highlighted ? 'var(--pg-accent, #7a77ff)' : 'var(--pg-line, #e8e8ec)'}`,
-                background: highlighted ? 'rgba(var(--purple-color-rgb), 0.08)' : undefined,
-                opacity: busy === org.id ? 0.6 : 1,
-              }}
-            >
-              <Typography.Text strong>{org.name}</Typography.Text>
-              {' '}
-              <Typography.Text type="secondary">
-                {list.length === 1 ? '(1 data source)' : `(${list.length} data sources)`}
-              </Typography.Text>
-              <div style={{ marginTop: 4 }}>
-                {list.length ? list.map((ds) => (
-                  <Tag key={ds.name} style={{ marginBottom: 4 }}>{ds.name}</Tag>
-                )) : (
-                  <Typography.Text type="secondary">Drag data sources here</Typography.Text>
-                )}
-              </div>
-            </div>
-          );
-        })}
+        {zone(
+          PLATFORM,
+          null,
+          <Typography.Text strong title="Without an organization: for platform admins only">Platform</Typography.Text>,
+          platform,
+          'Drag data sources here to take them out of their organization',
+        )}
+        {!shown.length ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={q ? 'No organizations match' : 'No organizations yet: create them in Admin → Organizations'}
+          />
+        ) : null}
+        {shown.map((org) => zone(
+          org.id,
+          org,
+          <Typography.Text strong>{org.name}</Typography.Text>,
+          owned[org.id] || [],
+          'Drag data sources here',
+        ))}
       </div>
     </div>
   );

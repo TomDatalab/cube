@@ -35,7 +35,7 @@ import { adminApi, ownerLabel, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
-import { DATA_SOURCE_DRAG_TYPE } from './organizationDrop';
+import { connectionLabel, DATA_SOURCE_DRAG_TYPE } from './organizationDrop';
 import { OrganizationDropPanel } from './OrganizationDropPanel';
 import { Content, Header } from '../components/Ui';
 
@@ -58,6 +58,8 @@ type Database = {
 };
 
 type DataSource = {
+  // With RBAC on, the id RBAC gave it.
+  id?: string | null;
   name: string;
   type: string;
   host?: string | null;
@@ -345,12 +347,30 @@ export function DataSourcesPage() {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',
-      render: (name: string) => <Text strong>{name}</Text>,
+      width: rbac ? 210 : undefined,
+      render: (name: string, ds: DataSource) => (
+        <div style={{ minWidth: 0 }}>
+          <Text strong>{name}</Text>
+          {ds.id ? (
+            <div>
+              <Text
+                type="secondary"
+                copyable={{ text: ds.id, tooltips: ['Copy id', 'Copied'] }}
+                style={{ fontFamily: 'monospace', fontSize: 11 }}
+                title={ds.id}
+              >
+                {ds.id.slice(0, 8)}
+              </Text>
+            </div>
+          ) : null}
+        </div>
+      ),
     },
     {
       title: 'Type',
       dataIndex: 'type',
       key: 'type',
+      width: rbac ? 130 : undefined,
       render: (type: string) => (
         <Space>
           <DatabaseLogo db={databaseOf(type)} size={20} />
@@ -361,6 +381,7 @@ export function DataSourcesPage() {
     ...(rbac ? [{
       title: 'Owner',
       key: 'owner',
+      width: 110,
       filters: [
         ...organizations.map((o) => ({ text: o.name, value: o.name })),
         { text: 'Platform', value: 'Platform' },
@@ -370,26 +391,37 @@ export function DataSourcesPage() {
         ? ownerLabel(ds)
         : <Tag title="Without an organization: for platform admins only">Platform</Tag>),
     }] : []),
-    {
-      title: 'Host',
-      key: 'host',
-      render: (_: unknown, ds: DataSource) => (ds.host ? `${ds.host}${ds.port ? `:${ds.port}` : ''}` : '—'),
-    },
-    {
-      title: 'Database',
-      dataIndex: 'database',
-      key: 'database',
-      render: (v?: string | null) => v || '—',
-    },
-    {
-      title: 'User',
-      dataIndex: 'user',
-      key: 'user',
-      render: (v?: string | null) => v || '—',
-    },
+    ...(rbac ? [{
+      title: 'Connection',
+      key: 'connection',
+      ellipsis: true,
+      render: (_: unknown, ds: DataSource) => {
+        const label = connectionLabel(ds);
+        return <span title={label}>{label}</span>;
+      },
+    }] : [
+      {
+        title: 'Host',
+        key: 'host',
+        render: (_: unknown, ds: DataSource) => (ds.host ? `${ds.host}${ds.port ? `:${ds.port}` : ''}` : '—'),
+      },
+      {
+        title: 'Database',
+        dataIndex: 'database',
+        key: 'database',
+        render: (v?: string | null) => v || '—',
+      },
+      {
+        title: 'User',
+        dataIndex: 'user',
+        key: 'user',
+        render: (v?: string | null) => v || '—',
+      },
+    ]),
     {
       title: 'Status',
       key: 'status',
+      width: rbac ? 110 : undefined,
       render: (_: unknown, ds: DataSource) => {
         if (!ds.active) {
           return <Tag color="orange">Restart pending</Tag>;
@@ -413,8 +445,8 @@ export function DataSourcesPage() {
       key: 'actions',
       align: 'right' as const,
       // With RBAC the table shares the row with the organizations: the
-      // actions stay in view, as icons, while the other columns scroll.
-      ...(rbac ? { fixed: 'right' as const } : {}),
+      // actions are icons, in a column of their own width.
+      ...(rbac ? { width: 112 } : {}),
       render: (_: unknown, ds: DataSource) => (
         <Space size={rbac ? 4 : 8}>
           <Tooltip title={rbac ? 'Test connection' : undefined}>
@@ -704,7 +736,9 @@ export function DataSourcesPage() {
               dataSource={dataSources}
               columns={columns}
               pagination={false}
-              scroll={rbac ? { x: 'max-content' } : undefined}
+              // Fixed widths, the Connection column takes the rest and ends
+              // in an ellipsis: no sideways scrolling.
+              tableLayout={rbac ? 'fixed' : undefined}
               onRow={(ds) => (draggable(ds) ? {
                 draggable: true,
                 onDragStart: (e) => {
