@@ -153,6 +153,8 @@ pub async fn create(
         // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
+    // Its folder is owned from now on.
+    crate::rbac::ownership::refresh_policy(&state).await?;
     Ok((StatusCode::CREATED, Json(view(&org))))
 }
 
@@ -280,6 +282,7 @@ pub async fn delete(
     for role in &roles {
         super::roles::forget(rbac, role.role.id).await?;
     }
+    crate::rbac::ownership::refresh_policy(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

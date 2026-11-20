@@ -72,9 +72,17 @@ fn rbac_config() -> RbacConfig {
 struct Env {
     router: axum::Router,
     model: tempfile::TempDir,
+    rbac: Arc<Rbac>,
+    state: AppState,
 }
 
 async fn env(store: cubeserver::rbac::store::Store) -> Env {
+    env_with(store, false).await
+}
+
+/// `real_meta`: the model is served by a tenant registry, as in `main`, so a
+/// policy change shows in `/cube/v1/meta`.
+async fn env_with(store: cubeserver::rbac::store::Store, real_meta: bool) -> Env {
     let model = tempfile::tempdir().unwrap();
     let rbac = Arc::new(
         Rbac::with_parts(Arc::new(FakeAuthz::new()), store, rbac_config())
@@ -83,9 +91,24 @@ async fn env(store: cubeserver::rbac::store::Store) -> Env {
     );
     let config = ServerConfig {
         schema_path: model.path().to_string_lossy().into_owned(),
+        data_sources: vec![("sofiadb".into(), "postgres".into())],
         ..ServerConfig::default()
     };
-    let router = build_app(AppState {
+    let tenants = real_meta.then(|| {
+        let cube_config = cubeconfig::CubeConfig::load_or_env(
+            "/nonexistent-cube-yml-dir",
+            &cubeconfig::Env::new().with("CUBEJS_SCHEMA_PATH", &*model.path().to_string_lossy()),
+        )
+        .expect("config from the environment");
+        Arc::new(cubeserver::tenants::TenantRegistry::new(
+            Arc::new(cube_config),
+            cubeplanner::Dialect::Postgres,
+            Some("postgres".to_string()),
+            1,
+            false,
+        ))
+    });
+    let state = AppState {
         config: Arc::new(config),
         query_config: Arc::new(cubequery::QueryConfig::default()),
         auth: Arc::new(CubeAuthService::new(
@@ -102,11 +125,12 @@ async fn env(store: cubeserver::rbac::store::Store) -> Env {
         sql_conversion: Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         graphql: Default::default(),
         ws: Default::default(),
-        tenants: None,
-        rbac: Some(rbac),
+        tenants,
+        rbac: Some(rbac.clone()),
         model_index: Default::default(),
-    });
-    Env { router, model }
+    };
+    let router = build_app(state.clone());
+    Env { router, model, rbac, state }
 }
 
 impl Env {
@@ -371,4 +395,81 @@ tree_test!(file_paths_cannot_escape, |store| {
         );
         assert!(!text.contains("SECRET_B_CONTENT"), "{path}: {text}");
     }
+});
+
+tree_test!(policy_follows_connections, |store| {
+    use cubeserver::rbac::store::ConnectionOrigin;
+    let env = env(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    create_org(&env, &admin, "Digital").await;
+    create_org(&env, &admin, "ON").await;
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
+    store
+        .create_connection("sofiadb", digital.id, ConnectionOrigin::Assigned)
+        .await
+        .unwrap();
+
+    let policy = cubeserver::rbac::ownership::build_policy(
+        &store,
+        &["default".to_string(), "sofiadb".to_string()],
+    )
+    .await
+    .unwrap();
+    let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+    assert_eq!(policy.organizations["digital"], set(&["sofiadb"]));
+    assert_eq!(policy.organizations["on"], set(&[]));
+    assert_eq!(policy.platform, set(&["default"]));
+
+    // Every policy is a new generation.
+    let again = cubeserver::rbac::ownership::build_policy(&store, &[]).await.unwrap();
+    assert!(again.generation > policy.generation);
+});
+
+tree_test!(moving_a_connection_rejects_its_cubes_without_restart, |store| {
+    use cubeserver::rbac::store::ConnectionOrigin;
+    let env = env_with(store.clone(), true).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    create_org(&env, &admin, "Digital").await;
+    create_org(&env, &admin, "ON").await;
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
+    let on = store.organization_by_slug("on").await.unwrap().unwrap();
+    store
+        .create_connection("sofiadb", digital.id, ConnectionOrigin::Assigned)
+        .await
+        .unwrap();
+    env.rbac.set_data_source_names(vec!["default".into(), "sofiadb".into()]);
+    env.write("digital/a.yml", CUBE_A);
+    cubeserver::rbac::ownership::refresh_policy(&env.state).await.unwrap();
+    let cubes = |body: &Value| -> Vec<String> {
+        body["cubes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (status, body, _) = get(&env, &admin, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(cubes(&body).contains(&"a".to_string()), "{body}");
+
+    let (status, _, text) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/connections/sofiadb/organization",
+        Some(&admin),
+        Some(json!({ "organizationId": on.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+
+    let (status, body, _) = get(&env, &admin, "/playground/tree/digital").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["errors"][0]["message"],
+        "data source sofiadb is not a connection of digital"
+    );
+    let (status, body, _) = get(&env, &admin, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!cubes(&body).contains(&"a".to_string()), "{body}");
 });

@@ -9,6 +9,7 @@ pub mod enforce;
 pub mod fake;
 pub mod handlers;
 pub mod identity;
+pub mod ownership;
 pub mod restrictions;
 pub mod data_sources;
 pub mod secrets;
@@ -49,6 +50,9 @@ pub struct Rbac {
     hashing: Arc<Semaphore>,
     /// Who runs each load, so only they (or a platform admin) cancel it.
     pub running: enforce::RunningRequests,
+    /// The data sources `cube.yml` and RBAC declare, for the ownership
+    /// policy: those no connection claims belong to the platform.
+    data_source_names: std::sync::RwLock<Vec<String>>,
 }
 
 impl std::fmt::Debug for Rbac {
@@ -104,6 +108,7 @@ impl Rbac {
             config,
             hashing,
             running: Default::default(),
+            data_source_names: Default::default(),
         };
         rbac.bootstrap_admins().await?;
         Ok(rbac)
@@ -188,6 +193,20 @@ impl Rbac {
         })
         .await
         .map_err(|_| ApiError::internal())
+    }
+
+    pub fn set_data_source_names(&self, names: Vec<String>) {
+        *self
+            .data_source_names
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = names;
+    }
+
+    pub fn data_source_names(&self) -> Vec<String> {
+        self.data_source_names
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Test hook: the semaphore bounding concurrent hashes, so a test can
