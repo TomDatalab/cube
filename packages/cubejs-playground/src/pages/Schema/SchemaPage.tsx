@@ -1,132 +1,283 @@
-import React, { Component } from 'react';
-import { Layout, Modal, Empty, Typography, message } from 'antd';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Layout, Modal, Empty, Typography, Input, Tooltip, message } from 'antd';
+import type { DataNode } from 'antd/lib/tree';
 import { RouterProps } from 'react-router-dom';
 
 import PrismCode from '../../PrismCode';
 import { playgroundAction } from '../../events';
-import { Menu, Tabs, Tree } from '../../components';
+import { Menu, Tree } from '../../components';
 import { Alert, CubeLoader } from '../../atoms';
 import { playgroundFetch } from '../../shared/helpers';
-import { AppContext, AppContextConsumer } from '../../components/AppContext';
+import { AppContext } from '../../components/AppContext';
 import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
+import { useCubejsApi, useSecurityContext } from '../../hooks';
 import { SchemaFormat } from '../../types';
+import { CubeDetail, MetaCube } from './CubeDetail';
+import {
+  OrgDetail,
+  OrgSummary,
+  buildQueryUrl,
+  detailNodes,
+  filterTree,
+  orgNodes,
+  parseKey,
+  tablesFromSameOrg,
+} from './tree';
 
 const { Content, Sider } = Layout;
 
-const { TreeNode } = Tree;
-const { TabPane } = Tabs;
+const PAGE_SIZE = 50;
+const MORE_KEY = 'more:';
+const SEARCH_DEBOUNCE_MS = 300;
+const SEARCH_MIN_CHARS = 2;
 
-const schemasMap = {};
-const schemaToTreeData = (schemas) => Object.keys(schemas).map((schemaName) => ({
-  title: schemaName,
-  key: schemaName,
-  treeData: Object.keys(schemas[schemaName]).map((tableName) => {
-    const key = `${schemaName}.${tableName}`;
-    schemasMap[key] = [schemaName, tableName];
-    return {
-      title: tableName,
-      key,
-    };
-  }),
-}));
+type OpenFile = { fileName: string; content: string; absPath: string };
 
-type SchemaPageProps = RouterProps;
+const encodePath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
 
-export class SchemaPage extends Component<SchemaPageProps, any> {
-  static contextType = AppContext;
-
-  context!: React.ContextType<typeof AppContext>;
-
-  constructor(props) {
-    super(props);
-
-    this.state = {
-      expandedKeys: [],
-      autoExpandParent: true,
-      checkedKeys: [],
-      selectedKeys: [],
-      activeTab: 'schema',
-      files: [],
-      isDocker: null,
-      shown: false
-    };
+async function readJson(res: Response) {
+  if (res.status !== 200) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Request failed (${res.status})`);
   }
+  return res.json();
+}
 
-  async componentDidMount() {
-    await this.loadDBSchema();
-    await this.loadFiles();
-  }
+export function SchemaPage({ history }: RouterProps) {
+  const { playgroundContext, apiUrl } = useContext(AppContext);
+  const { currentToken } = useSecurityContext();
+  const cubeApi = useCubejsApi(apiUrl ?? null, currentToken ?? null);
 
-  onExpand(expandedKeys) {
-    playgroundAction('Expand Tables');
-    this.setState({
-      expandedKeys,
-      autoExpandParent: false,
-    });
-  }
+  const [orgs, setOrgs] = useState<OrgSummary[]>([]);
+  const [total, setTotal] = useState(0);
+  const [orgsLoading, setOrgsLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState<Error | null>(null);
+  const [details, setDetails] = useState<Record<string, OrgDetail>>({});
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const [checkedKeys, setCheckedKeys] = useState<string[]>([]);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [file, setFile] = useState<OpenFile | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [metaCubes, setMetaCubes] = useState<Record<string, MetaCube> | null>(null);
+  const [metaLoading, setMetaLoading] = useState(true);
+  const [shown, setShown] = useState(false);
 
-  onCheck(checkedKeys) {
-    playgroundAction('Check Tables');
-    this.setState({ checkedKeys });
-  }
+  const detailRequests = useRef<Record<string, Promise<void> | undefined>>({});
+  const listRequest = useRef(0);
 
-  onSelect(selectedKeys) {
-    this.setState({ selectedKeys });
-  }
+  const [major, minor] = playgroundContext?.coreServerVersion
+    ? playgroundContext.coreServerVersion.split('.')
+    : [];
+  const isYamlFormatSupported: boolean = (Number(major) > 0) || (!minor || Number(minor) >= 31);
+  const isDocker = playgroundContext?.isDocker;
 
-  async loadDBSchema() {
-    this.setState({ schemaLoading: true });
-    try {
-      const res = await playgroundFetch('playground/db-schema');
-      const result = await res.json();
-      this.setState({
-        tablesSchema: result.tablesSchema,
-      });
-      // The data sources that could not be read, so their tables are missing.
-      if (result.errors?.length) {
-        message.warning(`Some tables are missing: ${result.errors.join('; ')}`, 10);
+  // The query the server sees: only 2+ characters search there.
+  useEffect(() => {
+    const term = search.trim();
+    const timer = setTimeout(
+      () => setQuery(term.length >= SEARCH_MIN_CHARS ? term : ''),
+      SEARCH_DEBOUNCE_MS
+    );
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    const request = ++listRequest.current;
+    setOrgsLoading(true);
+    setLoadError(null);
+
+    (async () => {
+      try {
+        const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: '0' });
+        if (query) {
+          params.set('q', query);
+        }
+        const result = await readJson(await playgroundFetch(`playground/tree?${params}`));
+        if (request === listRequest.current) {
+          setOrgs(result.organizations || []);
+          setTotal(result.total || 0);
+        }
+      } catch (e: any) {
+        if (request === listRequest.current) {
+          setLoadError(e);
+        }
+      } finally {
+        if (request === listRequest.current) {
+          setOrgsLoading(false);
+        }
       }
-    } catch (e: any) {
-      this.setState({ schemaLoadingError: e });
-    } finally {
-      this.setState({ schemaLoading: false });
+    })();
+  }, [query]);
+
+  useEffect(() => {
+    if (!cubeApi) {
+      return undefined;
     }
-  }
+    let cancelled = false;
+    setMetaLoading(true);
+    cubeApi
+      .meta()
+      .then((meta) => {
+        if (cancelled) {
+          return;
+        }
+        const map: Record<string, MetaCube> = {};
+        (meta.meta.cubes as unknown as MetaCube[]).forEach((cube) => {
+          map[cube.name] = cube;
+        });
+        setMetaCubes(map);
+      })
+      .catch(() => !cancelled && setMetaCubes({}))
+      .finally(() => !cancelled && setMetaLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [cubeApi]);
 
-  async loadFiles() {
-    const res = await playgroundFetch('playground/files');
-    const result = await res.json();
-    this.setState({
-      files: result.files,
-      activeTab: result.files && result.files.length > 0 ? 'files' : 'schema',
+  const loadDetail = useCallback((slug: string, force = false): Promise<void> => {
+    const existing = detailRequests.current[slug];
+    if (!force && existing) {
+      return existing;
+    }
+    const request = (async () => {
+      try {
+        const detail = await readJson(
+          await playgroundFetch(`playground/tree/${encodeURIComponent(slug)}`)
+        );
+        setDetails((current) => ({ ...current, [slug]: detail }));
+      } catch (e: any) {
+        delete detailRequests.current[slug];
+        message.error(`Could not load ${slug}: ${e.message}`);
+      }
+    })();
+    detailRequests.current[slug] = request;
+    return request;
+  }, []);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(orgs.length),
+      });
+      if (query) {
+        params.set('q', query);
+      }
+      const result = await readJson(await playgroundFetch(`playground/tree?${params}`));
+      setOrgs((current) => [...current, ...(result.organizations || [])]);
+      setTotal(result.total || 0);
+    } catch (e: any) {
+      message.error(e.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const selected = useMemo(
+    () => (selectedKey && selectedKey !== MORE_KEY ? parseKey(selectedKey) : null),
+    [selectedKey]
+  );
+
+  useEffect(() => {
+    setFile(null);
+    setFileError(null);
+    if (!selected || selected.kind !== 'file' || !selected.rest) {
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await readJson(
+          await playgroundFetch(
+            `playground/tree/${encodeURIComponent(selected.slug)}/files/${encodePath(selected.rest!)}`
+          )
+        );
+        if (!cancelled) {
+          setFile(result);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setFileError(e.message);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  const treeData = useMemo(() => {
+    const nodes: DataNode[] = orgNodes(orgs).map((node, index) => {
+      const org = orgs[index];
+      const detail = details[org.slug];
+      return {
+        ...node,
+        title: org.errors > 0 ? `${org.name} (${org.errors} errors)` : node.title,
+        ...(detail ? { children: detailNodes(org.slug, detail) } : {}),
+      };
     });
-  }
+    const visible = query ? nodes : filterTree(nodes, search);
+    if (orgs.length < total) {
+      visible.push({
+        key: MORE_KEY,
+        title: loadingMore ? 'Carregando…' : 'Carregar mais…',
+        isLeaf: true,
+        checkable: false,
+      });
+    }
+    return visible;
+  }, [orgs, total, details, search, query, loadingMore]);
 
-  async generateSchema(format: SchemaFormat = SchemaFormat.js) {
-    const { checkedKeys, tablesSchema } = this.state;
-    const { history } = this.props;
+  // table key -> [`<dataSource>.<schema>`, table], as `generate-schema` expects.
+  const tableRefs = useMemo(() => {
+    const refs: Record<string, [string, string]> = {};
+    Object.entries(details).forEach(([slug, detail]) => {
+      Object.entries(detail.tables || {}).forEach(([ds, schemas]) => {
+        Object.entries(schemas).forEach(([schema, tables]) => {
+          Object.keys(tables).forEach((table) => {
+            refs[`table:${slug}:${ds}.${schema}.${table}`] = [`${ds}.${schema}`, table];
+          });
+        });
+      });
+    });
+    return refs;
+  }, [details]);
+
+  const checkedSlug = checkedKeys.length ? tablesFromSameOrg(checkedKeys) : null;
+  const mixedOrgs = checkedKeys.length > 0 && checkedSlug === null;
+
+  const generateSchema = async (format: SchemaFormat = SchemaFormat.js) => {
+    if (!checkedSlug) {
+      return;
+    }
+    const detail = details[checkedSlug];
+    const tablesSchema: Record<string, Record<string, unknown>> = {};
+    Object.entries(detail.tables || {}).forEach(([ds, schemas]) => {
+      Object.entries(schemas).forEach(([schema, tables]) => {
+        tablesSchema[`${ds}.${schema}`] = tables;
+      });
+    });
 
     const options = { format };
-
     playgroundAction('Generate Schema', options);
     const res = await playgroundFetch('playground/generate-schema', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         format,
-        tables: checkedKeys
-          .filter((k) => !!schemasMap[k])
-          .map((e) => schemasMap[e]),
+        tables: checkedKeys.map((k) => tableRefs[k]).filter(Boolean),
         tablesSchema,
       }),
     });
 
     if (res.status === 200) {
       playgroundAction('Generate Schema Success', options);
-      await this.loadFiles();
-      this.setState({ checkedKeys: [], activeTab: 'files' });
+      await loadDetail(checkedSlug, true);
+      setCheckedKeys([]);
       Modal.success({
         title: 'Data model files successfully generated!',
         content:
@@ -139,116 +290,182 @@ export class SchemaPage extends Component<SchemaPageProps, any> {
         },
       });
     } else {
-      playgroundAction('Generate Schema Fail', {
-        error: await res.text(),
-        ...options,
-      });
+      const error = await res.text();
+      playgroundAction('Generate Schema Fail', { error, ...options });
+      message.error(error);
     }
-  }
+  };
 
-  selectedFileContent() {
-    const file = this.selectedFile();
-    return file && file.content;
-  }
+  const renderContent = () => {
+    if (!selected) {
+      return (
+        <Empty
+          style={{ marginTop: 50 }}
+          description="Select tables to generate Cube data model"
+        />
+      );
+    }
 
-  selectedFile() {
-    const { files, selectedFile } = this.state;
-    return files.find((f) => f.fileName === selectedFile);
-  }
+    const detail = details[selected.slug];
 
-  renderFilesMenu() {
-    const { selectedFile, files } = this.state;
-    return (
-      <Menu
-        mode="inline"
-        onClick={({ key }) => {
-          playgroundAction('Select File');
-          this.setState({ selectedFile: key });
-        }}
-        selectedKeys={selectedFile ? [selectedFile] : []}
-      >
-        {files.map((f) => (
-          <Menu.Item key={f.fileName}>{f.fileName}</Menu.Item>
-        ))}
-      </Menu>
-    );
-  }
+    if (selected.kind === 'cube') {
+      const cube = detail?.cubes.find((c) => c.name === selected.rest);
+      if (!cube) {
+        return <CubeLoader />;
+      }
+      return (
+        <CubeDetail
+          cube={cube}
+          metaCube={metaCubes?.[cube.name]}
+          metaLoading={metaLoading}
+          errors={detail.errors || []}
+          onOpen={(metaCube) => history.push(buildQueryUrl(metaCube))}
+        />
+      );
+    }
 
-  render() {
-    const {
-      schemaLoading,
-      schemaLoadingError,
-      tablesSchema,
-      selectedFile,
-      expandedKeys,
-      autoExpandParent,
-      checkedKeys,
-      selectedKeys,
-      activeTab,
-      isDocker,
-    } = this.state;
+    if (selected.kind === 'file') {
+      if (fileError) {
+        return <Alert type="error" message="Could not load the file" description={fileError} />;
+      }
+      if (!file) {
+        return <CubeLoader />;
+      }
+      return (
+        <>
+          <Alert
+            message={
+              isDocker ? (
+                <span>
+                  Data model files are located and can be edited in the mount
+                  volume directory.{' '}
+                  <Typography.Link
+                    href="https://docs.cube.dev/docs/data-modeling/overview"
+                    target="_blank"
+                  >
+                    Learn more about working with Cube data model in the docs
+                  </Typography.Link>
+                </span>
+              ) : (
+                <span>
+                  This file can be edited at&nbsp;
+                  <b>{file.absPath}</b>
+                </span>
+              )
+            }
+            type="info"
+            style={{ paddingTop: 10, paddingBottom: 11 }}
+          />
+          <PrismCode code={file.content} style={{ padding: 0, marginTop: 24 }} />
+        </>
+      );
+    }
 
-    const { playgroundContext } = this.context;
-
-    const [major, minor] = playgroundContext.coreServerVersion
-      ? playgroundContext.coreServerVersion.split('.')
-      : [];
-    const isYamlFormatSupported: boolean = (Number(major) > 0) || (!minor || Number(minor) >= 31);
-
-    const renderTreeNodes = (data) => data.map((item) => {
-      if (item.treeData) {
+    if (selected.kind === 'org') {
+      const org = orgs.find((o) => o.slug === selected.slug);
+      if (org && org.errors > 0 && !detail) {
+        return <CubeLoader />;
+      }
+      if (detail?.errors?.length) {
         return (
-        // @ts-ignore
-          <TreeNode title={item.title} key={item.key} dataRef={item}>
-            {renderTreeNodes(item.treeData)}
-          </TreeNode>
+          <Alert
+            type="error"
+            message={`${org?.name ?? selected.slug}: ${detail.errors.length} errors`}
+            description={detail.errors.map((e) => (
+              <div key={`${e.file}:${e.cube}:${e.message}`}>
+                <b>{e.file}</b>
+                {e.cube ? ` (${e.cube})` : ''}: {e.message}
+              </div>
+            ))}
+          />
         );
       }
-      return <TreeNode {...item} />;
-    });
-
-    const renderTree = () => (Object.keys(tablesSchema || {}).length > 0 ? (
-      <Tree
-        checkable
-        onExpand={this.onExpand.bind(this)}
-        expandedKeys={expandedKeys}
-        autoExpandParent={autoExpandParent}
-        onCheck={this.onCheck.bind(this)}
-        checkedKeys={checkedKeys}
-        onSelect={this.onSelect.bind(this)}
-        selectedKeys={selectedKeys}
-      >
-        {renderTreeNodes(schemaToTreeData(tablesSchema || {}))}
-      </Tree>
-    ) : (
-      <Alert
-        message="Empty DB Schema"
-        description="Please check connection settings"
-        type="warning"
-      />
-    ));
-
-    const renderTreeOrError = () => (schemaLoadingError ? (
-      <Alert
-        data-testid="schema-error"
-        message="Error while loading DB schema"
-        description={schemaLoadingError.toString()}
-        type="error"
-      />
-    ) : (
-      renderTree()
-    ));
+    }
 
     return (
-      <Layout style={{ height: '100%' }}>
-        <Sider width={340} className="schema-sidebar">
-          <Tabs
-            activeKey={activeTab}
-            onChange={(tab) => this.setState({ activeTab: tab })}
-            tabBarExtraContent={(
+      <Empty
+        style={{ marginTop: 50 }}
+        description="Select tables to generate Cube data model"
+      />
+    );
+  };
+
+  const renderTree = () => {
+    if (loadError) {
+      return (
+        <Alert
+          data-testid="schema-error"
+          message="Error while loading the data model"
+          description={loadError.toString()}
+          type="error"
+        />
+      );
+    }
+    if (orgsLoading) {
+      return <CubeLoader />;
+    }
+    if (!treeData.length) {
+      return (
+        <Alert
+          message="Empty data model"
+          description="No organization matches"
+          type="warning"
+        />
+      );
+    }
+    return (
+      <Tree
+        checkable
+        checkStrictly
+        treeData={treeData}
+        loadData={async (node: DataNode) => {
+          const key = String(node.key);
+          if (key !== MORE_KEY && parseKey(key).kind === 'org') {
+            await loadDetail(parseKey(key).slug);
+          }
+        }}
+        expandedKeys={expandedKeys}
+        onExpand={(keys: any) => {
+          playgroundAction('Expand Tables');
+          setExpandedKeys(keys);
+        }}
+        checkedKeys={checkedKeys}
+        onCheck={(checked: any) => {
+          playgroundAction('Check Tables');
+          const keys: string[] = Array.isArray(checked) ? checked : checked.checked;
+          setCheckedKeys(keys.filter((k) => k.startsWith('table:')));
+        }}
+        selectedKeys={selectedKey ? [selectedKey] : []}
+        onSelect={(keys: any[]) => {
+          const key = keys.length ? String(keys[0]) : null;
+          if (key === MORE_KEY) {
+            loadMore();
+            return;
+          }
+          setSelectedKey(key);
+          if (key && parseKey(key).kind === 'org') {
+            loadDetail(parseKey(key).slug);
+          }
+        }}
+      />
+    );
+  };
+
+  return (
+    <Layout style={{ height: '100%' }}>
+      <Sider width={340} className="schema-sidebar">
+        <div style={{ display: 'flex', gap: 8, padding: 8, alignItems: 'center' }}>
+          <Input
+            allowClear
+            placeholder="Search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <Tooltip title={mixedOrgs ? 'Escolha tabelas de uma única organização' : ''}>
+            <span>
               <ButtonDropdown
-                show={this.state.shown}
-                disabled={!checkedKeys.length}
+                show={shown}
+                disabled={!checkedKeys.length || mixedOrgs}
                 type="primary"
                 data-testid="chart-type-btn"
                 overlay={(
@@ -260,85 +477,31 @@ export class SchemaPage extends Component<SchemaPageProps, any> {
                           : ''
                       }
                       disabled={!isYamlFormatSupported}
-                      onClick={() => this.generateSchema(SchemaFormat.yaml)}
+                      onClick={() => generateSchema(SchemaFormat.yaml)}
                     >
                       YAML
                     </Menu.Item>
-                    <Menu.Item onClick={() => this.generateSchema()}>
+                    <Menu.Item onClick={() => generateSchema()}>
                       JavaScript
                     </Menu.Item>
                   </Menu>
                 )}
                 style={{ border: 0 }}
-                onOverlayOpen={() => this.setState({ shown: true })}
-                onOverlayClose={() => this.setState({ shown: false })}
-                onItemClick={() => this.setState({ shown: false })}
+                onOverlayOpen={() => setShown(true)}
+                onOverlayClose={() => setShown(false)}
+                onItemClick={() => setShown(false)}
               >
                 Generate Data Model
               </ButtonDropdown>
-            )}
-          >
-            <TabPane tab="Tables" key="schema">
-              {schemaLoading ? <CubeLoader /> : renderTreeOrError()}
-            </TabPane>
+            </span>
+          </Tooltip>
+        </div>
+        {renderTree()}
+      </Sider>
 
-            <TabPane tab="Files" key="files">
-              {this.renderFilesMenu()}
-            </TabPane>
-          </Tabs>
-        </Sider>
-
-        <Content
-          style={{
-            minHeight: 280,
-            padding: 24,
-          }}
-        >
-          {selectedFile && (
-            <Alert
-              message={
-                isDocker ? (
-                  <span>
-                    Data model files are located and can be edited in the mount
-                    volume directory.{' '}
-                    <Typography.Link
-                      href="https://docs.cube.dev/docs/data-modeling/overview"
-                      target="_blank"
-                    >
-                      Learn more about working with Cube data model in the docs
-                    </Typography.Link>
-                  </span>
-                ) : (
-                  <span>
-                    This file can be edited at&nbsp;
-                    <b>{this.selectedFile().absPath}</b>
-                  </span>
-                )
-              }
-              type="info"
-              style={{ paddingTop: 10, paddingBottom: 11 }}
-            />
-          )}
-          {selectedFile ? (
-            <PrismCode
-              code={this.selectedFileContent()}
-              style={{
-                padding: 0,
-                marginTop: 24,
-              }}
-            />
-          ) : (
-            <Empty
-              style={{ marginTop: 50 }}
-              description="Select tables to generate Cube data model"
-            />
-          )}
-
-          <AppContextConsumer
-            onReady={({ playgroundContext: readyContext }) => this.setState({ isDocker: readyContext?.isDocker })}
-          />
-        </Content>
-      </Layout>
-    );
-  }
+      <Content style={{ minHeight: 280, padding: 24 }}>
+        {renderContent()}
+      </Content>
+    </Layout>
+  );
 }
