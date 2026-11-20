@@ -13,7 +13,7 @@
 //! deleted by the organization's owners; a data source a platform admin
 //! assigned to it (`origin: assigned`) is only used and released by them:
 //! editing or deleting it is for platform admins, who can also move it to
-//! another organization (never back to none).
+//! another organization or take it back to Platform (no organization).
 //!
 //! A connection the caller can neither query nor manage answers 404.
 
@@ -34,6 +34,7 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::{self, data_source_types, CreateRequest, UpdateRequest};
+use crate::handlers::data_sources_rbac;
 use crate::rbac::store::{ConnectionOrigin, ConnectionRow, StoreError, Workspace};
 use crate::rbac::{
     authz_error, unavailable, ObjectRef, Precondition, Rbac, Relationship, RelationshipFilter,
@@ -219,7 +220,7 @@ pub async fn list(
         .connections_of_organization(org.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let types = data_source_types(&state);
+    let types = data_source_types(&state).await?;
     let mut connections = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut workspaces: Vec<String> = releases_of(rbac, &row.name)
@@ -299,15 +300,20 @@ pub(crate) async fn create_owned(
     origin: ConnectionOrigin,
     request: CreateRequest,
 ) -> Result<Response, ApiError> {
-    let name = request.name.trim().to_string();
-    data_sources::validate_name(&name)?;
+    let _guard = data_sources::WRITE.lock().await;
+    let (name, variables) = data_sources::validated(&request)?;
     // A data source without an organization is not taken over.
-    if data_source_types(state).contains_key(&name) {
+    if data_source_types(state).await?.contains_key(&name) {
         return Err(ApiError::bad_request(format!(
             "A data source named {name} already exists"
         )));
     }
+    data_sources_rbac::prepare_create(state, rbac, &name, &variables).await?;
+    let row = crate::rbac::data_sources::sealed(&rbac.config.secret_key, &name, &variables)
+        .map_err(ApiError::bad_request)?;
 
+    // The settings and the organization are written in one transaction:
+    // the data source never exists without its organization.
     let conflict = "A connection with this name already exists";
     let tx = rbac
         .store
@@ -315,6 +321,9 @@ pub(crate) async fn create_owned(
         .await
         .map_err(|e| store_error(e, conflict))?;
     tx.create_connection(&name, org, origin)
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+    tx.put_data_source(&name, &row.db_type, &row.settings, row.secrets.as_deref())
         .await
         .map_err(|e| store_error(e, conflict))?;
     let relationship = organization_relationship(&name, org);
@@ -328,20 +337,13 @@ pub(crate) async fn create_owned(
             tracing::error!(connection = %name, "Cannot undo connection#organization: {e}");
         }
     };
-    let response = match data_sources::create(State(state.clone()), Json(request)).await {
-        Ok(response) => response.into_response(),
-        Err(e) => {
-            undo().await;
-            return Err(e);
-        }
-    };
     if let Err(e) = tx.commit().await {
-        // The data source stays, without an organization: platform admins
-        // can assign it.
         undo().await;
         return Err(store_error(e, conflict));
     }
-    Ok(response)
+    tracing::info!(data_source = %name, "data source added for an organization (RBAC)");
+    let restarting = data_sources::restart_if_enabled(state, Vec::new(), Vec::new());
+    Ok(Json(json!({ "name": name, "restarting": restarting })).into_response())
 }
 
 /// `POST /v1/data-sources` and `POST /playground/data-sources` with RBAC
@@ -465,9 +467,9 @@ pub(crate) async fn refuse_tracked_name(rbac: &Rbac, name: &str) -> Result<(), A
 /// `cube.yml` to an organization (`origin: assigned`), or moves a
 /// connection another organization holds there: its releases to that
 /// organization's workspaces are withdrawn and it becomes `assigned` (its new
-/// organization did not create it). A connection never goes back to having
-/// no organization. `default` is never assigned (400). Assigning it again to
-/// its organization is a no-op.
+/// organization did not create it). [`unassign_organization`] takes it back
+/// to Platform. `default` is never assigned (400). Assigning it again to its
+/// organization is a no-op.
 pub async fn assign_organization(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -490,7 +492,7 @@ pub async fn assign_organization(
         .await
         .map_err(|e| store_error(e, "Conflict"))?
         .ok_or_else(|| ApiError::not_found("organization not found"))?;
-    if !data_source_types(&state).contains_key(&name) {
+    if !data_source_types(&state).await?.contains_key(&name) {
         return Err(not_found());
     }
 
@@ -584,6 +586,68 @@ async fn move_connection(rbac: &Rbac, name: &str, from: Uuid, to: Uuid) -> Resul
     Ok(())
 }
 
+/// `DELETE /v1/connections/{name}/organization` → 204: platform admins
+/// take a connection out of its organization, back to Platform. Its releases
+/// to that organization's workspaces are withdrawn with
+/// `connection#organization`, in one SpiceDB write; a failed write leaves
+/// the row, a failed commit writes the relationships back. `default` is 400;
+/// a connection without an organization (or none at all) 404; 409 when it
+/// moved between the read and the write.
+pub async fn unassign_organization(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let (rbac, _) = caller(&state, &ctx)?;
+    require_platform_admin(&ctx, "take connections out of organizations")?;
+    connection_name(&name)?;
+    if name == "default" {
+        return Err(ApiError::bad_request(
+            "The default data source always belongs to the platform",
+        ));
+    }
+    let row = rbac
+        .store
+        .connection(&name)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .ok_or_else(|| ApiError::not_found("This connection belongs to no organization"))?;
+
+    let conflict = "The connection changed concurrently; try again";
+    let releases = releases_of(rbac, &name).await?;
+    let owner = organization_relationship(&name, row.organization_id);
+    let mut updates: Vec<Update> = releases.iter().cloned().map(Update::Delete).collect();
+    updates.push(Update::Delete(owner.clone()));
+
+    let tx = rbac
+        .store
+        .transaction()
+        .await
+        .map_err(|e| store_error(e, conflict))?;
+    if !tx
+        .delete_connection_of(&name, row.organization_id)
+        .await
+        .map_err(|e| store_error(e, conflict))?
+    {
+        return Err(ApiError::new(StatusCode::CONFLICT, conflict));
+    }
+    rbac.authz
+        .write(&updates, &[])
+        .await
+        // Dropping `tx` rolls the row back.
+        .map_err(authz_error)?;
+    if let Err(e) = tx.commit().await {
+        let mut undo: Vec<Update> = releases.into_iter().map(Update::Touch).collect();
+        undo.push(Update::Touch(owner));
+        if let Err(err) = rbac.authz.write(&undo, &[]).await {
+            tracing::error!(connection = %name, "Cannot undo the unassignment of the connection: {err}");
+        }
+        return Err(store_error(e, conflict));
+    }
+    tracing::info!(connection = %name, "connection taken back to Platform");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn require_platform_admin(ctx: &RequestContext, what: &str) -> Result<(), ApiError> {
     if ctx.platform_admin {
         Ok(())
@@ -662,7 +726,7 @@ pub async fn of_workspace(
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let ws = visible_workspace(rbac, &id, "view", user).await?;
-    let types = data_source_types(&state);
+    let types = data_source_types(&state).await?;
     let connections: Vec<Value> = released_connections(rbac, &ws.id.to_string())
         .await?
         .into_iter()

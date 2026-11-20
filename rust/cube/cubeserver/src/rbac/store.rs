@@ -510,6 +510,28 @@ mod q {
             > 0)
     }
 
+    /// Adds data source `name`, or replaces its settings keeping its id.
+    pub async fn put_data_source(
+        c: &tokio_postgres::Client,
+        name: &str,
+        db_type: &str,
+        settings: &BTreeMap<String, String>,
+        secrets: Option<&[u8]>,
+    ) -> Result<Uuid, StoreError> {
+        let settings =
+            serde_json::to_value(settings).map_err(|e| StoreError::Db(e.to_string()))?;
+        let row = c
+            .query_one(
+                "INSERT INTO data_sources (name, db_type, settings, secrets) VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (name) DO UPDATE SET db_type = EXCLUDED.db_type, \
+                 settings = EXCLUDED.settings, secrets = EXCLUDED.secrets, updated_at = now() \
+                 RETURNING id",
+                &[&name, &db_type, &settings, &secrets],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
     /// Takes the connection out of organization `org`. `false` when there is
     /// no such row: it is in another organization by now, or none.
     pub async fn delete_connection_of(
@@ -739,6 +761,18 @@ macro_rules! shared_creates {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
             q::move_connection(c, name, from, to).await
+        }
+        /// See [`q::put_data_source`].
+        pub async fn put_data_source(
+            &self,
+            name: &str,
+            db_type: &str,
+            settings: &BTreeMap<String, String>,
+            secrets: Option<&[u8]>,
+        ) -> Result<Uuid, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::put_data_source(c, name, db_type, settings, secrets).await
         }
         /// See [`q::delete_connection_of`].
         pub async fn delete_connection_of(&self, name: &str, org: Uuid) -> Result<bool, StoreError> {
@@ -1314,28 +1348,6 @@ impl Store {
         let c = self.conn().await?;
         let sql = format!("SELECT {DATA_SOURCE_COLS} FROM data_sources WHERE name = $1");
         Ok(c.query_opt(&sql, &[&name]).await?.as_ref().map(data_source_from))
-    }
-
-    /// Adds data source `name`, or replaces its settings keeping its id.
-    pub async fn put_data_source(
-        &self,
-        name: &str,
-        db_type: &str,
-        settings: &BTreeMap<String, String>,
-        secrets: Option<&[u8]>,
-    ) -> Result<Uuid, StoreError> {
-        let c = self.conn().await?;
-        let settings = serde_json::to_value(settings).map_err(|e| StoreError::Db(e.to_string()))?;
-        let row = c
-            .query_one(
-                "INSERT INTO data_sources (name, db_type, settings, secrets) VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (name) DO UPDATE SET db_type = EXCLUDED.db_type, \
-                 settings = EXCLUDED.settings, secrets = EXCLUDED.secrets, updated_at = now() \
-                 RETURNING id",
-                &[&name, &db_type, &settings, &secrets],
-            )
-            .await?;
-        Ok(row.get(0))
     }
 
     pub async fn delete_data_source(&self, name: &str) -> Result<bool, StoreError> {

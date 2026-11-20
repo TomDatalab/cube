@@ -63,6 +63,20 @@ pub async fn save(
     name: &str,
     variables: &BTreeMap<String, String>,
 ) -> Result<Uuid, String> {
+    let row = sealed(key, name, variables)?;
+    store
+        .put_data_source(name, &row.db_type, &row.settings, row.secrets.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `variables` as the row [`save`] writes (its `id` is not set yet): for a
+/// write inside a transaction of the caller's.
+pub fn sealed(
+    key: &SecretKey,
+    name: &str,
+    variables: &BTreeMap<String, String>,
+) -> Result<DataSourceRow, String> {
     let db_type = variables
         .get(TYPE)
         .filter(|t| !t.trim().is_empty())
@@ -74,10 +88,13 @@ pub async fn save(
         let json = serde_json::to_vec(&secret).map_err(|e| e.to_string())?;
         Some(key.seal(&json))
     };
-    store
-        .put_data_source(name, db_type, &plain, sealed.as_deref())
-        .await
-        .map_err(|e| e.to_string())
+    Ok(DataSourceRow {
+        id: Uuid::nil(),
+        name: name.to_string(),
+        db_type: db_type.clone(),
+        settings: plain,
+        secrets: sealed,
+    })
 }
 
 const TYPE: &str = "CUBEJS_DB_TYPE";

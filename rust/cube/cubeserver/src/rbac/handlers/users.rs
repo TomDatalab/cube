@@ -392,7 +392,7 @@ pub(crate) async fn access(
     input.roles = roles;
     input.connections = connections;
     input.releases = releases;
-    input.configured = data_source_types(&state).into_keys().collect();
+    input.configured = data_source_types(&state).await?.into_keys().collect();
     Ok(Json(access::build(&input)))
 }
 

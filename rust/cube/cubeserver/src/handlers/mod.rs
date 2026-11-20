@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod connectors;
 pub mod data_sources;
+pub mod data_sources_rbac;
 pub mod graphql;
 pub mod health;
 pub mod meta;

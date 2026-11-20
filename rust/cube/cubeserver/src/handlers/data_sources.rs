@@ -113,6 +113,28 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
             .collect(),
     };
 
+    // With RBAC on, the data sources it holds replace the file's of the
+    // same name; each has an id.
+    if let Some(rbac) = state.rbac.as_deref() {
+        for ds in super::data_sources_rbac::stored(rbac).await? {
+            let entry = super::data_sources_rbac::listed(
+                &ds,
+                active.is_empty() || active.contains(&ds.name.as_str()),
+            );
+            match data_sources.iter_mut().find(|d| d["name"] == ds.name.as_str()) {
+                Some(existing) => *existing = entry,
+                None => data_sources.push(entry),
+            }
+        }
+        data_sources.sort_by(|a, b| {
+            let key = |d: &Value| {
+                let name = d["name"].as_str().unwrap_or_default().to_string();
+                (name != "default", name)
+            };
+            key(a).cmp(&key(b))
+        });
+    }
+
     // With RBAC on, the organization that owns each one; `null` for none
     // ("Platform").
     if let Some(rbac) = state.rbac.as_deref() {
@@ -136,8 +158,8 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
     Ok(Json(json!({
         "dataSources": data_sources,
         "connectors": connectors,
-        // Without a `cube.yml` there is nowhere to write a change to.
-        "editable": state.config.config_file.is_some(),
+        // Without RBAC or a `cube.yml` there is nowhere to write a change to.
+        "editable": state.rbac.is_some() || state.config.config_file.is_some(),
     })))
 }
 
@@ -148,6 +170,12 @@ pub async fn get(
     State(state): State<AppState>,
     UrlPath(name): UrlPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Some(rbac) = state.rbac.as_deref() {
+        let (variables, _) = super::data_sources_rbac::current(&state, rbac, &name)
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("No data source named {name}")))?;
+        return Ok(Json(super::data_sources_rbac::without_secrets(&name, variables)));
+    }
     let paths = paths(&state)?;
     let env = env_with_file(&paths.env);
     let config = load(&paths.config, &env)?;
@@ -193,10 +221,18 @@ pub async fn test(
             run_test(driver).await?;
         }
         (Some(name), false) => {
-            let paths = paths(&state)?;
-            let env = env_with_file(&paths.env);
-            let config = load(&paths.config, &env)?;
-            let current = current_variables(&config, &name, &env)?;
+            let current = match state.rbac.as_deref() {
+                Some(rbac) => super::data_sources_rbac::current(&state, rbac, &name)
+                    .await?
+                    .ok_or_else(|| ApiError::not_found(format!("No data source named {name}")))?
+                    .0,
+                None => {
+                    let paths = paths(&state)?;
+                    let env = env_with_file(&paths.env);
+                    let config = load(&paths.config, &env)?;
+                    current_variables(&config, &name, &env)?
+                }
+            };
             let (set, cleared) = split_changes(&request.variables, &current)?;
             test_variables(&edited(&current, &set, &cleared)).await?;
         }
@@ -222,22 +258,17 @@ pub async fn create(
     State(state): State<AppState>,
     Json(request): Json<CreateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let paths = paths(&state)?;
     let _guard = WRITE.lock().await;
 
-    let name = request.name.trim().to_string();
-    let variables = clean(&request.variables)?;
-    validate_name(&name)?;
-    let db_type = variables
-        .get("CUBEJS_DB_TYPE")
-        .cloned()
-        .ok_or_else(|| ApiError::bad_request("Choose a database type"))?;
-    if !cubedriver::DriverFactory::is_implemented(&db_type) {
-        return Err(ApiError::bad_request(format!(
-            "This server has no {db_type} connector"
-        )));
-    }
+    let (name, variables) = validated(&request)?;
+    let db_type = variables["CUBEJS_DB_TYPE"].clone();
 
+    if let Some(rbac) = state.rbac.as_deref() {
+        return super::data_sources_rbac::create(&state, rbac, &name, &variables)
+            .await
+            .map(Json);
+    }
+    let paths = paths(&state)?;
     let current = std::fs::read_to_string(&paths.config).map_err(io_error)?;
     if load(&paths.config, &env_with_file(&paths.env))?
         .data_sources
@@ -286,14 +317,38 @@ pub struct UpdateRequest {
     variables: BTreeMap<String, String>,
 }
 
+/// The new data source's name and settings, checked: a valid name, a type
+/// this server has a connector for.
+pub(crate) fn validated(
+    request: &CreateRequest,
+) -> Result<(String, BTreeMap<String, String>), ApiError> {
+    let name = request.name.trim().to_string();
+    let variables = clean(&request.variables)?;
+    validate_name(&name)?;
+    let db_type = variables
+        .get("CUBEJS_DB_TYPE")
+        .ok_or_else(|| ApiError::bad_request("Choose a database type"))?;
+    if !cubedriver::DriverFactory::is_implemented(db_type) {
+        return Err(ApiError::bad_request(format!(
+            "This server has no {db_type} connector"
+        )));
+    }
+    Ok((name, variables))
+}
+
 /// `PUT /playground/data-sources/:name`
 pub async fn update(
     State(state): State<AppState>,
     UrlPath(name): UrlPath<String>,
     Json(request): Json<UpdateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let paths = paths(&state)?;
     let _guard = WRITE.lock().await;
+    if let Some(rbac) = state.rbac.as_deref() {
+        return super::data_sources_rbac::update(&state, rbac, &name, &request.variables)
+            .await
+            .map(Json);
+    }
+    let paths = paths(&state)?;
 
     let env = env_with_file(&paths.env);
     let config = load(&paths.config, &env)?;
@@ -356,7 +411,6 @@ pub async fn delete(
     State(state): State<AppState>,
     UrlPath(name): UrlPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let paths = paths(&state)?;
     let _guard = WRITE.lock().await;
 
     if name == "default" {
@@ -364,42 +418,33 @@ pub async fn delete(
             "The default data source cannot be deleted: the server plans queries with it",
         ));
     }
-    let config = load(&paths.config, &env_with_file(&paths.env))?;
-    if !config.data_sources.contains_key(&name) {
+    let file_config = match &state.config.config_file {
+        Some(path) => Some(load(path, &env_with_file(&path.with_file_name(".env")))?),
+        None => None,
+    };
+    let in_file = file_config
+        .as_ref()
+        .is_some_and(|config| config.data_sources.contains_key(&name));
+    let in_rbac = match state.rbac.as_deref() {
+        Some(rbac) => super::data_sources_rbac::current(&state, rbac, &name)
+            .await?
+            .is_some_and(|(_, stored)| stored),
+        None => false,
+    };
+    if !in_file && !in_rbac {
         return Err(ApiError::not_found(format!("No data source named {name}")));
     }
+    refuse_if_in_use(&state, file_config.as_ref(), &name)?;
 
-    // A cube pointing at a missing data source fails the whole model: the
-    // deployment's, or a tenant's that has a directory of its own (one that
-    // differs per claim value cannot be listed).
-    let mut model_dirs = vec![PathBuf::from(&state.config.schema_path)];
-    if let Some(tenants) = config.tenants() {
-        model_dirs.extend(
-            tenants
-                .rules
-                .iter()
-                .chain(&tenants.default)
-                .filter_map(|rule| rule.model_path.as_deref())
-                .filter(|path| !path.contains('{'))
-                .map(PathBuf::from),
-        );
+    if in_rbac {
+        let rbac = state.rbac.as_deref().expect("in_rbac implies RBAC");
+        if let Some(body) = super::data_sources_rbac::delete(&state, rbac, &name).await? {
+            return Ok(Json(body));
+        }
     }
-    model_dirs.sort();
-    model_dirs.dedup();
-    let users: Vec<String> = model_dirs
-        .iter()
-        .flat_map(|dir| cubes_using(dir, &name))
-        .collect();
-    if !users.is_empty() {
-        let shown: Vec<&str> = users.iter().take(5).map(String::as_str).collect();
-        let more = users.len().saturating_sub(shown.len());
-        return Err(ApiError::bad_request(format!(
-            "{} cube(s) still use {name} ({}{}). Delete them or point them at another data source first.",
-            users.len(),
-            shown.join(", "),
-            if more > 0 { format!(", and {more} more") } else { String::new() },
-        )));
-    }
+
+    let paths = paths(&state)?;
+    let config = file_config.expect("in_file implies a cube.yml");
 
     let text = std::fs::read_to_string(&paths.config).map_err(io_error)?;
     let updated = remove_from_config(&text, &name).ok_or_else(|| {
@@ -434,6 +479,44 @@ pub async fn delete(
         "name": name,
         "restarting": restart_if_enabled(&state, Vec::new(), to_remove),
     })))
+}
+
+/// 400 when a cube of the model (the deployment's, or a tenant's with a
+/// directory of its own) still uses data source `name`.
+fn refuse_if_in_use(state: &AppState, config: Option<&CubeConfig>, name: &str) -> Result<(), ApiError> {
+    // A cube pointing at a missing data source fails the whole model: the
+    // deployment's, or a tenant's that has a directory of its own (one that
+    // differs per claim value cannot be listed).
+    let mut model_dirs = vec![PathBuf::from(&state.config.schema_path)];
+    if let Some(tenants) = config.and_then(|c| c.tenants()) {
+        model_dirs.extend(
+            tenants
+                .rules
+                .iter()
+                .chain(&tenants.default)
+                .filter_map(|rule| rule.model_path.as_deref())
+                .filter(|path| !path.contains('{'))
+                .map(PathBuf::from),
+        );
+    }
+    model_dirs.sort();
+    model_dirs.dedup();
+    let users: Vec<String> = model_dirs
+        .iter()
+        .flat_map(|dir| cubes_using(dir, name))
+        .collect();
+    if !users.is_empty() {
+        let shown: Vec<&str> = users.iter().take(5).map(String::as_str).collect();
+        let more = users.len().saturating_sub(shown.len());
+        return Err(ApiError::bad_request(format!(
+            "{} cube(s) still use {name} ({}{}). Delete them or point them at another data source first.",
+            users.len(),
+            shown.join(", "),
+            if more > 0 { format!(", and {more} more") } else { String::new() },
+        )));
+    }
+
+    Ok(())
 }
 
 async fn v1<R: IntoResponse>(
@@ -632,6 +715,13 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
                 "Name the connection: a data source name, or its CUBEJS_DB_* settings",
             ))
         }
+        Some(Connection::Name(name)) if state.rbac.is_some() => {
+            let rbac = state.rbac.as_deref().expect("checked");
+            let (variables, _) = super::data_sources_rbac::current(state, rbac, &name)
+                .await?
+                .ok_or_else(|| ApiError::not_found(format!("No data source named {name}")))?;
+            (name, variables)
+        }
         Some(Connection::Name(name)) => {
             let Some(config_file) = &state.config.config_file else {
                 return Err(ApiError::not_implemented(
@@ -735,7 +825,21 @@ async fn execute(state: &AppState, request: ExecuteRequest) -> Result<Json<Value
 
 /// Each data source's type, by name: as `cube.yml` has them now, or as the
 /// server started with when there is no file or it cannot be read.
-pub(crate) fn data_source_types(state: &AppState) -> BTreeMap<String, String> {
+/// Every data source by name, with its type: the file's (or the running
+/// configuration's), and with RBAC on the ones it holds. 503 when RBAC
+/// cannot be read.
+pub(crate) async fn data_source_types(state: &AppState) -> Result<BTreeMap<String, String>, ApiError> {
+    let mut types = file_data_source_types(state);
+    if let Some(rbac) = state.rbac.as_deref() {
+        for ds in super::data_sources_rbac::stored(rbac).await? {
+            let db_type = ds.variables.get("CUBEJS_DB_TYPE").cloned().unwrap_or_default();
+            types.insert(ds.name, db_type);
+        }
+    }
+    Ok(types)
+}
+
+fn file_data_source_types(state: &AppState) -> BTreeMap<String, String> {
     let from_file = state.config.config_file.as_ref().and_then(|path| {
         load(path, &env_with_file(&path.with_file_name(".env")))
             .ok()
@@ -766,7 +870,7 @@ fn paths(state: &AppState) -> Result<Paths, ApiError> {
     Ok(Paths { config, env })
 }
 
-fn load(path: &Path, env: &Env) -> Result<CubeConfig, ApiError> {
+pub(crate) fn load(path: &Path, env: &Env) -> Result<CubeConfig, ApiError> {
     CubeConfig::load_file_with_env(path, env).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
@@ -863,7 +967,7 @@ pub(crate) fn is_secret(var: &str) -> bool {
 /// `url` without the secrets it may carry, and whether it had any: the
 /// password of `postgres://u:p@h/db` (→ `postgres://u@h/db`), and the value
 /// of a parameter such as `?password=`, `&token=` or JDBC's `;PWD=` (→ `***`).
-fn without_password(url: &str) -> (String, bool) {
+pub(crate) fn without_password(url: &str) -> (String, bool) {
     let mut hidden = false;
     let mut out = url.to_string();
     if let Some((scheme, rest)) = url.split_once("://") {
@@ -899,7 +1003,7 @@ fn without_password(url: &str) -> (String, bool) {
 
 /// The form's fields, split into the ones to set and the ones emptied. An
 /// empty secret (a password, say) means "keep it", not "clear it".
-fn split_changes(
+pub(crate) fn split_changes(
     variables: &BTreeMap<String, String>,
     current: &BTreeMap<String, String>,
 ) -> Result<(BTreeMap<String, String>, BTreeSet<String>), ApiError> {
@@ -912,7 +1016,7 @@ fn split_changes(
     Ok((set, cleared))
 }
 
-fn edited(
+pub(crate) fn edited(
     current: &BTreeMap<String, String>,
     set: &BTreeMap<String, String>,
     cleared: &BTreeSet<String>,
@@ -978,7 +1082,7 @@ fn check_config(
         .map_err(|e| ApiError::bad_request(format!("The new configuration would not load: {e}")))
 }
 
-async fn test_variables(variables: &BTreeMap<String, String>) -> Result<(), ApiError> {
+pub(crate) async fn test_variables(variables: &BTreeMap<String, String>) -> Result<(), ApiError> {
     let env: std::collections::HashMap<String, String> = variables.clone().into_iter().collect();
     let config = cubedriver::DriverConfig::from_env_source(&env, None, false)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
@@ -1009,7 +1113,7 @@ async fn run_test(driver: std::sync::Arc<dyn cubedriver::Driver>) -> Result<(), 
 
 /// Drops empty fields and refuses anything that is not a `CUBEJS_*` variable
 /// or that would break the `.env` line it is written to.
-fn clean(variables: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>, ApiError> {
+pub(crate) fn clean(variables: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>, ApiError> {
     let mut out = BTreeMap::new();
     for (key, value) in variables {
         let valid_key = key.starts_with("CUBEJS_")
@@ -1052,7 +1156,7 @@ pub(crate) fn validate_name(name: &str) -> Result<(), ApiError> {
 }
 
 /// The model files with a cube whose `data_source` is `name`.
-fn cubes_using(model_dir: &Path, name: &str) -> Vec<String> {
+pub(crate) fn cubes_using(model_dir: &Path, name: &str) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, name: &str, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -1331,7 +1435,7 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<(), ApiErro
     std::fs::rename(&tmp, path).map_err(io_error)
 }
 
-fn restart_if_enabled(state: &AppState, set: Vec<(String, String)>, remove: Vec<String>) -> bool {
+pub(crate) fn restart_if_enabled(state: &AppState, set: Vec<(String, String)>, remove: Vec<String>) -> bool {
     if state.config.restart_on_config_change {
         restart_soon(set, remove);
     }
