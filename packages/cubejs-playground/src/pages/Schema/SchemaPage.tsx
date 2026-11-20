@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Layout, Modal, Empty, Typography, Input, Tooltip, message } from 'antd';
+import { Layout, Modal, Empty, Typography, Input, Tooltip, Button, Spin, message } from 'antd';
 import type { DataNode } from 'antd/lib/tree';
 import { RouterProps } from 'react-router-dom';
 
@@ -10,7 +10,8 @@ import { Alert, CubeLoader } from '../../atoms';
 import { playgroundFetch } from '../../shared/helpers';
 import { AppContext } from '../../components/AppContext';
 import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
-import { useCubejsApi, useSecurityContext } from '../../hooks';
+import { useSecurityContext } from '../../hooks';
+import { createCubeApi } from '../../shared/cube-api';
 import { SchemaFormat } from '../../types';
 import { CubeDetail, MetaCube } from './CubeDetail';
 import {
@@ -46,14 +47,26 @@ async function readJson(res: Response) {
 export function SchemaPage({ history }: RouterProps) {
   const { playgroundContext, apiUrl } = useContext(AppContext);
   const { currentToken } = useSecurityContext();
-  const cubeApi = useCubejsApi(apiUrl ?? null, currentToken ?? null);
+  // No workspace header: a platform admin sees the cubes of every organization.
+  const cubeApi = useMemo(
+    () => (apiUrl && currentToken && currentToken !== 'undefined'
+      ? createCubeApi(currentToken, apiUrl, { workspace: false })
+      : null),
+    [apiUrl, currentToken]
+  );
 
   const [orgs, setOrgs] = useState<OrgSummary[]>([]);
   const [total, setTotal] = useState(0);
+  // Organizations the server's `?q=` returned for the current query.
+  const [found, setFound] = useState<OrgSummary[]>([]);
+  const [foundTotal, setFoundTotal] = useState(0);
+  const [searching, setSearching] = useState(false);
   const [orgsLoading, setOrgsLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [details, setDetails] = useState<Record<string, OrgDetail>>({});
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
+  const [metaError, setMetaError] = useState<string | null>(null);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [checkedKeys, setCheckedKeys] = useState<string[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -66,7 +79,9 @@ export function SchemaPage({ history }: RouterProps) {
   const [shown, setShown] = useState(false);
 
   const detailRequests = useRef<Record<string, Promise<void> | undefined>>({});
-  const listRequest = useRef(0);
+  const baseRequest = useRef(0);
+  const foundRequest = useRef(0);
+  const loadingMoreRef = useRef(false);
 
   const [major, minor] = playgroundContext?.coreServerVersion
     ? playgroundContext.coreServerVersion.split('.')
@@ -84,29 +99,60 @@ export function SchemaPage({ history }: RouterProps) {
     return () => clearTimeout(timer);
   }, [search]);
 
-  useEffect(() => {
-    const request = ++listRequest.current;
-    setOrgsLoading(true);
-    setLoadError(null);
+  const fetchPage = async (q: string, offset: number) => {
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+    if (q) {
+      params.set('q', q);
+    }
+    return readJson(await playgroundFetch(`playground/tree?${params}`));
+  };
 
+  // The unfiltered list, once.
+  useEffect(() => {
+    const request = ++baseRequest.current;
     (async () => {
       try {
-        const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: '0' });
-        if (query) {
-          params.set('q', query);
-        }
-        const result = await readJson(await playgroundFetch(`playground/tree?${params}`));
-        if (request === listRequest.current) {
+        const result = await fetchPage('', 0);
+        if (request === baseRequest.current) {
           setOrgs(result.organizations || []);
           setTotal(result.total || 0);
         }
       } catch (e: any) {
-        if (request === listRequest.current) {
+        if (request === baseRequest.current) {
           setLoadError(e);
         }
       } finally {
-        if (request === listRequest.current) {
+        if (request === baseRequest.current) {
           setOrgsLoading(false);
+        }
+      }
+    })();
+  }, []);
+
+  // What the server finds for a query of 2+ characters.
+  useEffect(() => {
+    const request = ++foundRequest.current;
+    if (!query) {
+      setFound([]);
+      setFoundTotal(0);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    (async () => {
+      try {
+        const result = await fetchPage(query, 0);
+        if (request === foundRequest.current) {
+          setFound(result.organizations || []);
+          setFoundTotal(result.total || 0);
+        }
+      } catch (e: any) {
+        if (request === foundRequest.current) {
+          message.error(e.message);
+        }
+      } finally {
+        if (request === foundRequest.current) {
+          setSearching(false);
         }
       }
     })();
@@ -124,13 +170,19 @@ export function SchemaPage({ history }: RouterProps) {
         if (cancelled) {
           return;
         }
+        setMetaError(null);
         const map: Record<string, MetaCube> = {};
         (meta.meta.cubes as unknown as MetaCube[]).forEach((cube) => {
           map[cube.name] = cube;
         });
         setMetaCubes(map);
       })
-      .catch(() => !cancelled && setMetaCubes({}))
+      .catch((e: any) => {
+        if (!cancelled) {
+          setMetaCubes({});
+          setMetaError(e?.message || String(e));
+        }
+      })
       .finally(() => !cancelled && setMetaLoading(false));
     return () => {
       cancelled = true;
@@ -148,9 +200,13 @@ export function SchemaPage({ history }: RouterProps) {
           await playgroundFetch(`playground/tree/${encodeURIComponent(slug)}`)
         );
         setDetails((current) => ({ ...current, [slug]: detail }));
+        setDetailErrors((current) => {
+          const { [slug]: _gone, ...rest } = current;
+          return rest;
+        });
       } catch (e: any) {
         delete detailRequests.current[slug];
-        message.error(`Could not load ${slug}: ${e.message}`);
+        setDetailErrors((current) => ({ ...current, [slug]: e.message }));
       }
     })();
     detailRequests.current[slug] = request;
@@ -158,21 +214,37 @@ export function SchemaPage({ history }: RouterProps) {
   }, []);
 
   const loadMore = async () => {
+    if (loadingMoreRef.current) {
+      return;
+    }
+    const searchingNow = !!query;
+    const counter = searchingNow ? foundRequest : baseRequest;
+    const request = counter.current;
+    const offset = searchingNow ? found.length : orgs.length;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const params = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(orgs.length),
-      });
-      if (query) {
-        params.set('q', query);
+      const result = await fetchPage(query, offset);
+      if (request !== counter.current) {
+        return;
       }
-      const result = await readJson(await playgroundFetch(`playground/tree?${params}`));
-      setOrgs((current) => [...current, ...(result.organizations || [])]);
-      setTotal(result.total || 0);
+      const append = (current: OrgSummary[]) => [
+        ...current,
+        ...(result.organizations || []).filter(
+          (o: OrgSummary) => !current.some((c) => c.slug === o.slug)
+        ),
+      ];
+      if (searchingNow) {
+        setFound(append);
+        setFoundTotal(result.total || 0);
+      } else {
+        setOrgs(append);
+        setTotal(result.total || 0);
+      }
     } catch (e: any) {
       message.error(e.message);
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
   };
@@ -211,8 +283,10 @@ export function SchemaPage({ history }: RouterProps) {
   }, [selected]);
 
   const treeData = useMemo(() => {
-    const nodes: DataNode[] = orgNodes(orgs).map((node, index) => {
-      const org = orgs[index];
+    // The loaded list, plus what the server found that is not in it yet.
+    const all = [...orgs, ...found.filter((f) => !orgs.some((o) => o.slug === f.slug))];
+    const nodes: DataNode[] = orgNodes(all).map((node, index) => {
+      const org = all[index];
       const detail = details[org.slug];
       return {
         ...node,
@@ -220,8 +294,19 @@ export function SchemaPage({ history }: RouterProps) {
         ...(detail ? { children: detailNodes(org.slug, detail) } : {}),
       };
     });
-    const visible = query ? nodes : filterTree(nodes, search);
-    if (orgs.length < total) {
+    const filtered = filterTree(nodes, search);
+    const foundSlugs = new Set(found.map((f) => f.slug));
+    const visible: DataNode[] = [];
+    nodes.forEach((node) => {
+      const match = filtered.find((f) => f.key === node.key);
+      if (match) {
+        visible.push(match);
+      } else if (foundSlugs.has(String(node.key).slice('org:'.length))) {
+        visible.push(node);
+      }
+    });
+    const more = query ? found.length < foundTotal : orgs.length < total;
+    if (more) {
       visible.push({
         key: MORE_KEY,
         title: loadingMore ? 'Carregando…' : 'Carregar mais…',
@@ -230,7 +315,7 @@ export function SchemaPage({ history }: RouterProps) {
       });
     }
     return visible;
-  }, [orgs, total, details, search, query, loadingMore]);
+  }, [orgs, found, foundTotal, total, details, search, query, loadingMore]);
 
   // table key -> [`<dataSource>.<schema>`, table], as `generate-schema` expects.
   const tableRefs = useMemo(() => {
@@ -264,15 +349,22 @@ export function SchemaPage({ history }: RouterProps) {
 
     const options = { format };
     playgroundAction('Generate Schema', options);
-    const res = await playgroundFetch('playground/generate-schema', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        format,
-        tables: checkedKeys.map((k) => tableRefs[k]).filter(Boolean),
-        tablesSchema,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await playgroundFetch('playground/generate-schema', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          format,
+          tables: checkedKeys.map((k) => tableRefs[k]).filter(Boolean),
+          tablesSchema,
+        }),
+      });
+    } catch (e: any) {
+      playgroundAction('Generate Schema Fail', { error: String(e), ...options });
+      message.error(`Could not generate the data model: ${e.message}`);
+      return;
+    }
 
     if (res.status === 200) {
       playgroundAction('Generate Schema Success', options);
@@ -308,6 +400,23 @@ export function SchemaPage({ history }: RouterProps) {
 
     const detail = details[selected.slug];
 
+    if (!detail && detailErrors[selected.slug]) {
+      return (
+        <Alert
+          type="error"
+          message="Could not load this organization"
+          description={(
+            <>
+              <div>{detailErrors[selected.slug]}</div>
+              <Button style={{ marginTop: 8 }} onClick={() => loadDetail(selected.slug, true)}>
+                Tentar de novo
+              </Button>
+            </>
+          )}
+        />
+      );
+    }
+
     if (selected.kind === 'cube') {
       const cube = detail?.cubes.find((c) => c.name === selected.rest);
       if (!cube) {
@@ -318,6 +427,7 @@ export function SchemaPage({ history }: RouterProps) {
           cube={cube}
           metaCube={metaCubes?.[cube.name]}
           metaLoading={metaLoading}
+          metaError={metaError}
           errors={detail.errors || []}
           onOpen={(metaCube) => history.push(buildQueryUrl(metaCube))}
         />
@@ -418,6 +528,7 @@ export function SchemaPage({ history }: RouterProps) {
         checkable
         checkStrictly
         treeData={treeData}
+        loadedKeys={Object.keys(details).map((slug) => `org:${slug}`)}
         loadData={async (node: DataNode) => {
           const key = String(node.key);
           if (key !== MORE_KEY && parseKey(key).kind === 'org') {
@@ -460,6 +571,7 @@ export function SchemaPage({ history }: RouterProps) {
             placeholder="Search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            suffix={searching ? <Spin size="small" /> : undefined}
           />
           <Tooltip title={mixedOrgs ? 'Escolha tabelas de uma única organização' : ''}>
             <span>

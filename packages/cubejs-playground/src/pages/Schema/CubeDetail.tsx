@@ -11,8 +11,7 @@ export type MetaMember = {
   primaryKey?: boolean;
 };
 
-// A cube as `/cube/v1/meta` describes it. `joins` is only there when the server
-// sends it (the extended meta), the standard response leaves it out.
+// A cube as `/cube/v1/meta` describes it (joins come from the tree entry).
 export type MetaCube = {
   name: string;
   title?: string;
@@ -20,7 +19,6 @@ export type MetaCube = {
   measures: MetaMember[];
   dimensions: MetaMember[];
   segments: MetaMember[];
-  joins?: { name?: string; relationship?: string; sql?: string }[];
 };
 
 export type CubeDetailProps = {
@@ -28,6 +26,7 @@ export type CubeDetailProps = {
   // undefined when the cube is not in the meta (rejected, or meta not loaded).
   metaCube?: MetaCube;
   metaLoading?: boolean;
+  metaError?: string | null;
   errors: { file: string; cube: string; message: string }[];
   onOpen: (cube: MetaCube) => void;
 };
@@ -46,7 +45,7 @@ const memberColumns = (withPrimaryKey: boolean) => [
 ];
 
 export function CubeDetail({
-  cube, metaCube, metaLoading, errors, onOpen,
+  cube, metaCube, metaLoading, metaError, errors, onOpen,
 }: CubeDetailProps) {
   const rejections = errors.filter((e) => e.cube === cube.name || e.file === cube.file);
 
@@ -60,7 +59,15 @@ export function CubeDetail({
         <Descriptions.Item label="File">{cube.file}</Descriptions.Item>
       </Descriptions>
 
-      {!metaCube && !metaLoading && (
+      {!metaCube && !metaLoading && metaError && (
+        <Alert
+          type="error"
+          message={`Não foi possível carregar o meta: ${metaError}`}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {!metaCube && !metaLoading && !metaError && (
         <Alert
           type="error"
           message="Cube not available"
@@ -79,6 +86,30 @@ export function CubeDetail({
       >
         Abrir no Playground
       </Button>
+
+      {cube.joins && cube.joins.length > 0 && (
+        <>
+          <Typography.Title level={5}>Joins ({cube.joins.length})</Typography.Title>
+          <Table
+            size="small"
+            rowKey="name"
+            pagination={false}
+            dataSource={cube.joins}
+            columns={[
+              { title: 'Cube', dataIndex: 'name', key: 'name' },
+              { title: 'Relationship', dataIndex: 'relationship', key: 'relationship' },
+            ]}
+            style={{ marginBottom: 24 }}
+          />
+        </>
+      )}
+
+      {cube.includes && cube.includes.length > 0 && (
+        <>
+          <Typography.Title level={5}>Includes ({cube.includes.length})</Typography.Title>
+          <Typography.Paragraph>{cube.includes.join(', ')}</Typography.Paragraph>
+        </>
+      )}
 
       {metaCube && (
         <>
@@ -116,24 +147,6 @@ export function CubeDetail({
             ]}
           />
 
-          {metaCube.joins && metaCube.joins.length > 0 && (
-            <>
-              <Typography.Title level={5} style={{ marginTop: 24 }}>
-                Joins ({metaCube.joins.length})
-              </Typography.Title>
-              <Table
-                size="small"
-                rowKey={(join) => join.name || join.sql || ''}
-                pagination={false}
-                dataSource={metaCube.joins}
-                columns={[
-                  { title: 'Name', dataIndex: 'name', key: 'name' },
-                  { title: 'Relationship', dataIndex: 'relationship', key: 'relationship' },
-                  { title: 'SQL', dataIndex: 'sql', key: 'sql' },
-                ]}
-              />
-            </>
-          )}
         </>
       )}
     </div>

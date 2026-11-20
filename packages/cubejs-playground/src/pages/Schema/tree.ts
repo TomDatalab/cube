@@ -7,6 +7,9 @@ export type TreeCube = {
   dataSource: string;
   file: string;
   members: { measures: number; dimensions: number };
+  joins?: { name: string; relationship?: string | null }[];
+  // A view's source cubes.
+  includes?: string[];
 };
 
 export type OrgSummary = {

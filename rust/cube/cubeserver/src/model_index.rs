@@ -23,6 +23,10 @@ pub struct IndexedCube {
     pub owner: Owner,
     pub measures: usize,
     pub dimensions: usize,
+    /// `(target cube, relationship)`.
+    pub joins: Vec<(String, Option<String>)>,
+    /// A view's source cubes: every segment of every `join_path`, deduped.
+    pub includes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +96,25 @@ impl ModelIndex {
                 owner: owner_of(&c.file_name),
                 measures: c.measures.len(),
                 dimensions: c.dimensions.len(),
+                joins: c
+                    .joins
+                    .iter()
+                    .map(|j| (j.name.clone(), j.relationship.clone()))
+                    .collect(),
+                includes: {
+                    let mut names: Vec<String> = Vec::new();
+                    for part in c
+                        .cubes
+                        .iter()
+                        .filter_map(|i| i.join_path.as_deref())
+                        .flat_map(|p| p.split('.'))
+                    {
+                        if !part.is_empty() && !names.iter().any(|n| n == part) {
+                            names.push(part.to_string());
+                        }
+                    }
+                    names
+                },
             })
             .collect();
         let files = sources

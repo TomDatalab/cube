@@ -1477,7 +1477,7 @@ async fn tree_without_rbac_is_one_model_node() {
     let model = std::path::PathBuf::from(&config.schema_path);
     std::fs::write(
         model.join("orders.yml"),
-        "cubes:\n  - name: orders\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n",
+        "cubes:\n  - name: orders\n    sql_table: t\n    joins:\n      - name: users\n        relationship: many_to_one\n        sql: \"1=1\"\n    measures:\n      - name: n\n        type: count\n",
     )
     .unwrap();
     std::fs::write(
@@ -1515,6 +1515,14 @@ async fn tree_without_rbac_is_one_model_node() {
         .collect();
     cubes.sort();
     assert_eq!(cubes, ["orders", "sales"]);
+    let orders = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "orders")
+        .unwrap();
+    assert_eq!(orders["joins"][0]["name"], "users", "{body}");
+    assert_eq!(orders["joins"][0]["relationship"], "manyToOne", "{body}");
 
     let (status, body) = get_json(router.clone(), "/playground/tree/_model/files/orders.yml").await;
     assert_eq!(status, StatusCode::OK, "{body}");

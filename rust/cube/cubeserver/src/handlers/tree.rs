@@ -178,7 +178,11 @@ pub async fn detail(
         .map(|c| {
             json!({ "name": c.name, "title": c.title, "type": c.kind,
                     "dataSource": c.data_source, "file": c.file,
-                    "members": { "measures": c.measures, "dimensions": c.dimensions } })
+                    "members": { "measures": c.measures, "dimensions": c.dimensions },
+                    "joins": c.joins.iter()
+                        .map(|(name, rel)| json!({ "name": name, "relationship": rel }))
+                        .collect::<Vec<_>>(),
+                    "includes": c.includes })
         })
         .collect();
     let files: Vec<Value> = index
