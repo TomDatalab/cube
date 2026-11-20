@@ -378,6 +378,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None => Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         },
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: ws_state.clone(),
         rbac,
     };

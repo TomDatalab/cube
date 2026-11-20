@@ -79,6 +79,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
     let mut helpers = Router::new()
         .route("/playground/files", get(files))
         .route("/playground/db-schema", get(db_schema))
+        .route("/playground/tree", get(super::tree::list))
+        .route("/playground/tree/:slug", get(super::tree::detail))
+        .route("/playground/tree/:slug/files/*path", get(super::tree::file))
         .route("/playground/driver", get(driver))
         .merge(keyed)
         // Not ported. Named individually so the message says why, rather
@@ -334,7 +337,7 @@ async fn db_schema(
     Ok(Json(json!({ "tablesSchema": merged, "errors": errors })))
 }
 
-async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
+pub(super) async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
     // A database that never answers, while connecting or once connected,
     // would otherwise hold up every other source's tables.
     let no_answer = || {

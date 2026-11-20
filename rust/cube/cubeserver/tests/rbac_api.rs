@@ -97,6 +97,7 @@ fn state_with(rbac: Option<Arc<Rbac>>, config: ServerConfig) -> AppState {
         pre_aggregations: Arc::new(cubeserver::services::UnimplementedPreAggregationService),
         sql_conversion: Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: Default::default(),
         tenants: None,
         rbac,

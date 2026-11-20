@@ -38,6 +38,8 @@ pub struct AppState {
     /// RBAC (`CUBE_RBAC=spicedb`). When absent no RBAC route is mounted and
     /// every request is authorized as before.
     pub rbac: Option<Arc<crate::rbac::Rbac>>,
+    /// The model's cubes and files by owner, for the Playground's tree.
+    pub model_index: Arc<crate::model_index::ModelIndexCache>,
 }
 
 impl AppState {

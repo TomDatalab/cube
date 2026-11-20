@@ -979,7 +979,7 @@ impl Store {
         let q = s.escaped();
         let visible = visible.map(<[Uuid]>::to_vec);
         const WHERE: &str = "($1::text IS NULL OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
-             OR id::text LIKE lower($1) || '%' ESCAPE '\\') \
+             OR slug ILIKE '%' || $1 || '%' ESCAPE '\\' OR id::text LIKE lower($1) || '%' ESCAPE '\\') \
              AND ($2::uuid[] IS NULL OR id = ANY($2))";
         let sql = format!(
             "SELECT id, name, slug, created_at, created_by FROM organizations WHERE {WHERE} \

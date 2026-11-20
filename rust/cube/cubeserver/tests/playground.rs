@@ -109,6 +109,7 @@ fn app(config: ServerConfig, auth: Arc<dyn AuthService>) -> axum::Router {
         pre_aggregations: Arc::new(cubeserver::services::UnimplementedPreAggregationService),
         sql_conversion: Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: Default::default(),
         tenants: None,
         rbac: None,
@@ -1455,4 +1456,55 @@ async fn a_request_naming_no_host_is_refused() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn tree_without_rbac_is_one_model_node() {
+    let (_dir, config) = fixture();
+    let model = std::path::PathBuf::from(&config.schema_path);
+    std::fs::write(
+        model.join("orders.yml"),
+        "cubes:\n  - name: orders\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n",
+    )
+    .unwrap();
+    std::fs::write(
+        model.join("views/sales.yml"),
+        "cubes:\n  - name: sales\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n",
+    )
+    .unwrap();
+    let router = app(config, Arc::new(TokenIssuingAuth));
+
+    let (status, body) = get_json(router.clone(), "/playground/tree").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let orgs = body["organizations"].as_array().unwrap();
+    assert_eq!(orgs.len(), 1, "{body}");
+    assert_eq!(orgs[0]["slug"], "_model");
+    assert_eq!(orgs[0]["name"], "Model");
+    assert_eq!(orgs[0]["counts"]["cubes"], 2);
+    assert_eq!(orgs[0]["counts"]["files"], 2);
+    assert_eq!(body["total"], 1);
+
+    let (status, body) = get_json(router.clone(), "/playground/tree/_model").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut files: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["orders.yml", "views/sales.yml"]);
+    let mut cubes: Vec<&str> = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    cubes.sort();
+    assert_eq!(cubes, ["orders", "sales"]);
+
+    let (status, body) = get_json(router.clone(), "/playground/tree/_model/files/orders.yml").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["content"].as_str().unwrap().contains("orders"));
+    assert_eq!(get(router, "/playground/tree/digital").await.0, StatusCode::NOT_FOUND);
 }
