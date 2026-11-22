@@ -175,3 +175,38 @@ export function tablesFromSameOrg(checked: NodeKey[]): string | null {
   const slugs = new Set(checked.map((key) => parseKey(key).slug));
   return slugs.size === 1 ? [...slugs][0] : null;
 }
+
+/**
+ * The REST address the page reads `/v1/meta` from. Only the query builder
+ * puts one in the app context, so a Data Model page opened or reloaded
+ * directly builds it from its own address, the way the query builder does.
+ * Null until the playground context has told the base path.
+ */
+export function metaApiUrl(
+  contextApiUrl: string | null,
+  basePath: string | undefined,
+  href: string
+): string | null {
+  if (contextApiUrl) {
+    return contextApiUrl;
+  }
+  if (!basePath) {
+    return null;
+  }
+  return `${href.split('#')[0].replace(/\/$/, '')}${basePath}/v1`;
+}
+
+/**
+ * The token for `/v1/meta`: the security context's, or else the session token
+ * the app puts in the playground context, which is what the query builder
+ * falls back to (the context's own token is set only by the query builder).
+ */
+export function metaToken(
+  currentToken: string | null | undefined,
+  cubejsToken: string | null | undefined
+): string | null {
+  if (currentToken && currentToken !== 'undefined') {
+    return currentToken;
+  }
+  return cubejsToken || null;
+}

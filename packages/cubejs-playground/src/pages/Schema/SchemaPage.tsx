@@ -20,6 +20,8 @@ import {
   buildQueryUrl,
   detailNodes,
   filterTree,
+  metaApiUrl,
+  metaToken,
   orgNodes,
   parseKey,
   tablesFromSameOrg,
@@ -45,14 +47,16 @@ async function readJson(res: Response) {
 }
 
 export function SchemaPage({ history }: RouterProps) {
-  const { playgroundContext, apiUrl } = useContext(AppContext);
+  const { playgroundContext, apiUrl: contextApiUrl } = useContext(AppContext);
   const { currentToken } = useSecurityContext();
+  // Only the query builder sets the context's address; opened directly, the
+  // page builds it, or meta would never load.
+  const apiUrl = metaApiUrl(contextApiUrl, playgroundContext.basePath, window.location.href);
   // No workspace header: a platform admin sees the cubes of every organization.
+  const token = metaToken(currentToken, playgroundContext.cubejsToken);
   const cubeApi = useMemo(
-    () => (apiUrl && currentToken && currentToken !== 'undefined'
-      ? createCubeApi(currentToken, apiUrl, { workspace: false })
-      : null),
-    [apiUrl, currentToken]
+    () => (apiUrl && token ? createCubeApi(token, apiUrl, { workspace: false }) : null),
+    [apiUrl, token]
   );
 
   const [orgs, setOrgs] = useState<OrgSummary[]>([]);
