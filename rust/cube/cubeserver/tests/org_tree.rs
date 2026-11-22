@@ -72,6 +72,9 @@ fn rbac_config() -> RbacConfig {
 struct Env {
     router: axum::Router,
     model: tempfile::TempDir,
+    /// The Playground's assets: `build_app` mounts `/playground/*` only when
+    /// they exist, as the deployment does.
+    _assets: tempfile::TempDir,
     rbac: Arc<Rbac>,
     state: AppState,
 }
@@ -91,15 +94,20 @@ async fn env_with(store: cubeserver::rbac::store::Store, real_meta: bool) -> Env
     );
     // As `main` does when it installs the boot policy.
     rbac.enable_ownership();
+    let assets = tempfile::tempdir().unwrap();
+    std::fs::write(assets.path().join("index.html"), "<html></html>").unwrap();
     let config = ServerConfig {
         schema_path: model.path().to_string_lossy().into_owned(),
+        playground_path: Some(assets.path().to_string_lossy().into_owned()),
         data_sources: vec![("sofiadb".into(), "postgres".into())],
         ..ServerConfig::default()
     };
     let tenants = real_meta.then(|| {
         let cube_config = cubeconfig::CubeConfig::load_or_env(
             "/nonexistent-cube-yml-dir",
-            &cubeconfig::Env::new().with("CUBEJS_SCHEMA_PATH", &*model.path().to_string_lossy()),
+            &cubeconfig::Env::new()
+                .with("CUBEJS_SCHEMA_PATH", &*model.path().to_string_lossy())
+                .with("CUBEJS_DB_TYPE", "postgres"),
         )
         .expect("config from the environment");
         Arc::new(cubeserver::tenants::TenantRegistry::new(
@@ -132,7 +140,7 @@ async fn env_with(store: cubeserver::rbac::store::Store, real_meta: bool) -> Env
         model_index: Default::default(),
     };
     let router = build_app(state.clone());
-    Env { router, model, rbac, state }
+    Env { router, model, _assets: assets, rbac, state }
 }
 
 impl Env {
