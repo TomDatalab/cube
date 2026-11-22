@@ -53,7 +53,11 @@ export function SchemaPage({ history }: RouterProps) {
   // page builds it, or meta would never load.
   const apiUrl = metaApiUrl(contextApiUrl, playgroundContext.basePath, window.location.href);
   // No workspace header: a platform admin sees the cubes of every organization.
-  const token = metaToken(currentToken, playgroundContext.cubejsToken);
+  const token = metaToken(
+    currentToken,
+    playgroundContext.cubejsToken,
+    Boolean(playgroundContext.rbac || playgroundContext.authRequired)
+  );
   const cubeApi = useMemo(
     () => (apiUrl && token ? createCubeApi(token, apiUrl, { workspace: false }) : null),
     [apiUrl, token]

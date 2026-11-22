@@ -197,14 +197,20 @@ export function metaApiUrl(
 }
 
 /**
- * The token for `/v1/meta`: the security context's, or else the session token
- * the app puts in the playground context, which is what the query builder
- * falls back to (the context's own token is set only by the query builder).
+ * The token for `/v1/meta`. With RBAC it is the session token the app puts in
+ * the playground context: a token saved in the Security Context dialog is
+ * signed for no user and survives logins, and this page needs the admin.
+ * Without RBAC, the security context's token first, as the query builder does
+ * (the context's own token is set only by the query builder).
  */
 export function metaToken(
   currentToken: string | null | undefined,
-  cubejsToken: string | null | undefined
+  cubejsToken: string | null | undefined,
+  rbac = false
 ): string | null {
+  if (rbac) {
+    return cubejsToken || null;
+  }
   if (currentToken && currentToken !== 'undefined') {
     return currentToken;
   }

@@ -109,3 +109,13 @@ describe('metaToken', () => {
     expect(metaToken(null, undefined)).toBeNull();
   });
 });
+
+describe('metaToken with RBAC', () => {
+  it('uses the session token even when a security context token was saved', () => {
+    expect(metaToken('saved', 'session', true)).toBe('session');
+  });
+
+  it('keeps the saved token first without RBAC', () => {
+    expect(metaToken('saved', 'session', false)).toBe('saved');
+  });
+});
