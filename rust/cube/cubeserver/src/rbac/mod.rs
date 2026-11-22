@@ -9,6 +9,7 @@ pub mod enforce;
 pub mod fake;
 pub mod handlers;
 pub mod identity;
+pub mod model_store;
 pub mod ownership;
 pub mod restrictions;
 pub mod data_sources;

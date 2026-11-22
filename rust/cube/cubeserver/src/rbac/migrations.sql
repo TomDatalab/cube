@@ -137,3 +137,27 @@ CREATE TABLE IF NOT EXISTS data_sources (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- The Cube data model (YAML/Jinja files), one row per file. The owner is
+-- `organization_id` (NULL: Platform); `path` is relative to the organization.
+CREATE TABLE IF NOT EXISTS model_files (
+    id uuid PRIMARY KEY,
+    organization_id uuid REFERENCES organizations (id),
+    path text NOT NULL,
+    content text NOT NULL,
+    version integer NOT NULL DEFAULT 1,
+    managed_by text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    updated_by text NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS model_files_path_idx
+    ON model_files (coalesce(organization_id, '00000000-0000-0000-0000-000000000000'), path);
+
+-- One row; `version` goes up in the same transaction as every model write.
+CREATE TABLE IF NOT EXISTS model_state (
+    id boolean PRIMARY KEY DEFAULT true CHECK (id),
+    version bigint NOT NULL DEFAULT 0
+);
+INSERT INTO model_state (id, version) VALUES (true, 0) ON CONFLICT DO NOTHING;

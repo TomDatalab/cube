@@ -486,7 +486,7 @@ mod q {
         {
             Ok(n) => Ok(n > 0),
             Err(e) if e.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) => Err(
-                StoreError::Conflict("organization still has workspaces or connections".into()),
+                StoreError::Conflict("organization still has workspaces, connections or model files".into()),
             ),
             Err(e) => Err(e.into()),
         }
@@ -930,7 +930,7 @@ impl Store {
         Ok(store)
     }
 
-    async fn conn(&self) -> Result<Object, StoreError> {
+    pub(crate) async fn conn(&self) -> Result<Object, StoreError> {
         Ok(self.pool.get().await?)
     }
 
