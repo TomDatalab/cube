@@ -38,20 +38,28 @@ const MORE_KEY = 'more:';
 
 const TREE_ICONS = { cube: CubeIcon, table: TableIcon, file: FileIcon };
 
-// The node's name, after its kind's icon when it has one.
+// The full name a tooltip shows: a file's whole path, else the title.
+function fullName(node: DataNode): string | undefined {
+  const key = String(node.key);
+  if (key.startsWith('file:')) {
+    return parseKey(key).rest;
+  }
+  return typeof node.title === 'string' ? node.title : undefined;
+}
+
+// The node's name, after its kind's icon when it has one. A name too long for
+// the sidebar ends in an ellipsis; the tooltip has all of it.
 function TreeTitle({ node }: { node: DataNode }) {
   const kind = iconKind(String(node.key));
-  const { title } = node;
-  if (!kind) {
-    return <>{title}</>;
-  }
-  const Icon = TREE_ICONS[kind];
+  const Icon = kind ? TREE_ICONS[kind] : null;
   return (
-    <span className="schema-tree-title">
-      <span className={`schema-tree-icon schema-tree-icon-${kind}`}>
-        <Icon />
-      </span>
-      {title}
+    <span className="schema-tree-title" title={fullName(node)}>
+      {Icon ? (
+        <span className={`schema-tree-icon schema-tree-icon-${kind}`}>
+          <Icon />
+        </span>
+      ) : null}
+      <span className="schema-tree-label">{node.title}</span>
     </span>
   );
 }

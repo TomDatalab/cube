@@ -95,7 +95,11 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
       checkable: false,
       children: d.files.map((file) => ({
         key: `file:${slug}:${file.fileName}`,
-        title: file.fileName,
+        // Every file of the node starts with the organization's folder; the
+        // full path stays in the key, the tooltip and the file panel.
+        title: file.fileName.startsWith(`${slug}/`)
+          ? file.fileName.slice(slug.length + 1)
+          : file.fileName,
         isLeaf: true,
         checkable: false,
       })),

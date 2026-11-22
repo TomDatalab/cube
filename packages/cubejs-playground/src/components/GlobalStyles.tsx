@@ -49,11 +49,34 @@ const GlobalStyles = createGlobalStyle`
     border: 0;
   }
 
-  /* Data Model tree: an icon before cubes, tables and files. */
+  /* Data Model tree: an icon before cubes, tables and files, and names cut
+     with an ellipsis at the sidebar's edge (the tooltip has them whole). */
+  .schema-sidebar .ant-tree .ant-tree-treenode {
+    width: 100%;
+  }
+
+  .schema-sidebar .ant-tree .ant-tree-node-content-wrapper {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .schema-sidebar .ant-tree .ant-tree-title {
+    display: block;
+    min-width: 0;
+  }
+
   .schema-tree-title {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+  }
+
+  .schema-tree-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .schema-tree-icon {

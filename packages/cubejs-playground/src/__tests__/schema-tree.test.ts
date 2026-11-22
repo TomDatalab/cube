@@ -143,3 +143,16 @@ describe('iconKind', () => {
     expect(iconKind('__more__')).toBeNull();
   });
 });
+
+describe('file titles', () => {
+  it('drop the organization folder they all share, keeping the full path in the key', () => {
+    const files = detailNodes('digital', detail)[2].children!;
+    expect(files.map((n) => n.title)).toEqual(['sofiadb/a.yml', 'b.yml']);
+    expect(files.map((n) => n.key)).toEqual(['file:digital:digital/sofiadb/a.yml', 'file:digital:b.yml']);
+  });
+
+  it('drop the Platform folder too', () => {
+    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[2].children!;
+    expect(files.map((n) => n.title)).toEqual(['orders.yml']);
+  });
+});
