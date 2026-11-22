@@ -165,6 +165,26 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // The folder decides which organization owns a cube. The policy goes in
+    // before the first load of the model (meta, planner and SQL API each load
+    // it), so all of them see the same owners. If it cannot be built the
+    // server does not start: without it every folder would be unowned.
+    if let Some(rbac) = &rbac {
+        rbac.set_data_source_names(cube_config.data_sources.keys().cloned().collect());
+        match cubeserver::rbac::ownership::build_policy(&rbac.store, &rbac.data_source_names())
+            .await
+        {
+            Ok(policy) => {
+                cubemodel::ownership::set_policy(Some(Arc::new(policy)));
+                rbac.enable_ownership();
+            }
+            Err(e) => {
+                eprintln!("RBAC error: cannot build the folder ownership policy: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Without RBAC the Playground bootstraps by fetching a token from an
     // unauthenticated route, so mounting it where authentication is enforced
     // would hand the API away to anyone who can reach the port. Node.js has
@@ -378,6 +398,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None => Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         },
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: ws_state.clone(),
         rbac,
     };

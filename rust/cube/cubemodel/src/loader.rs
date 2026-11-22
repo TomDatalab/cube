@@ -110,8 +110,21 @@ impl ModelLoader {
     }
 
     /// The whole pipeline: render -> parse -> normalise -> extends -> validate
-    /// -> view resolution.
+    /// -> view resolution, with the process-wide ownership policy
+    /// ([`crate::ownership::current_policy`]).
     pub fn load_sources(&self, sources: &[(String, String)]) -> Result<DataModel, ModelError> {
+        let policy = crate::ownership::current_policy();
+        self.load_sources_with_policy(sources, policy.as_deref())
+    }
+
+    /// [`Self::load_sources`] with an explicit ownership policy (`None`: no
+    /// folder ownership), so a caller that also reads the policy for its own
+    /// purposes works from the same snapshot.
+    pub fn load_sources_with_policy(
+        &self,
+        sources: &[(String, String)],
+        policy: Option<&crate::ownership::OwnershipPolicy>,
+    ) -> Result<DataModel, ModelError> {
         let mut reporter = ErrorReporter::new();
         let mut model = DataModel::default();
         let mut seen_names: HashSet<String> = HashSet::new();
@@ -192,6 +205,16 @@ impl ModelLoader {
         reporter.exit_file();
 
         resolve_extends(&mut model, &mut reporter);
+
+        if let Some(policy) = policy {
+            model.rejected = crate::ownership::apply(&mut model, policy);
+            for r in &model.rejected {
+                eprintln!(
+                    "cubemodel: rejected cube {} in {}: {}",
+                    r.cube, r.file, r.message
+                );
+            }
+        }
 
         if self.validate {
             validate::validate_model(&model, &mut reporter);
@@ -357,6 +380,24 @@ fn describe_template_error(error: &minijinja::Error) -> String {
     message
 }
 
+/// Whether the loader reads `path` as a model file (`yml`, `yaml`, `jinja`,
+/// `j2`, in any case).
+pub fn is_model_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| YAML_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// The model files under `root` that [`ModelLoader::load_dir`] reads,
+/// recursively, sorted. `NotFound` when `root` does not exist.
+pub fn model_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut unsupported = Vec::new();
+    collect_files(root, &mut files, &mut unsupported)?;
+    files.sort();
+    Ok(files)
+}
+
 fn collect_files(
     dir: &Path,
     out: &mut Vec<PathBuf>,
@@ -379,7 +420,7 @@ fn collect_files(
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase())
                 .unwrap_or_default();
-            if YAML_EXTENSIONS.contains(&extension.as_str()) {
+            if is_model_file(&path) {
                 out.push(path);
             } else if UNSUPPORTED_EXTENSIONS.contains(&extension.as_str()) {
                 unsupported.push(path);

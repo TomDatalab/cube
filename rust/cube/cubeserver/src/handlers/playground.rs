@@ -79,6 +79,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
     let mut helpers = Router::new()
         .route("/playground/files", get(files))
         .route("/playground/db-schema", get(db_schema))
+        .route("/playground/tree", get(super::tree::list))
+        .route("/playground/tree/:slug", get(super::tree::detail))
+        .route("/playground/tree/:slug/files/*path", get(super::tree::file))
         .route("/playground/driver", get(driver))
         .merge(keyed)
         // Not ported. Named individually so the message says why, rather
@@ -166,6 +169,17 @@ async fn files(State(state): State<AppState>) -> Result<impl IntoResponse, ApiEr
 
     let mut files = Vec::new();
     collect_model_files(root, root, &mut files)?;
+    if let Some(policy) = cubemodel::ownership::current_policy() {
+        use cubemodel::ownership::{Owner, PLATFORM_FOLDER};
+        for file in &mut files {
+            let name = file["fileName"].as_str().unwrap_or_default().replace('\\', "/");
+            file["organization"] = match policy.owner_of_file(&name) {
+                Owner::Organization(slug) => json!(slug),
+                Owner::Platform => json!(PLATFORM_FOLDER),
+                Owner::Unowned(_) => Value::Null,
+            };
+        }
+    }
     files.sort_by(|a, b| a["fileName"].as_str().cmp(&b["fileName"].as_str()));
 
     Ok(Json(json!({ "files": files })))
@@ -210,6 +224,7 @@ fn collect_model_files(
             "content": std::fs::read_to_string(&path).unwrap_or_default(),
             "absPath": path.canonicalize().unwrap_or(path.clone()).to_string_lossy(),
             "readOnly": true,
+            "organization": Value::Null,
         }));
     }
 
@@ -334,7 +349,7 @@ async fn db_schema(
     Ok(Json(json!({ "tablesSchema": merged, "errors": errors })))
 }
 
-async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
+pub(super) async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
     // A database that never answers, while connecting or once connected,
     // would otherwise hold up every other source's tables.
     let no_answer = || {

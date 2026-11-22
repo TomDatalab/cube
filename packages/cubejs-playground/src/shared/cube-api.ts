@@ -58,8 +58,13 @@ class PlaygroundTransport extends HttpTransport {
 
 // The Cube API client for the Playground: data requests carry the chosen
 // workspace (`X-Cube-Workspace`) when the API is this server.
-export function createCubeApi(token: string, apiUrl: string): CubeApi {
-  const headers: TransportOptions['headers'] = isSameOrigin(apiUrl) ? workspaceHeaders() : {};
+// `workspace: false` leaves the header out, for pages that look across workspaces.
+export function createCubeApi(
+  token: string,
+  apiUrl: string,
+  { workspace = true }: { workspace?: boolean } = {}
+): CubeApi {
+  const headers: TransportOptions['headers'] = workspace && isSameOrigin(apiUrl) ? workspaceHeaders() : {};
   return cube(token, {
     apiUrl,
     transport: new PlaygroundTransport({ authorization: token, apiUrl, headers }),

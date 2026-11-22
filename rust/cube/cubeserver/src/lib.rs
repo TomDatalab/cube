@@ -15,6 +15,7 @@ pub mod handlers;
 pub mod health_adapter;
 pub mod load_response;
 pub mod meta_adapter;
+pub mod model_index;
 pub mod orchestrator_adapter;
 pub mod planner_adapter;
 pub mod playground;

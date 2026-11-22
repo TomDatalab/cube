@@ -48,6 +48,25 @@ const GlobalStyles = createGlobalStyle`
   .schema-sidebar .ant-menu {
     border: 0;
   }
+
+  /* Data Model tree: an icon before cubes, tables and files. */
+  .schema-tree-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .schema-tree-icon {
+    display: inline-flex;
+    flex: none;
+    font-size: 14px;
+    opacity: 0.75;
+  }
+
+  .schema-tree-icon-cube {
+    color: var(--purple-color);
+    opacity: 1;
+  }
   
   .ant-layout {
     height: 100%;

@@ -58,15 +58,17 @@ pub mod loader;
 pub mod meta;
 pub mod model;
 pub mod naming;
+pub mod ownership;
 pub mod validate;
 pub mod views;
 pub mod yaml;
 
 pub use error::{ErrorReporter, ModelError, ModelErrorItem};
 pub use jinja::TemplateContext;
-pub use loader::ModelLoader;
+pub use loader::{is_model_file, model_files, ModelLoader};
 pub use meta::{meta_config, rest_meta_response, CubeMetaConfig, MetaConfig};
 pub use model::{
     CubeDef, DataModel, Dimension, EvaluatedFolder, EvaluatedHierarchy, Granularity, Hierarchy,
     IncludedMember, Join, Measure, PreAggregation, Segment,
 };
+pub use ownership::{Owner, OwnershipPolicy, Rejection};

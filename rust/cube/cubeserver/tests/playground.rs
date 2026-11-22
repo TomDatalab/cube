@@ -109,6 +109,7 @@ fn app(config: ServerConfig, auth: Arc<dyn AuthService>) -> axum::Router {
         pre_aggregations: Arc::new(cubeserver::services::UnimplementedPreAggregationService),
         sql_conversion: Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: Default::default(),
         tenants: None,
         rbac: None,
@@ -205,6 +206,19 @@ async fn the_file_list_holds_the_model_and_nothing_else() {
     // and a non-model file is left out.
     assert_eq!(names, vec!["orders.yml", "views/sales.yml"]);
     assert_eq!(body["files"][0]["content"], "cubes: []");
+}
+
+#[tokio::test]
+async fn files_carry_null_organization_without_rbac() {
+    let (_dir, config) = fixture();
+    let (status, body) =
+        get_json(app(config, Arc::new(TokenIssuingAuth)), "/playground/files").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for file in body["files"].as_array().unwrap() {
+        assert!(file["organization"].is_null(), "{file}");
+        assert!(file.as_object().unwrap().contains_key("organization"), "{file}");
+    }
 }
 
 /// The landing page reads an empty list as "no data model yet".
@@ -1455,4 +1469,164 @@ async fn a_request_naming_no_host_is_refused() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn tree_without_rbac_is_one_model_node() {
+    let (_dir, config) = fixture();
+    let model = std::path::PathBuf::from(&config.schema_path);
+    std::fs::write(
+        model.join("orders.yml"),
+        "cubes:\n  - name: orders\n    sql_table: t\n    joins:\n      - name: users\n        relationship: many_to_one\n        sql: \"1=1\"\n    measures:\n      - name: n\n        type: count\n",
+    )
+    .unwrap();
+    std::fs::write(
+        model.join("views/sales.yml"),
+        "cubes:\n  - name: sales\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n",
+    )
+    .unwrap();
+    let router = app(config, Arc::new(TokenIssuingAuth));
+
+    let (status, body) = get_json(router.clone(), "/playground/tree").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let orgs = body["organizations"].as_array().unwrap();
+    assert_eq!(orgs.len(), 1, "{body}");
+    assert_eq!(orgs[0]["slug"], "_model");
+    assert_eq!(orgs[0]["name"], "Model");
+    assert_eq!(orgs[0]["counts"]["cubes"], 2);
+    assert_eq!(orgs[0]["counts"]["files"], 2);
+    assert_eq!(body["total"], 1);
+
+    let (status, body) = get_json(router.clone(), "/playground/tree/_model").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut files: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["orders.yml", "views/sales.yml"]);
+    let mut cubes: Vec<&str> = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    cubes.sort();
+    assert_eq!(cubes, ["orders", "sales"]);
+    let orders = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "orders")
+        .unwrap();
+    assert_eq!(orders["joins"][0]["name"], "users", "{body}");
+    assert_eq!(orders["joins"][0]["relationship"], "manyToOne", "{body}");
+
+    let (status, body) = get_json(router.clone(), "/playground/tree/_model/files/orders.yml").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["content"].as_str().unwrap().contains("orders"));
+    assert_eq!(get(router, "/playground/tree/digital").await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_tree_lists_a_views_includes_and_every_model_file() {
+    let (_dir, config) = fixture();
+    let model = std::path::PathBuf::from(&config.schema_path);
+    std::fs::write(
+        model.join("orders.yml"),
+        "cubes:\n  - name: orders\n    sql_table: t\n    joins:\n      - name: users\n        relationship: many_to_one\n        sql: \"1=1\"\n    measures:\n      - name: n\n        type: count\n  - name: users\n    sql_table: u\n    measures:\n      - name: n\n        type: count\n",
+    )
+    .unwrap();
+    std::fs::write(
+        model.join("views/sales.yml"),
+        "views:\n  - name: sales\n    cubes:\n      - join_path: orders\n        includes: \"*\"\n      - join_path: orders.users\n        prefix: true\n        includes: \"*\"\n",
+    )
+    .unwrap();
+    // The loader reads these too, so the tree lists them.
+    std::fs::write(
+        model.join("Extra.YML"),
+        "cubes:\n  - name: extra\n    sql_table: e\n",
+    )
+    .unwrap();
+    std::fs::write(
+        model.join("more.jinja"),
+        "cubes:\n  - name: {{ 'more' }}\n    sql_table: m\n",
+    )
+    .unwrap();
+    let router = app(config, Arc::new(TokenIssuingAuth));
+
+    let (status, body) = get_json(router.clone(), "/playground/tree/_model").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sales = body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "sales")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(sales["type"], "view", "{body}");
+    assert_eq!(sales["includes"], json!(["orders", "users"]), "{body}");
+    let mut files: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["Extra.YML", "more.jinja", "orders.yml", "views/sales.yml"]);
+    assert!(
+        body["cubes"].as_array().unwrap().iter().any(|c| c["name"] == "more"),
+        "{body}"
+    );
+
+    for path in ["Extra.YML", "more.jinja"] {
+        let (status, body) =
+            get_json(router.clone(), &format!("/playground/tree/_model/files/{path}")).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body["fileName"], path);
+    }
+    let (status, _) = get(router, "/playground/tree/_model/files/notes.txt").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A model that does not compile still shows its tree: the files by folder,
+/// and the compile error on every node.
+#[tokio::test]
+async fn a_model_that_does_not_compile_still_shows_its_tree() {
+    let (_dir, config) = fixture();
+    let model = std::path::PathBuf::from(&config.schema_path);
+    std::fs::write(model.join("orders.yml"), "cubes:\n  - name: orders\n    sql_table: [t\n").unwrap();
+    let router = app(config, Arc::new(TokenIssuingAuth));
+
+    let (status, body) = get_json(router.clone(), "/playground/tree").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let node = &body["organizations"][0];
+    assert_eq!(node["counts"]["files"], 2, "{body}");
+    assert_eq!(node["counts"]["cubes"], 0, "{body}");
+    assert!(node["errors"].as_u64().unwrap() >= 1, "{body}");
+
+    let (status, body) = get_json(router.clone(), "/playground/tree/_model").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cubes"], json!([]), "{body}");
+    let mut files: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["orders.yml", "views/sales.yml"]);
+    assert!(
+        body["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["file"] == "orders.yml" && e["message"].as_str().unwrap().contains("Syntax error")),
+        "{body}"
+    );
+
+    // The broken file can still be opened.
+    let (status, body) = get_json(router, "/playground/tree/_model/files/orders.yml").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

@@ -151,6 +151,7 @@ fn app(registry: Arc<TenantRegistry>) -> axum::Router {
         pre_aggregations: Arc::new(UnimplementedPreAggregationService),
         sql_conversion: Arc::new(UnimplementedSqlConversionService),
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: Default::default(),
         tenants: Some(registry),
         rbac: None,
@@ -328,6 +329,36 @@ async fn a_changed_model_is_reloaded() {
             .generation
             > before
     );
+}
+
+/// `mv` between subfolders keeps the file's mtime and leaves the model
+/// root's alone: the file set changed all the same, so the model reloads
+/// (the tree's index notices the same change).
+#[tokio::test]
+async fn a_file_moved_between_subfolders_is_reloaded() {
+    let dir = deployment();
+    let acme = dir.path().join("models/acme");
+    std::fs::create_dir_all(acme.join("digital")).unwrap();
+    std::fs::create_dir_all(acme.join("on")).unwrap();
+    std::fs::rename(acme.join("orders.yml"), acme.join("on/orders.yml")).unwrap();
+    let registry = registry(&dir);
+    let context = json!({ "tenant_id": "acme" });
+    let before = registry.resolve(&context).await.unwrap().generation;
+    assert!(registry.reload_changed().await.is_empty());
+    assert_eq!(registry.resolve(&context).await.unwrap().generation, before);
+
+    let root_mtime = std::fs::metadata(&acme).unwrap().modified().unwrap();
+    let file_mtime = std::fs::metadata(acme.join("on/orders.yml")).unwrap().modified().unwrap();
+    std::fs::rename(acme.join("on/orders.yml"), acme.join("digital/orders.yml")).unwrap();
+    // Nothing the mtime alone would see.
+    assert_eq!(std::fs::metadata(&acme).unwrap().modified().unwrap(), root_mtime);
+    assert_eq!(
+        std::fs::metadata(acme.join("digital/orders.yml")).unwrap().modified().unwrap(),
+        file_mtime
+    );
+
+    assert!(registry.reload_changed().await.is_empty());
+    assert!(registry.resolve(&context).await.unwrap().generation > before);
 }
 
 #[tokio::test]

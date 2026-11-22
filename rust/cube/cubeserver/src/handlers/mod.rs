@@ -7,6 +7,7 @@ pub mod health;
 pub mod meta;
 pub mod playground;
 pub mod preaggs;
+pub mod tree;
 pub mod query;
 pub mod scaffold;
 pub mod sql_convert;

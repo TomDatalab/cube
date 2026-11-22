@@ -1,0 +1,283 @@
+//! `GET /playground/tree*` — the model by organization, for the Playground's
+//! tree. Mounted with the other Playground helpers, so with RBAC on only
+//! platform admins reach it.
+
+use std::path::{Component, Path as FsPath, PathBuf};
+
+use axum::extract::{Path, Query, State};
+use axum::response::IntoResponse;
+use axum::Json;
+use cubemodel::ownership::{current_policy, Owner, PLATFORM_FOLDER};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::app::AppState;
+use crate::error::ApiError;
+use crate::model_index::ModelIndex;
+use crate::rbac::store::Search;
+
+/// The one node of the tree when RBAC is off.
+const MODEL_NODE: &str = "_model";
+const DEFAULT_LIMIT: i64 = 50;
+const MAX_LIMIT: i64 = 200;
+
+#[derive(Debug, Deserialize)]
+pub struct TreeQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn index(state: &AppState) -> Result<std::sync::Arc<ModelIndex>, ApiError> {
+    let cache = state.model_index.clone();
+    let path = PathBuf::from(&state.config.schema_path);
+    tokio::task::spawn_blocking(move || cache.get(&path))
+        .await
+        .map_err(|e| {
+            tracing::error!("Cannot index the data model: {e}");
+            ApiError::internal()
+        })
+}
+
+/// A store failure is ours, not the caller's: 503, like the rest of RBAC.
+fn store_error(e: crate::rbac::store::StoreError) -> ApiError {
+    tracing::error!("The RBAC database cannot answer the tree: {e}");
+    crate::rbac::unavailable()
+}
+
+/// Whether something owned by `o` shows under the node of `node`. What no
+/// organization owns shows under `_platform`, so the admin sees why it is
+/// refused.
+fn belongs(node: &Owner, o: &Owner) -> bool {
+    match node {
+        Owner::Platform => matches!(o, Owner::Platform | Owner::Unowned(_)),
+        _ => node == o,
+    }
+}
+
+fn clamp_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(DEFAULT_LIMIT).clamp(0, MAX_LIMIT)
+}
+
+fn counts(index: &ModelIndex, owner: &Owner, connections: usize) -> (Value, usize) {
+    let errors = index.rejected.iter().filter(|(o, _)| belongs(owner, o)).count()
+        + index.errors.len();
+    let cubes = index.cubes.iter().filter(|c| belongs(owner, &c.owner)).count();
+    let files = index.files.iter().filter(|f| belongs(owner, &f.owner)).count();
+    (
+        json!({ "cubes": cubes, "files": files, "connections": connections }),
+        errors,
+    )
+}
+
+/// `GET /playground/tree?q=&limit=&offset=`
+pub async fn list(
+    State(state): State<AppState>,
+    Query(query): Query<TreeQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let index = index(&state).await?;
+
+    let Some(rbac) = &state.rbac else {
+        let all = Owner::Unowned(String::new());
+        let (counts, errors) = counts(&index, &all, state.config.data_sources.len());
+        return Ok(Json(json!({
+            "organizations": [{ "slug": MODEL_NODE, "name": "Model", "counts": counts, "errors": errors }],
+            "total": 1,
+        })));
+    };
+
+    let q = query.q.filter(|q| !q.is_empty());
+    let limit = clamp_limit(query.limit);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let search = Search {
+        q: q.clone(),
+        limit: Some(limit),
+        offset,
+    };
+    let page = rbac
+        .store
+        .search_organizations(None, &search)
+        .await
+        .map_err(store_error)?;
+
+    let policy = current_policy();
+    let connections = |slug: &str| {
+        policy
+            .as_ref()
+            .and_then(|p| p.organizations.get(slug))
+            .map_or(0, |s| s.len())
+    };
+
+    let mut organizations: Vec<Value> = page
+        .items
+        .iter()
+        .map(|org| {
+            let (counts, errors) = counts(
+                &index,
+                &Owner::Organization(org.slug.clone()),
+                connections(&org.slug),
+            );
+            json!({ "id": org.id, "slug": org.slug, "name": org.name,
+                    "counts": counts, "errors": errors })
+        })
+        .collect();
+
+    // `_platform` closes the list, on the last page.
+    let last_page = offset + page.items.len() as i64 >= page.total;
+    let matches = q.as_deref().is_none_or(|q| {
+        let q = q.to_lowercase();
+        "platform".contains(&q) || PLATFORM_FOLDER.contains(&q)
+    });
+    if last_page && matches {
+        let (counts, errors) = counts(
+            &index,
+            &Owner::Platform,
+            policy.as_ref().map_or(0, |p| p.platform.len()),
+        );
+        organizations.push(json!({ "slug": PLATFORM_FOLDER, "name": "Platform",
+                                   "counts": counts, "errors": errors }));
+    }
+
+    Ok(Json(json!({ "organizations": organizations, "total": page.total })))
+}
+
+/// Who a node of the tree is: its owner, and the data sources it holds.
+async fn resolve(state: &AppState, slug: &str) -> Result<(Option<Owner>, Vec<String>), ApiError> {
+    let unknown = || ApiError::not_found(format!("Unknown organization {slug}"));
+    let policy = current_policy();
+    let Some(rbac) = &state.rbac else {
+        if slug != MODEL_NODE {
+            return Err(unknown());
+        }
+        let mut names: Vec<String> = state.config.data_sources.iter().map(|(n, _)| n.clone()).collect();
+        if names.is_empty() {
+            names.push("default".into());
+        }
+        return Ok((None, names));
+    };
+    if slug == PLATFORM_FOLDER {
+        let sources = policy.map_or_else(Vec::new, |p| p.platform.iter().cloned().collect());
+        return Ok((Some(Owner::Platform), sources));
+    }
+    rbac.store
+        .organization_by_slug(slug)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(unknown)?;
+    let sources = policy
+        .and_then(|p| p.organizations.get(slug).cloned())
+        .map_or_else(Vec::new, |s| s.into_iter().collect());
+    Ok((Some(Owner::Organization(slug.to_string())), sources))
+}
+
+/// `GET /playground/tree/:slug`
+pub async fn detail(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (owner, sources) = resolve(&state, &slug).await?;
+    let index = index(&state).await?;
+    // `None`: no policy, everything is in the one node.
+    let mine = |o: &Owner| owner.as_ref().is_none_or(|owner| belongs(owner, o));
+
+    let cubes: Vec<Value> = index
+        .cubes
+        .iter()
+        .filter(|c| mine(&c.owner))
+        .map(|c| {
+            json!({ "name": c.name, "title": c.title, "type": c.kind,
+                    "dataSource": c.data_source, "file": c.file,
+                    "members": { "measures": c.measures, "dimensions": c.dimensions },
+                    "joins": c.joins.iter()
+                        .map(|(name, rel)| json!({ "name": name, "relationship": rel }))
+                        .collect::<Vec<_>>(),
+                    "includes": c.includes })
+        })
+        .collect();
+    let files: Vec<Value> = index
+        .files
+        .iter()
+        .filter(|f| mine(&f.owner))
+        .map(|f| json!({ "fileName": f.file_name }))
+        .collect();
+    let mut errors: Vec<Value> = index
+        .rejected
+        .iter()
+        .filter(|(o, _)| mine(o))
+        .map(|(_, r)| r)
+        .chain(index.errors.iter())
+        .map(|r| json!({ "file": r.file, "cube": r.cube, "message": r.message }))
+        .collect();
+
+    // Only here, on expanding, are the databases asked for their tables.
+    let results = futures::future::join_all(
+        sources
+            .iter()
+            .map(|s| super::playground::data_source_schema(s)),
+    )
+    .await;
+    let mut tables = serde_json::Map::new();
+    for (name, result) in sources.iter().zip(results) {
+        match result {
+            Ok(structure) => {
+                tables.insert(name.clone(), json!(structure));
+            }
+            Err(e) => errors.push(json!({ "file": "", "cube": "", "message": e.body.error })),
+        }
+    }
+
+    Ok(Json(json!({ "cubes": cubes, "tables": tables, "files": files, "errors": errors })))
+}
+
+/// `GET /playground/tree/:slug/files/*path` — `path` is a `fileName` from the
+/// listing: relative to the model directory, inside the node's folder.
+pub async fn file(
+    State(state): State<AppState>,
+    Path((slug, path)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (owner, _) = resolve(&state, &slug).await?;
+
+    let rel = FsPath::new(&path);
+    // The files the index lists: the loader's model files.
+    let clean = !path.is_empty()
+        && rel.components().all(|c| matches!(c, Component::Normal(_)))
+        && cubemodel::is_model_file(rel);
+    if !clean {
+        return Err(ApiError::bad_request("Invalid file path"));
+    }
+
+    let root = FsPath::new(&state.config.schema_path);
+    let folder = match &owner {
+        None => root.to_path_buf(),
+        Some(Owner::Platform) => root.join(PLATFORM_FOLDER),
+        Some(Owner::Organization(slug)) => root.join(slug),
+        Some(Owner::Unowned(_)) => unreachable!("a node is never unowned"),
+    };
+    let not_found = || ApiError::not_found(format!("No file {path}"));
+    // Resolved, so a symlink cannot lead out of the folder.
+    let folder = folder.canonicalize().map_err(|_| not_found())?;
+    let abs = root.join(rel).canonicalize().map_err(|_| not_found())?;
+    if !abs.starts_with(&folder) || !abs.is_file() {
+        return Err(not_found());
+    }
+    let content = std::fs::read_to_string(&abs).map_err(|_| not_found())?;
+
+    Ok(Json(json!({
+        "fileName": path,
+        "content": content,
+        "absPath": abs.to_string_lossy(),
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_limit_defaults_to_50_and_stops_at_200() {
+        assert_eq!(clamp_limit(None), 50);
+        assert_eq!(clamp_limit(Some(100_000)), 200);
+        assert_eq!(clamp_limit(Some(-3)), 0);
+        assert_eq!(clamp_limit(Some(7)), 7);
+    }
+}

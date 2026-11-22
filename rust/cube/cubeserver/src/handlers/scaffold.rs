@@ -59,7 +59,9 @@ pub fn generate(
         return Err(ApiError::bad_request("No tables selected"));
     }
 
+    let policy = cubemodel::ownership::current_policy();
     let existing = existing_cubes(model_dir);
+    let mut folders: BTreeSet<Option<String>> = BTreeSet::new();
     let mut planned: BTreeSet<String> = BTreeSet::new();
 
     // Everything is decided before anything is written, so one bad table
@@ -131,7 +133,19 @@ pub fn generate(
         };
         planned.insert(name.clone());
 
-        let target = model_dir.join(format!("{}.yml", plan.name()));
+        // With ownership on, the cube goes in the folder of its owner.
+        let folder = target_folder(policy.as_deref(), data_source);
+        folders.insert(folder.clone());
+        if folders.len() > 1 {
+            return Err(ApiError::bad_request(
+                "The tables belong to more than one organization",
+            ));
+        }
+        let file = format!("{}.yml", plan.name());
+        let target = match &folder {
+            Some(folder) => model_dir.join(folder).join(file),
+            None => model_dir.join(file),
+        };
         if target.exists() && !matches!(&plan, Plan::Adopt { from, .. } if *from == target) {
             return Err(ApiError::bad_request(format!(
                 "{} already exists",
@@ -142,6 +156,9 @@ pub fn generate(
     }
 
     std::fs::create_dir_all(model_dir).map_err(io_error)?;
+    for folder in folders.iter().flatten() {
+        std::fs::create_dir_all(model_dir.join(folder)).map_err(io_error)?;
+    }
 
     // Every file is first written under a name the loader skips, so the
     // model is never read with a half-written file, and a failure here
@@ -186,6 +203,21 @@ pub fn generate(
     }
 
     Ok(files)
+}
+
+/// The model folder for cubes reading `data_source`: its organization's slug,
+/// or `_platform` (also for a source the policy does not know). `None` when
+/// no policy is installed: the model root, as before.
+fn target_folder(
+    policy: Option<&cubemodel::ownership::OwnershipPolicy>,
+    data_source: &str,
+) -> Option<String> {
+    use cubemodel::ownership::{Owner, PLATFORM_FOLDER};
+    let policy = policy?;
+    Some(match policy.owner_of_data_source(data_source) {
+        Some(Owner::Organization(slug)) => slug,
+        _ => PLATFORM_FOLDER.to_string(),
+    })
 }
 
 enum Plan {
@@ -491,6 +523,20 @@ fn io_error(e: std::io::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_target_folder_follows_the_data_source_owner() {
+        use cubemodel::ownership::OwnershipPolicy;
+        let policy = OwnershipPolicy {
+            organizations: [("digital".to_string(), ["d1".to_string()].into())].into(),
+            platform: ["default".to_string()].into(),
+            generation: 1,
+        };
+        assert_eq!(target_folder(None, "d1"), None);
+        assert_eq!(target_folder(Some(&policy), "d1").as_deref(), Some("digital"));
+        assert_eq!(target_folder(Some(&policy), "default").as_deref(), Some("_platform"));
+        assert_eq!(target_folder(Some(&policy), "nobody").as_deref(), Some("_platform"));
+    }
 
     #[test]
     fn types_map_onto_cubes() {

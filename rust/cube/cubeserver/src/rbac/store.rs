@@ -75,6 +75,8 @@ pub struct User {
 pub struct Organization {
     pub id: Uuid,
     pub name: String,
+    /// Fixed short identifier (the model folder name); never changes.
+    pub slug: String,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
 }
@@ -329,8 +331,9 @@ fn org_from(r: &Row) -> Organization {
     Organization {
         id: r.get(0),
         name: r.get(1),
-        created_at: r.get(2),
-        created_by: r.get(3),
+        slug: r.get(2),
+        created_at: r.get(3),
+        created_by: r.get(4),
     }
 }
 
@@ -425,13 +428,14 @@ mod q {
     pub async fn create_organization(
         c: &tokio_postgres::Client,
         name: &str,
+        slug: &str,
         created_by: &str,
     ) -> Result<Organization, StoreError> {
         let row = c
             .query_one(
-                "INSERT INTO organizations (id, name, created_by) VALUES ($1, $2, $3) \
-                 RETURNING id, name, created_at, created_by",
-                &[&Uuid::new_v4(), &name, &created_by],
+                "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4) \
+                 RETURNING id, name, slug, created_at, created_by",
+                &[&Uuid::new_v4(), &name, &slug, &created_by],
             )
             .await?;
         Ok(org_from(&row))
@@ -729,11 +733,12 @@ macro_rules! shared_creates {
         pub async fn create_organization(
             &self,
             name: &str,
+            slug: &str,
             created_by: &str,
         ) -> Result<Organization, StoreError> {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
-            q::create_organization(c, name, created_by).await
+            q::create_organization(c, name, slug, created_by).await
         }
         pub async fn create_workspace(
             &self,
@@ -974,10 +979,10 @@ impl Store {
         let q = s.escaped();
         let visible = visible.map(<[Uuid]>::to_vec);
         const WHERE: &str = "($1::text IS NULL OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
-             OR id::text LIKE lower($1) || '%' ESCAPE '\\') \
+             OR slug ILIKE '%' || $1 || '%' ESCAPE '\\' OR id::text LIKE lower($1) || '%' ESCAPE '\\') \
              AND ($2::uuid[] IS NULL OR id = ANY($2))";
         let sql = format!(
-            "SELECT id, name, created_at, created_by FROM organizations WHERE {WHERE} \
+            "SELECT id, name, slug, created_at, created_by FROM organizations WHERE {WHERE} \
              ORDER BY name, id LIMIT $3 OFFSET $4"
         );
         let items = c
@@ -1087,11 +1092,84 @@ impl Store {
         let c = self.conn().await?;
         let row = c
             .query_opt(
-                "SELECT id, name, created_at, created_by FROM organizations WHERE id = $1",
+                "SELECT id, name, slug, created_at, created_by FROM organizations WHERE id = $1",
                 &[&id],
             )
             .await?;
         Ok(row.as_ref().map(org_from))
+    }
+
+    pub async fn organization_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<Organization>, StoreError> {
+        let c = self.conn().await?;
+        let row = c
+            .query_opt(
+                "SELECT id, name, slug, created_at, created_by FROM organizations \
+                 WHERE slug = $1",
+                &[&slug],
+            )
+            .await?;
+        Ok(row.as_ref().map(org_from))
+    }
+
+    /// Slugs equal to `base` or starting with `base-`: the ones a new slug
+    /// derived from `base` may collide with.
+    pub async fn slugs_like(&self, base: &str) -> Result<Vec<String>, StoreError> {
+        let c = self.conn().await?;
+        let prefix = format!(
+            "{}-%",
+            base.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let rows = c
+            .query(
+                "SELECT slug FROM organizations WHERE slug = $1 OR slug LIKE $2 ESCAPE '\\'",
+                &[&base, &prefix],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Gives every organization without a slug one (oldest first, so the
+    /// oldest gets the bare slug), then makes the column `NOT NULL`.
+    /// Returns how many rows were filled.
+    pub async fn backfill_slugs(&self) -> Result<usize, StoreError> {
+        let mut c = self.conn().await?;
+        let tx = c.transaction().await?;
+        // Serialize concurrent starts.
+        tx.batch_execute("SELECT pg_advisory_xact_lock(7263542)")
+            .await?;
+        let mut taken: std::collections::HashSet<String> = tx
+            .query("SELECT slug FROM organizations WHERE slug IS NOT NULL", &[])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let missing = tx
+            .query(
+                "SELECT id, name FROM organizations WHERE slug IS NULL ORDER BY created_at, id",
+                &[],
+            )
+            .await?;
+        for row in &missing {
+            let id: Uuid = row.get(0);
+            let name: String = row.get(1);
+            let slug =
+                super::slug::unique_slug(&super::slug::slugify(&name), &|s| taken.contains(s));
+            tx.execute(
+                "UPDATE organizations SET slug = $2 WHERE id = $1",
+                &[&id, &slug],
+            )
+            .await?;
+            taken.insert(slug);
+        }
+        tx.batch_execute("ALTER TABLE organizations ALTER COLUMN slug SET NOT NULL")
+            .await?;
+        tx.commit().await?;
+        Ok(missing.len())
     }
 
     pub async fn organizations_by_ids(
@@ -1101,7 +1179,7 @@ impl Store {
         let c = self.conn().await?;
         let rows = c
             .query(
-                "SELECT id, name, created_at, created_by FROM organizations \
+                "SELECT id, name, slug, created_at, created_by FROM organizations \
                  WHERE id = ANY($1) ORDER BY name",
                 &[&ids],
             )
@@ -1118,7 +1196,7 @@ impl Store {
         let row = c
             .query_opt(
                 "UPDATE organizations SET name = $2 WHERE id = $1 \
-                 RETURNING id, name, created_at, created_by",
+                 RETURNING id, name, slug, created_at, created_by",
                 &[&id, &name],
             )
             .await?;

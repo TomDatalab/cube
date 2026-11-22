@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use cubeconfig::{CubeConfig, ResolvedTenant};
 use cubeplanner::Dialect;
@@ -21,7 +21,8 @@ use tokio::sync::RwLock;
 
 use crate::error::ApiError;
 use crate::graphql_adapter::GraphQLSchemaCache;
-use crate::meta_adapter::{newest_mtime, ModelMetaService};
+use crate::meta_adapter::ModelMetaService;
+use crate::model_index::{model_stamp, ModelStamp};
 use crate::orchestrator_adapter::{orchestrator, OrchestratedQueryService};
 use crate::planner_adapter::PlannerQueryService;
 use crate::services::{MetaServiceRef, QueryServiceRef};
@@ -37,9 +38,9 @@ pub struct TenantRuntime {
     pub graphql: Arc<GraphQLSchemaCache>,
     /// Incremented on every reload, so a caller can tell versions apart.
     pub generation: u64,
-    /// The newest modification time seen in the model directory when this
-    /// runtime was compiled.
-    model_mtime: Option<SystemTime>,
+    /// The model directory's stamp (newest mtime and file set) when this
+    /// runtime was compiled; `None` forces a reload.
+    model_stamp: Option<ModelStamp>,
 }
 
 impl std::fmt::Debug for TenantRuntime {
@@ -234,7 +235,7 @@ impl TenantRegistry {
         ));
 
         Ok(TenantRuntime {
-            model_mtime: newest_mtime(&model_path),
+            model_stamp: Some(model_stamp(&model_path)),
             tenant,
             meta: Arc::new(meta),
             query,
@@ -253,8 +254,10 @@ impl TenantRegistry {
 
         let mut failures = Vec::new();
         for runtime in live {
-            let current = newest_mtime(&runtime.tenant.model_path);
-            if current == runtime.model_mtime {
+            // The same key as the tree's index: a file moved between folders
+            // keeps its mtime but changes the file set.
+            let current = model_stamp(&runtime.tenant.model_path);
+            if runtime.model_stamp == Some(current) {
                 continue;
             }
 
@@ -283,7 +286,7 @@ impl TenantRegistry {
 
     /// Recompiles every live tenant, whether or not the files changed.
     pub async fn reload_all(&self) -> Vec<(String, ApiError)> {
-        // Clearing the recorded time makes `reload_changed` see each as stale.
+        // Clearing the recorded stamp makes `reload_changed` see each as stale.
         {
             let mut runtimes = self.runtimes.write().await;
             for runtime in runtimes.values_mut() {
@@ -293,7 +296,7 @@ impl TenantRegistry {
                     query: runtime.query.clone(),
                     graphql: runtime.graphql.clone(),
                     generation: runtime.generation,
-                    model_mtime: None,
+                    model_stamp: None,
                 });
             }
         }

@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS organizations (
     created_by text NOT NULL
 );
 
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS slug text;
+CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     id uuid PRIMARY KEY,
     organization_id uuid NOT NULL REFERENCES organizations (id),

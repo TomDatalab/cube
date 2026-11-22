@@ -128,6 +128,7 @@ fn app(cache_prefix: &str) -> (tempfile::TempDir, axum::Router) {
         pre_aggregations: Arc::new(UnimplementedPreAggregationService),
         sql_conversion: Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         graphql: Default::default(),
+        model_index: Default::default(),
         ws: Default::default(),
         tenants: None,
         rbac: None,

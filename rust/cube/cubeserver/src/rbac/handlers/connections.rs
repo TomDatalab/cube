@@ -342,6 +342,7 @@ pub(crate) async fn create_owned(
         return Err(store_error(e, conflict));
     }
     tracing::info!(data_source = %name, "data source added for an organization (RBAC)");
+    crate::rbac::ownership::refresh_after_commit(state).await;
     let restarting = data_sources::restart_if_enabled(state, Vec::new(), Vec::new());
     Ok(Json(json!({ "name": name, "restarting": restarting })).into_response())
 }
@@ -441,6 +442,7 @@ pub(crate) async fn delete_with_grants(
             .delete_connection(name)
             .await
             .map_err(|e| store_error(e, "Conflict"))?;
+        crate::rbac::ownership::refresh_after_commit(state).await;
     }
     Ok(response)
 }
@@ -506,6 +508,7 @@ pub async fn assign_organization(
     match row {
         Some(row) if row.organization_id != org.id => {
             move_connection(rbac, &name, row.organization_id, org.id).await?;
+            policy_changed(&state, &name, &org.slug).await?;
             Ok(StatusCode::NO_CONTENT)
         }
         Some(_) => {
@@ -514,6 +517,7 @@ pub async fn assign_organization(
                 .touch(std::slice::from_ref(&relationship))
                 .await
                 .map_err(authz_error)?;
+            policy_changed(&state, &name, &org.slug).await?;
             Ok(StatusCode::NO_CONTENT)
         }
         None => {
@@ -536,9 +540,20 @@ pub async fn assign_organization(
                 }
                 return Err(store_error(e, conflict));
             }
+            policy_changed(&state, &name, &org.slug).await?;
             Ok(StatusCode::NO_CONTENT)
         }
     }
+}
+
+/// A connection changed organization: installs the policy that follows it so
+/// the models are read with the new owners, with no restart. The cubes the
+/// new owner rejects are logged with where their files should go; the tree
+/// shows them as the organization's `errors`.
+async fn policy_changed(state: &AppState, name: &str, destination: &str) -> Result<(), ApiError> {
+    let rejections = crate::rbac::ownership::refresh_after_commit(state).await;
+    crate::rbac::ownership::warn_rejections(name, destination, &rejections);
+    Ok(())
 }
 
 /// Moves the connection `name` from organization `from` to `to`: the row
@@ -665,6 +680,7 @@ pub async fn unassign_organization(
         return Err(store_error(e, conflict));
     }
     tracing::info!(connection = %name, "connection taken back to Platform");
+    policy_changed(&state, &name, cubemodel::ownership::PLATFORM_FOLDER).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
