@@ -13,6 +13,9 @@ import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
 import { useSecurityContext } from '../../hooks';
 import { createCubeApi } from '../../shared/cube-api';
 import { SchemaFormat } from '../../types';
+import { CubeIcon } from '../../shared/icons/CubeIcon';
+import { FileIcon } from '../../shared/icons/FileIcon';
+import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeDetail, MetaCube } from './CubeDetail';
 import {
   OrgDetail,
@@ -20,6 +23,7 @@ import {
   buildQueryUrl,
   detailNodes,
   filterTree,
+  iconKind,
   metaApiUrl,
   metaToken,
   orgNodes,
@@ -31,6 +35,26 @@ const { Content, Sider } = Layout;
 
 const PAGE_SIZE = 50;
 const MORE_KEY = 'more:';
+
+const TREE_ICONS = { cube: CubeIcon, table: TableIcon, file: FileIcon };
+
+// The node's name, after its kind's icon when it has one.
+function TreeTitle({ node }: { node: DataNode }) {
+  const kind = iconKind(String(node.key));
+  const { title } = node;
+  if (!kind) {
+    return <>{title}</>;
+  }
+  const Icon = TREE_ICONS[kind];
+  return (
+    <span className="schema-tree-title">
+      <span className={`schema-tree-icon schema-tree-icon-${kind}`}>
+        <Icon />
+      </span>
+      {title}
+    </span>
+  );
+}
 const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS = 2;
 
@@ -591,6 +615,7 @@ export function SchemaPage({ history }: RouterProps) {
         checkable
         checkStrictly
         treeData={treeData}
+        titleRender={(node: DataNode) => <TreeTitle node={node} />}
         loadedKeys={Object.keys(details).map((slug) => `org:${slug}`)}
         loadData={async (node: DataNode) => {
           const key = String(node.key);

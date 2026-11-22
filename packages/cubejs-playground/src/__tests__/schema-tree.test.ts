@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  buildQueryUrl, detailNodes, filterTree, metaApiUrl, metaToken, orgNodes, parseKey, tablesFromSameOrg,
+  buildQueryUrl, detailNodes, filterTree, iconKind, metaApiUrl, metaToken, orgNodes, parseKey, tablesFromSameOrg,
 } from '../pages/Schema/tree';
 
 const detail = {
@@ -117,5 +117,29 @@ describe('metaToken with RBAC', () => {
 
   it('keeps the saved token first without RBAC', () => {
     expect(metaToken('saved', 'session', false)).toBe('saved');
+  });
+});
+
+describe('iconKind', () => {
+  it('gives the Cubes group and every cube the cube icon', () => {
+    expect(iconKind('org:digital:cubes')).toBe('cube');
+    expect(iconKind('cube:digital:fatos')).toBe('cube');
+  });
+
+  it('gives the Tables group and every table the table icon', () => {
+    expect(iconKind('tables:digital')).toBe('table');
+    expect(iconKind('table:digital:sofiadb.dfos.fibercable')).toBe('table');
+  });
+
+  it('gives the Files group and every file the file icon', () => {
+    expect(iconKind('files:digital')).toBe('file');
+    expect(iconKind('file:digital:sofiadb/dfos_a.yml')).toBe('file');
+  });
+
+  it('leaves organizations, connections, schemas and unknown keys bare', () => {
+    expect(iconKind('org:digital')).toBeNull();
+    expect(iconKind('datasource:digital:sofiadb')).toBeNull();
+    expect(iconKind('schema:digital:sofiadb.dfos')).toBeNull();
+    expect(iconKind('__more__')).toBeNull();
   });
 });

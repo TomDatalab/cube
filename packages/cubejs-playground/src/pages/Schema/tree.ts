@@ -216,3 +216,32 @@ export function metaToken(
   }
   return cubejsToken || null;
 }
+
+export type TreeIconKind = 'cube' | 'table' | 'file';
+
+/**
+ * Which icon a node shows: the three groups and their leaves get one each;
+ * organizations, connections and schemas stay bare so the tree reads as
+ * folders and things.
+ */
+export function iconKind(key: NodeKey): TreeIconKind | null {
+  let kind: ParsedKey['kind'];
+  try {
+    ({ kind } = parseKey(key));
+  } catch {
+    return null;
+  }
+  switch (kind) {
+    case 'cubes':
+    case 'cube':
+      return 'cube';
+    case 'tables':
+    case 'table':
+      return 'table';
+    case 'files':
+    case 'file':
+      return 'file';
+    default:
+      return null;
+  }
+}
