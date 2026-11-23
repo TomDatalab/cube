@@ -21,19 +21,15 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// The first `FROM <ref>` of a query: `\bfrom\s+([\w.`"]+)`, case-insensitive.
+/// The first `FROM <ref>` of a query: `\bfrom\s+([\w.`"]+)`, case-insensitive
+/// on the keyword, the reference keeps its case.
 fn from_ref(sql: &str) -> Option<String> {
-    let lower = sql.to_lowercase();
-    // Lowercasing can change byte offsets; fall back to the chars of `sql`.
-    let chars: Vec<char> = if lower.chars().count() == sql.chars().count() {
-        lower.chars().collect()
-    } else {
-        sql.chars().collect()
-    };
+    let chars: Vec<char> = sql.chars().collect();
     let n = chars.len();
     let mut i = 0;
     while i + 4 <= n {
-        if chars[i..i + 4] == ['f', 'r', 'o', 'm'] && (i == 0 || !is_word(chars[i - 1])) {
+        let keyword: String = chars[i..i + 4].iter().collect();
+        if keyword.eq_ignore_ascii_case("from") && (i == 0 || !is_word(chars[i - 1])) {
             let mut j = i + 4;
             let spaces = j;
             while j < n && chars[j].is_whitespace() {
@@ -131,6 +127,16 @@ mod tests {
         for n in ["eventos", "visao", "vendas", "outra"] {
             assert!(c.taken.contains(n), "{n}");
         }
+    }
+
+    #[test]
+    fn mixed_case_from_keeps_the_table_case() {
+        let sources = vec![src(
+            "org/m.yml",
+            "cubes:\n  - name: misto\n    data_source: sofiadb\n    sql: \"select * FROM DFOS.Eventos where x\"\n",
+        )];
+        let c = sync_context(&sources, &HashSet::new(), "sofiadb", "dfos");
+        assert_eq!(c.covered["DFOS.Eventos"], "misto");
     }
 
     #[test]

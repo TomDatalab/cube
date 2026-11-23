@@ -704,3 +704,23 @@ api_test!(only_the_sync_user, |store| {
     let (status, body) = sync_put(&env, &sync, &[("sofiadb/a.yml", &cube_on("a", "sofiadb"))]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 });
+
+api_test!(sync_path_taken_by_a_hand_file_names_it, |store| {
+    let env = env_live(store.clone()).await;
+    let (admin, sync) = sync_tokens(&env, &store).await;
+    let (org_id, _) = org(&env, &store, &admin, "Digital").await;
+    own_connection(&store, org_id).await;
+    install_policy(&[("digital", &["sofiadb"])], &["default"]);
+    env.writer.clone().unwrap().write("ann", "seed", |_| Ok(vec![
+        put_in(Some(org_id), "sofiadb/a.yml", &cube_on("mao", "sofiadb"), None),
+    ])).await.unwrap();
+    let version = store.model_version().await.unwrap();
+    let (status, body) = sync_put(&env, &sync, &[
+        ("sofiadb/a.yml", &cube_on("a", "sofiadb")),
+        ("sofiadb/b.yml", &cube_on("b", "sofiadb")),
+    ]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("sofiadb/a.yml"), "{body}");
+    assert!(!body["error"].as_str().unwrap().contains("sofiadb/b.yml"), "{body}");
+    assert_eq!(store.model_version().await.unwrap(), version);
+});

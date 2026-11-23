@@ -666,6 +666,28 @@ pub async fn sync_put(
                     "O modelo mudou durante a sincronização",
                 ));
             }
+            let is_sync_row = |f: &ModelFile| {
+                f.managed_by.as_deref() == Some(SYNC_MANAGER) && f.path.starts_with(&prefix)
+            };
+            let mut taken: Vec<&str> = request
+                .files
+                .iter()
+                .filter(|file| {
+                    rows.files.iter().any(|f| {
+                        f.organization_id == destination && f.path == file.path && !is_sync_row(f)
+                    })
+                })
+                .map(|file| file.path.as_str())
+                .collect();
+            if !taken.is_empty() {
+                taken.sort();
+                let message = taken
+                    .iter()
+                    .map(|p| format!("O caminho {p} já é de um arquivo que não é do sync; renomeie ou mova esse arquivo"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(WriteError::bad_request(message));
+            }
             // The sync's rows of this connection, in any organization. Of a
             // path found twice, the one already in place stays.
             let mut keep: std::collections::HashMap<&str, &ModelFile> = Default::default();
