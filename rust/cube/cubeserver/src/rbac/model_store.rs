@@ -106,6 +106,19 @@ impl Store {
         Ok(ModelRows { version, files })
     }
 
+    /// Every organization's slug, by id.
+    pub async fn organization_slugs(
+        &self,
+    ) -> Result<std::collections::HashMap<Uuid, String>, StoreError> {
+        let c = self.conn().await?;
+        Ok(c
+            .query("SELECT id, slug FROM organizations WHERE slug IS NOT NULL", &[])
+            .await?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect())
+    }
+
     pub async fn model_version(&self) -> Result<i64, StoreError> {
         let c = self.conn().await?;
         Ok(c.query_one("SELECT version FROM model_state", &[])

@@ -83,6 +83,7 @@ fn app(model: &str) -> (tempfile::TempDir, axum::Router) {
         sql_conversion: Arc::new(cubeserver::services::UnimplementedSqlConversionService),
         graphql: Default::default(),
         model_index: Default::default(),
+        model_runtime: None,
         ws: Default::default(),
         tenants: None,
         rbac: None,

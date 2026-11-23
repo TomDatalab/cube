@@ -138,6 +138,7 @@ async fn env_with(store: cubeserver::rbac::store::Store, real_meta: bool) -> Env
         tenants,
         rbac: Some(rbac.clone()),
         model_index: Default::default(),
+        model_runtime: None,
     };
     let router = build_app(state.clone());
     Env { router, model, _assets: assets, rbac, state }

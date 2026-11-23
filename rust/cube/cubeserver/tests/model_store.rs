@@ -311,3 +311,60 @@ mod import {
         assert!(!dir.path().join("model.imported-20261122").exists());
     }
 }
+
+// ---- ModelRuntime ----
+
+use cubeserver::rbac::model_runtime::ModelRuntime;
+
+fn cache_dir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    d
+}
+
+db_test!(runtime_serves_rows_from_live, |store| {
+    let org = store.create_organization("Digital", "digital", "ann").await.unwrap();
+    write(&store, vec![put(Some(org.id), "fatos.yml", "a")]).await.unwrap();
+    let cache = cache_dir();
+    let rt = ModelRuntime::start(store.clone(), cache.path().to_path_buf())
+        .await
+        .unwrap();
+    assert_eq!(rt.version(), 1);
+    assert_eq!(
+        std::fs::read_to_string(rt.live_path().join("digital/fatos.yml")).unwrap(),
+        "a"
+    );
+});
+
+db_test!(refresh_sees_writes_of_other_processes, |store| {
+    let org = store.create_organization("Digital", "digital", "ann").await.unwrap();
+    let cache = cache_dir();
+    let rt = ModelRuntime::start(store.clone(), cache.path().to_path_buf())
+        .await
+        .unwrap();
+    assert!(!rt.refresh().await.unwrap());
+    write(&store, vec![put(Some(org.id), "novo.yml", "n")]).await.unwrap();
+    assert!(rt.refresh().await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(rt.live_path().join("digital/novo.yml")).unwrap(),
+        "n"
+    );
+    assert!(!rt.refresh().await.unwrap());
+    // A new organization's files get its slug.
+    let o2 = store.create_organization("Outra", "outra", "ann").await.unwrap();
+    write(&store, vec![put(Some(o2.id), "x.yml", "x")]).await.unwrap();
+    assert!(rt.refresh().await.unwrap());
+    assert!(rt.live_path().join("outra/x.yml").exists());
+});
+
+db_test!(disk_folder_is_not_read, |store| {
+    let model = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(model.path().join("digital")).unwrap();
+    std::fs::write(model.path().join("digital/novo.yml"), "x").unwrap();
+    let cache = cache_dir();
+    let rt = ModelRuntime::start(store.clone(), cache.path().to_path_buf())
+        .await
+        .unwrap();
+    assert!(!rt.live_path().join("digital/novo.yml").exists());
+});

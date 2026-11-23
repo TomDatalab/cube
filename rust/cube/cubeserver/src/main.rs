@@ -185,6 +185,59 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // With RBAC the model lives in the database. The folder is imported once
+    // (only into an empty model), then everything reads the private `live`
+    // folder that the runtime rewrites per model version.
+    let mut model_runtime = None;
+    if let Some(rbac) = &rbac {
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+        let report = match cubeserver::rbac::model_import::import_if_empty(
+            &rbac.store,
+            &cube_config.model_path,
+            &today,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("RBAC error: cannot import the data model: {e}");
+                std::process::exit(1);
+            }
+        };
+        for path in &report.unowned {
+            tracing::warn!(
+                "model file {path} has no owner: imported into Platform, where the ownership rule rejects it"
+            );
+        }
+        if report.imported > 0 {
+            tracing::info!(
+                imported = report.imported,
+                renamed_to = ?report.renamed_to,
+                "imported the model folder into the RBAC database"
+            );
+        }
+        let cache_dir = cubeserver::rbac::model_snapshot::cache_dir_from_env(config.port);
+        let runtime =
+            match cubeserver::rbac::model_runtime::ModelRuntime::start(rbac.store.clone(), cache_dir)
+                .await
+            {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    eprintln!("RBAC error: {e}");
+                    std::process::exit(1);
+                }
+            };
+        let live = runtime.live_path().to_path_buf();
+        config.schema_path = live.to_string_lossy().into_owned();
+        cube_config.model_path = live.clone();
+        println!(
+            "🗄️  Data model from the RBAC database (version {}), served from {}",
+            runtime.version(),
+            live.display()
+        );
+        model_runtime = Some(runtime);
+    }
+
     // Without RBAC the Playground bootstraps by fetching a token from an
     // unauthenticated route, so mounting it where authentication is enforced
     // would hand the API away to anyone who can reach the port. Node.js has
@@ -358,6 +411,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if let Some(runtime) = &model_runtime {
+        let interval =
+            model_reload_interval(config.dev_mode).unwrap_or(std::time::Duration::from_secs(5));
+        runtime.spawn_loop(interval, tenants.clone());
+    }
+
     // `/readyz` and `/livez` test the configured data sources and the
     // orchestrator's store. With no planner there is no orchestrator and no
     // query path to speak of, so the probes only report the process is up.
@@ -399,6 +458,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         graphql: Default::default(),
         model_index: Default::default(),
+        model_runtime: model_runtime.clone(),
         ws: ws_state.clone(),
         rbac,
     };

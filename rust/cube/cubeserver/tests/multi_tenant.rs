@@ -152,6 +152,7 @@ fn app(registry: Arc<TenantRegistry>) -> axum::Router {
         sql_conversion: Arc::new(UnimplementedSqlConversionService),
         graphql: Default::default(),
         model_index: Default::default(),
+        model_runtime: None,
         ws: Default::default(),
         tenants: Some(registry),
         rbac: None,

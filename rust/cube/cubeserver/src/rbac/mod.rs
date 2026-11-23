@@ -10,6 +10,7 @@ pub mod fake;
 pub mod handlers;
 pub mod identity;
 pub mod model_import;
+pub mod model_runtime;
 pub mod model_snapshot;
 pub mod model_store;
 pub mod ownership;

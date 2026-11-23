@@ -40,6 +40,8 @@ pub struct AppState {
     pub rbac: Option<Arc<crate::rbac::Rbac>>,
     /// The model's cubes and files by owner, for the Playground's tree.
     pub model_index: Arc<crate::model_index::ModelIndexCache>,
+    /// With RBAC, the model served from the database through `live`.
+    pub model_runtime: Option<Arc<crate::rbac::model_runtime::ModelRuntime>>,
 }
 
 impl AppState {
