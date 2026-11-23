@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use cubemodel::{DataModel, ModelError, ModelLoader};
 use uuid::Uuid;
 
-use super::model_snapshot::validate_path;
+use super::model_snapshot::{platform_source, validate_path, UNOWNED_DIR};
 use super::model_store::ModelChange;
 use super::store::Store;
 
@@ -20,7 +20,8 @@ cube_app database (model_files). Export it with ./start-all.sh export-model.\n";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportReport {
     pub imported: usize,
-    /// Files placed in Platform with their whole relative path.
+    /// Files with no owner, kept under `_unowned/` with their whole relative
+    /// path; the ownership rule rejects their cubes.
     pub unowned: Vec<String>,
     pub renamed_to: Option<PathBuf>,
 }
@@ -136,6 +137,11 @@ where
         };
         let (org, path) = match first {
             Some(PLATFORM_DIR) => (None, rest.to_string()),
+            // An export's unowned files stay where they were.
+            Some(UNOWNED_DIR) => {
+                unowned.push(rel.clone());
+                (None, rel.clone())
+            }
             Some(slug) => {
                 if !orgs.contains_key(slug) {
                     let found = store
@@ -149,13 +155,13 @@ where
                     Some(id) => (Some(id), rest.to_string()),
                     None => {
                         unowned.push(rel.clone());
-                        (None, rel.clone())
+                        (None, format!("{UNOWNED_DIR}/{rel}"))
                     }
                 }
             }
             None => {
                 unowned.push(rel.clone());
-                (None, rel.clone())
+                (None, format!("{UNOWNED_DIR}/{rel}"))
             }
         };
         validate_path(&path).map_err(|e| format!("Cannot import {rel}: {e}"))?;
@@ -194,7 +200,7 @@ where
                         content,
                         ..
                     } => match organization_id {
-                        None => Some((format!("{PLATFORM_DIR}/{path}"), content.clone())),
+                        None => Some((platform_source(path), content.clone())),
                         Some(id) => slugs.get(id).map(|s| (format!("{s}/{path}"), content.clone())),
                     },
                     _ => None,

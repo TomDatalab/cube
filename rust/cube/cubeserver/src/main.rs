@@ -206,7 +206,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         for path in &report.unowned {
             tracing::warn!(
-                "model file {path} has no owner: imported into Platform, where the ownership rule rejects it"
+                "model file {path} has no owner: imported as _unowned/{path}, where the ownership rule rejects it"
             );
         }
         if report.imported > 0 {

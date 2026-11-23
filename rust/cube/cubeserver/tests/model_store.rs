@@ -225,15 +225,68 @@ mod import {
         assert_eq!(
             got,
             vec![
+                (None, "_unowned/solto.yml".to_string(), None),
                 (Some(org.id), "fatos.yml".to_string(), None),
                 (None, "orders.yml".to_string(), None),
                 (Some(org.id), "sofiadb/dfos_a.yml".to_string(), Some("sofiadb-sync".to_string())),
-                (None, "solto.yml".to_string(), None),
             ]
         );
         assert!(dir.path().join("model.imported-20261122").is_dir());
         assert!(model.join("README").is_file());
         assert!(!model.join("digital").exists());
+    });
+
+    db_test!(files_without_an_owner_stay_rejected, |store| {
+        let org = store.create_organization("Digital", "digital", "ann").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        put_file(&model, "digital/fatos.yml", &cube("fatos"));
+        put_file(&model, "_platform/x.yml", &cube("orders"));
+        put_file(&model, "x.yml", &cube("solto"));
+        put_file(&model, "ghost/y.yml", &cube("fantasma"));
+        // An export writes them back under `_unowned/`; they stay there.
+        put_file(&model, "_unowned/z.yml", &cube("exportado"));
+        let report = import_if_empty(&store, &model, "20261122").await.unwrap();
+        assert_eq!(report.imported, 5);
+        let mut unowned = report.unowned.clone();
+        unowned.sort();
+        assert_eq!(unowned, ["_unowned/z.yml", "ghost/y.yml", "x.yml"]);
+
+        let rows = store.model_rows().await.unwrap();
+        let mut got: Vec<_> = rows.files.iter().map(|f| (f.organization_id, f.path.clone())).collect();
+        got.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(
+            got,
+            vec![
+                (None, "_unowned/ghost/y.yml".to_string()),
+                (None, "_unowned/x.yml".to_string()),
+                (None, "_unowned/z.yml".to_string()),
+                (Some(org.id), "fatos.yml".to_string()),
+                (None, "x.yml".to_string()),
+            ]
+        );
+        let slugs = store.organization_slugs().await.unwrap();
+        let srcs = cubeserver::rbac::model_snapshot::sources(&rows, &slugs);
+        let paths: Vec<_> = srcs.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(paths, ["_platform/x.yml", "_unowned/ghost/y.yml", "_unowned/x.yml", "_unowned/z.yml", "digital/fatos.yml"]);
+
+        let policy = cubemodel::ownership::OwnershipPolicy {
+            organizations: [("digital".to_string(), ["default".to_string()].into())].into(),
+            platform: ["default".to_string()].into(),
+            generation: 0,
+        };
+        let compiled = cubemodel::ModelLoader::new()
+            .load_sources_with_policy(&srcs, Some(&policy))
+            .unwrap();
+        let mut rejected: Vec<_> = compiled
+            .rejected
+            .iter()
+            .filter(|r| r.message.contains("does not belong to any organization"))
+            .map(|r| (r.file.as_str(), r.cube.as_str()))
+            .collect();
+        rejected.sort();
+        assert_eq!(rejected, [("_unowned/ghost/y.yml", "fantasma"), ("_unowned/x.yml", "solto"), ("_unowned/z.yml", "exportado")]);
+        assert!(compiled.cubes.contains_key("fatos"));
     });
 
     db_test!(import_is_not_repeated_when_the_folder_survives, |store| {

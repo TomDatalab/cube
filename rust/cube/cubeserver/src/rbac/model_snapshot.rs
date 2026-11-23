@@ -52,10 +52,24 @@ pub fn is_editable(path: &str, managed_by: Option<&str>) -> bool {
     yaml && managed_by.map_or(true, str::is_empty)
 }
 
-/// `<slug>/<path>`, or `_platform/<path>` for platform files.
+/// Where the import keeps a file that has no owner (one at the root of the
+/// folder, or in a folder of no organization): `_unowned/<its path>`, with no
+/// organization. The ownership rule rejects its cubes.
+pub const UNOWNED_DIR: &str = "_unowned";
+
+/// The source of a file with no organization: `_platform/<path>`, or the path
+/// itself for an unowned one (`_unowned/...`).
+pub fn platform_source(path: &str) -> String {
+    match path.strip_prefix(UNOWNED_DIR) {
+        Some(rest) if rest.starts_with('/') => path.to_string(),
+        _ => format!("_platform/{path}"),
+    }
+}
+
+/// `<slug>/<path>`, or for a file with no organization [`platform_source`].
 pub fn source_path(file: &ModelFile, slugs: &HashMap<Uuid, String>) -> Option<String> {
     match file.organization_id {
-        None => Some(format!("_platform/{}", file.path)),
+        None => Some(platform_source(&file.path)),
         Some(org) => slugs.get(&org).map(|s| format!("{s}/{}", file.path)),
     }
 }
@@ -287,7 +301,7 @@ mod tests {
 
     #[test]
     fn validate_path_rules() {
-        for ok in ["fatos.yml", "sofiadb/dfos_a.yml", "x.J2"] {
+        for ok in ["fatos.yml", "sofiadb/dfos_a.yml", "x.J2", "_unowned/x.yml", "_unowned/ghost/y.yml"] {
             assert!(validate_path(ok).is_ok(), "{ok}");
         }
         let long = format!("{}.yml", "a".repeat(252));
@@ -307,6 +321,10 @@ mod tests {
         };
         let paths: Vec<_> = sources(&rows, &slugs).into_iter().map(|s| s.0).collect();
         assert_eq!(paths, ["_platform/fatos.yml", "digital/fatos.yml"]);
+        let unowned = file(None, "_unowned/ghost/x.yml", "");
+        assert_eq!(source_path(&unowned, &slugs).as_deref(), Some("_unowned/ghost/x.yml"));
+        let lookalike = file(None, "_unownedx/x.yml", "");
+        assert_eq!(source_path(&lookalike, &slugs).as_deref(), Some("_platform/_unownedx/x.yml"));
         let orphan = file(Some(Uuid::new_v4()), "x.yml", "");
         assert_eq!(source_path(&orphan, &slugs), None);
     }
