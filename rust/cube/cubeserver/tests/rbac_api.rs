@@ -79,6 +79,7 @@ fn rbac_config(failure_delay: Duration) -> RbacConfig {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         )
         .unwrap(),
+        sync_user: "sofiadb-sync".into(),
     }
 }
 

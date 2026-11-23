@@ -21,7 +21,8 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::tree::org_detail as detail_of;
 use crate::handlers::scaffold::{plan, split_schema, is_prefixed, GenerateRequest};
-use crate::rbac::model_snapshot::{is_editable, source_path, sources};
+use crate::rbac::model_snapshot::{is_editable, source_path, sources, validate_path};
+use crate::rbac::model_sync::{SyncContext, SYNC_MANAGER};
 use crate::rbac::model_store::{ModelChange, ModelFile};
 use crate::rbac::model_writer::{ModelWriter, WriteError};
 use crate::services::RequestContext;
@@ -528,4 +529,206 @@ pub async fn platform_generate(
 ) -> Result<Json<Value>, ApiError> {
     let (scope, user) = platform_scope(&state, &ctx)?;
     generate_route(&state, scope, user, body(request)?.tables).await
+}
+
+/// The caller must be the sync user: not even an admin uses the sync routes.
+fn require_sync_user<'a>(
+    state: &'a AppState,
+    ctx: &'a RequestContext,
+) -> Result<&'a crate::rbac::Rbac, ApiError> {
+    let (rbac, user) = caller(state, ctx)?;
+    if user != rbac.config.sync_user {
+        return Err(ApiError::forbidden(
+            "Só o usuário de sincronização usa esta rota",
+        ));
+    }
+    Ok(rbac)
+}
+
+/// The context of the sync of `connection` over `rows`: the sync's own rows
+/// (any connection) do not count.
+fn context_of(
+    rows: &crate::rbac::model_store::ModelRows,
+    slugs: &std::collections::HashMap<Uuid, String>,
+    connection: &str,
+    default_db: &str,
+) -> SyncContext {
+    let managed = rows
+        .files
+        .iter()
+        .filter(|f| f.managed_by.as_deref() == Some(SYNC_MANAGER))
+        .filter_map(|f| source_path(f, slugs))
+        .collect();
+    crate::rbac::model_sync::sync_context(&sources(rows, slugs), &managed, connection, default_db)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncContextParams {
+    default_db: Option<String>,
+}
+
+/// `GET /model/sync/{connection}/context?defaultDb=`: the sync user.
+pub async fn sync_context(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(connection): Path<String>,
+    Query(params): Query<SyncContextParams>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = require_sync_user(&state, &ctx)?;
+    let rows = rbac
+        .store
+        .model_rows()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let slugs = rbac
+        .store
+        .organization_slugs()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let context = context_of(
+        &rows,
+        &slugs,
+        &connection,
+        params.default_db.as_deref().unwrap_or("default"),
+    );
+    Ok(Json(json!(context)))
+}
+
+#[derive(Deserialize)]
+pub struct SyncFile {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBody {
+    files: Vec<SyncFile>,
+    context: SyncContext,
+    default_db: Option<String>,
+}
+
+/// `PUT /model/sync/{connection}` `{files, context, defaultDb}`: the sync
+/// user. Replaces the rows the sync owns under `<connection>/` with `files`,
+/// in the organization that owns the connection, in one validated write.
+pub async fn sync_put(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(connection): Path<String>,
+    request: Result<Json<SyncBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = require_sync_user(&state, &ctx)?;
+    let user = ctx.user.clone().unwrap_or_default();
+    let request = body(request)?;
+    let prefix = format!("{connection}/");
+    let mut seen = std::collections::HashSet::new();
+    for file in &request.files {
+        if !file.path.starts_with(&prefix) {
+            return Err(ApiError::bad_request(format!(
+                "O arquivo {} não está na pasta {prefix}",
+                file.path
+            )));
+        }
+        if let Err(why) = validate_path(&file.path) {
+            return Err(ApiError::bad_request(format!(
+                "Caminho inválido {}: {why}",
+                file.path
+            )));
+        }
+        if !seen.insert(file.path.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "O arquivo {} aparece duas vezes",
+                file.path
+            )));
+        }
+    }
+    let writer = writer(&state)?;
+    let slugs = rbac
+        .store
+        .organization_slugs()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let destination = rbac
+        .store
+        .connection(&connection)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .map(|c| c.organization_id);
+    let default_db = request.default_db.clone().unwrap_or_else(|| "default".into());
+
+    let (mut added, mut updated, mut removed) = (0usize, 0usize, 0usize);
+    let written = writer
+        .write(&user, "sync", |rows| {
+            if context_of(rows, &slugs, &connection, &default_db) != request.context {
+                return Err(WriteError::new(
+                    StatusCode::CONFLICT,
+                    "O modelo mudou durante a sincronização",
+                ));
+            }
+            // The sync's rows of this connection, in any organization. Of a
+            // path found twice, the one already in place stays.
+            let mut keep: std::collections::HashMap<&str, &ModelFile> = Default::default();
+            let mut changes = Vec::new();
+            for row in rows.files.iter().filter(|f| {
+                f.managed_by.as_deref() == Some(SYNC_MANAGER) && f.path.starts_with(&prefix)
+            }) {
+                match keep.get(row.path.as_str()) {
+                    Some(old) if old.organization_id == destination => {
+                        changes.push(ModelChange::Delete { id: row.id, expected_version: Some(row.version) });
+                    }
+                    Some(old) => {
+                        changes.push(ModelChange::Delete { id: old.id, expected_version: Some(old.version) });
+                        keep.insert(row.path.as_str(), row);
+                    }
+                    None => {
+                        keep.insert(row.path.as_str(), row);
+                    }
+                }
+            }
+            let mut gone: Vec<&&ModelFile> = keep
+                .values()
+                .filter(|row| !request.files.iter().any(|f| f.path == row.path))
+                .collect();
+            gone.sort_by(|a, b| a.path.cmp(&b.path));
+            for row in gone {
+                removed += 1;
+                changes.push(ModelChange::Delete { id: row.id, expected_version: Some(row.version) });
+            }
+            for file in &request.files {
+                match keep.get(file.path.as_str()) {
+                    Some(row) if row.organization_id == destination && row.content == file.content => {}
+                    Some(row) => {
+                        updated += 1;
+                        changes.push(ModelChange::Put {
+                            id: Some(row.id),
+                            organization_id: destination,
+                            path: file.path.clone(),
+                            content: file.content.clone(),
+                            expected_version: Some(row.version),
+                            managed_by: Some(SYNC_MANAGER.to_string()),
+                        });
+                    }
+                    None => {
+                        added += 1;
+                        changes.push(ModelChange::Put {
+                            id: None,
+                            organization_id: destination,
+                            path: file.path.clone(),
+                            content: file.content.clone(),
+                            expected_version: None,
+                            managed_by: Some(SYNC_MANAGER.to_string()),
+                        });
+                    }
+                }
+            }
+            Ok(changes)
+        })
+        .await?;
+    Ok(Json(json!({
+        "changed": written.changed,
+        "added": added,
+        "updated": updated,
+        "removed": removed,
+    })))
 }

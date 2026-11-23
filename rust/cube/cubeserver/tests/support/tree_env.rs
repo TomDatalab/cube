@@ -62,6 +62,7 @@ pub fn rbac_config() -> RbacConfig {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         )
         .unwrap(),
+        sync_user: "sofiadb-sync".into(),
     }
 }
 

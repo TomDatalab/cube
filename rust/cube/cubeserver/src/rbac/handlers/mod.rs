@@ -176,6 +176,14 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         )
         .route(&format!("{base}/v1/model/export"), get(model::export))
         .route(
+            &format!("{base}/v1/model/sync/:connection/context"),
+            get(model::sync_context),
+        )
+        .route(
+            &format!("{base}/v1/model/sync/:connection"),
+            put(model::sync_put),
+        )
+        .route(
             &format!("{base}/v1/objects/:id"),
             get(objects::get)
                 .put(objects::update)

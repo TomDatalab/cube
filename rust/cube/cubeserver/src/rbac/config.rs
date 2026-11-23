@@ -3,6 +3,9 @@
 use std::time::Duration;
 
 /// Default validity of a login token (`CUBE_RBAC_TOKEN_TTL`).
+/// The user the SofiaDB sync logs in as, unless `CUBE_SYNC_USER` says otherwise.
+pub const DEFAULT_SYNC_USER: &str = "sofiadb-sync";
+
 pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// How long a failed login waits before answering, to slow down guessing.
@@ -41,6 +44,8 @@ pub struct RbacConfig {
     pub hash_queue_wait: Duration,
     /// `CUBE_RBAC_SECRET_KEY`: seals the data source secrets RBAC keeps.
     pub secret_key: super::secrets::SecretKey,
+    /// `CUBE_SYNC_USER`: the only user of the SofiaDB sync routes.
+    pub sync_user: String,
 }
 
 /// Secrets stay out of logs and panics.
@@ -124,6 +129,7 @@ impl RbacConfig {
             max_concurrent_hashes: default_max_concurrent_hashes(),
             hash_queue_wait: DEFAULT_HASH_QUEUE_WAIT,
             secret_key,
+            sync_user: var("CUBE_SYNC_USER").unwrap_or_else(|| DEFAULT_SYNC_USER.to_string()),
         }))
     }
 }
