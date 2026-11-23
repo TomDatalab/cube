@@ -3,7 +3,6 @@ import { Layout, Modal, Empty, Typography, Input, Tooltip, Button, Spin, message
 import type { DataNode } from 'antd/lib/tree';
 import { RouterProps } from 'react-router-dom';
 
-import PrismCode from '../../PrismCode';
 import { playgroundAction } from '../../events';
 import { Menu, Tree } from '../../components';
 import { Alert, CubeLoader } from '../../atoms';
@@ -15,7 +14,8 @@ import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeDetail } from './CubeDetail';
-import { FileContent, OrgNode, modelApi } from './api';
+import { FileDetail } from './FileDetail';
+import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
 import { useOpenBlock } from './useOpenBlock';
 import {
   OrgDetail,
@@ -104,6 +104,7 @@ export function SchemaPage({ history }: RouterProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [file, setFile] = useState<FileContent | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [fileReload, setFileReload] = useState(0);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [shown, setShown] = useState(false);
@@ -330,7 +331,7 @@ export function SchemaPage({ history }: RouterProps) {
     return () => {
       cancelled = true;
     };
-  }, [api, selected?.slug, fileId]);
+  }, [api, selected?.slug, fileId, fileReload]);
 
   const treeData = useMemo(() => {
     // The loaded list, plus what the server found that is not in it yet.
@@ -425,6 +426,15 @@ export function SchemaPage({ history }: RouterProps) {
     });
   };
 
+  const afterFileChange = (slug: string, others: string[] = []) => {
+    [slug, ...others].forEach((s) => {
+      if (details[s]) {
+        loadDetail(s, true);
+      }
+    });
+    refreshOrgs();
+  };
+
   const renderContent = () => {
     if (!selected) {
       return (
@@ -498,12 +508,31 @@ export function SchemaPage({ history }: RouterProps) {
               style={{ paddingTop: 10, paddingBottom: 11 }}
             />
           )}
-          <PrismCode code={file.content} style={{ padding: 0, marginTop: 24 }} />
-          {file.updatedBy && file.updatedAt && (
-            <Typography.Text type="secondary">
-              Alterado por {file.updatedBy} em {new Date(file.updatedAt).toLocaleString()}
-            </Typography.Text>
-          )}
+          <FileDetail
+            api={api}
+            org={known.current[selected.slug] ?? { slug: selected.slug, name: selected.slug }}
+            id={fileId!}
+            file={file}
+            isAdmin={rbac.isAdmin}
+            orgs={orgs}
+            onSaved={(saved) => {
+              setDetails((current) => ({ ...current, [selected.slug]: saved }));
+              setFileReload((n) => n + 1);
+              refreshOrgs();
+            }}
+            onRemoved={() => {
+              setSelectedKey(null);
+              afterFileChange(selected.slug);
+            }}
+            onMoved={(destination) => {
+              const dest = destination
+                ? Object.values(known.current).find((o) => o.id === destination)?.slug
+                : PLATFORM;
+              setSelectedKey(null);
+              afterFileChange(selected.slug, dest ? [dest] : []);
+            }}
+            onReload={() => setFileReload((n) => n + 1)}
+          />
         </>
       );
     }

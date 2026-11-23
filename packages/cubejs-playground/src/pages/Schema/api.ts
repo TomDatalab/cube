@@ -25,9 +25,13 @@ export type OrgNode = Pick<OrgSummary, 'id' | 'slug' | 'name'>;
 export class ApiError extends Error {
   status: number;
 
-  constructor(message: string, status: number) {
+  // The 400 body's `problems`: `{file, cube, message}`.
+  problems?: { file: string; cube: string; message: string }[];
+
+  constructor(message: string, status: number, problems?: ApiError['problems']) {
     super(message);
     this.status = status;
+    this.problems = problems;
   }
 }
 
@@ -46,7 +50,7 @@ async function answer(response: Response): Promise<any> {
     // Not JSON; the text or the status says enough.
   }
   if (!response.ok) {
-    throw new ApiError(body?.error || text || `${response.status} ${response.statusText}`, response.status);
+    throw new ApiError(body?.error || text || `${response.status} ${response.statusText}`, response.status, body?.problems);
   }
   return body;
 }
