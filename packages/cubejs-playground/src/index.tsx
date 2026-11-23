@@ -16,6 +16,7 @@ import {
 import { SecurityContextProvider } from './components/SecurityContext/SecurityContextProvider';
 import { AppContextProvider } from './components/AppContext';
 import { AdminOnly } from './components/AdminOnly/AdminOnly';
+import { OwnerOrAdmin } from './components/AdminOnly/OwnerOrAdmin';
 
 const history = createHashHistory();
 history.listen((location) => {
@@ -71,7 +72,7 @@ ReactDOM.render(
         <Route
           key="schema"
           path="/schema"
-          render={(props) => <AdminOnly><SchemaPage {...props} /></AdminOnly>}
+          render={(props) => <OwnerOrAdmin><SchemaPage {...props} /></OwnerOrAdmin>}
         />
         <Route
           key="data-sources"
