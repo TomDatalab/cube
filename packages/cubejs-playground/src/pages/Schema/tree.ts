@@ -120,6 +120,33 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
   ];
 }
 
+/**
+ * The keys to give the Tree as `loadedKeys`. Only organizations load on
+ * demand (`loadData`); every other node arrives with its children. A node the
+ * Tree is not told is loaded, and that has no children (an empty Cubes or
+ * Files group), would be loaded again on every render once expanded, freezing
+ * the page. So: every node that is not an organization, plus the
+ * organizations whose detail is loaded.
+ */
+export function loadedTreeKeys(nodes: DataNode[], loadedSlugs: string[]): string[] {
+  const loaded = new Set(loadedSlugs.map((slug) => `org:${slug}`));
+  const keys: string[] = [];
+  const walk = (list: DataNode[]) => {
+    list.forEach((node) => {
+      const key = String(node.key);
+      const isOrg = key.startsWith('org:') && key.indexOf(':', 4) === -1;
+      if (!isOrg || loaded.has(key)) {
+        keys.push(key);
+      }
+      if (node.children) {
+        walk(node.children);
+      }
+    });
+  };
+  walk(nodes);
+  return keys;
+}
+
 export function filterTree(nodes: DataNode[], term: string): DataNode[] {
   const needle = term.trim().toLowerCase();
   if (!needle) {

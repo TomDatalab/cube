@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  buildQueryUrl, detailNodes, filterTree, iconKind, orgNodes, parseKey, tablesFromSameOrg,
+  buildQueryUrl, detailNodes, filterTree, iconKind, loadedTreeKeys, orgNodes, parseKey,
+  tablesFromSameOrg,
 } from '../pages/Schema/tree';
 
 const detail = {
@@ -123,5 +124,31 @@ describe('file titles', () => {
   it('drop the Platform folder too', () => {
     const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[2].children!;
     expect(files.map((n) => n.title)).toEqual(['orders.yml']);
+  });
+});
+
+describe('loadedTreeKeys', () => {
+  // The Tree is given loadData for the organizations. A node it is not told is
+  // loaded and that has no children (an empty Cubes or Files group) would be
+  // "loaded" again on every render when expanded, freezing the page.
+  it('marks every non-organization node as loaded, and only the loaded organizations', () => {
+    const empty = { cubes: [], tables: {}, files: [], errors: [] };
+    const summary = (slug: string) => ({
+      slug, name: slug, counts: { cubes: 0, files: 0, connections: 0 }, errors: 0,
+    });
+    const [on, bossa] = orgNodes([summary('on'), summary('bossa')]);
+    const tree = [{ ...on, children: detailNodes('on', empty) }, bossa];
+    const keys = loadedTreeKeys(tree, ['on']);
+    expect(keys).toEqual(expect.arrayContaining(['org:on', 'org:on:cubes', 'tables:on', 'files:on']));
+    expect(keys).not.toContain('org:bossa');
+  });
+
+  it('includes nested nodes', () => {
+    const [on] = orgNodes([{
+      slug: 'on', name: 'on', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
+    }]);
+    const keys = loadedTreeKeys([{ ...on, children: detailNodes('on', detail) }], ['on']);
+    expect(keys.some((k) => k.startsWith('schema:'))).toBe(true);
+    expect(keys.some((k) => k.startsWith('file:'))).toBe(true);
   });
 });

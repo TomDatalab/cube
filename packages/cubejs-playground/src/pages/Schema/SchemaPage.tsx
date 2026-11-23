@@ -26,6 +26,7 @@ import {
   detailNodes,
   filterTree,
   iconKind,
+  loadedTreeKeys,
   orgNodes,
   parseKey,
   tablesFromSameOrg,
@@ -609,7 +610,7 @@ export function SchemaPage({ history }: RouterProps) {
         checkStrictly
         treeData={treeData}
         titleRender={(node: DataNode) => <TreeTitle node={node} />}
-        loadedKeys={Object.keys(details).map((slug) => `org:${slug}`)}
+        loadedKeys={loadedTreeKeys(treeData, Object.keys(details))}
         loadData={async (node: DataNode) => {
           const key = String(node.key);
           if (key !== MORE_KEY && parseKey(key).kind === 'org') {
