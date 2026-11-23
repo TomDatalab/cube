@@ -1479,7 +1479,7 @@ async fn tree_without_rbac_is_one_model_node() {
     let model = std::path::PathBuf::from(&config.schema_path);
     std::fs::write(
         model.join("orders.yml"),
-        "cubes:\n  - name: orders\n    sql_table: t\n    joins:\n      - name: users\n        relationship: many_to_one\n        sql: \"1=1\"\n    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n        primary_key: true\n        public: true\n    segments:\n      - name: big\n        sql: \"1=1\"\n",
+        "cubes:\n  - name: orders\n    sql_table: t\n    joins:\n      - name: users\n        relationship: many_to_one\n        sql: \"1=1\"\n    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n        primary_key: true\n    segments:\n      - name: big\n        sql: \"1=1\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -1532,6 +1532,10 @@ async fn tree_without_rbac_is_one_model_node() {
     assert!(orders["measures"][0]["title"].is_null(), "{body}");
     assert_eq!(orders["dimensions"][0]["name"], "orders.id", "{body}");
     assert_eq!(orders["dimensions"][0]["primaryKey"], true, "{body}");
+    assert_eq!(orders["dimensions"][0]["public"], false, "{body}");
+    assert_eq!(orders["measures"][0]["public"], true, "{body}");
+    let sales = body["cubes"].as_array().unwrap().iter().find(|c| c["name"] == "sales").unwrap();
+    assert_eq!(sales["measures"][0]["name"], "sales.n", "{body}");
     assert_eq!(orders["segments"][0]["name"], "orders.big", "{body}");
 
     let (status, body) = get_json(router.clone(), "/playground/tree/_model/files/orders.yml").await;

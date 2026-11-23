@@ -207,7 +207,7 @@ pub(crate) async fn org_detail_for(
             let members = |list: &[crate::model_index::IndexedMember]| -> Vec<Value> {
                 list.iter()
                     .map(|m| json!({ "name": m.name, "type": m.r#type, "title": m.title,
-                                     "primaryKey": m.primary_key }))
+                                     "primaryKey": m.primary_key, "public": m.public }))
                     .collect()
             };
             json!({ "name": c.name, "title": c.title, "type": c.kind,
