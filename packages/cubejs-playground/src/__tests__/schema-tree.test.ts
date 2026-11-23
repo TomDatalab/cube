@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  buildQueryUrl, detailNodes, filterTree, iconKind, metaApiUrl, metaToken, orgNodes, parseKey, tablesFromSameOrg,
+  buildQueryUrl, detailNodes, filterTree, iconKind, orgNodes, parseKey, tablesFromSameOrg,
 } from '../pages/Schema/tree';
 
 const detail = {
@@ -74,49 +74,18 @@ describe('organization tree helpers', () => {
     })).toBe(`/build?query=${encodeURIComponent(JSON.stringify({ dimensions: ['c.x'] }))}`);
   });
 
+  it('buildQueryUrl skips hidden members', () => {
+    const url = buildQueryUrl({
+      name: 'c',
+      measures: [{ name: 'c.secret', public: false }],
+      dimensions: [{ name: 'c.id', primaryKey: true }, { name: 'c.name' }],
+    });
+    expect(JSON.parse(decodeURIComponent(url.split('query=')[1]))).toEqual({ dimensions: ['c.name'] });
+  });
+
   it('tablesFromSameOrg returns the common slug or null', () => {
     expect(tablesFromSameOrg(['table:on:x.s.t', 'table:digital:y.s.t'])).toBeNull();
     expect(tablesFromSameOrg(['table:on:x.s.t', 'table:on:y.s.t'])).toBe('on');
-  });
-});
-
-describe('metaApiUrl', () => {
-  it('uses the context address when the query builder already set it', () => {
-    expect(metaApiUrl('http://h:4000/cube/v1', '/cube', 'http://h:4000/#/schema')).toBe('http://h:4000/cube/v1');
-  });
-
-  it('builds it from the page address when the page is opened directly', () => {
-    expect(metaApiUrl(null, '/cube', 'http://h:4000/#/schema')).toBe('http://h:4000/cube/v1');
-    expect(metaApiUrl(null, '/cube', 'http://h:4000/')).toBe('http://h:4000/cube/v1');
-  });
-
-  it('waits for the playground context to know the base path', () => {
-    expect(metaApiUrl(null, undefined, 'http://h:4000/#/schema')).toBeNull();
-  });
-});
-
-describe('metaToken', () => {
-  it('prefers the security context token', () => {
-    expect(metaToken('saved', 'session')).toBe('saved');
-  });
-
-  it('falls back to the session token the app puts in the playground context', () => {
-    expect(metaToken(null, 'session')).toBe('session');
-    expect(metaToken('undefined', 'session')).toBe('session');
-  });
-
-  it('has none before login', () => {
-    expect(metaToken(null, undefined)).toBeNull();
-  });
-});
-
-describe('metaToken with RBAC', () => {
-  it('uses the session token even when a security context token was saved', () => {
-    expect(metaToken('saved', 'session', true)).toBe('session');
-  });
-
-  it('keeps the saved token first without RBAC', () => {
-    expect(metaToken('saved', 'session', false)).toBe('saved');
   });
 });
 

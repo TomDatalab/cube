@@ -14,9 +14,9 @@ vi.mock('../hooks', () => ({ useRbac: () => rbac }));
 // eslint-disable-next-line import/first
 import { pageFor, pageTrail, Sidebar } from '../components/Sidebar/Sidebar';
 
-const ADMIN = { enabled: true, isAdmin: true, session: { token: 't', user: { id: 'a', platformAdmin: true } } } as any;
+const ADMIN = { enabled: true, isAdmin: true, canModel: true, session: { token: 't', user: { id: 'a', platformAdmin: true } } } as any;
 const USER = { enabled: true, isAdmin: false, session: { token: 't', user: { id: 'u' } } } as any;
-const NO_RBAC = { enabled: false, isAdmin: true, session: null } as Rbac;
+const NO_RBAC = { enabled: false, isAdmin: true, canModel: true, session: null } as Rbac;
 
 describe('Sidebar', () => {
   let root: ReturnType<typeof createRoot>;
@@ -53,6 +53,14 @@ describe('Sidebar', () => {
   });
 
   const group = () => host.querySelector('[data-testid="nav-group-admin"]') as HTMLButtonElement | null;
+
+  it('shows Data Model, and nothing of the admin, to an organization owner', () => {
+    rbac = { enabled: true, isAdmin: false, canModel: true, session: { token: 't', user: { id: 'u' } } } as any;
+    render();
+    expect(labels()).toContain('Data Model');
+    expect(labels()).not.toContain('Data Source');
+    expect(group()).toBeNull();
+  });
 
   it('lists every page, the Admin group under its divider, for a platform admin', () => {
     rbac = ADMIN;

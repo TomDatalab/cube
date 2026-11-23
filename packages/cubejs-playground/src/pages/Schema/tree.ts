@@ -1,5 +1,14 @@
 import type { DataNode } from 'antd/lib/tree';
 
+export type TreeMember = {
+  name: string;
+  type?: string;
+  title?: string;
+  primaryKey?: boolean;
+  // false: query users do not see the member.
+  public?: boolean;
+};
+
 export type TreeCube = {
   name: string;
   title?: string;
@@ -7,6 +16,9 @@ export type TreeCube = {
   dataSource: string;
   file: string;
   members: { measures: number; dimensions: number };
+  measures?: TreeMember[];
+  dimensions?: TreeMember[];
+  segments?: TreeMember[];
   joins?: { name: string; relationship?: string | null }[];
   // A view's source cubes.
   includes?: string[];
@@ -16,14 +28,15 @@ export type OrgSummary = {
   id?: string;
   slug: string;
   name: string;
-  counts: { cubes: number; files: number; connections: number };
-  errors: number;
+  // Only the admin's list has them; an owner's comes from the session.
+  counts?: { cubes: number; files: number; connections: number };
+  errors?: number;
 };
 
 export type OrgDetail = {
   cubes: TreeCube[];
   tables: Record<string, Record<string, Record<string, { name: string; type: string }[]>>>;
-  files: { fileName: string }[];
+  files: { id?: string; fileName: string; path?: string; version?: number; editable?: boolean }[];
   errors: { file: string; cube: string; message: string }[];
 };
 
@@ -162,14 +175,18 @@ export function parseKey(key: NodeKey): ParsedKey {
 
 export function buildQueryUrl(cube: {
   name: string;
-  measures: { name: string }[];
-  dimensions: { name: string; primaryKey?: boolean }[];
+  measures?: TreeMember[];
+  dimensions?: TreeMember[];
 }): string {
+  // A hidden member is not in the query users' meta.
+  const shown = (list: TreeMember[] = []) => list.filter((m) => m.public !== false);
+  const measures = shown(cube.measures);
+  const dimensions = shown(cube.dimensions);
   let query: Record<string, string[]> = {};
-  if (cube.measures.length) {
-    query = { measures: cube.measures.map((m) => m.name) };
-  } else if (cube.dimensions.length) {
-    const dim = cube.dimensions.find((d) => !d.primaryKey) || cube.dimensions[0];
+  if (measures.length) {
+    query = { measures: measures.map((m) => m.name) };
+  } else if (dimensions.length) {
+    const dim = dimensions.find((d) => !d.primaryKey) || dimensions[0];
     query = { dimensions: [dim.name] };
   }
   return `/build?query=${encodeURIComponent(JSON.stringify(query))}`;
@@ -178,47 +195,6 @@ export function buildQueryUrl(cube: {
 export function tablesFromSameOrg(checked: NodeKey[]): string | null {
   const slugs = new Set(checked.map((key) => parseKey(key).slug));
   return slugs.size === 1 ? [...slugs][0] : null;
-}
-
-/**
- * The REST address the page reads `/v1/meta` from. Only the query builder
- * puts one in the app context, so a Data Model page opened or reloaded
- * directly builds it from its own address, the way the query builder does.
- * Null until the playground context has told the base path.
- */
-export function metaApiUrl(
-  contextApiUrl: string | null,
-  basePath: string | undefined,
-  href: string
-): string | null {
-  if (contextApiUrl) {
-    return contextApiUrl;
-  }
-  if (!basePath) {
-    return null;
-  }
-  return `${href.split('#')[0].replace(/\/$/, '')}${basePath}/v1`;
-}
-
-/**
- * The token for `/v1/meta`. With RBAC it is the session token the app puts in
- * the playground context: a token saved in the Security Context dialog is
- * signed for no user and survives logins, and this page needs the admin.
- * Without RBAC, the security context's token first, as the query builder does
- * (the context's own token is set only by the query builder).
- */
-export function metaToken(
-  currentToken: string | null | undefined,
-  cubejsToken: string | null | undefined,
-  rbac = false
-): string | null {
-  if (rbac) {
-    return cubejsToken || null;
-  }
-  if (currentToken && currentToken !== 'undefined') {
-    return currentToken;
-  }
-  return cubejsToken || null;
 }
 
 export type TreeIconKind = 'cube' | 'table' | 'file';

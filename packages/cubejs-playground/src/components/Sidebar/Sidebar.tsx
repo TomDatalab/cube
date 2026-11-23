@@ -32,6 +32,8 @@ export type NavPage = {
   icon: ReactNode;
   // Platform admins only (with RBAC on).
   admin?: boolean;
+  // Platform admins and organization owners (with RBAC on).
+  model?: boolean;
   // Shown under the "Administração" divider.
   section?: 'admin';
   // A group: the row opens and closes them instead of being a page itself.
@@ -49,7 +51,7 @@ const ADMIN_ICONS: Record<AdminSection, ReactNode> = {
 
 export const NAV_PAGES: NavPage[] = [
   { path: '/build', label: 'Playground', icon: <CaretRightOutlined /> },
-  { path: '/schema', label: 'Data Model', icon: <ApiOutlined />, admin: true },
+  { path: '/schema', label: 'Data Model', icon: <ApiOutlined />, model: true },
   { path: '/data-sources', label: 'Data Source', icon: <DatabaseOutlined />, admin: true },
   { path: '/frontend-integrations', label: 'Frontend Integrations', icon: <CodeOutlined /> },
   {
@@ -254,7 +256,7 @@ type Props = {
 };
 
 export function Sidebar({ pathname }: Props) {
-  const { session, isAdmin } = useRbac();
+  const { session, isAdmin, canModel } = useRbac();
   // Below a laptop the sidebar stays collapsed, so the page keeps its width.
   const narrow = useMediaQuery({ query: '(max-width: 991px)' });
   const [chosen, setChosen] = useState(readCollapsed);
@@ -278,6 +280,9 @@ export function Sidebar({ pathname }: Props) {
     if (page.section === 'admin') {
       // The Admin pages manage logins: there are none without RBAC.
       return session != null && isAdmin;
+    }
+    if (page.model) {
+      return canModel;
     }
     return !page.admin || isAdmin;
   });

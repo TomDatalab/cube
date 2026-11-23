@@ -7,25 +7,24 @@ import PrismCode from '../../PrismCode';
 import { playgroundAction } from '../../events';
 import { Menu, Tree } from '../../components';
 import { Alert, CubeLoader } from '../../atoms';
-import { playgroundFetch } from '../../shared/helpers';
 import { AppContext } from '../../components/AppContext';
 import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
-import { useSecurityContext } from '../../hooks';
-import { createCubeApi } from '../../shared/cube-api';
+import { useRbac } from '../../hooks';
 import { SchemaFormat } from '../../types';
 import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
-import { CubeDetail, MetaCube } from './CubeDetail';
+import { CubeDetail } from './CubeDetail';
+import { FileContent, OrgNode, modelApi } from './api';
+import { useOpenBlock } from './useOpenBlock';
 import {
   OrgDetail,
   OrgSummary,
+  TreeCube,
   buildQueryUrl,
   detailNodes,
   filterTree,
   iconKind,
-  metaApiUrl,
-  metaToken,
   orgNodes,
   parseKey,
   tablesFromSameOrg,
@@ -66,33 +65,27 @@ function TreeTitle({ node }: { node: DataNode }) {
 const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS = 2;
 
-type OpenFile = { fileName: string; content: string; absPath: string };
-
-const encodePath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
-
-async function readJson(res: Response) {
-  if (res.status !== 200) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `Request failed (${res.status})`);
-  }
-  return res.json();
+// A cube's panel: its members come with the model, and the button needs the
+// organization's workspaces.
+function CubePanel({ api, org, owner, cube, errors, onOpen }: {
+  api: ReturnType<typeof modelApi>;
+  org: OrgNode | undefined;
+  owner: boolean;
+  cube: TreeCube;
+  errors: OrgDetail['errors'];
+  onOpen: () => void;
+}) {
+  const open = useOpenBlock(api, org, owner, cube);
+  return <CubeDetail cube={cube} errors={errors} open={open} onOpen={onOpen} />;
 }
 
 export function SchemaPage({ history }: RouterProps) {
-  const { playgroundContext, apiUrl: contextApiUrl } = useContext(AppContext);
-  const { currentToken } = useSecurityContext();
-  // Only the query builder sets the context's address; opened directly, the
-  // page builds it, or meta would never load.
-  const apiUrl = metaApiUrl(contextApiUrl, playgroundContext.basePath, window.location.href);
-  // No workspace header: a platform admin sees the cubes of every organization.
-  const token = metaToken(
-    currentToken,
-    playgroundContext.cubejsToken,
-    Boolean(playgroundContext.rbac || playgroundContext.authRequired)
-  );
-  const cubeApi = useMemo(
-    () => (apiUrl && token ? createCubeApi(token, apiUrl, { workspace: false }) : null),
-    [apiUrl, token]
+  const { playgroundContext } = useContext(AppContext);
+  const rbac = useRbac();
+  const token = rbac.session?.token;
+  const api = useMemo(
+    () => modelApi(rbac, playgroundContext.basePath),
+    [rbac.isAdmin, token, playgroundContext.basePath]
   );
 
   const [orgs, setOrgs] = useState<OrgSummary[]>([]);
@@ -106,18 +99,17 @@ export function SchemaPage({ history }: RouterProps) {
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [details, setDetails] = useState<Record<string, OrgDetail>>({});
   const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
-  const [metaError, setMetaError] = useState<string | null>(null);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [checkedKeys, setCheckedKeys] = useState<string[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [file, setFile] = useState<OpenFile | null>(null);
+  const [file, setFile] = useState<FileContent | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
-  const [metaCubes, setMetaCubes] = useState<Record<string, MetaCube> | null>(null);
-  const [metaLoading, setMetaLoading] = useState(true);
   const [shown, setShown] = useState(false);
 
+  // The organizations the lists returned, by slug.
+  const known = useRef<Record<string, OrgSummary>>({});
   const detailRequests = useRef<Record<string, Promise<void> | undefined>>({});
   const baseRequest = useRef(0);
   const foundRequest = useRef(0);
@@ -129,6 +121,12 @@ export function SchemaPage({ history }: RouterProps) {
   const isYamlFormatSupported: boolean = (Number(major) > 0) || (!minor || Number(minor) >= 31);
   const isDocker = playgroundContext?.isDocker;
 
+  useEffect(() => {
+    [...orgs, ...found].forEach((o) => {
+      known.current[o.slug] = o;
+    });
+  }, [orgs, found]);
+
   // The query the server sees: only 2+ characters search there.
   useEffect(() => {
     const term = search.trim();
@@ -139,13 +137,7 @@ export function SchemaPage({ history }: RouterProps) {
     return () => clearTimeout(timer);
   }, [search]);
 
-  const fetchPage = async (q: string, offset: number) => {
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-    if (q) {
-      params.set('q', q);
-    }
-    return readJson(await playgroundFetch(`playground/tree?${params}`));
-  };
+  const fetchPage = (q: string, offset: number) => api.list(q, offset);
 
   // The unfiltered list, once.
   useEffect(() => {
@@ -197,40 +189,6 @@ export function SchemaPage({ history }: RouterProps) {
       }
     })();
   }, [query]);
-
-  // Bumped after a Generate Data Model, so meta is fetched again.
-  const [metaVersion, setMetaVersion] = useState(0);
-
-  useEffect(() => {
-    if (!cubeApi) {
-      return undefined;
-    }
-    let cancelled = false;
-    setMetaLoading(true);
-    cubeApi
-      .meta()
-      .then((meta) => {
-        if (cancelled) {
-          return;
-        }
-        setMetaError(null);
-        const map: Record<string, MetaCube> = {};
-        (meta.meta.cubes as unknown as MetaCube[]).forEach((cube) => {
-          map[cube.name] = cube;
-        });
-        setMetaCubes(map);
-      })
-      .catch((e: any) => {
-        if (!cancelled) {
-          setMetaCubes({});
-          setMetaError(e?.message || String(e));
-        }
-      })
-      .finally(() => !cancelled && setMetaLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [cubeApi, metaVersion]);
 
   // The organizations already listed (every loaded page) and the search
   // results, fetched again so their counts follow a change of the model.
@@ -288,9 +246,7 @@ export function SchemaPage({ history }: RouterProps) {
     }
     const request = (async () => {
       try {
-        const detail = await readJson(
-          await playgroundFetch(`playground/tree/${encodeURIComponent(slug)}`)
-        );
+        const detail = await api.detail(known.current[slug] ?? { slug, name: slug });
         setDetails((current) => ({ ...current, [slug]: detail }));
         setDetailErrors((current) => {
           const { [slug]: _gone, ...rest } = current;
@@ -298,12 +254,18 @@ export function SchemaPage({ history }: RouterProps) {
         });
       } catch (e: any) {
         delete detailRequests.current[slug];
+        // No longer the owner: the organization leaves the tree.
+        if (!rbac.isAdmin && (e.status === 403 || e.status === 404)) {
+          setOrgs((current) => current.filter((o) => o.slug !== slug));
+          setFound((current) => current.filter((o) => o.slug !== slug));
+          return;
+        }
         setDetailErrors((current) => ({ ...current, [slug]: e.message }));
       }
     })();
     detailRequests.current[slug] = request;
     return request;
-  }, []);
+  }, [api, rbac.isAdmin]);
 
   const loadMore = async () => {
     if (loadingMoreRef.current) {
@@ -346,33 +308,29 @@ export function SchemaPage({ history }: RouterProps) {
     [selectedKey]
   );
 
+  // The file's id (its path without RBAC) and the node it belongs to.
+  const fileId = useMemo(() => {
+    if (selected?.kind !== 'file' || !selected.rest) {
+      return null;
+    }
+    return details[selected.slug]?.files.find((f) => f.fileName === selected.rest)?.id ?? selected.rest;
+  }, [selected, details]);
+
   useEffect(() => {
     setFile(null);
     setFileError(null);
-    if (!selected || selected.kind !== 'file' || !selected.rest) {
+    if (!selected || !fileId) {
       return undefined;
     }
     let cancelled = false;
-    (async () => {
-      try {
-        const result = await readJson(
-          await playgroundFetch(
-            `playground/tree/${encodeURIComponent(selected.slug)}/files/${encodePath(selected.rest!)}`
-          )
-        );
-        if (!cancelled) {
-          setFile(result);
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setFileError(e.message);
-        }
-      }
-    })();
+    api.file(known.current[selected.slug] ?? { slug: selected.slug, name: selected.slug }, fileId).then(
+      (result) => !cancelled && setFile(result),
+      (e: Error) => !cancelled && setFileError(e.message)
+    );
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [api, selected?.slug, fileId]);
 
   const treeData = useMemo(() => {
     // The loaded list, plus what the server found that is not in it yet.
@@ -382,7 +340,7 @@ export function SchemaPage({ history }: RouterProps) {
       const detail = details[org.slug];
       return {
         ...node,
-        title: org.errors > 0 ? `${org.name} (${org.errors} errors)` : node.title,
+        title: (org.errors ?? 0) > 0 ? `${org.name} (${org.errors} errors)` : node.title,
         ...(detail ? { children: detailNodes(org.slug, detail) } : {}),
       };
     });
@@ -431,56 +389,40 @@ export function SchemaPage({ history }: RouterProps) {
     if (!checkedSlug) {
       return;
     }
-    const detail = details[checkedSlug];
-    const tablesSchema: Record<string, Record<string, unknown>> = {};
-    Object.entries(detail.tables || {}).forEach(([ds, schemas]) => {
-      Object.entries(schemas).forEach(([schema, tables]) => {
-        tablesSchema[`${ds}.${schema}`] = tables;
-      });
-    });
-
     const options = { format };
     playgroundAction('Generate Schema', options);
-    let res: Response;
-    try {
-      res = await playgroundFetch('playground/generate-schema', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          format,
-          tables: checkedKeys.map((k) => tableRefs[k]).filter(Boolean),
-          tablesSchema,
-        }),
+    const org = known.current[checkedSlug] ?? { slug: checkedSlug, name: checkedSlug };
+    const tables = checkedKeys.map((k) => tableRefs[k]).filter(Boolean);
+    const tablesSchema: Record<string, unknown> = {};
+    Object.entries(details[checkedSlug]?.tables || {}).forEach(([ds, schemas]) => {
+      Object.entries(schemas).forEach(([schema, list]) => {
+        tablesSchema[`${ds}.${schema}`] = list;
       });
+    });
+    try {
+      await api.generate(org, tables, { format, tablesSchema });
     } catch (e: any) {
       playgroundAction('Generate Schema Fail', { error: String(e), ...options });
-      message.error(`Could not generate the data model: ${e.message}`);
+      message.error(e.message);
       return;
     }
 
-    if (res.status === 200) {
-      playgroundAction('Generate Schema Success', options);
-      await loadDetail(checkedSlug, true);
-      setCheckedKeys([]);
-      // The new cubes show in meta and in the organizations' counts.
-      setMetaVersion((v) => v + 1);
-      refreshOrgs();
-      Modal.success({
-        title: 'Data model files successfully generated!',
-        content:
-          'You can start exploring your data model and building the charts',
-        okText: 'Build',
-        cancelText: 'Close',
-        okCancel: true,
-        onOk() {
-          history.push('/build');
-        },
-      });
-    } else {
-      const error = await res.text();
-      playgroundAction('Generate Schema Fail', { error, ...options });
-      message.error(error);
-    }
+    playgroundAction('Generate Schema Success', options);
+    await loadDetail(checkedSlug, true);
+    setCheckedKeys([]);
+    // The new cubes show in the organizations' counts.
+    refreshOrgs();
+    Modal.success({
+      title: 'Data model files successfully generated!',
+      content:
+        'You can start exploring your data model and building the charts',
+      okText: 'Build',
+      cancelText: 'Close',
+      okCancel: true,
+      onOk() {
+        history.push('/build');
+      },
+    });
   };
 
   const renderContent = () => {
@@ -518,13 +460,13 @@ export function SchemaPage({ history }: RouterProps) {
         return <CubeLoader />;
       }
       return (
-        <CubeDetail
+        <CubePanel
+          api={api}
+          org={known.current[selected.slug]}
+          owner={!rbac.isAdmin}
           cube={cube}
-          metaCube={metaCubes?.[cube.name]}
-          metaLoading={metaLoading}
-          metaError={metaError}
           errors={detail.errors || []}
-          onOpen={(metaCube) => history.push(buildQueryUrl(metaCube))}
+          onOpen={() => history.push(buildQueryUrl(cube))}
         />
       );
     }
@@ -538,9 +480,9 @@ export function SchemaPage({ history }: RouterProps) {
       }
       return (
         <>
-          <Alert
-            message={
-              isDocker ? (
+          {isDocker && (
+            <Alert
+              message={(
                 <span>
                   Data model files are located and can be edited in the mount
                   volume directory.{' '}
@@ -551,24 +493,24 @@ export function SchemaPage({ history }: RouterProps) {
                     Learn more about working with Cube data model in the docs
                   </Typography.Link>
                 </span>
-              ) : (
-                <span>
-                  This file can be edited at&nbsp;
-                  <b>{file.absPath}</b>
-                </span>
-              )
-            }
-            type="info"
-            style={{ paddingTop: 10, paddingBottom: 11 }}
-          />
+              )}
+              type="info"
+              style={{ paddingTop: 10, paddingBottom: 11 }}
+            />
+          )}
           <PrismCode code={file.content} style={{ padding: 0, marginTop: 24 }} />
+          {file.updatedBy && file.updatedAt && (
+            <Typography.Text type="secondary">
+              Alterado por {file.updatedBy} em {new Date(file.updatedAt).toLocaleString()}
+            </Typography.Text>
+          )}
         </>
       );
     }
 
     if (selected.kind === 'org') {
       const org = orgs.find((o) => o.slug === selected.slug);
-      if (org && org.errors > 0 && !detail) {
+      if (org && (org.errors ?? 0) > 0 && !detail) {
         return <CubeLoader />;
       }
       if (detail?.errors?.length) {

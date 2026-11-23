@@ -7,16 +7,27 @@ export type Rbac = {
   session: Session | null;
   // May use the Data Model and Data Source pages: everyone without RBAC.
   isAdmin: boolean;
+  // May use the Data Model page: platform admins and organization owners.
+  canModel: boolean;
 };
 
-export function useRbac(): Rbac {
-  const context = usePlaygroundContext();
+export function buildRbac(
+  context: { authRequired?: boolean; rbac?: boolean } | null | undefined,
+  current: Session | null
+): Rbac {
   const enabled = Boolean(context?.authRequired || context?.rbac);
-  const session = enabled ? getSession() : null;
+  const session = enabled ? current : null;
+  const isAdmin = !enabled || Boolean(session?.user.platformAdmin);
 
   return {
     enabled,
     session,
-    isAdmin: !enabled || Boolean(session?.user.platformAdmin),
+    isAdmin,
+    canModel: isAdmin || (session?.user.ownedOrganizations?.length ?? 0) > 0,
   };
+}
+
+export function useRbac(): Rbac {
+  const context = usePlaygroundContext();
+  return buildRbac(context, getSession());
 }

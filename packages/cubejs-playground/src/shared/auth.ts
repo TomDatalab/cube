@@ -12,7 +12,13 @@ export const WORKSPACE_HEADER = 'X-Cube-Workspace';
 export type Session = {
   token: string;
   expiresAt: string;
-  user: { id: string; name: string | null; platformAdmin: boolean };
+  user: {
+    id: string;
+    name: string | null;
+    platformAdmin: boolean;
+    // The organizations the user owns: they open the Data Model page.
+    ownedOrganizations: { id: string; slug: string; name: string }[];
+  };
 };
 
 function storage(): Storage | null {
@@ -179,7 +185,12 @@ export async function login(
   const session: Session = {
     token: body.token,
     expiresAt: body.expiresAt,
-    user: { ...body.user, platformAdmin: Boolean(body.user?.platformAdmin) },
+    user: {
+      ...body.user,
+      platformAdmin: Boolean(body.user?.platformAdmin),
+      // Older servers do not send the list.
+      ownedOrganizations: body.user?.ownedOrganizations ?? [],
+    },
   };
   write(STORAGE_KEY, JSON.stringify(session));
   lastToken = session.token;
