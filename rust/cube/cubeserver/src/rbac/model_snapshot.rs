@@ -153,10 +153,53 @@ pub fn prepare_cache_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Writes `v<version>/` (through `v<version>.tmp/`), points `live` at it with
-/// an atomic rename and prunes old versions (never `live`'s target). An
-/// existing `v<version>` is complete by construction, so only `live` is
-/// relinked. Prune errors are logged, not returned.
+/// A name no other call of this process or of another one uses.
+fn unique_tmp(base: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!("{base}.tmp-{}-{n}", std::process::id())
+}
+
+/// Whether `name` is a temporary entry of [`materialize`]: `v<n>.tmp…` or
+/// `live.tmp…`.
+fn is_tmp(name: &str) -> bool {
+    match name.split_once(".tmp") {
+        Some(("live", _)) => true,
+        Some((v, _)) => version_of(v).is_some(),
+        None => false,
+    }
+}
+
+/// Removes the temporary entries a stopped [`materialize`] left behind. Only
+/// call it while no materialize runs on `cache_dir`: it would remove that
+/// one's half-written folder.
+pub fn remove_stale_tmp(cache_dir: &Path) -> io::Result<()> {
+    let entries = match std::fs::read_dir(cache_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_name().to_str().is_some_and(is_tmp) {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes `v<version>/` (through a temporary folder of its own), points
+/// `live` at it with an atomic rename and prunes old versions (never `live`'s
+/// target). An existing `v<version>` is complete by construction, so only
+/// `live` is relinked. Prune errors are logged, not returned. Temporary
+/// names are unique per call, so two calls never write into the same folder.
 pub fn materialize(
     cache_dir: &Path,
     version: i64,
@@ -175,24 +218,27 @@ fn materialize_with(
     let name = format!("v{version}");
     let dir = cache_dir.join(&name);
     if !dir.is_dir() {
-        let tmp = cache_dir.join(format!("{name}.tmp"));
-        if tmp.exists() {
-            std::fs::remove_dir_all(&tmp)?;
-        }
+        let tmp = cache_dir.join(unique_tmp(&name));
         std::fs::create_dir(&tmp)?;
         if let Err(e) = write_sources(&tmp, sources) {
             let _ = std::fs::remove_dir_all(&tmp);
             return Err(e);
         }
-        std::fs::rename(&tmp, &dir)?;
+        if let Err(e) = std::fs::rename(&tmp, &dir) {
+            let _ = std::fs::remove_dir_all(&tmp);
+            // Another call completed the same version first.
+            if !dir.is_dir() {
+                return Err(e);
+            }
+        }
     }
     let live = cache_dir.join("live");
-    let live_tmp = cache_dir.join("live.tmp");
-    if live_tmp.symlink_metadata().is_ok() {
-        std::fs::remove_file(&live_tmp)?;
-    }
+    let live_tmp = cache_dir.join(unique_tmp("live"));
     std::os::unix::fs::symlink(&name, &live_tmp)?;
-    std::fs::rename(&live_tmp, &live)?;
+    if let Err(e) = std::fs::rename(&live_tmp, &live) {
+        let _ = std::fs::remove_file(&live_tmp);
+        return Err(e);
+    }
     if let Err(e) = prune(cache_dir) {
         tracing::warn!(error = %e, "could not prune old model versions");
     }
@@ -292,12 +338,48 @@ mod tests {
         let tmp = d.path().join("v5.tmp");
         std::fs::create_dir_all(tmp.join("digital")).unwrap();
         std::fs::write(tmp.join("partial.yml"), "half").unwrap();
+        std::fs::write(d.path().join("live.tmp-1-1"), "").unwrap();
         assert_eq!(std::fs::read_link(d.path().join("live")).unwrap(), PathBuf::from("v4"));
+        remove_stale_tmp(d.path()).unwrap();
+        assert!(!d.path().join("live.tmp-1-1").exists());
         let live = materialize(d.path(), 5, &src("new")).unwrap();
         assert_eq!(std::fs::read_link(&live).unwrap(), PathBuf::from("v5"));
         assert_eq!(std::fs::read_to_string(live.join("digital/fatos.yml")).unwrap(), "new");
         assert!(!live.join("partial.yml").exists());
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn concurrent_materialize_of_one_version_is_complete() {
+        let d = tdir();
+        let srcs: Vec<(String, String)> =
+            (0..300).map(|i| (format!("digital/f{i}.yml"), format!("c{i}"))).collect();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| materialize(d.path(), 7, &srcs).unwrap());
+            }
+        });
+        let live = d.path().join("live");
+        assert_eq!(std::fs::read_link(&live).unwrap(), PathBuf::from("v7"));
+        for (p, c) in &srcs {
+            assert_eq!(&std::fs::read_to_string(live.join(p)).unwrap(), c);
+        }
+        let left: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn stale_tmp_names() {
+        for t in ["v5.tmp", "v5.tmp-1-2", "live.tmp", "live.tmp-9-0"] {
+            assert!(is_tmp(t), "{t}");
+        }
+        for n in ["v5", "live", "digital.tmp", "x.tmp-1"] {
+            assert!(!is_tmp(n), "{n}");
+        }
     }
 
     #[test]

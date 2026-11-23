@@ -368,3 +368,99 @@ db_test!(disk_folder_is_not_read, |store| {
         .unwrap();
     assert!(!rt.live_path().join("digital/novo.yml").exists());
 });
+
+/// Every file of `rows` under `live`, with its content.
+fn live_is_complete(rt: &ModelRuntime, rounds: usize, count: usize) {
+    let target = std::fs::read_link(rt.live_path()).unwrap();
+    assert_eq!(target, std::path::PathBuf::from(format!("v{}", rt.version())));
+    for (round, i) in (0..rounds).flat_map(|r| (0..count).map(move |i| (r, i))) {
+        let p = rt.live_path().join(format!("digital/r{round}/f{i:04}.yml"));
+        assert_eq!(std::fs::read_to_string(&p).unwrap_or_default(), format!("c{i}"), "{}", p.display());
+    }
+}
+
+db_test!(concurrent_refreshes_leave_a_complete_live, |store| {
+    let org = store.create_organization("Digital", "digital", "ann").await.unwrap();
+    let cache = cache_dir();
+    let rt = ModelRuntime::start(store.clone(), cache.path().to_path_buf())
+        .await
+        .unwrap();
+    let count = 400;
+    for round in 0..3 {
+        let changes = (0..count)
+            .map(|i| put(Some(org.id), &format!("r{round}/f{i:04}.yml"), &format!("c{i}")))
+            .collect();
+        write(&store, changes).await.unwrap();
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let rt = rt.clone();
+                tokio::spawn(async move { rt.refresh().await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        assert_eq!(rt.version(), store.model_version().await.unwrap());
+        live_is_complete(&rt, round + 1, count);
+    }
+    // No temporary folder is left behind.
+    let left: Vec<_> = std::fs::read_dir(cache.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+});
+
+db_test!(refresh_never_moves_live_back, |store| {
+    let org = store.create_organization("Digital", "digital", "ann").await.unwrap();
+    let cache = cache_dir();
+    let rt = ModelRuntime::start(store.clone(), cache.path().to_path_buf())
+        .await
+        .unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Stops the watcher even when the test panics first.
+    struct Stop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let stop = Stop(done.clone());
+    // Watches `live` and the version while writes and refreshes race.
+    let watcher = {
+        let (rt, done, live) = (rt.clone(), done.clone(), rt.live_path().to_path_buf());
+        tokio::task::spawn_blocking(move || {
+            let (mut last_link, mut last_seen) = (0i64, 0i64);
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok(t) = std::fs::read_link(&live) {
+                    let v: i64 = t.to_string_lossy().trim_start_matches('v').parse().unwrap();
+                    assert!(v >= last_link, "live went from v{last_link} back to v{v}");
+                    last_link = v;
+                }
+                let seen = rt.version();
+                assert!(seen >= last_seen, "version went from {last_seen} back to {seen}");
+                last_seen = seen;
+            }
+        })
+    };
+    let mut refreshes = Vec::new();
+    for round in 0..20 {
+        let changes = (0..50)
+            .map(|i| put(Some(org.id), &format!("r{round}/f{i:04}.yml"), "x"))
+            .collect();
+        write(&store, changes).await.unwrap();
+        for _ in 0..3 {
+            let rt = rt.clone();
+            refreshes.push(tokio::spawn(async move { rt.refresh().await }));
+        }
+    }
+    for r in refreshes {
+        r.await.unwrap().unwrap();
+    }
+    drop(stop);
+    watcher.await.unwrap();
+    let last = store.model_version().await.unwrap();
+    assert_eq!(rt.version(), last);
+    assert_eq!(std::fs::read_link(rt.live_path()).unwrap(), std::path::PathBuf::from(format!("v{last}")));
+});
