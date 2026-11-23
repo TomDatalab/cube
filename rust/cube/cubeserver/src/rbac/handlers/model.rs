@@ -19,7 +19,8 @@ use super::organizations::visible_organization;
 use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::handlers::tree::org_detail as detail_of;
+use crate::handlers::tree::org_detail_for;
+use crate::rbac::model_redact::redact;
 use crate::handlers::scaffold::{plan, split_schema, is_prefixed, GenerateRequest};
 use crate::rbac::model_snapshot::{is_editable, source_path, sources, validate_path};
 use crate::rbac::model_sync::{SyncContext, SYNC_MANAGER};
@@ -34,6 +35,21 @@ const TEMPLATE_MESSAGE: &str = "Arquivos .jinja e .j2 não são editáveis aqui"
 struct Scope {
     organization: Option<Uuid>,
     slug: String,
+    /// The caller owns the organization without being a platform admin:
+    /// nothing returned may reveal another organization's files.
+    owner_only: bool,
+}
+
+/// `e` as `owner_only` callers may see it.
+fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> WriteError {
+    if owner_only && !e.problems.is_empty() {
+        e.problems = redact(&e.problems, &e.problems, slug);
+    }
+    e
+}
+
+async fn detail_of(state: &AppState, scope: &Scope) -> Result<Value, ApiError> {
+    org_detail_for(state, &scope.slug, scope.owner_only).await
 }
 
 fn writer(state: &AppState) -> Result<Arc<ModelWriter>, ApiError> {
@@ -77,10 +93,12 @@ async fn org_scope(
 ) -> Result<(Scope, String), ApiError> {
     let (rbac, user) = caller(state, ctx)?;
     let org = visible_organization(rbac, id, "admin", user).await?;
+    let owner_only = !rbac.is_platform_admin(user).await?;
     Ok((
         Scope {
             organization: Some(org.id),
             slug: org.slug,
+            owner_only,
         },
         user.to_string(),
     ))
@@ -93,6 +111,7 @@ fn platform_scope(state: &AppState, ctx: &RequestContext) -> Result<(Scope, Stri
         Scope {
             organization: None,
             slug: PLATFORM_FOLDER.to_string(),
+            owner_only: false,
         },
         user.to_string(),
     ))
@@ -138,7 +157,7 @@ async fn after_write(
     scope: &Scope,
     fixed: usize,
 ) -> Result<Json<Value>, ApiError> {
-    let mut detail = detail_of(state, &scope.slug).await?;
+    let mut detail = detail_of(state, scope).await?;
     if fixed > 0 {
         detail["fixed"] = json!(fixed);
     }
@@ -173,7 +192,8 @@ async fn put_file(
                 managed_by: None,
             }])
         })
-        .await?;
+        .await
+        .map_err(|e| redacted(e, scope.owner_only, &scope.slug))?;
     after_write(state, &scope, written.fixed).await
 }
 
@@ -203,7 +223,8 @@ async fn delete_file(
                 expected_version: Some(version),
             }])
         })
-        .await?;
+        .await
+        .map_err(|e| redacted(e, scope.owner_only, &scope.slug))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -214,7 +235,7 @@ pub async fn org_detail(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let (scope, _) = org_scope(&state, &ctx, &id).await?;
-    Ok(Json(detail_of(&state, &scope.slug).await?))
+    Ok(Json(detail_of(&state, &scope).await?))
 }
 
 /// `GET /organizations/{id}/model/files/{file}`
@@ -255,7 +276,7 @@ pub async fn platform_detail(
     Extension(ctx): Extension<RequestContext>,
 ) -> Result<Json<Value>, ApiError> {
     let (scope, _) = platform_scope(&state, &ctx)?;
-    Ok(Json(detail_of(&state, &scope.slug).await?))
+    Ok(Json(detail_of(&state, &scope).await?))
 }
 
 /// `GET /platform/model/files/{file}`
@@ -362,6 +383,7 @@ pub async fn generate_into_model(
     slug: &str,
     tables: &[(String, String)],
     schema: &cubedriver::DatabaseStructure,
+    owner_only: bool,
 ) -> Result<Vec<Value>, ApiError> {
     let writer = writer(state)?;
     let rbac = super::rbac_of(state)?;
@@ -375,6 +397,7 @@ pub async fn generate_into_model(
         &state.config.data_sources,
         &request,
         Some(slug),
+        owner_only,
     )?;
     let slugs = rbac
         .store
@@ -428,7 +451,8 @@ pub async fn generate_into_model(
             }
             Ok(changes)
         })
-        .await?;
+        .await
+        .map_err(|e| redacted(e, owner_only, slug))?;
     Ok(planned
         .into_iter()
         .map(|f| json!({ "fileName": f.name, "content": f.content }))
@@ -505,7 +529,7 @@ async fn generate_route(
         }
     }
     let files =
-        generate_into_model(state, &user, scope.organization, &scope.slug, &tables, &merged)
+        generate_into_model(state, &user, scope.organization, &scope.slug, &tables, &merged, scope.owner_only)
             .await?;
     Ok(Json(json!({ "files": files })))
 }

@@ -454,6 +454,7 @@ async fn generate_into_database(
         &slug,
         &request.tables,
         &request.tables_schema,
+        false,
     )
     .await
 }

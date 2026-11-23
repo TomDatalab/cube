@@ -11,6 +11,7 @@ pub mod handlers;
 pub mod identity;
 pub mod model_import;
 pub mod model_sync;
+pub mod model_redact;
 pub mod model_runtime;
 pub mod model_snapshot;
 pub mod model_validate;

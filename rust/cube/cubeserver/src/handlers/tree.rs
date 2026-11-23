@@ -184,6 +184,16 @@ pub async fn detail(
 /// `_platform`). With RBAC on, each file also carries `id`, `path`,
 /// `version` and `editable`.
 pub(crate) async fn org_detail(state: &AppState, slug: &str) -> Result<Value, ApiError> {
+    org_detail_for(state, slug, false).await
+}
+
+/// [`org_detail`]; with `owner_only` the model's errors are redacted for an
+/// owner who is not a platform admin (see `model_redact`).
+pub(crate) async fn org_detail_for(
+    state: &AppState,
+    slug: &str,
+    owner_only: bool,
+) -> Result<Value, ApiError> {
     let (owner, sources) = resolve(state, slug).await?;
     let index = index(state).await?;
     // `None`: no policy, everything is in the one node.
@@ -243,6 +253,24 @@ pub(crate) async fn org_detail(state: &AppState, slug: &str) -> Result<Value, Ap
         .chain(index.errors.iter())
         .map(|r| json!({ "file": r.file, "cube": r.cube, "message": r.message }))
         .collect();
+    if owner_only {
+        let problems: Vec<crate::rbac::model_validate::Problem> = index
+            .rejected
+            .iter()
+            .filter(|(o, _)| mine(o))
+            .map(|(_, r)| r)
+            .chain(index.errors.iter())
+            .map(|r| crate::rbac::model_validate::Problem {
+                file: r.file.clone(),
+                cube: r.cube.clone(),
+                message: r.message.clone(),
+            })
+            .collect();
+        errors = crate::rbac::model_redact::redact(&problems, &[], slug)
+            .into_iter()
+            .map(|p| json!({ "file": p.file, "cube": p.cube, "message": p.message }))
+            .collect();
+    }
 
     // Only here, on expanding, are the databases asked for their tables.
     let results = futures::future::join_all(
