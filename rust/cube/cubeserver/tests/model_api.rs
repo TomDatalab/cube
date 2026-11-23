@@ -729,6 +729,75 @@ api_test!(owner_sees_only_own_errors_in_detail, |store| {
     assert!(full.to_string().contains("digital/ruim.yml"), "{full}");
 });
 
+// ---- the permission matrix of the spec ----
+
+api_test!(owner_reaches_only_own_model, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (olga, a, _) = owner_org(&env, &store, &admin, "olga", "Alfa").await;
+    let (b, _) = org(&env, &store, &admin, "Beta").await;
+    install_policy(&[("alfa", &["default"]), ("beta", &["default"])], &[]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![
+            put_in(Some(a), "a.yml", &cube("a"), None),
+            put_in(Some(b), "b.yml", &cube("b"), None),
+        ]))
+        .await
+        .unwrap();
+    let rows = store.model_rows().await.unwrap();
+    let row = |org| rows.files.iter().find(|f| f.organization_id == Some(org)).unwrap();
+    let (fa, fb) = (row(a), row(b));
+    let before = store.model_version().await.unwrap();
+    let edit = |v: i32| Some(json!({ "content": cube("z"), "version": v }));
+    let generate = Some(json!({ "tables": [["default.cluster_test", "fatos"]] }));
+
+    // The owner of A cannot see B: B's routes are 404.
+    let ob = format!("/cube/v1/organizations/{b}/model");
+    let fb_url = format!("{ob}/files/{}", fb.id);
+    assert_eq!(call(&env, Method::GET, &olga, &ob, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::GET, &olga, &fb_url, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::PUT, &olga, &fb_url, edit(fb.version)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::DELETE, &olga, &format!("{fb_url}?version={}", fb.version), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::POST, &olga, &format!("{ob}/generate"), generate.clone()).await.0, StatusCode::NOT_FOUND);
+
+    // A's id with a file of B: 404 too.
+    let oa = format!("/cube/v1/organizations/{a}/model");
+    let cross = format!("{oa}/files/{}", fb.id);
+    assert_eq!(call(&env, Method::GET, &olga, &cross, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::PUT, &olga, &cross, edit(fb.version)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::DELETE, &olga, &format!("{cross}?version={}", fb.version), None).await.0, StatusCode::NOT_FOUND);
+    // Its own model is open to it.
+    assert_eq!(call(&env, Method::GET, &olga, &oa, None).await.0, StatusCode::OK);
+    assert_eq!(call(&env, Method::GET, &olga, &format!("{oa}/files/{}", fa.id), None).await.0, StatusCode::OK);
+
+    // A workspace member of A who is not its owner: 403 on A's model routes.
+    store
+        .create_user(&cubeserver::rbac::store::NewUser {
+            id: "bia".into(),
+            name: None,
+            email: None,
+            password_hash: cubeserver::rbac::identity::hash_password("member-password-1").unwrap(),
+        })
+        .await
+        .unwrap();
+    let (status, ws) = call(&env, Method::POST, &olga, &format!("/cube/v1/organizations/{a}/workspaces"),
+        Some(json!({ "name": "W1" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{ws}");
+    let ws = ws["id"].as_str().unwrap().to_string();
+    let (status, body) = call(&env, Method::PUT, &olga, &format!("/cube/v1/workspaces/{ws}/members/bia"),
+        Some(json!({ "role": "editor" }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bia = login(&env, "bia", "member-password-1").await;
+    let fa_url = format!("{oa}/files/{}", fa.id);
+    assert_eq!(call(&env, Method::GET, &bia, &oa, None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&env, Method::GET, &bia, &fa_url, None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&env, Method::PUT, &bia, &fa_url, edit(fa.version)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&env, Method::DELETE, &bia, &format!("{fa_url}?version={}", fa.version), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&env, Method::POST, &bia, &format!("{oa}/generate"), generate).await.0, StatusCode::FORBIDDEN);
+
+    assert_eq!(store.model_version().await.unwrap(), before);
+});
+
 // ---------------------------------------------------------------- SofiaDB sync
 
 const SYNC_USER: &str = "sofiadb-sync";
