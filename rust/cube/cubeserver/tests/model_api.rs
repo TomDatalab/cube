@@ -314,7 +314,7 @@ api_test!(file_of_other_org_is_404, |store| {
     let url = format!("/cube/v1/organizations/{a}/model/files/{id}");
     assert_eq!(call(&env, Method::GET, &admin, &url, None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(call(&env, Method::PUT, &admin, &url, Some(json!({ "content": cube("x"), "version": version }))).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(call(&env, Method::DELETE, &admin, &url, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::DELETE, &admin, &format!("{url}?version={version}"), None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{a}/model/files/not-a-uuid"), None).await.0, StatusCode::NOT_FOUND);
 });
 
@@ -402,4 +402,24 @@ api_test!(organization_with_files_is_400, |store| {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, body) = call(&env, Method::DELETE, &admin, &url, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+});
+
+api_test!(delete_without_version_is_400, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (org_id, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(org_id), "a.yml", &cube("a"), None)]))
+        .await
+        .unwrap();
+    let base = format!("/cube/v1/organizations/{org_id}/model");
+    let (_, detail) = call(&env, Method::GET, &admin, &base, None).await;
+    let (id, _) = file_in(&detail, "digital/a.yml");
+    let before = store.model_version().await.unwrap();
+    let (status, body) = call(&env, Method::DELETE, &admin, &format!("{base}/files/{id}"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Informe a versão do arquivo (?version=)");
+    assert_eq!(call(&env, Method::GET, &admin, &format!("{base}/files/{id}"), None).await.0, StatusCode::OK);
+    assert_eq!(store.model_version().await.unwrap(), before);
 });

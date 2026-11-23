@@ -182,13 +182,15 @@ async fn delete_file(
     file: &str,
     version: Option<i32>,
 ) -> Result<StatusCode, ApiError> {
+    let version =
+        version.ok_or_else(|| ApiError::bad_request("Informe a versão do arquivo (?version=)"))?;
     let writer = writer(state)?;
     let id = resource_id(file, "file")?;
     writer
         .write(&user, "delete file", |rows| {
             let row = find(&rows.files, &scope, id)?;
             check_editable(row)?;
-            if version.is_some_and(|v| v != row.version) {
+            if version != row.version {
                 return Err(WriteError::new(
                     StatusCode::CONFLICT,
                     "O arquivo mudou desde que você abriu; abra de novo",
@@ -196,7 +198,7 @@ async fn delete_file(
             }
             Ok(vec![ModelChange::Delete {
                 id,
-                expected_version: version,
+                expected_version: Some(version),
             }])
         })
         .await?;
