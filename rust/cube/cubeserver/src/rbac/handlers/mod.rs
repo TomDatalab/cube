@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod connections;
+pub mod model;
 pub mod objects;
 pub mod organizations;
 pub mod roles;
@@ -141,6 +142,31 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             &format!("{base}/v1/workspaces/:id/objects"),
             get(objects::list).post(objects::create),
         )
+        .route(
+            &format!("{base}/v1/organizations/:id/model"),
+            get(model::org_detail),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/model/files/:file"),
+            get(model::org_get_file)
+                .put(model::org_put_file)
+                .delete(model::org_delete_file),
+        )
+        .route(
+            &format!("{base}/v1/platform/model"),
+            get(model::platform_detail),
+        )
+        .route(
+            &format!("{base}/v1/platform/model/files/:file"),
+            get(model::platform_get_file)
+                .put(model::platform_put_file)
+                .delete(model::platform_delete_file),
+        )
+        .route(
+            &format!("{base}/v1/model/files/:file/organization"),
+            put(model::move_file),
+        )
+        .route(&format!("{base}/v1/model/export"), get(model::export))
         .route(
             &format!("{base}/v1/objects/:id"),
             get(objects::get)

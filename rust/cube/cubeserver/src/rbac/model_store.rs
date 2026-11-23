@@ -132,6 +132,16 @@ impl Store {
         Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(file_from))
     }
 
+    pub async fn organization_has_model_files(&self, id: Uuid) -> Result<bool, StoreError> {
+        let c = self.conn().await?;
+        Ok(c.query_one(
+            "SELECT EXISTS (SELECT 1 FROM model_files WHERE organization_id = $1)",
+            &[&id],
+        )
+        .await?
+        .get::<_, bool>(0))
+    }
+
     pub async fn model_is_empty(&self) -> Result<bool, StoreError> {
         let c = self.conn().await?;
         Ok(!c

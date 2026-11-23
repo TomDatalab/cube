@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::model_index::ModelIndex;
+use crate::rbac::model_snapshot::{is_editable, source_path};
+use crate::rbac::model_store::ModelFile;
 use crate::rbac::store::Search;
 
 /// The one node of the tree when RBAC is off.
@@ -175,8 +177,15 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (owner, sources) = resolve(&state, &slug).await?;
-    let index = index(&state).await?;
+    Ok(Json(org_detail(&state, &slug).await?))
+}
+
+/// The detail of one node of the tree (an organization's slug, or
+/// `_platform`). With RBAC on, each file also carries `id`, `path`,
+/// `version` and `editable`.
+pub(crate) async fn org_detail(state: &AppState, slug: &str) -> Result<Value, ApiError> {
+    let (owner, sources) = resolve(state, slug).await?;
+    let index = index(state).await?;
     // `None`: no policy, everything is in the one node.
     let mine = |o: &Owner| owner.as_ref().is_none_or(|owner| belongs(owner, o));
 
@@ -194,11 +203,37 @@ pub async fn detail(
                     "includes": c.includes })
         })
         .collect();
+    let rows = match &state.rbac {
+        Some(rbac) => {
+            let rows = rbac.store.model_rows().await.map_err(store_error)?;
+            let slugs = rbac.store.organization_slugs().await.map_err(store_error)?;
+            Some((rows, slugs))
+        }
+        None => None,
+    };
+    let by_source: std::collections::HashMap<String, &ModelFile> = rows
+        .as_ref()
+        .map(|(rows, slugs)| {
+            rows.files
+                .iter()
+                .filter_map(|f| source_path(f, slugs).map(|p| (p, f)))
+                .collect()
+        })
+        .unwrap_or_default();
     let files: Vec<Value> = index
         .files
         .iter()
         .filter(|f| mine(&f.owner))
-        .map(|f| json!({ "fileName": f.file_name }))
+        .map(|f| match by_source.get(&f.file_name) {
+            Some(row) => json!({
+                "fileName": f.file_name,
+                "id": row.id,
+                "path": row.path,
+                "version": row.version,
+                "editable": is_editable(&row.path, row.managed_by.as_deref()),
+            }),
+            None => json!({ "fileName": f.file_name }),
+        })
         .collect();
     let mut errors: Vec<Value> = index
         .rejected
@@ -226,7 +261,7 @@ pub async fn detail(
         }
     }
 
-    Ok(Json(json!({ "cubes": cubes, "tables": tables, "files": files, "errors": errors })))
+    Ok(json!({ "cubes": cubes, "tables": tables, "files": files, "errors": errors }))
 }
 
 /// `GET /playground/tree/:slug/files/*path` — `path` is a `fileName` from the

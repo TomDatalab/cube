@@ -148,3 +148,258 @@ api_test!(write_to_unknown_organization_is_refused, |store| {
     assert_eq!(err.message, "Organização desconhecida");
     assert_eq!(store.model_version().await.unwrap(), before);
 });
+
+// ---- routes of Task 7 ----
+
+use serde_json::{json, Value};
+
+const SYNC_MESSAGE: &str = "Este arquivo é gerado a partir do catálogo do SofiaDB e é reescrito a cada sincronização. Para personalizar uma tabela, escreva o cubo dela em outro arquivo da organização, com outro nome; na próxima sincronização o cubo gerado sai";
+const STALE: &str = "O arquivo mudou desde que você abriu; abra de novo";
+
+fn cube_on(name: &str, source: &str) -> String {
+    cube(name).replace("data_source: default", &format!("data_source: {source}"))
+}
+
+/// An organization of the admin's: its id and slug.
+async fn org(env: &Env, store: &cubeserver::rbac::store::Store, admin: &str, name: &str) -> (uuid::Uuid, String) {
+    let slug = create_org(env, admin, name).await;
+    let org = store.organization_by_slug(&slug).await.unwrap().unwrap();
+    (org.id, slug)
+}
+
+fn put_in(org: Option<uuid::Uuid>, path: &str, content: &str, managed_by: Option<&str>) -> ModelChange {
+    ModelChange::Put {
+        id: None,
+        organization_id: org,
+        path: path.into(),
+        content: content.into(),
+        expected_version: None,
+        managed_by: managed_by.map(str::to_string),
+    }
+}
+
+/// `(id, version)` of the file `file_name` in a detail.
+fn file_in(detail: &Value, file_name: &str) -> (String, i64) {
+    let f = detail["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["fileName"] == file_name)
+        .unwrap_or_else(|| panic!("{file_name} not in {detail}"));
+    (f["id"].as_str().unwrap().to_string(), f["version"].as_i64().unwrap())
+}
+
+async fn call(env: &Env, method: Method, token: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let (status, body, text) = send(&env.router, method, path, Some(token), body).await;
+    assert!(!matches!(status, StatusCode::SERVICE_UNAVAILABLE | StatusCode::INTERNAL_SERVER_ERROR), "{text}");
+    (status, body)
+}
+
+api_test!(admin_edits_a_file, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (org_id, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(org_id), "fatos.yml", &cube("fatos"), None)]))
+        .await
+        .unwrap();
+    let base = format!("/cube/v1/organizations/{org_id}/model");
+    let (status, detail) = call(&env, Method::GET, &admin, &base, None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let (id, version) = file_in(&detail, "digital/fatos.yml");
+    let f = detail["files"].as_array().unwrap().iter().find(|f| f["id"] == id).unwrap();
+    assert_eq!((f["path"].as_str(), f["editable"].as_bool()), (Some("fatos.yml"), Some(true)));
+
+    let new_content = cube("fatos2");
+    let (status, detail) = call(&env, Method::PUT, &admin, &format!("{base}/files/{id}"),
+        Some(json!({ "content": new_content, "version": version }))).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(file_in(&detail, "digital/fatos.yml").1, version + 1);
+
+    let (status, file) = call(&env, Method::GET, &admin, &format!("{base}/files/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{file}");
+    assert_eq!(file["content"], new_content);
+    assert_eq!(file["version"], version + 1);
+    assert_eq!(file["editable"], true);
+    assert_eq!(file["updatedBy"], ADMIN);
+});
+
+api_test!(stale_put_is_409, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (org_id, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(org_id), "a.yml", &cube("a"), None)]))
+        .await
+        .unwrap();
+    let base = format!("/cube/v1/organizations/{org_id}/model");
+    let (_, detail) = call(&env, Method::GET, &admin, &base, None).await;
+    let (id, version) = file_in(&detail, "digital/a.yml");
+    let url = format!("{base}/files/{id}");
+    let (first, _) = call(&env, Method::PUT, &admin, &url, Some(json!({ "content": cube("a"), "version": version }))).await;
+    assert_eq!(first, StatusCode::OK);
+    let (second, body) = call(&env, Method::PUT, &admin, &url, Some(json!({ "content": cube("a"), "version": version }))).await;
+    assert_eq!(second, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], STALE);
+    let (status, body) = call(&env, Method::DELETE, &admin, &format!("{url}?version={version}"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+});
+
+api_test!(sync_file_is_read_only, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (org_id, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("sync", "seed", |_| Ok(vec![
+            put_in(Some(org_id), "gerado.yml", &cube("gerado"), Some("sofiadb-sync")),
+            put_in(Some(org_id), "t.jinja", "cubes: []\n", None),
+        ]))
+        .await
+        .unwrap();
+    let base = format!("/cube/v1/organizations/{org_id}/model");
+    let (_, detail) = call(&env, Method::GET, &admin, &base, None).await;
+    let (id, version) = file_in(&detail, "digital/gerado.yml");
+    let url = format!("{base}/files/{id}");
+    let (status, body) = call(&env, Method::PUT, &admin, &url, Some(json!({ "content": cube("gerado"), "version": version }))).await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::BAD_REQUEST, Some(SYNC_MESSAGE)));
+    let (status, body) = call(&env, Method::DELETE, &admin, &format!("{url}?version={version}"), None).await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::BAD_REQUEST, Some(SYNC_MESSAGE)));
+    // Readable, and not editable.
+    let (status, file) = call(&env, Method::GET, &admin, &url, None).await;
+    assert_eq!((status, file["editable"].clone()), (StatusCode::OK, json!(false)));
+
+    let (id, version) = file_in(&detail, "digital/t.jinja");
+    let (status, body) = call(&env, Method::PUT, &admin, &format!("{base}/files/{id}"), Some(json!({ "content": "y", "version": version }))).await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::BAD_REQUEST, Some("Arquivos .jinja e .j2 não são editáveis aqui")));
+});
+
+api_test!(delete_of_depended_file_is_400, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let a = "cubes:\n  - name: a\n    sql_table: t\n    data_source: default\n    joins:\n      - name: b\n        sql: \"{CUBE}.id = {b}.id\"\n        relationship: many_to_one\n    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n";
+    let b = "cubes:\n  - name: b\n    sql_table: t\n    data_source: default\n    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n        primary_key: true\n";
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(None, "a.yml", a, None), put_in(None, "b.yml", b, None)]))
+        .await
+        .unwrap();
+    let (status, detail) = call(&env, Method::GET, &admin, "/cube/v1/platform/model", None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let (id, version) = file_in(&detail, "_platform/b.yml");
+    let (status, body) = call(&env, Method::DELETE, &admin, &format!("/cube/v1/platform/model/files/{id}?version={version}"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body["problems"].as_array().unwrap().is_empty(), "{body}");
+    // Nothing was deleted.
+    assert_eq!(call(&env, Method::GET, &admin, &format!("/cube/v1/platform/model/files/{id}"), None).await.0, StatusCode::OK);
+    // `a` lives in Platform, so an organization route does not see it.
+    let (org_id, _) = org(&env, &store, &admin, "Digital").await;
+    let (status, _) = call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{org_id}/model/files/{id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+api_test!(file_of_other_org_is_404, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (a, _) = org(&env, &store, &admin, "Alfa").await;
+    let (b, _) = org(&env, &store, &admin, "Beta").await;
+    install_policy(&[("alfa", &["default"]), ("beta", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(b), "x.yml", &cube("x"), None)]))
+        .await
+        .unwrap();
+    let (_, detail) = call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{b}/model"), None).await;
+    let (id, version) = file_in(&detail, "beta/x.yml");
+    let url = format!("/cube/v1/organizations/{a}/model/files/{id}");
+    assert_eq!(call(&env, Method::GET, &admin, &url, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::PUT, &admin, &url, Some(json!({ "content": cube("x"), "version": version }))).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::DELETE, &admin, &url, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{a}/model/files/not-a-uuid"), None).await.0, StatusCode::NOT_FOUND);
+});
+
+api_test!(move_revalidates, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    let (on, _) = org(&env, &store, &admin, "ON").await;
+    install_policy(&[("digital", &["sofiadb"]), ("on", &[])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(digital), "a.yml", &cube_on("a", "sofiadb"), None)]))
+        .await
+        .unwrap();
+    let (_, detail) = call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{digital}/model"), None).await;
+    let (id, _) = file_in(&detail, "digital/a.yml");
+    let url = format!("/cube/v1/model/files/{id}/organization");
+    let (status, body) = call(&env, Method::PUT, &admin, &url, Some(json!({ "organizationId": on }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body["problems"].as_array().unwrap().is_empty(), "{body}");
+    let (status, body) = call(&env, Method::PUT, &admin, &url, Some(json!({ "organizationId": null }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Once the connection is `on`'s, the file can go to its owner.
+    install_policy(&[("digital", &[]), ("on", &["sofiadb"])], &["default"]);
+    let before = store.model_version().await.unwrap();
+    let (status, body) = call(&env, Method::PUT, &admin, &url, Some(json!({ "organizationId": on }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["version"], before + 1);
+    let (_, detail) = call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{on}/model"), None).await;
+    assert_eq!(file_in(&detail, "on/a.yml").0, id);
+});
+
+api_test!(export_lists_every_file, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["other"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![
+            put_in(Some(digital), "fatos.yml", &cube_on("fatos", "other"), None),
+            put_in(None, "orders.yml", &cube("orders"), None),
+        ]))
+        .await
+        .unwrap();
+    let (status, body) = call(&env, Method::GET, &admin, "/cube/v1/model/export", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["version"], store.model_version().await.unwrap());
+    let files = body["files"].as_array().unwrap();
+    let content = |p: &str| files.iter().find(|f| f["path"] == p).map(|f| f["content"].clone());
+    assert_eq!(content("digital/fatos.yml"), Some(json!(cube_on("fatos", "other"))));
+    assert_eq!(content("_platform/orders.yml"), Some(json!(cube("orders"))));
+});
+
+api_test!(non_admin_cannot_reach_platform, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (status, body) = call(&env, Method::POST, &admin, "/cube/v1/users", Some(json!({
+        "id": "ann", "name": "Ann", "email": "a@example.org", "password": "ann-password-1" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ann = login(&env, "ann", "ann-password-1").await;
+    assert_eq!(call(&env, Method::GET, &ann, "/cube/v1/platform/model", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&env, Method::GET, &ann, "/cube/v1/model/export", None).await.0, StatusCode::FORBIDDEN);
+    let id = uuid::Uuid::new_v4();
+    assert_eq!(call(&env, Method::PUT, &ann, &format!("/cube/v1/model/files/{id}/organization"), Some(json!({ "organizationId": null }))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&env, Method::GET, &ann, &format!("/cube/v1/platform/model/files/{id}"), None).await.0, StatusCode::FORBIDDEN);
+});
+
+api_test!(organization_with_files_is_400, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(digital), "a.yml", &cube("a"), None)]))
+        .await
+        .unwrap();
+    let url = format!("/cube/v1/organizations/{digital}");
+    let (status, body) = call(&env, Method::DELETE, &admin, &url, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Mova ou apague os arquivos do modelo antes");
+
+    let (_, detail) = call(&env, Method::GET, &admin, &format!("{url}/model"), None).await;
+    let (id, version) = file_in(&detail, "digital/a.yml");
+    let (status, _) = call(&env, Method::DELETE, &admin, &format!("{url}/model/files/{id}?version={version}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = call(&env, Method::DELETE, &admin, &url, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+});

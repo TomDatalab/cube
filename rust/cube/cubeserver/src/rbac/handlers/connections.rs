@@ -684,7 +684,7 @@ pub async fn unassign_organization(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn require_platform_admin(ctx: &RequestContext, what: &str) -> Result<(), ApiError> {
+pub(crate) fn require_platform_admin(ctx: &RequestContext, what: &str) -> Result<(), ApiError> {
     if ctx.platform_admin {
         Ok(())
     } else {

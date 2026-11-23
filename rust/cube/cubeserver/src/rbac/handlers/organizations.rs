@@ -248,6 +248,16 @@ pub async fn delete(
     if !workspaces.is_empty() || !connections.is_empty() {
         return Err(in_use());
     }
+    if rbac
+        .store
+        .organization_has_model_files(org.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+    {
+        return Err(ApiError::bad_request(
+            "Mova ou apague os arquivos do modelo antes",
+        ));
+    }
     // Its roles go with the row; their grants go after the commit.
     let roles = rbac
         .store
