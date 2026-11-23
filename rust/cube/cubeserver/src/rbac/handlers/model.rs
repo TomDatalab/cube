@@ -21,7 +21,7 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::tree::org_detail_for;
 use crate::rbac::model_redact::redact;
-use crate::handlers::scaffold::{plan, split_schema, is_prefixed, GenerateRequest};
+use crate::handlers::scaffold::{plan, split_schema, GenerateRequest};
 use crate::rbac::model_snapshot::{is_editable, source_path, sources, validate_path};
 use crate::rbac::model_sync::{SyncContext, SYNC_MANAGER};
 use crate::rbac::model_store::{ModelChange, ModelFile};
@@ -517,21 +517,22 @@ async fn generate_route(
     let _guard = crate::handlers::data_sources::WRITE.lock().await;
     let mut merged = cubedriver::DatabaseStructure::new();
     for name in &involved {
-        for (schema, tables) in crate::handlers::playground::data_source_schema(name).await? {
-            let key = if name != "default" {
-                format!("{name}.{schema}")
-            } else if is_prefixed(&schema, sources) {
-                format!("default.{schema}")
-            } else {
-                schema
-            };
-            merged.entry(key).or_default().extend(tables);
-        }
+        let columns = crate::handlers::playground::data_source_schema(name).await?;
+        merge_columns(&mut merged, name, columns);
     }
     let files =
         generate_into_model(state, &user, scope.organization, &scope.slug, &tables, &merged, scope.owner_only)
             .await?;
     Ok(Json(json!({ "files": files })))
+}
+
+/// Adds the columns read from data source `name` to `merged`, keyed as the
+/// data-model page sends the tables: `<name>.<schema>`, `default` included
+/// (which [`split_schema`] reads back).
+fn merge_columns(merged: &mut cubedriver::DatabaseStructure, name: &str, columns: cubedriver::DatabaseStructure) {
+    for (schema, tables) in columns {
+        merged.entry(format!("{name}.{schema}")).or_default().extend(tables);
+    }
 }
 
 /// `POST /organizations/{id}/model/generate` `{tables: [[schema, table]]}`
@@ -777,4 +778,26 @@ pub async fn sync_put(
         "updated": updated,
         "removed": removed,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_columns_are_keyed_as_the_page_sends_them() {
+        let sources = vec![("sofiadb".to_string(), "postgres".to_string())];
+        let one = |schema: &str| {
+            let mut s = cubedriver::DatabaseStructure::new();
+            s.entry(schema.to_string()).or_default().insert("orders".to_string(), Vec::new());
+            s
+        };
+        let mut merged = cubedriver::DatabaseStructure::new();
+        merge_columns(&mut merged, "default", one("public"));
+        merge_columns(&mut merged, "sofiadb", one("dfos"));
+        let keys: Vec<_> = merged.keys().cloned().collect();
+        assert_eq!(keys, ["default.public", "sofiadb.dfos"]);
+        // Each key reads back as its data source and schema.
+        assert_eq!(split_schema("default.public", &sources), ("default", "public"));
+    }
 }

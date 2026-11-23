@@ -477,6 +477,28 @@ api_test!(generate_writes_rows, |store| {
     assert!(cube_names(&env, &admin).await.contains(&"fatos".to_string()));
 });
 
+api_test!(generate_from_a_default_schema_key, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (org_id, slug) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(org_id), "base.yml", &cube("base"), None)]))
+        .await
+        .unwrap();
+    // The page names a `default` schema `default.<schema>`.
+    let mut schema = cubedriver::DatabaseStructure::new();
+    schema.insert("default.cluster_test".to_string(), structure(&["fatos"]).remove("cluster_test").unwrap());
+    let tables = vec![("default.cluster_test".to_string(), "fatos".to_string())];
+    let files = cubeserver::rbac::handlers::model::generate_into_model(
+        &env.state, "ann", Some(org_id), &slug, &tables, &schema, false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(files[0]["fileName"], "digital/fatos.yml");
+    assert!(cube_names(&env, &admin).await.contains(&"fatos".to_string()));
+});
+
 api_test!(generate_is_all_or_nothing, |store| {
     let env = env_live(store.clone()).await;
     let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
