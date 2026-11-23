@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use cubemodel::{DataModel, ModelError, ModelLoader};
 use uuid::Uuid;
 
-use super::model_snapshot::{sources, validate_path};
+use super::model_snapshot::validate_path;
 use super::model_store::ModelChange;
 use super::store::Store;
 
@@ -85,6 +85,20 @@ pub async fn import_if_empty(
     model_dir: &Path,
     today: &str,
 ) -> Result<ImportReport, String> {
+    import_if_empty_with(store, model_dir, today, verify_import).await
+}
+
+/// [`import_if_empty`] with the cube-name check injected, so a test can force
+/// a mismatch.
+pub async fn import_if_empty_with<V>(
+    store: &Store,
+    model_dir: &Path,
+    today: &str,
+    verify: V,
+) -> Result<ImportReport, String>
+where
+    V: Fn(&[(String, String)], &[(String, String)]) -> Result<(), String> + Send,
+{
     let files = match cubemodel::model_files(model_dir) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -158,21 +172,42 @@ pub async fn import_if_empty(
     }
     let imported = changes.len();
 
-    store
-        .model_write("import", move |rows| {
-            // A concurrent start may have imported already.
-            Ok::<_, ()>(if rows.files.is_empty() { changes } else { Vec::new() })
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|_| "import failed".to_string())?;
-
-    let rows = store.model_rows().await.map_err(|e| e.to_string())?;
     let slugs: HashMap<Uuid, String> = orgs
         .iter()
         .filter_map(|(s, id)| id.map(|id| (id, s.clone())))
         .collect();
-    verify_import(&folder_sources, &sources(&rows, &slugs))?;
+    let folder_for_check = folder_sources;
+    // The check runs inside the transaction: a mismatch rolls everything back.
+    let outcome = store
+        .model_write("import", move |rows| {
+            // A concurrent start may have imported already.
+            if !rows.files.is_empty() {
+                return Ok::<_, String>(Vec::new());
+            }
+            let mut planned: Vec<(String, String)> = changes
+                .iter()
+                .filter_map(|c| match c {
+                    ModelChange::Put {
+                        organization_id,
+                        path,
+                        content,
+                        ..
+                    } => match organization_id {
+                        None => Some((format!("{PLATFORM_DIR}/{path}"), content.clone())),
+                        Some(id) => slugs.get(id).map(|s| (format!("{s}/{path}"), content.clone())),
+                    },
+                    _ => None,
+                })
+                .collect();
+            planned.sort_by(|a, b| a.0.cmp(&b.0));
+            verify(&folder_for_check, &planned)?;
+            Ok(changes)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    if !outcome.changed {
+        return Ok(ImportReport::default());
+    }
 
     let renamed = PathBuf::from(format!("{}.imported-{today}", model_dir.display()));
     std::fs::rename(model_dir, &renamed)

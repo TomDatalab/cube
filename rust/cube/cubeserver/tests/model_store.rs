@@ -178,7 +178,7 @@ db_test!(organization_with_files_cannot_be_deleted, |store| {
 
 mod import {
     use super::*;
-    use cubeserver::rbac::model_import::{import_if_empty, verify_import};
+    use cubeserver::rbac::model_import::{import_if_empty, import_if_empty_with, verify_import};
     use std::fs;
     use std::path::Path;
 
@@ -260,6 +260,26 @@ mod import {
         assert!(err.contains("bad name.yml"), "{err}");
         assert!(store.model_is_empty().await.unwrap());
         assert!(model.join("_platform").is_dir());
+    });
+
+    db_test!(mismatch_writes_nothing, |store| {
+        store.create_organization("Digital", "digital", "ann").await.unwrap();
+        let dir = tree();
+        let model = dir.path().join("model");
+        let err = import_if_empty_with(&store, &model, "20261122", |_, _| {
+            Err("the imported model lacks cubes: b".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert!(err.contains("b"), "{err}");
+        assert!(store.model_is_empty().await.unwrap());
+        assert_eq!(store.model_version().await.unwrap(), 0);
+        assert!(model.join("digital/fatos.yml").is_file());
+        assert!(model.join("_platform/orders.yml").is_file());
+        assert!(!dir.path().join("model.imported-20261122").exists());
+        // The next start retries and succeeds.
+        let report = import_if_empty(&store, &model, "20261122").await.unwrap();
+        assert_eq!(report.imported, 4);
     });
 
     #[test]
