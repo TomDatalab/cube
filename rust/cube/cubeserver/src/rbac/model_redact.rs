@@ -38,6 +38,22 @@ fn context_cube(message: &str) -> Option<&str> {
         .filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))
 }
 
+/// The names between single quotes in a message.
+fn quoted_names(message: &str) -> Vec<&str> {
+    message.split('\'').skip(1).step_by(2).collect()
+}
+
+/// "... belongs to <slug>" tells which organization holds a name.
+fn hide_slug(mut p: Problem) -> Problem {
+    if let Some(i) = p.message.rfind(" belongs to ") {
+        if !p.message[i + 12..].contains(char::is_whitespace) {
+            p.message.truncate(i + 12);
+            p.message.push_str("outra organização");
+        }
+    }
+    p
+}
+
 /// `problems` as an owner of `own_folder` may see them. `new` are the ones
 /// the current change caused; `defs` maps each cube and view name of the
 /// candidate model to the source file defining it.
@@ -57,7 +73,7 @@ pub fn redact(
     for p in problems {
         if !new.contains(p) {
             if p.file.starts_with(&prefix) {
-                push_once(&mut out, p.clone());
+                push_once(&mut out, hide_slug(p.clone()));
             } else {
                 push_once(
                     &mut out,
@@ -92,7 +108,15 @@ pub fn redact(
             .or_else(|| (!p.file.is_empty()).then(|| p.file.clone()));
         let own = match &home {
             Some(h) => h.starts_with(&prefix),
-            None => cube.is_none(),
+            // No file and no cube: fail closed unless every name it quotes
+            // is one of the owner's.
+            None => {
+                let names = quoted_names(&p.message);
+                !names.is_empty()
+                    && names
+                        .iter()
+                        .all(|n| defs.get(*n).is_some_and(|f| f.starts_with(&prefix)))
+            }
         };
         if !own {
             push_once(
@@ -104,15 +128,15 @@ pub fn redact(
                 },
             );
         } else if p.file.is_empty() || p.file.starts_with(&prefix) {
-            push_once(&mut out, p.clone());
+            push_once(&mut out, hide_slug(p.clone()));
         } else {
             push_once(
                 &mut out,
-                Problem {
+                hide_slug(Problem {
                     file: FOREIGN_FILE.to_string(),
                     cube: p.cube.clone(),
                     message: p.message.replace(&p.file, FOREIGN_FILE),
-                },
+                }),
             );
         }
     }
@@ -134,8 +158,8 @@ mod tests {
     #[test]
     fn redact_keeps_own_and_new() {
         let own = p("on/a.yml", "ruim");
-        let newer = p("", "novo sem arquivo");
-        let out = redact(&[own.clone(), newer.clone()], &[newer.clone()], "on", &BTreeMap::new());
+        let newer = p("", "novo problema do cubo 'meu'");
+        let out = redact(&[own.clone(), newer.clone()], &[newer.clone()], "on", &defs(&[("meu", "on/x.yml")]));
         assert_eq!(out, vec![own, newer]);
     }
 
@@ -196,5 +220,31 @@ mod tests {
         let d = defs(&[("meu", "on/x.yml")]);
         let out = redact(&[n.clone()], &[n.clone()], "on", &d);
         assert_eq!(out, vec![n]);
+    }
+
+    #[test]
+    fn context_less_problem_naming_a_foreign_cube_is_fixed() {
+        let n = p("", "Circular extends detected for cube 'segredo'");
+        let d = defs(&[("segredo", "digital/a.yml")]);
+        let out = redact(&[n.clone()], &[n], "on", &d);
+        assert_eq!(out, vec![Problem { file: "".into(), cube: "".into(), message: FOREIGN_CUBE_LINE.into() }]);
+    }
+
+    #[test]
+    fn context_less_problem_naming_only_own_cubes_is_kept() {
+        let n = p("", "Circular extends detected for cube 'meu'");
+        let d = defs(&[("meu", "on/x.yml")]);
+        assert_eq!(redact(&[n.clone()], &[n.clone()], "on", &d), vec![n]);
+        let unknown = p("", "Circular extends detected for cube 'nada'");
+        assert_eq!(redact(&[unknown.clone()], &[unknown], "on", &d)[0].message, FOREIGN_CUBE_LINE);
+    }
+
+    #[test]
+    fn ownership_refusal_hides_the_other_slug() {
+        let mut n = p("on/x.yml", "joins fatos belongs to digital");
+        n.cube = "meu".into();
+        let d = defs(&[("meu", "on/x.yml")]);
+        let out = redact(&[n.clone()], &[n], "on", &d);
+        assert_eq!(out[0].message, "joins fatos belongs to outra organização");
     }
 }
