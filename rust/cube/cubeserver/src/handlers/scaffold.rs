@@ -131,7 +131,7 @@ pub fn plan(
                     && (!owner_only
                         || (folder.is_some_and(|f| owner.path.starts_with(model_dir.join(f)))
                             && !std::fs::read_to_string(&owner.path)
-                                .is_ok_and(|t| t.starts_with(GENERATED_MARKER)))) =>
+                                .is_ok_and(|t| t.starts_with(crate::rbac::model_import::SYNC_MARKER)))) =>
             {
                 let text = std::fs::read_to_string(&owner.path).map_err(io_error)?;
                 (strip_header(&text), Some(owner.path.clone()))
