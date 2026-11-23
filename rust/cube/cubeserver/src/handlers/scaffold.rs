@@ -59,8 +59,9 @@ pub struct PlannedFile {
 /// but `default`) belongs to that source.
 ///
 /// `owner_only`: the caller is an organization owner, not a platform admin.
-/// Nothing it gets back names another organization's file, and a generated
-/// file is never adopted: the cube is refused as a name already in use.
+/// Nothing it gets back names another organization's file. Only a generated
+/// file of its own folder that is not the SofiaDB sync's is adopted; any
+/// other cube already defined is refused as a name already in use.
 pub fn plan(
     model_dir: &Path,
     data_sources: &[(String, String)],

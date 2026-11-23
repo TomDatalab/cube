@@ -266,7 +266,13 @@ pub(crate) async fn org_detail_for(
                 message: r.message.clone(),
             })
             .collect();
-        errors = crate::rbac::model_redact::redact(&problems, &[], slug)
+        let defs = rows
+            .as_ref()
+            .map(|(rows, slugs)| {
+                crate::rbac::model_validate::definitions(&crate::rbac::model_snapshot::sources(rows, slugs))
+            })
+            .unwrap_or_default();
+        errors = crate::rbac::model_redact::redact(&problems, &[], slug, &defs)
             .into_iter()
             .map(|p| json!({ "file": p.file, "cube": p.cube, "message": p.message }))
             .collect();

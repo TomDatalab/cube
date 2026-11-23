@@ -20,6 +20,9 @@ pub struct WriteError {
     pub status: StatusCode,
     pub message: String,
     pub problems: Vec<Problem>,
+    /// Cube and view names of the candidate model, with their source files:
+    /// what `model_redact::redact` needs.
+    pub defs: std::collections::BTreeMap<String, String>,
 }
 
 impl WriteError {
@@ -28,6 +31,7 @@ impl WriteError {
             status,
             message: message.into(),
             problems: Vec::new(),
+            defs: Default::default(),
         }
     }
 
@@ -166,13 +170,15 @@ impl ModelWriter {
                 }
                 let before = check(&sources(rows, &slugs), &self.ctx, policy.as_deref());
                 let after_rows = apply_in_memory(rows, &changes);
-                let after = check(&sources(&after_rows, &slugs), &self.ctx, policy.as_deref());
+                let after_sources = sources(&after_rows, &slugs);
+                let after = check(&after_sources, &self.ctx, policy.as_deref());
                 let problems = new_problems(&before, &after);
                 if !problems.is_empty() {
                     return Err(WriteError {
                         status: StatusCode::BAD_REQUEST,
                         message: "A mudança não compila".into(),
                         problems,
+                        defs: crate::rbac::model_validate::definitions(&after_sources),
                     });
                 }
                 fixed = fixed_count(&before, &after);

@@ -43,7 +43,7 @@ struct Scope {
 /// `e` as `owner_only` callers may see it.
 fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> WriteError {
     if owner_only && !e.problems.is_empty() {
-        e.problems = redact(&e.problems, &e.problems, slug);
+        e.problems = redact(&e.problems, &e.problems, slug, &e.defs);
     }
     e
 }

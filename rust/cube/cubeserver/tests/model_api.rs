@@ -660,6 +660,28 @@ api_test!(owner_does_not_adopt_foreign_generated_or_own_sync_file, |store| {
     }
 });
 
+api_test!(owner_breaking_a_foreign_join_sees_no_names, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    let (token, on, _) = owner_org(&env, &store, &admin, "olga", "ON").await;
+    install_policy(&[("digital", &["default"]), ("on", &["sofiadb"])], &["default"]);
+    let joiner = "cubes:\n  - name: segredo\n    sql_table: t\n    data_source: default\n    joins:\n      - name: base_on\n        sql: \"1=1\"\n        relationship: many_to_one\n    measures:\n      - name: n\n        type: count\n";
+    // The ownership rules refuse this reference, so it is seeded around the
+    // writer: it stands for a dependency the rules do not see.
+    let seed = vec![
+        put_in(Some(on), "base.yml", &cube_on("base_on", "sofiadb"), None),
+        put_in(Some(digital), "j.yml", joiner, None),
+    ];
+    store.model_write("ann", |_| Ok::<_, WriteError>(seed)).await.unwrap().unwrap();
+    let row = store.model_rows().await.unwrap().files.into_iter().find(|f| f.organization_id == Some(on)).unwrap();
+    let (status, body) = call(&env, Method::DELETE, &token,
+        &format!("/cube/v1/organizations/{on}/model/files/{}?version={}", row.id, row.version), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let text = body.to_string();
+    assert!(!text.contains("segredo") && !text.contains("digital"), "{text}");
+});
+
 api_test!(owner_sees_only_own_errors_in_detail, |store| {
     let env = env_live(store.clone()).await;
     let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;

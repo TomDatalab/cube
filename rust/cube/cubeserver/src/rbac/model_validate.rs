@@ -44,6 +44,27 @@ pub fn check(
     Check { problems }
 }
 
+/// Each cube and view name of `sources` with the file defining it.
+pub fn definitions(sources: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for (path, content) in sources {
+        if !(path.ends_with(".yml") || path.ends_with(".yaml")) {
+            continue;
+        }
+        let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+            continue;
+        };
+        for kind in ["cubes", "views"] {
+            for item in doc.get(kind).and_then(|v| v.as_sequence()).into_iter().flatten() {
+                if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                    out.entry(name.to_string()).or_insert_with(|| path.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Problems in `after` that `before` did not have, sorted.
 pub fn new_problems(before: &Check, after: &Check) -> Vec<Problem> {
     after.problems.difference(&before.problems).cloned().collect()

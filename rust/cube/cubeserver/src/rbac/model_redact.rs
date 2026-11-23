@@ -1,6 +1,8 @@
 //! What an organization owner may see of model problems: nothing that
 //! reveals another organization's files, paths or cube names.
 
+use std::collections::BTreeMap;
+
 use super::model_validate::Problem;
 
 const FOREIGN_FILE: &str = "(arquivo de outra organização)";
@@ -22,39 +24,96 @@ fn duplicate_name(message: &str) -> Option<&str> {
     rest.split_once('\'').map(|(name, _)| name)
 }
 
+/// Shown for a new problem in a cube of another organization.
+const FOREIGN_CUBE_LINE: &str =
+    "Sua mudança quebra um cubo de outra organização que depende deste; avise o administrador";
+
+/// The cube a compile message is about: its leading context, `<name> cube`
+/// or `<name> view`.
+fn context_cube(message: &str) -> Option<&str> {
+    let first = message.split(" -> ").next()?.split(": ").next()?;
+    first
+        .strip_suffix(" cube")
+        .or_else(|| first.strip_suffix(" view"))
+        .filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))
+}
+
 /// `problems` as an owner of `own_folder` may see them. `new` are the ones
-/// the current change caused.
-pub fn redact(problems: &[Problem], new: &[Problem], own_folder: &str) -> Vec<Problem> {
+/// the current change caused; `defs` maps each cube and view name of the
+/// candidate model to the source file defining it.
+pub fn redact(
+    problems: &[Problem],
+    new: &[Problem],
+    own_folder: &str,
+    defs: &BTreeMap<String, String>,
+) -> Vec<Problem> {
     let prefix = format!("{own_folder}/");
-    let mut out = Vec::new();
-    let mut generic = false;
+    let mut out: Vec<Problem> = Vec::new();
+    let mut push_once = |out: &mut Vec<Problem>, p: Problem| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
     for p in problems {
-        let is_new = new.contains(p);
-        if is_new {
-            if let Some(name) = duplicate_name(&p.message) {
-                out.push(Problem {
+        if !new.contains(p) {
+            if p.file.starts_with(&prefix) {
+                push_once(&mut out, p.clone());
+            } else {
+                push_once(
+                    &mut out,
+                    Problem {
+                        file: String::new(),
+                        cube: String::new(),
+                        message: GENERIC_LINE.to_string(),
+                    },
+                );
+            }
+            continue;
+        }
+        if let Some(name) = duplicate_name(&p.message) {
+            push_once(
+                &mut out,
+                Problem {
                     file: String::new(),
                     cube: p.cube.clone(),
                     message: duplicate_name_message(name),
-                });
-            } else if p.file.is_empty() || p.file.starts_with(&prefix) {
-                out.push(p.clone());
-            } else {
-                out.push(Problem {
+                },
+            );
+            continue;
+        }
+        let cube = if p.cube.is_empty() {
+            context_cube(&p.message).map(str::to_string)
+        } else {
+            Some(p.cube.clone())
+        };
+        let home = cube
+            .as_ref()
+            .and_then(|c| defs.get(c).cloned())
+            .or_else(|| (!p.file.is_empty()).then(|| p.file.clone()));
+        let own = match &home {
+            Some(h) => h.starts_with(&prefix),
+            None => cube.is_none(),
+        };
+        if !own {
+            push_once(
+                &mut out,
+                Problem {
+                    file: if p.file.is_empty() { String::new() } else { FOREIGN_FILE.to_string() },
+                    cube: String::new(),
+                    message: FOREIGN_CUBE_LINE.to_string(),
+                },
+            );
+        } else if p.file.is_empty() || p.file.starts_with(&prefix) {
+            push_once(&mut out, p.clone());
+        } else {
+            push_once(
+                &mut out,
+                Problem {
                     file: FOREIGN_FILE.to_string(),
                     cube: p.cube.clone(),
                     message: p.message.replace(&p.file, FOREIGN_FILE),
-                });
-            }
-        } else if p.file.starts_with(&prefix) {
-            out.push(p.clone());
-        } else if !generic {
-            generic = true;
-            out.push(Problem {
-                file: String::new(),
-                cube: String::new(),
-                message: GENERIC_LINE.to_string(),
-            });
+                },
+            );
         }
     }
     out
@@ -76,14 +135,14 @@ mod tests {
     fn redact_keeps_own_and_new() {
         let own = p("on/a.yml", "ruim");
         let newer = p("", "novo sem arquivo");
-        let out = redact(&[own.clone(), newer.clone()], &[newer.clone()], "on");
+        let out = redact(&[own.clone(), newer.clone()], &[newer.clone()], "on", &BTreeMap::new());
         assert_eq!(out, vec![own, newer]);
     }
 
     #[test]
     fn redact_hides_foreign_path() {
         let foreign = p("digital/x.yml", "erro em digital/x.yml na linha 3");
-        let out = redact(&[foreign.clone()], &[foreign], "on");
+        let out = redact(&[foreign.clone()], &[foreign], "on", &BTreeMap::new());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].file, "(arquivo de outra organização)");
         assert!(!out[0].message.contains("digital/"), "{}", out[0].message);
@@ -95,7 +154,7 @@ mod tests {
         let b = p("_platform/b.yml", "b");
         let c = p("", "cubo secreto quebrado");
         let own = p("on/o.yml", "o");
-        let out = redact(&[a, b, c, own.clone()], &[], "on");
+        let out = redact(&[a, b, c, own.clone()], &[], "on", &BTreeMap::new());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].message, GENERIC_LINE);
         assert_eq!(out[1], own);
@@ -104,8 +163,38 @@ mod tests {
     #[test]
     fn duplicate_becomes_the_generic_name_message() {
         let d = p("digital/x.yml", "Found duplicate cube name 'fatos'.");
-        let out = redact(&[d.clone()], &[d], "on");
+        let out = redact(&[d.clone()], &[d], "on", &BTreeMap::new());
         assert_eq!(out[0].file, "");
         assert_eq!(out[0].message, duplicate_name_message("fatos"));
+    }
+
+    fn defs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn foreign_cube_names_never_shown() {
+        let n = p("digital/a.yml", "segredo cube -> joins: Cube 'b' not found");
+        let d = defs(&[("segredo", "digital/a.yml")]);
+        let out = redact(&[n.clone()], &[n], "on", &d);
+        assert_eq!(out.len(), 1);
+        let all = format!("{} {} {}", out[0].file, out[0].cube, out[0].message);
+        assert!(!all.contains("segredo") && !all.contains("digital"), "{all}");
+    }
+
+    #[test]
+    fn file_less_problem_of_foreign_cube_is_fixed_message() {
+        let n = p("", "segredo cube: algo");
+        let d = defs(&[("segredo", "digital/a.yml")]);
+        let out = redact(&[n.clone()], &[n], "on", &d);
+        assert_eq!(out, vec![Problem { file: "".into(), cube: "".into(), message: FOREIGN_CUBE_LINE.into() }]);
+    }
+
+    #[test]
+    fn own_cube_problem_kept_in_full() {
+        let n = p("", "meu cube: algo");
+        let d = defs(&[("meu", "on/x.yml")]);
+        let out = redact(&[n.clone()], &[n.clone()], "on", &d);
+        assert_eq!(out, vec![n]);
     }
 }
