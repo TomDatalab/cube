@@ -153,6 +153,14 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
                 .delete(model::org_delete_file),
         )
         .route(
+            &format!("{base}/v1/organizations/:id/model/generate"),
+            post(model::org_generate),
+        )
+        .route(
+            &format!("{base}/v1/platform/model/generate"),
+            post(model::platform_generate),
+        )
+        .route(
             &format!("{base}/v1/platform/model"),
             get(model::platform_detail),
         )

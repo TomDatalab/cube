@@ -349,7 +349,7 @@ async fn db_schema(
     Ok(Json(json!({ "tablesSchema": merged, "errors": errors })))
 }
 
-pub(super) async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
+pub(crate) async fn data_source_schema(data_source: &str) -> Result<cubedriver::DatabaseStructure, ApiError> {
     // A database that never answers, while connecting or once connected,
     // would otherwise hold up every other source's tables.
     let no_answer = || {
@@ -385,11 +385,16 @@ struct DataSourceQuery {
 /// picked on the data-model page; see `scaffold.rs`.
 async fn generate_schema(
     State(state): State<AppState>,
+    ctx: Option<axum::Extension<RequestContext>>,
     Json(request): Json<super::scaffold::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Not while a data source is being deleted: the delete checks no cube
     // uses it, and a cube written meanwhile would.
     let _guard = super::data_sources::WRITE.lock().await;
+    if state.model_writer.is_some() {
+        let files = generate_into_database(&state, ctx.as_deref(), &request).await?;
+        return Ok(Json(json!({ "files": files })));
+    }
     let files = super::scaffold::generate(
         std::path::Path::new(&state.config.schema_path),
         &state.config.data_sources,
@@ -397,6 +402,60 @@ async fn generate_schema(
     )?;
 
     Ok(Json(json!({ "files": files })))
+}
+
+/// With the model in the RBAC database: the cubes go to the rows of the
+/// organization that owns the tables' connections (Platform for a source no
+/// organization has), never to two at once.
+async fn generate_into_database(
+    state: &AppState,
+    ctx: Option<&RequestContext>,
+    request: &super::scaffold::GenerateRequest,
+) -> Result<Vec<Value>, ApiError> {
+    if request.format.as_deref() != Some("yaml") {
+        return Err(ApiError::bad_request(
+            "Only YAML data models can be generated: this server loads YAML \
+             and does not run JavaScript.",
+        ));
+    }
+    let rbac = crate::rbac::handlers::rbac_of(state)?;
+    let user = ctx.and_then(|c| c.user.as_deref())
+        .ok_or_else(crate::rbac::unauthenticated)?;
+    let mut owners = std::collections::BTreeSet::new();
+    for (schema, _) in &request.tables {
+        let (data_source, _) = super::scaffold::split_schema(schema, &state.config.data_sources);
+        let connection = rbac
+            .store
+            .connection(data_source)
+            .await
+            .map_err(|e| crate::rbac::handlers::store_error(e, "Conflict"))?;
+        owners.insert(connection.map(|c| c.organization_id));
+    }
+    if owners.len() > 1 {
+        return Err(ApiError::bad_request(
+            "The tables belong to more than one organization",
+        ));
+    }
+    let organization = owners.into_iter().next().flatten();
+    let slug = match organization {
+        Some(id) => rbac
+            .store
+            .organization_slugs()
+            .await
+            .map_err(|e| crate::rbac::handlers::store_error(e, "Conflict"))?
+            .remove(&id)
+            .ok_or_else(|| ApiError::bad_request("Organização desconhecida"))?,
+        None => cubemodel::ownership::PLATFORM_FOLDER.to_string(),
+    };
+    crate::rbac::handlers::model::generate_into_model(
+        state,
+        user,
+        organization,
+        &slug,
+        &request.tables,
+        &request.tables_schema,
+    )
+    .await
 }
 
 /// Refuses a request whose host is a name the deployment did not list, or

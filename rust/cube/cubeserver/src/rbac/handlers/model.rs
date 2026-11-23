@@ -20,7 +20,8 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::tree::org_detail as detail_of;
-use crate::rbac::model_snapshot::{is_editable, sources};
+use crate::handlers::scaffold::{plan, split_schema, is_prefixed, GenerateRequest};
+use crate::rbac::model_snapshot::{is_editable, source_path, sources};
 use crate::rbac::model_store::{ModelChange, ModelFile};
 use crate::rbac::model_writer::{ModelWriter, WriteError};
 use crate::services::RequestContext;
@@ -347,4 +348,184 @@ pub async fn export(
         .map(|(path, content)| json!({ "path": path, "content": content }))
         .collect();
     Ok(Json(json!({ "version": rows.version, "files": files })))
+}
+
+/// Writes the cubes of `tables` into the model of one owner, all or none:
+/// `organization` and `slug` are the organization's (`None` and `_platform`
+/// for Platform). `schema` holds the columns of every table, keyed as the
+/// data-model page sends them. Answers `[{fileName, content}]`.
+pub async fn generate_into_model(
+    state: &AppState,
+    actor: &str,
+    organization: Option<Uuid>,
+    slug: &str,
+    tables: &[(String, String)],
+    schema: &cubedriver::DatabaseStructure,
+) -> Result<Vec<Value>, ApiError> {
+    let writer = writer(state)?;
+    let rbac = super::rbac_of(state)?;
+    let request = GenerateRequest {
+        format: Some("yaml".to_string()),
+        tables: tables.to_vec(),
+        tables_schema: schema.clone(),
+    };
+    let planned = plan(
+        std::path::Path::new(&state.config.schema_path),
+        &state.config.data_sources,
+        &request,
+        Some(slug),
+    )?;
+    let slugs = rbac
+        .store
+        .organization_slugs()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+
+    let to_write = planned.clone();
+    writer
+        .write(actor, "generate", move |rows| {
+            let stale = || {
+                WriteError::new(
+                    StatusCode::CONFLICT,
+                    "O modelo mudou enquanto era gerado; tente de novo",
+                )
+            };
+            let mut changes = Vec::new();
+            for file in &to_write {
+                let mut put = ModelChange::Put {
+                    id: None,
+                    organization_id: organization,
+                    path: file.file.clone(),
+                    content: file.content.clone(),
+                    expected_version: None,
+                    managed_by: None,
+                };
+                if let Some(from) = &file.adopt_from {
+                    let row = rows
+                        .files
+                        .iter()
+                        .find(|f| source_path(f, &slugs).as_deref() == Some(from.as_str()))
+                        .ok_or_else(stale)?;
+                    if *from == file.name {
+                        // Same place: the row stops being the generator's.
+                        put = ModelChange::Put {
+                            id: Some(row.id),
+                            organization_id: row.organization_id,
+                            path: row.path.clone(),
+                            content: file.content.clone(),
+                            expected_version: Some(row.version),
+                            managed_by: None,
+                        };
+                    } else {
+                        changes.push(ModelChange::Delete {
+                            id: row.id,
+                            expected_version: Some(row.version),
+                        });
+                    }
+                }
+                changes.push(put);
+            }
+            Ok(changes)
+        })
+        .await?;
+    Ok(planned
+        .into_iter()
+        .map(|f| json!({ "fileName": f.name, "content": f.content }))
+        .collect())
+}
+
+#[derive(Deserialize)]
+pub struct GenerateBody {
+    #[serde(default)]
+    tables: Vec<(String, String)>,
+}
+
+/// Reads the columns of `tables` from their connections, after checking that
+/// every one is a connection of the scope, then generates into its model.
+async fn generate_route(
+    state: &AppState,
+    scope: Scope,
+    user: String,
+    tables: Vec<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = super::rbac_of(state)?;
+    let sources = &state.config.data_sources;
+    let own: Vec<String> = match scope.organization {
+        Some(org) => rbac
+            .store
+            .connections_of_organization(org)
+            .await
+            .map_err(|e| store_error(e, "Conflict"))?
+            .into_iter()
+            .map(|c| c.name)
+            .collect(),
+        None => {
+            let taken: std::collections::HashSet<String> = rbac
+                .store
+                .all_connections()
+                .await
+                .map_err(|e| store_error(e, "Conflict"))?
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            let mut names: Vec<String> = sources.iter().map(|(n, _)| n.clone()).collect();
+            if names.is_empty() {
+                names.push("default".to_string());
+            }
+            names.retain(|n| !taken.contains(n));
+            names
+        }
+    };
+    let mut involved = std::collections::BTreeSet::new();
+    for (schema, table) in &tables {
+        let (data_source, _) = split_schema(schema, sources);
+        if !own.iter().any(|n| n == data_source) {
+            return Err(ApiError::bad_request(format!(
+                "A tabela {schema}.{table} não é de uma conexão {}",
+                if scope.organization.is_some() { "desta organização" } else { "da Plataforma" }
+            )));
+        }
+        involved.insert(data_source.to_string());
+    }
+
+    // Not while a data source is being deleted; see `generate_schema`.
+    let _guard = crate::handlers::data_sources::WRITE.lock().await;
+    let mut merged = cubedriver::DatabaseStructure::new();
+    for name in &involved {
+        for (schema, tables) in crate::handlers::playground::data_source_schema(name).await? {
+            let key = if name != "default" {
+                format!("{name}.{schema}")
+            } else if is_prefixed(&schema, sources) {
+                format!("default.{schema}")
+            } else {
+                schema
+            };
+            merged.entry(key).or_default().extend(tables);
+        }
+    }
+    let files =
+        generate_into_model(state, &user, scope.organization, &scope.slug, &tables, &merged)
+            .await?;
+    Ok(Json(json!({ "files": files })))
+}
+
+/// `POST /organizations/{id}/model/generate` `{tables: [[schema, table]]}`
+pub async fn org_generate(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    request: Result<Json<GenerateBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let (scope, user) = org_scope(&state, &ctx, &id).await?;
+    generate_route(&state, scope, user, body(request)?.tables).await
+}
+
+/// `POST /platform/model/generate` `{tables: [[schema, table]]}`
+pub async fn platform_generate(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    request: Result<Json<GenerateBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let (scope, user) = platform_scope(&state, &ctx)?;
+    generate_route(&state, scope, user, body(request)?.tables).await
 }

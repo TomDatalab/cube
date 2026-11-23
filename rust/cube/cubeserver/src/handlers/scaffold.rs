@@ -35,17 +35,33 @@ pub struct GenerateRequest {
     pub tables_schema: cubedriver::DatabaseStructure,
 }
 
-/// Writes the cubes for `request.tables` under `model_dir`, returning the
-/// files written as `{ fileName, content }`, as Node.js does.
+/// One cube file `plan` decided on.
+#[derive(Debug, Clone)]
+pub struct PlannedFile {
+    /// Where it goes under the model dir, `<folder>/<cube>.yml`, as `fileName`.
+    pub name: String,
+    /// `<cube>.yml`, without the folder.
+    pub file: String,
+    pub content: String,
+    /// The generator's file this one adopts, relative to the model dir
+    /// (`<slug>/<path>`), to be removed once this one is in place.
+    pub adopt_from: Option<String>,
+}
+
+/// Decides the cubes for `request.tables`, writing nothing. `model_dir` is
+/// only read, for the cubes that exist. `folder` is the model folder every
+/// file goes in; `None` takes it from each table's owner under the ownership
+/// policy (the model root without one).
 ///
 /// `data_sources` is the configured `(name, type)` list: a schema named
 /// `<data source>.<schema>` (how `/playground/db-schema` lists every source
 /// but `default`) belongs to that source.
-pub fn generate(
+pub fn plan(
     model_dir: &Path,
     data_sources: &[(String, String)],
     request: &GenerateRequest,
-) -> Result<Vec<Value>, ApiError> {
+    folder: Option<&str>,
+) -> Result<Vec<PlannedFile>, ApiError> {
     match request.format.as_deref() {
         Some("yaml") => {}
         _ => {
@@ -64,9 +80,7 @@ pub fn generate(
     let mut folders: BTreeSet<Option<String>> = BTreeSet::new();
     let mut planned: BTreeSet<String> = BTreeSet::new();
 
-    // Everything is decided before anything is written, so one bad table
-    // leaves the model as it was.
-    let mut plans = Vec::new();
+    let mut files = Vec::new();
     for (schema, table) in &request.tables {
         let columns = request
             .tables_schema
@@ -104,11 +118,11 @@ pub fn generate(
             )));
         }
 
-        let plan = match existing.get(&name) {
-            Some(owner) if owner.generated && owner.reads(data_source, table) => Plan::Adopt {
-                name: name.clone(),
-                from: owner.path.clone(),
-            },
+        let (content, adopted) = match existing.get(&name) {
+            Some(owner) if owner.generated && owner.reads(data_source, table) => {
+                let text = std::fs::read_to_string(&owner.path).map_err(io_error)?;
+                (strip_header(&text), Some(owner.path.clone()))
+            }
             Some(owner) => {
                 return Err(ApiError::bad_request(format!(
                     "A cube named {name} already exists in {}",
@@ -125,84 +139,98 @@ pub fn generate(
                     .find(|(n, _)| n == data_source)
                     .map(|(_, t)| t.as_str())
                     .unwrap_or("");
-                Plan::Write {
-                    name: name.clone(),
-                    content: cube_yaml(&name, data_source, db_type, db_schema, table, columns)?,
-                }
+                (
+                    cube_yaml(&name, data_source, db_type, db_schema, table, columns)?,
+                    None,
+                )
             }
         };
         planned.insert(name.clone());
 
         // With ownership on, the cube goes in the folder of its owner.
-        let folder = target_folder(policy.as_deref(), data_source);
+        let folder = match folder {
+            Some(folder) => Some(folder.to_string()),
+            None => target_folder(policy.as_deref(), data_source),
+        };
         folders.insert(folder.clone());
         if folders.len() > 1 {
             return Err(ApiError::bad_request(
                 "The tables belong to more than one organization",
             ));
         }
-        let file = format!("{}.yml", plan.name());
+        let file = format!("{name}.yml");
         let target = match &folder {
-            Some(folder) => model_dir.join(folder).join(file),
-            None => model_dir.join(file),
+            Some(folder) => model_dir.join(folder).join(&file),
+            None => model_dir.join(&file),
         };
-        if target.exists() && !matches!(&plan, Plan::Adopt { from, .. } if *from == target) {
-            return Err(ApiError::bad_request(format!(
-                "{} already exists",
-                target.file_name().unwrap_or_default().to_string_lossy()
-            )));
+        if target.exists() && adopted.as_ref() != Some(&target) {
+            return Err(ApiError::bad_request(format!("{file} already exists")));
         }
-        plans.push((plan, target));
+        let relative = |path: &Path| {
+            path.strip_prefix(model_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        files.push(PlannedFile {
+            name: relative(&target),
+            file,
+            content,
+            adopt_from: adopted.as_deref().map(relative),
+        });
     }
+    Ok(files)
+}
+
+/// Writes the cubes for `request.tables` under `model_dir`, returning the
+/// files written as `{ fileName, content }`, as Node.js does. Used without
+/// RBAC; with it the model lives in the database.
+pub fn generate(
+    model_dir: &Path,
+    data_sources: &[(String, String)],
+    request: &GenerateRequest,
+) -> Result<Vec<Value>, ApiError> {
+    // Everything is decided before anything is written, so one bad table
+    // leaves the model as it was.
+    let plans = plan(model_dir, data_sources, request, None)?;
 
     std::fs::create_dir_all(model_dir).map_err(io_error)?;
-    for folder in folders.iter().flatten() {
-        std::fs::create_dir_all(model_dir.join(folder)).map_err(io_error)?;
+    for file in &plans {
+        if let Some(parent) = model_dir.join(&file.name).parent() {
+            std::fs::create_dir_all(parent).map_err(io_error)?;
+        }
     }
 
     // Every file is first written under a name the loader skips, so the
     // model is never read with a half-written file, and a failure here
     // leaves it as it was.
-    let mut staged: Vec<(PathBuf, String)> = Vec::new();
-    let discard = |staged: &[(PathBuf, String)]| {
-        for (tmp, _) in staged {
-            let _ = std::fs::remove_file(tmp);
-        }
-    };
-    for (plan, target) in &plans {
-        let tmp = target.with_extension("yml.tmp");
-        let written = match plan {
-            Plan::Write { content, .. } => Ok(content.clone()),
-            Plan::Adopt { from, .. } => std::fs::read_to_string(from).map(|t| strip_header(&t)),
-        }
-        .and_then(|content| std::fs::write(&tmp, &content).map(|_| content));
-        match written {
-            Ok(content) => staged.push((tmp, content)),
-            Err(e) => {
-                discard(&staged);
-                return Err(io_error(e));
+    let mut staged: Vec<PathBuf> = Vec::new();
+    for file in &plans {
+        let tmp = model_dir.join(&file.name).with_extension("yml.tmp");
+        if let Err(e) = std::fs::write(&tmp, &file.content) {
+            for tmp in &staged {
+                let _ = std::fs::remove_file(tmp);
             }
+            return Err(io_error(e));
         }
+        staged.push(tmp);
     }
 
-    let mut files = Vec::new();
-    for ((plan, target), (tmp, content)) in plans.iter().zip(staged) {
-        std::fs::rename(&tmp, target).map_err(io_error)?;
+    let mut out = Vec::new();
+    for (file, tmp) in plans.iter().zip(staged) {
+        let target = model_dir.join(&file.name);
+        std::fs::rename(&tmp, &target).map_err(io_error)?;
         // The generator's file goes only once its copy is in place, so a
         // failure cannot lose the cube.
-        if let Plan::Adopt { from, .. } = plan {
-            if from != target {
-                std::fs::remove_file(from).map_err(io_error)?;
+        if let Some(from) = &file.adopt_from {
+            if *from != file.name {
+                std::fs::remove_file(model_dir.join(from)).map_err(io_error)?;
             }
         }
-
-        files.push(json!({
-            "fileName": target.strip_prefix(model_dir).unwrap_or(target.as_path()).to_string_lossy(),
-            "content": content,
-        }));
+        out.push(json!({ "fileName": file.name, "content": file.content }));
     }
 
-    Ok(files)
+    Ok(out)
 }
 
 /// The model folder for cubes reading `data_source`: its organization's slug,
@@ -218,19 +246,6 @@ fn target_folder(
         Some(Owner::Organization(slug)) => slug,
         _ => PLATFORM_FOLDER.to_string(),
     })
-}
-
-enum Plan {
-    Write { name: String, content: String },
-    Adopt { name: String, from: PathBuf },
-}
-
-impl Plan {
-    fn name(&self) -> &str {
-        match self {
-            Plan::Write { name, .. } | Plan::Adopt { name, .. } => name,
-        }
-    }
 }
 
 struct Owner {
@@ -331,7 +346,7 @@ fn walk(dir: &Path, out: &mut BTreeMap<String, Owner>) {
 /// source other than `default`; `default.x` → `("default", "x")`, which is
 /// how `/playground/db-schema` names a `default` schema that would otherwise
 /// read as another source's; anything else is a `default` schema.
-fn split_schema<'a>(schema: &'a str, data_sources: &'a [(String, String)]) -> (&'a str, &'a str) {
+pub(crate) fn split_schema<'a>(schema: &'a str, data_sources: &'a [(String, String)]) -> (&'a str, &'a str) {
     if let Some((source, rest)) = schema.split_once('.') {
         if source == "default" || data_sources.iter().any(|(n, _)| n == source) {
             return (source, rest);
