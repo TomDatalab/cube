@@ -84,6 +84,7 @@ fn app(model: &str) -> (tempfile::TempDir, axum::Router) {
         graphql: Default::default(),
         model_index: Default::default(),
         model_runtime: None,
+        model_writer: None,
         ws: Default::default(),
         tenants: None,
         rbac: None,

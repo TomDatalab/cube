@@ -441,8 +441,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let ws_state = cubeserver::ws::WsState::default();
 
+    // Writes validate against the default tenant's compile context, like the
+    // model that is served.
+    let model_writer = match (&rbac, &model_runtime) {
+        (Some(rbac), Some(runtime)) => {
+            let compile_context = cube_config
+                .for_security_context(&serde_json::json!({}))
+                .map(|t| t.compile_context)
+                .unwrap_or_default();
+            Some(Arc::new(cubeserver::rbac::model_writer::ModelWriter::new(
+                rbac.store.clone(),
+                runtime.clone(),
+                tenants.clone(),
+                cubemodel::TemplateContext {
+                    compile_context,
+                    variables: serde_json::Value::Object(Default::default()),
+                },
+            )))
+        }
+        _ => None,
+    };
+
     let state = AppState {
-        tenants: Some(tenants),
+        tenants: Some(tenants.clone()),
         config: Arc::new(config.clone()),
         query_config: Arc::new(cubequery::QueryConfig::from_env()?),
         auth: Arc::new(auth),
@@ -459,6 +480,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         graphql: Default::default(),
         model_index: Default::default(),
         model_runtime: model_runtime.clone(),
+        model_writer,
         ws: ws_state.clone(),
         rbac,
     };

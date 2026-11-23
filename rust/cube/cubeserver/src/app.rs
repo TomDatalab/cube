@@ -42,6 +42,8 @@ pub struct AppState {
     pub model_index: Arc<crate::model_index::ModelIndexCache>,
     /// With RBAC, the model served from the database through `live`.
     pub model_runtime: Option<Arc<crate::rbac::model_runtime::ModelRuntime>>,
+    /// With RBAC, the single path of every model write.
+    pub model_writer: Option<Arc<crate::rbac::model_writer::ModelWriter>>,
 }
 
 impl AppState {

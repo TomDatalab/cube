@@ -13,6 +13,9 @@ pub struct ApiErrorBody {
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    /// Extra detail some routes attach (a model write's compile problems).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problems: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,8 +32,14 @@ impl ApiError {
                 error: message.into(),
                 request_id: None,
                 stack: None,
+                problems: None,
             },
         }
+    }
+
+    pub fn with_problems(mut self, problems: serde_json::Value) -> Self {
+        self.body.problems = Some(problems);
+        self
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
