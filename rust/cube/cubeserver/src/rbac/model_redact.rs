@@ -106,11 +106,14 @@ pub fn redact(
             .as_ref()
             .and_then(|c| defs.get(c).cloned())
             .or_else(|| (!p.file.is_empty()).then(|| p.file.clone()));
-        let own = match &home {
-            Some(h) => h.starts_with(&prefix),
+        let own = match (&home, &cube) {
+            (Some(h), _) => h.starts_with(&prefix),
+            // A cube the definitions do not list (a template, say) and no
+            // file: nothing says it is the owner's.
+            (None, Some(_)) => false,
             // No file and no cube: fail closed unless every name it quotes
             // is one of the owner's.
-            None => {
+            (None, None) => {
                 let names = quoted_names(&p.message);
                 !names.is_empty()
                     && names
@@ -237,6 +240,22 @@ mod tests {
         assert_eq!(redact(&[n.clone()], &[n.clone()], "on", &d), vec![n]);
         let unknown = p("", "Circular extends detected for cube 'nada'");
         assert_eq!(redact(&[unknown.clone()], &[unknown], "on", &d)[0].message, FOREIGN_CUBE_LINE);
+    }
+
+    #[test]
+    fn attributed_cube_missing_from_defs_is_fixed() {
+        // `segredo` lives in a template, so `defs` lacks it; the names it
+        // quotes are the owner's.
+        let by_context = p("", "segredo cube: Cube 'meu' not found");
+        let mut by_field = p("", "Cube 'meu' not found");
+        by_field.cube = "segredo".into();
+        let d = defs(&[("meu", "on/x.yml")]);
+        for n in [by_context, by_field] {
+            let out = redact(&[n.clone()], &[n], "on", &d);
+            assert_eq!(out, vec![Problem { file: "".into(), cube: "".into(), message: FOREIGN_CUBE_LINE.into() }]);
+            let all = format!("{} {} {}", out[0].file, out[0].cube, out[0].message);
+            assert!(!all.contains("segredo"), "{all}");
+        }
     }
 
     #[test]
