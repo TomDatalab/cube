@@ -12,6 +12,22 @@ use std::time::SystemTime;
 use cubemodel::ownership::{current_policy, Owner, OwnershipPolicy, Rejection};
 use cubemodel::{ModelError, ModelLoader};
 
+/// One member of a cube, as the Data Model page lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMember {
+    /// `"cube.member"`.
+    pub name: String,
+    pub r#type: String,
+    pub title: Option<String>,
+    pub primary_key: bool,
+}
+
+/// `/meta`'s rule (non-dev mode): `public`, else `visible`, else `shown`,
+/// else the default.
+fn visible(public: Option<bool>, visible: Option<bool>, shown: Option<bool>, default: bool) -> bool {
+    public.or(visible).or(shown).unwrap_or(default)
+}
+
 #[derive(Debug, Clone)]
 pub struct IndexedCube {
     pub name: String,
@@ -23,6 +39,10 @@ pub struct IndexedCube {
     pub owner: Owner,
     pub measures: usize,
     pub dimensions: usize,
+    /// The visible members, as `/meta` would list them.
+    pub measure_list: Vec<IndexedMember>,
+    pub dimension_list: Vec<IndexedMember>,
+    pub segment_list: Vec<IndexedMember>,
     /// `(target cube, relationship)`.
     pub joins: Vec<(String, Option<String>)>,
     /// A view's source cubes: every segment of every `join_path`, deduped.
@@ -141,6 +161,60 @@ impl ModelIndex {
                 owner: owner_of(&c.file_name),
                 measures: c.measures.len(),
                 dimensions: c.dimensions.len(),
+                measure_list: {
+                    let cube_visible = visible(c.public, c.visible, c.shown, true);
+                    if !cube_visible {
+                        Vec::new()
+                    } else {
+                        c.measures
+                            .iter()
+                            .filter(|(_, m)| visible(m.public, m.visible, m.shown, true))
+                            .map(|(n, m)| IndexedMember {
+                                name: format!("{}.{}", c.name, n),
+                                r#type: m.member_type.clone().unwrap_or_default(),
+                                title: m.title.clone(),
+                                primary_key: false,
+                            })
+                            .collect()
+                    }
+                },
+                dimension_list: {
+                    let cube_visible = visible(c.public, c.visible, c.shown, true);
+                    if !cube_visible {
+                        Vec::new()
+                    } else {
+                        c.dimensions
+                            .iter()
+                            .filter(|(_, d)| {
+                                let pk = d.primary_key.unwrap_or(false);
+                                visible(d.public, d.visible, d.shown, !pk)
+                            })
+                            .map(|(n, d)| IndexedMember {
+                                name: format!("{}.{}", c.name, n),
+                                r#type: d.member_type.clone().unwrap_or_default(),
+                                title: d.title.clone(),
+                                primary_key: d.primary_key.unwrap_or(false),
+                            })
+                            .collect()
+                    }
+                },
+                segment_list: {
+                    let cube_visible = visible(c.public, c.visible, c.shown, true);
+                    if !cube_visible {
+                        Vec::new()
+                    } else {
+                        c.segments
+                            .iter()
+                            .filter(|(_, g)| visible(g.public, g.visible, g.shown, true))
+                            .map(|(n, g)| IndexedMember {
+                                name: format!("{}.{}", c.name, n),
+                                r#type: "segment".into(),
+                                title: g.title.clone(),
+                                primary_key: false,
+                            })
+                            .collect()
+                    }
+                },
                 joins: c
                     .joins
                     .iter()
@@ -226,5 +300,38 @@ impl ModelIndexCache {
         let index = Arc::new(ModelIndex::load_with(model_path, policy.as_deref()));
         *cached = Some((key, index.clone()));
         index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cube_lists_its_visible_members() {
+        let dir = std::env::temp_dir().join(format!("model-index-members-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("orders.yml"),
+            "cubes:\n  - name: orders\n    sql_table: t\n    measures:\n      - name: count\n        type: count\n        title: Orders\n      - name: secret\n        type: count\n        public: false\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n        primary_key: true\n        public: true\n      - name: hidden_key\n        sql: k\n        type: number\n        primary_key: true\n    segments:\n      - name: big\n        sql: \"1=1\"\n",
+        )
+        .unwrap();
+        let index = ModelIndex::load_with(&dir, None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let c = &index.cubes[0];
+        assert_eq!((c.measures, c.dimensions), (2, 2));
+        assert_eq!(
+            c.measure_list,
+            [IndexedMember {
+                name: "orders.count".into(),
+                r#type: "count".into(),
+                title: Some("Orders".into()),
+                primary_key: false
+            }]
+        );
+        assert_eq!(c.dimension_list.len(), 1);
+        assert_eq!(c.dimension_list[0].name, "orders.id");
+        assert!(c.dimension_list[0].primary_key);
+        assert_eq!(c.segment_list[0].name, "orders.big");
     }
 }

@@ -204,7 +204,16 @@ pub(crate) async fn org_detail_for(
         .iter()
         .filter(|c| mine(&c.owner))
         .map(|c| {
+            let members = |list: &[crate::model_index::IndexedMember]| -> Vec<Value> {
+                list.iter()
+                    .map(|m| json!({ "name": m.name, "type": m.r#type, "title": m.title,
+                                     "primaryKey": m.primary_key }))
+                    .collect()
+            };
             json!({ "name": c.name, "title": c.title, "type": c.kind,
+                    "measures": members(&c.measure_list),
+                    "dimensions": members(&c.dimension_list),
+                    "segments": members(&c.segment_list),
                     "dataSource": c.data_source, "file": c.file,
                     "members": { "measures": c.measures, "dimensions": c.dimensions },
                     "joins": c.joins.iter()
