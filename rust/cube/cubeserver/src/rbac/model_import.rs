@@ -166,7 +166,8 @@ where
             content: content.clone(),
             expected_version: None,
             managed_by: content
-                .contains(SYNC_MARKER)
+                .trim_start_matches('\u{feff}')
+                .starts_with(SYNC_MARKER)
                 .then(|| SYNC_MANAGER.to_string()),
         });
     }
