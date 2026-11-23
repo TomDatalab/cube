@@ -143,7 +143,7 @@ pub fn prepare_cache_dir(dir: &Path) -> io::Result<()> {
         return Err(denied("has group/other permissions"));
     }
     // The uid of a file we create here is our effective uid.
-    let probe = dir.join(format!(".owner-probe-{}", std::process::id()));
+    let probe = dir.join(unique_tmp(".owner-probe"));
     std::fs::write(&probe, b"")?;
     let me = std::fs::symlink_metadata(&probe).map(|m| m.uid());
     let _ = std::fs::remove_file(&probe);
