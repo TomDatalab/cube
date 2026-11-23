@@ -154,6 +154,16 @@ impl ModelWriter {
                 if changes.is_empty() {
                     return Ok(changes);
                 }
+                for change in &changes {
+                    let org = match change {
+                        ModelChange::Put { organization_id, .. }
+                        | ModelChange::Move { organization_id, .. } => *organization_id,
+                        ModelChange::Delete { .. } => None,
+                    };
+                    if org.is_some_and(|o| !slugs.contains_key(&o)) {
+                        return Err(WriteError::bad_request("Organização desconhecida"));
+                    }
+                }
                 let before = check(&sources(rows, &slugs), &self.ctx, policy.as_deref());
                 let after_rows = apply_in_memory(rows, &changes);
                 let after = check(&sources(&after_rows, &slugs), &self.ctx, policy.as_deref());
@@ -161,7 +171,7 @@ impl ModelWriter {
                 if !problems.is_empty() {
                     return Err(WriteError {
                         status: StatusCode::BAD_REQUEST,
-                        message: "The change does not compile".into(),
+                        message: "A mudança não compila".into(),
                         problems,
                     });
                 }

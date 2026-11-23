@@ -95,6 +95,7 @@ api_test!(invalid_write_changes_nothing, |store| {
         .await
         .unwrap_err();
     assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.message, "A mudança não compila");
     assert!(err.problems[0].file.ends_with(".yml"), "{err:?}");
 
     assert_eq!(store.model_version().await.unwrap(), before);
@@ -124,4 +125,26 @@ api_test!(concurrent_writes_both_validate, |store| {
     let mut paths: Vec<_> = rows.files.iter().map(|f| f.path.as_str()).collect();
     paths.sort();
     assert_eq!(paths, ["a.yml", "b.yml"]);
+});
+
+api_test!(write_to_unknown_organization_is_refused, |store| {
+    let env = env_live(store.clone()).await;
+    let writer = env.writer.clone().unwrap();
+    let before = store.model_version().await.unwrap();
+    let err = writer
+        .write("ann", "test", |_| {
+            Ok(vec![ModelChange::Put {
+                id: None,
+                organization_id: Some(uuid::Uuid::new_v4()),
+                path: "x.yml".into(),
+                content: cube("x"),
+                expected_version: None,
+                managed_by: None,
+            }])
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.message, "Organização desconhecida");
+    assert_eq!(store.model_version().await.unwrap(), before);
 });

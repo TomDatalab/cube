@@ -448,7 +448,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let compile_context = cube_config
                 .for_security_context(&serde_json::json!({}))
                 .map(|t| t.compile_context)
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    eprintln!("RBAC error: cannot resolve the default tenant's compile context: {e}");
+                    std::process::exit(1);
+                });
             Some(Arc::new(cubeserver::rbac::model_writer::ModelWriter::new(
                 rbac.store.clone(),
                 runtime.clone(),
