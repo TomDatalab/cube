@@ -251,6 +251,29 @@ impl Rbac {
         self.check(&platform(), "manage", user).await
     }
 
+    /// The organizations `user` owns (organization permission `admin`),
+    /// sorted by name. Ids SpiceDB returns that are not UUIDs are ignored.
+    /// 503 when SpiceDB or the RBAC database cannot answer.
+    pub async fn owned_organizations(
+        &self,
+        user: &str,
+    ) -> Result<Vec<store::Organization>, ApiError> {
+        let ids: Vec<uuid::Uuid> = self
+            .authz
+            .lookup_resources("organization", "admin", user)
+            .await
+            .map_err(authz_error)?
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        let mut organizations = self.store.organizations_by_ids(&ids).await.map_err(|e| {
+            tracing::error!("Cannot read the owned organizations: {e}");
+            unavailable()
+        })?;
+        organizations.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(organizations)
+    }
+
     /// 403 unless `user` has `permission` on `resource`.
     pub async fn require(
         &self,

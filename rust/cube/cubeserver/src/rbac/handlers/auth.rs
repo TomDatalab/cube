@@ -39,7 +39,7 @@ async fn failure(rbac: &Rbac, error: ApiError) -> ApiError {
     error
 }
 
-/// `{username, password}` → `{token, expiresAt, user: {id, name, platformAdmin}}`.
+/// `{username, password}` → `{token, expiresAt, user: {id, name, platformAdmin, ownedOrganizations: [{id, slug, name}]}}`.
 pub async fn login(
     State(state): State<AppState>,
     request: Result<Json<LoginRequest>, JsonRejection>,
@@ -51,10 +51,15 @@ pub async fn login(
     // 503 whether or not the password is right: the answer never tells a
     // correct password from a wrong one. A name that is not a valid id
     // cannot be asked about, and is refused below like an unknown user.
-    let platform_admin = if validate_user_id(&request.username).is_ok() {
-        rbac.is_platform_admin(&request.username).await?
+    // The owned organizations are looked up here too, and only put in the
+    // answer once the password is right.
+    let (platform_admin, owned) = if validate_user_id(&request.username).is_ok() {
+        (
+            rbac.is_platform_admin(&request.username).await?,
+            rbac.owned_organizations(&request.username).await?,
+        )
     } else {
-        false
+        (false, Vec::new())
     };
 
     let Some(user) = check_credentials(rbac, &request.username, &request.password).await? else {
@@ -70,6 +75,10 @@ pub async fn login(
             "id": user.id,
             "name": user.name,
             "platformAdmin": platform_admin,
+            "ownedOrganizations": owned
+                .iter()
+                .map(|o| json!({ "id": o.id, "slug": o.slug, "name": o.name }))
+                .collect::<Vec<_>>(),
         },
     })))
 }

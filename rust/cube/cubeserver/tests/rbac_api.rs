@@ -1069,6 +1069,48 @@ async fn org_names(env: &Env, token: &str) -> Vec<String> {
     names(&body, "organizations")
 }
 
+db_test!(login_lists_owned_organizations, |store| {
+    let s = scenario(store).await;
+    create_org(&s.env, &s.admin, "Teste", "ana").await;
+    let (status, body) = login(&s.env.router, "ana", "ana-password-1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let owned = body["user"]["ownedOrganizations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no ownedOrganizations in {body}"));
+    let mut found: Vec<(String, String)> = owned
+        .iter()
+        .map(|o| {
+            assert!(o["id"].as_str().is_some(), "{o}");
+            (
+                o["slug"].as_str().unwrap().to_string(),
+                o["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        found.contains(&("teste".to_string(), "Teste".to_string())),
+        "{body}"
+    );
+    // Sorted by name: "A" (the scenario organization) before "Teste".
+    found.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(
+        owned.iter().map(|o| o["name"].as_str().unwrap()).collect::<Vec<_>>(),
+        found.iter().map(|f| f.1.as_str()).collect::<Vec<_>>()
+    );
+
+    let (status, body) = login(&s.env.router, "bia", "bia-password-1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["ownedOrganizations"], json!([]));
+});
+
+db_test!(failed_login_has_no_owned_organizations, |store| {
+    let s = scenario(store).await;
+    let (status, body) = login(&s.env.router, "ana", "wrong-password").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(!body.to_string().contains("ownedOrganizations"), "{body}");
+    assert!(body.get("user").is_none(), "{body}");
+});
+
 db_test!(organizations_list_only_what_the_user_can_view, |store| {
     let s = scenario(store).await;
     let env = &s.env;
