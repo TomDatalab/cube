@@ -104,7 +104,9 @@ fn version_of(name: &str) -> Option<i64> {
     digits.parse().ok()
 }
 
+/// Keeps the two highest versions and whatever `live` points to.
 fn prune(cache_dir: &Path) -> io::Result<()> {
+    let target = std::fs::read_link(cache_dir.join("live")).ok();
     let mut versions: Vec<(i64, PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(cache_dir)? {
         let entry = entry?;
@@ -114,20 +116,62 @@ fn prune(cache_dir: &Path) -> io::Result<()> {
     }
     versions.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, path) in versions.into_iter().skip(2) {
+        if target.as_deref().and_then(Path::file_name) == path.file_name() {
+            continue;
+        }
         std::fs::remove_dir_all(path)?;
     }
     Ok(())
 }
 
+/// Creates `dir` (mode 0700) if missing, then checks it is a real directory
+/// owned by this user with no group/other permissions.
+pub fn prepare_cache_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let denied = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("model cache dir {}: {why}", dir.display()),
+        )
+    };
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(denied("not a real directory"));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(denied("has group/other permissions"));
+    }
+    // The uid of a file we create here is our effective uid.
+    let probe = dir.join(format!(".owner-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"")?;
+    let me = std::fs::symlink_metadata(&probe).map(|m| m.uid());
+    let _ = std::fs::remove_file(&probe);
+    if me? != meta.uid() {
+        return Err(denied("not owned by the current user"));
+    }
+    Ok(())
+}
+
 /// Writes `v<version>/` (through `v<version>.tmp/`), points `live` at it with
-/// an atomic rename and prunes all but the two newest versions. An existing
-/// `v<version>` is complete by construction, so only `live` is relinked.
+/// an atomic rename and prunes old versions (never `live`'s target). An
+/// existing `v<version>` is complete by construction, so only `live` is
+/// relinked. Prune errors are logged, not returned.
 pub fn materialize(
     cache_dir: &Path,
     version: i64,
     sources: &[(String, String)],
 ) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(cache_dir)?;
+    materialize_with(cache_dir, version, sources, prune)
+}
+
+fn materialize_with(
+    cache_dir: &Path,
+    version: i64,
+    sources: &[(String, String)],
+    prune: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    prepare_cache_dir(cache_dir)?;
     let name = format!("v{version}");
     let dir = cache_dir.join(&name);
     if !dir.is_dir() {
@@ -149,21 +193,19 @@ pub fn materialize(
     }
     std::os::unix::fs::symlink(&name, &live_tmp)?;
     std::fs::rename(&live_tmp, &live)?;
-    prune(cache_dir)?;
+    if let Err(e) = prune(cache_dir) {
+        tracing::warn!(error = %e, "could not prune old model versions");
+    }
     Ok(live)
 }
 
-/// `CUBE_MODEL_CACHE_DIR`, or `<temp>/cube-model-<port>`; created with mode
-/// 0700 (best effort: a failure surfaces when materializing).
+/// `CUBE_MODEL_CACHE_DIR`, or `<temp>/cube-model-<port>`. Pure: call
+/// [`prepare_cache_dir`] (materialize does) before using it.
 pub fn cache_dir_from_env(port: u16) -> PathBuf {
-    let dir = match std::env::var_os("CUBE_MODEL_CACHE_DIR") {
+    match std::env::var_os("CUBE_MODEL_CACHE_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => std::env::temp_dir().join(format!("cube-model-{port}")),
-    };
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    dir
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +226,13 @@ mod tests {
             updated_at: Utc::now(),
             updated_by: "t".into(),
         }
+    }
+
+    fn tdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        d
     }
 
     fn src(c: &str) -> Vec<(String, String)> {
@@ -218,7 +267,7 @@ mod tests {
 
     #[test]
     fn materialize_writes_and_links() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tdir();
         let live = materialize(d.path(), 3, &src("hello")).unwrap();
         assert_eq!(live, d.path().join("live"));
         assert_eq!(std::fs::read_link(&live).unwrap(), PathBuf::from("v3"));
@@ -227,7 +276,7 @@ mod tests {
 
     #[test]
     fn materialize_prunes_old_versions() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tdir();
         for v in 1..=3 {
             materialize(d.path(), v, &src("x")).unwrap();
         }
@@ -238,7 +287,7 @@ mod tests {
 
     #[test]
     fn live_switches_only_to_complete_versions() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tdir();
         materialize(d.path(), 4, &src("old")).unwrap();
         let tmp = d.path().join("v5.tmp");
         std::fs::create_dir_all(tmp.join("digital")).unwrap();
@@ -256,5 +305,58 @@ mod tests {
         assert!(is_editable("a.yml", None));
         assert!(!is_editable("a.jinja", None));
         assert!(!is_editable("a.yml", Some("sofiadb-sync")));
+    }
+
+    #[test]
+    fn prune_keeps_live_target_when_version_goes_back() {
+        let d = tdir();
+        for v in [5, 6, 7, 3] {
+            materialize(d.path(), v, &src("x")).unwrap();
+        }
+        let live = d.path().join("live");
+        assert_eq!(std::fs::read_link(&live).unwrap(), PathBuf::from("v3"));
+        assert!(live.join("digital/fatos.yml").is_file());
+        assert!(d.path().join("v3").exists());
+    }
+
+    #[test]
+    fn prune_failure_does_not_fail_materialize() {
+        let d = tdir();
+        let live = materialize_with(d.path(), 2, &src("x"), |_| {
+            Err(io::Error::new(io::ErrorKind::Other, "boom"))
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_link(&live).unwrap(), PathBuf::from("v2"));
+    }
+
+    #[test]
+    fn prepare_refuses_a_symlink() {
+        let d = tdir();
+        let real = d.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(prepare_cache_dir(&link).is_err());
+    }
+
+    #[test]
+    fn prepare_refuses_group_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tdir();
+        let c = d.path().join("c");
+        std::fs::create_dir(&c).unwrap();
+        std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let e = prepare_cache_dir(&c).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn prepare_creates_with_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tdir();
+        let c = d.path().join("a/b");
+        prepare_cache_dir(&c).unwrap();
+        let mode = std::fs::metadata(&c).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 }
