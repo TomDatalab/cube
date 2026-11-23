@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use cubemodel::ownership::OwnershipPolicy;
-use cubemodel::{ModelError, ModelLoader, TemplateContext};
+use cubemodel::{ModelLoader, TemplateContext};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -26,39 +26,20 @@ pub fn check(
     policy: Option<&OwnershipPolicy>,
 ) -> Check {
     let mut problems = BTreeSet::new();
-    match ModelLoader::with_context(ctx.clone()).load_sources_with_policy(sources, policy) {
-        Ok(model) => {
-            for r in model.rejected {
-                problems.insert(Problem {
-                    file: r.file,
-                    cube: r.cube,
-                    message: r.message,
-                });
-            }
-        }
-        Err(ModelError::Compile(items)) => {
-            for i in items {
-                problems.insert(Problem {
-                    file: i.file_name.clone().unwrap_or_default(),
-                    cube: String::new(),
-                    message: i.full_message(),
-                });
-            }
-        }
-        Err(ModelError::Template { file_name, message }) => {
-            problems.insert(Problem {
-                file: file_name,
-                cube: String::new(),
-                message,
-            });
-        }
-        Err(e) => {
-            problems.insert(Problem {
-                file: String::new(),
-                cube: String::new(),
-                message: e.to_string(),
-            });
-        }
+    let report = ModelLoader::with_context(ctx.clone()).check_sources_with_policy(sources, policy);
+    for i in report.errors {
+        problems.insert(Problem {
+            file: i.file_name.clone().unwrap_or_default(),
+            cube: String::new(),
+            message: i.full_message(),
+        });
+    }
+    for r in report.rejected {
+        problems.insert(Problem {
+            file: r.file,
+            cube: r.cube,
+            message: r.message,
+        });
     }
     Check { problems }
 }
@@ -150,6 +131,49 @@ mod tests {
         let before = run(&[("a.yml", a), ("b.yml", B)], None);
         assert!(before.problems.is_empty(), "{:?}", before.problems);
         let after = run(&[("a.yml", a)], None);
-        assert_eq!(new_problems(&before, &after).len(), 1);
+        let p = new_problems(&before, &after);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].message.contains('b'), "{p:?}");
+    }
+
+    fn on_policy() -> OwnershipPolicy {
+        let mut organizations = BTreeMap::new();
+        organizations.insert("on".to_string(), ["on_pg".to_string()].into_iter().collect());
+        OwnershipPolicy {
+            organizations,
+            platform: BTreeSet::new(),
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn old_compile_error_does_not_hide_a_rejection() {
+        let policy = on_policy();
+        let x = "cubes:\n  - name: x\n    sql_table: t\n    data_source: sofiadb\n";
+        let before = run(&[("x.yml", BROKEN)], Some(&policy));
+        let after = run(&[("x.yml", BROKEN), ("on/x.yml", x)], Some(&policy));
+        let p = new_problems(&before, &after);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].cube, "x");
+    }
+
+    #[test]
+    fn old_template_error_does_not_hide_new_yaml() {
+        let t = "{{ nope( }}";
+        let before = run(&[("t.yml.jinja", t)], None);
+        assert!(!before.problems.is_empty());
+        let after = run(&[("t.yml.jinja", t), ("b.yml", BROKEN)], None);
+        let p = new_problems(&before, &after);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].file, "b.yml");
+    }
+
+    #[test]
+    fn same_mistake_in_a_second_file_is_new() {
+        let before = run(&[("x.yml", "- a")], None);
+        let after = run(&[("x.yml", "- a"), ("b.yml", "- b")], None);
+        let p = new_problems(&before, &after);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].file, "b.yml");
     }
 }

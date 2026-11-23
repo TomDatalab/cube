@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use minijinja::Environment;
 use serde_json::{Map, Value};
 
-use crate::error::{ErrorReporter, ModelError};
+use crate::error::{ErrorReporter, ModelError, ModelErrorItem};
 use crate::jinja::{build_environment, has_jinja_syntax, render, TemplateContext};
 use crate::model::{CubeDef, DataModel};
 use crate::validate;
@@ -20,6 +20,13 @@ const YAML_EXTENSIONS: &[&str] = &["yml", "yaml", "jinja", "j2"];
 /// Model files that would need a JavaScript engine. This backend is pure Rust,
 /// so they are rejected loudly rather than skipped.
 const UNSUPPORTED_EXTENSIONS: &[&str] = &["js", "ts", "mjs", "cjs", "jsx", "tsx", "py"];
+
+/// Everything [`ModelLoader::check_sources_with_policy`] found.
+#[derive(Debug, Clone)]
+pub struct SourcesReport {
+    pub errors: Vec<ModelErrorItem>,
+    pub rejected: Vec<crate::ownership::Rejection>,
+}
 
 /// Loads YAML/Jinja data models from disk or from a string.
 pub struct ModelLoader {
@@ -125,6 +132,37 @@ impl ModelLoader {
         sources: &[(String, String)],
         policy: Option<&crate::ownership::OwnershipPolicy>,
     ) -> Result<DataModel, ModelError> {
+        let (model, reporter) = self.run(sources, policy, false)?;
+        reporter.result(model)
+    }
+
+    /// Validation-only pass: never stops at the first problem. Template
+    /// render errors are recorded per file, and ownership rejections are
+    /// computed even when there are compile errors. Nothing is served from it.
+    pub fn check_sources_with_policy(
+        &self,
+        sources: &[(String, String)],
+        policy: Option<&crate::ownership::OwnershipPolicy>,
+    ) -> SourcesReport {
+        match self.run(sources, policy, true) {
+            Ok((model, reporter)) => SourcesReport {
+                errors: reporter.into_errors(),
+                rejected: model.rejected,
+            },
+            // keep_going never returns Err; kept for totality.
+            Err(e) => SourcesReport {
+                errors: vec![ModelErrorItem::new(e.to_string())],
+                rejected: Vec::new(),
+            },
+        }
+    }
+
+    fn run(
+        &self,
+        sources: &[(String, String)],
+        policy: Option<&crate::ownership::OwnershipPolicy>,
+        keep_going: bool,
+    ) -> Result<(DataModel, ErrorReporter), ModelError> {
         let mut reporter = ErrorReporter::new();
         let mut model = DataModel::default();
         let mut seen_names: HashSet<String> = HashSet::new();
@@ -134,6 +172,10 @@ impl ModelLoader {
             let rendered = if has_jinja_syntax(content) {
                 match render(&self.env, content, &self.context) {
                     Ok(r) => r,
+                    Err(e) if keep_going => {
+                        reporter.error(describe_template_error(&e));
+                        continue;
+                    }
                     Err(e) => {
                         return Err(ModelError::Template {
                             file_name: file_name.clone(),
@@ -222,7 +264,7 @@ impl ModelLoader {
 
         views::resolve_views(&mut model, &mut reporter);
 
-        reporter.result(model)
+        Ok((model, reporter))
     }
 
     fn build_cube(

@@ -171,7 +171,11 @@ impl ErrorReporter {
             file_name,
         };
         let rendered = item.full_message();
-        if self.errors.iter().any(|e| e.full_message() == rendered) {
+        if self
+            .errors
+            .iter()
+            .any(|e| e.file_name == item.file_name && e.full_message() == rendered)
+        {
             return;
         }
         self.errors.push(item);

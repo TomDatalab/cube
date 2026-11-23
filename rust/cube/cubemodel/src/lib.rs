@@ -65,7 +65,7 @@ pub mod yaml;
 
 pub use error::{ErrorReporter, ModelError, ModelErrorItem};
 pub use jinja::TemplateContext;
-pub use loader::{is_model_file, model_files, ModelLoader};
+pub use loader::{is_model_file, model_files, ModelLoader, SourcesReport};
 pub use meta::{meta_config, rest_meta_response, CubeMetaConfig, MetaConfig};
 pub use model::{
     CubeDef, DataModel, Dimension, EvaluatedFolder, EvaluatedHierarchy, Granularity, Hierarchy,

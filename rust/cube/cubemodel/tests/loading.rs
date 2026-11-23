@@ -309,3 +309,10 @@ fn missing_directory_is_an_io_error() {
     let err = ModelLoader::load_dir("tests/fixtures/does-not-exist").unwrap_err();
     assert!(matches!(err, ModelError::Io(_)));
 }
+
+#[test]
+fn served_path_still_errs_on_a_template_error() {
+    let sources = vec![("t.yml.jinja".to_string(), "{{ nope( }}".to_string())];
+    let r = cubemodel::ModelLoader::new().load_sources_with_policy(&sources, None);
+    assert!(matches!(r, Err(cubemodel::ModelError::Template { .. })));
+}
