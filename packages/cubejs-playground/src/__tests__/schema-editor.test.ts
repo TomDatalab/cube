@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { EditorState, reduce, problemLines, readOnlyReason } from '../pages/Schema/editor';
+import {
+  EditorState, reduce, problemLines, readOnlyReason, fileHint, offersJavaScript,
+} from '../pages/Schema/editor';
 
 const view: EditorState = {
   mode: 'view', draft: '', base: 3, error: null, problems: [], stale: false,
@@ -41,5 +43,22 @@ describe('model file editor state', () => {
     expect(readOnlyReason({ managedBy: 'sofiadb-sync', path: 'a.yml' })).toMatch(/^Este arquivo é gerado a partir do catálogo do SofiaDB/);
     expect(readOnlyReason({ path: 'a/b.JINJA' })).toBe('Arquivos .jinja e .j2 não são editáveis aqui');
     expect(readOnlyReason({ path: 'a.yml' })).toBeNull();
+  });
+});
+
+describe('file panel and generate menu by RBAC', () => {
+  it('without RBAC the file panel says where the file is', () => {
+    expect(fileHint(false, false)).toBe('path');
+    expect(fileHint(false, true)).toBe('docker');
+  });
+
+  it('with RBAC the file panel shows no disk path', () => {
+    expect(fileHint(true, false)).toBe(null);
+    expect(fileHint(true, true)).toBe('docker');
+  });
+
+  it('JavaScript is offered only without RBAC', () => {
+    expect(offersJavaScript(false)).toBe(true);
+    expect(offersJavaScript(true)).toBe(false);
   });
 });

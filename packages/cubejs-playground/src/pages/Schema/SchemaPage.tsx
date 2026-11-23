@@ -15,6 +15,7 @@ import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeDetail } from './CubeDetail';
 import { FileDetail } from './FileDetail';
+import { fileHint, offersJavaScript } from './editor';
 import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
 import { useOpenBlock } from './useOpenBlock';
 import {
@@ -488,9 +489,10 @@ export function SchemaPage({ history }: RouterProps) {
       if (!file) {
         return <CubeLoader />;
       }
+      const hint = fileHint(rbac.enabled, Boolean(isDocker));
       return (
         <>
-          {isDocker && (
+          {hint === 'docker' && (
             <Alert
               message={(
                 <span>
@@ -502,6 +504,18 @@ export function SchemaPage({ history }: RouterProps) {
                   >
                     Learn more about working with Cube data model in the docs
                   </Typography.Link>
+                </span>
+              )}
+              type="info"
+              style={{ paddingTop: 10, paddingBottom: 11 }}
+            />
+          )}
+          {hint === 'path' && (
+            <Alert
+              message={(
+                <span>
+                  This file can be edited at&nbsp;
+                  <b>{file.absPath}</b>
                 </span>
               )}
               type="info"
@@ -660,9 +674,11 @@ export function SchemaPage({ history }: RouterProps) {
                     >
                       YAML
                     </Menu.Item>
-                    <Menu.Item onClick={() => generateSchema()}>
-                      JavaScript
-                    </Menu.Item>
+                    {offersJavaScript(rbac.enabled) && (
+                      <Menu.Item onClick={() => generateSchema()}>
+                        JavaScript
+                      </Menu.Item>
+                    )}
                   </Menu>
                 )}
                 style={{ border: 0 }}

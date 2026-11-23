@@ -65,3 +65,16 @@ export function readOnlyReason(file: { managedBy?: string | null; path?: string 
   }
   return null;
 }
+
+// The hint above a file: where Docker keeps the files, or (without RBAC,
+// where the file is on disk) its path. With RBAC the file lives in the
+// database, so there is no path to show.
+export function fileHint(rbacOn: boolean, isDocker: boolean): 'docker' | 'path' | null {
+  if (isDocker) {
+    return 'docker';
+  }
+  return rbacOn ? null : 'path';
+}
+
+// With RBAC the model is generated into the database, which takes YAML only.
+export const offersJavaScript = (rbacOn: boolean) => !rbacOn;
