@@ -8,13 +8,15 @@ import { Menu, Tree } from '../../components';
 import { Alert, CubeLoader } from '../../atoms';
 import { AppContext } from '../../components/AppContext';
 import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
-import { useRbac } from '../../hooks';
+import { useRbac, useWorkspace } from '../../hooks';
+import { authHeaders, onUnauthorized } from '../../shared/auth';
 import { SchemaFormat } from '../../types';
 import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeChange, CubeDetail } from './CubeDetail';
 import { cubeEditBlock, cubeFileOf } from './cubeEdit';
+import { loadRows, previewHeaders, PreviewQuery } from './preview';
 import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
 import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
@@ -73,11 +75,12 @@ const SEARCH_MIN_CHARS = 2;
 // Its members are edited in its file: read fresh, changed, saved with the
 // version read (a concurrent change makes the save a 409, not a loss).
 function CubePanel({
-  api, org, owner, cube, errors, files, onOpen, onSaved,
+  api, org, owner, basePath, cube, errors, files, onOpen, onSaved,
 }: {
   api: ReturnType<typeof modelApi>;
   org: OrgNode | undefined;
   owner: boolean;
+  basePath: string;
   cube: TreeCube;
   errors: OrgDetail['errors'];
   files: OrgDetail['files'];
@@ -85,6 +88,25 @@ function CubePanel({
   onSaved: (detail: OrgDetail) => void;
 }) {
   const open = useOpenBlock(api, org, owner, cube);
+  // The preview queries with the user's own access: an admin in the cube's
+  // organization, an owner in the workspace chosen in the header.
+  const workspace = useWorkspace();
+  const scope = org ? previewHeaders({ isAdmin: !owner, slug: org.slug, workspace }) : null;
+  let previewBlock: string | null = null;
+  if (!scope) {
+    previewBlock = 'Choose a workspace in the header to preview this cube';
+  } else if (open.disabled && open.hint) {
+    previewBlock = open.hint;
+  }
+  const loadUrl = `${basePath.replace(/\/$/, '')}/v1/load`;
+  const runQuery = scope && !open.disabled
+    ? (query: PreviewQuery) => loadRows(loadUrl, { ...authHeaders(), ...scope }, query, (url, init) => (
+      fetch(url, init).then((r) => {
+        onUnauthorized(r);
+        return r;
+      })
+    ))
+    : null;
   const file = cubeFileOf(files, cube);
   const routed = Boolean(org && (org.slug === PLATFORM || org.id));
   const editBlock = cubeEditBlock({ cube, file, routed });
@@ -107,6 +129,9 @@ function CubePanel({
       onOpen={onOpen}
       editBlock={editBlock}
       onEdit={onEdit}
+      preview={{
+        runQuery, block: previewBlock, hidden: !owner,
+      }}
     />
   );
 }
@@ -506,6 +531,7 @@ export function SchemaPage({ history }: RouterProps) {
           api={api}
           org={known.current[selected.slug]}
           owner={!rbac.isAdmin}
+          basePath={playgroundContext.basePath ?? '/cube'}
           cube={cube}
           errors={detail.errors || []}
           files={detail.files || []}
