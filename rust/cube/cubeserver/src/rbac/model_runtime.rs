@@ -89,7 +89,7 @@ impl ModelRuntime {
                 // Writes the new version and prunes the old ones; a scope
                 // that fails here is written again on its next use.
                 if let Err(e) =
-                    materialize(&scope_dir, version, &scope_sources(&srcs, &scope, &org_slugs))
+                    materialize(&scope_dir, version, &scope_files(&srcs, &scope, &org_slugs))
                 {
                     tracing::warn!(scope = scope.key(), error = %e, "could not materialize a model scope");
                 }
@@ -116,7 +116,7 @@ impl ModelRuntime {
         }
         let scope = scope.clone();
         tokio::task::spawn_blocking(move || {
-            materialize(&scope_dir, version, &scope_sources(&srcs, &scope, &slugs))
+            materialize(&scope_dir, version, &scope_files(&srcs, &scope, &slugs))
         })
         .await
         .map_err(|e| StoreError::Db(e.to_string()))?
@@ -174,6 +174,24 @@ impl ModelRuntime {
             }
         });
     }
+}
+
+/// The file a scope with no sources is compiled from: the planner refuses a
+/// folder without YAML, and such a scope serves an empty model instead.
+const EMPTY_SCOPE_FILE: (&str, &str) = ("_empty.yml", "cubes: []\n");
+
+/// What `scope`'s folder holds: its sources, or [`EMPTY_SCOPE_FILE`].
+fn scope_files(
+    srcs: &[(String, String)],
+    scope: &ModelScope,
+    org_slugs: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    let files = scope_sources(srcs, scope, org_slugs);
+    if !files.is_empty() {
+        return files;
+    }
+    let (path, content) = EMPTY_SCOPE_FILE;
+    vec![(path.to_string(), content.to_string())]
 }
 
 /// The scopes with a folder under `<cache>/scopes/`: the Platform and the

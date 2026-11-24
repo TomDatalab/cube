@@ -780,3 +780,54 @@ tree_test!(moving_a_connection_moves_its_cubes_between_scopes, |store| {
     let digital_names = meta_of("digital").await;
     assert!(!digital_names.contains(&"b".to_string()), "{digital_names:?}");
 });
+
+tree_test!(an_organization_without_files_serves_an_empty_model, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    // Every file belongs to Digital: ON and the Platform have none, and there
+    // is no `_platform/` file either.
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![put_in(Some(digital), "a.yml", &titled("a", "A Digital", "sofiadb"))])
+        })
+        .await
+        .unwrap();
+    let bia = user(&env, &admin, "bia").await;
+    let ws_on = workspace_with(&env, &admin, on, "ondb", &["bia"]).await;
+    let cache = env._cache.as_ref().unwrap().path().to_string_lossy().into_owned();
+
+    let mut answers = vec![
+        ("member in workspace", get_in_workspace(&env, &bia, &ws_on, "/cube/v1/meta").await),
+        ("member", get(&env, &bia, "/cube/v1/meta").await),
+        (
+            "admin of on",
+            get_with(&env, &admin, &[("x-cube-organization", "on")], "/cube/v1/meta").await,
+        ),
+        ("admin", get(&env, &admin, "/cube/v1/meta").await),
+    ];
+    for (who, (status, body, text)) in &answers {
+        assert_eq!(*status, StatusCode::OK, "{who}: {text}");
+        assert_eq!(body["cubes"], json!([]), "{who}: {text}");
+    }
+
+    // A query naming a cube the scope does not have is the usual error: the
+    // one a scope with files gives for a cube it does not have.
+    let load = |cube: &str| {
+        format!("/cube/v1/load?query=%7B%22measures%22%3A%5B%22{cube}.n%22%5D%7D")
+    };
+    let (status, _, text) = get_in_workspace(&env, &bia, &ws_on, &load("a")).await;
+    assert_ne!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+    answers.push(("member load", (status, Value::Null, text)));
+    let (usual_status, usual, _) =
+        get_with(&env, &admin, &[("x-cube-organization", "digital")], &load("zz")).await;
+    let (status, body, text) =
+        get_with(&env, &admin, &[("x-cube-organization", "on")], &load("zz")).await;
+    assert_eq!(status, usual_status, "{text}");
+    assert_eq!(body, usual, "{text}");
+    answers.push(("admin load", (status, body, text)));
+    for (who, (_, _, text)) in &answers {
+        assert!(!text.contains(&cache), "{who} shows the cache dir: {text}");
+        assert!(!text.contains("scopes/"), "{who} shows a scope folder: {text}");
+    }
+});
