@@ -27,10 +27,10 @@ describe('cubeEditBlock', () => {
 
   it('says why a cube cannot be edited here', () => {
     expect(cubeEditBlock({ ...ok, cube: { ...cube, type: 'view' } })).toMatch(/view/i);
-    expect(cubeEditBlock({ ...ok, file: undefined })).toMatch(/arquivo/);
-    expect(cubeEditBlock({ ...ok, file: files[1] })).toMatch(/somente leitura/);
+    expect(cubeEditBlock({ ...ok, file: undefined })).toMatch(/file/);
+    expect(cubeEditBlock({ ...ok, file: files[1] })).toMatch(/read-only/);
     expect(cubeEditBlock({ ...ok, file: { ...files[0], fileName: 'bossa/cables.js' } })).toMatch(/YAML/);
-    expect(cubeEditBlock({ ...ok, routed: false })).toMatch(/arquivo/);
+    expect(cubeEditBlock({ ...ok, routed: false })).toMatch(/file/);
   });
 });
 
@@ -43,9 +43,9 @@ describe('shortName', () => {
 
 describe('editFailure', () => {
   it('turns an edit refusal, a compile refusal and a conflict into text', () => {
-    expect(editFailure(new CubeEditError('nome inválido'))).toEqual({ message: 'nome inválido', problems: [] });
+    expect(editFailure(new CubeEditError('invalid name'))).toEqual({ message: 'invalid name', problems: [] });
     expect(editFailure(new ApiError('A mudança não compila', 400, [{ file: 'bossa/v.yml', cube: 'v', message: 'fiber_count is not defined' }])))
       .toEqual({ message: 'A mudança não compila', problems: ['bossa/v.yml: fiber_count is not defined'] });
-    expect(editFailure(new ApiError('stale', 409)).message).toMatch(/mudou/);
+    expect(editFailure(new ApiError('stale', 409)).message).toMatch(/changed/);
   });
 });

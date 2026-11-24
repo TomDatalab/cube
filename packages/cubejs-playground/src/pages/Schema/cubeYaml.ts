@@ -35,7 +35,7 @@ export const measureNeedsSql = (type: MeasureType) => type !== 'count';
 function load(text: string): Document {
   const doc = parseDocument(text);
   if (doc.errors.length) {
-    throw new CubeEditError(`O arquivo não é um YAML válido: ${doc.errors[0].message}`);
+    throw new CubeEditError(`The file is not valid YAML: ${doc.errors[0].message}`);
   }
   return doc;
 }
@@ -52,7 +52,7 @@ function cubeOf(doc: Document, cube: string): YAMLMap {
     ? (cubes as YAMLSeq).items.find((c) => isMap(c) && c.get('name') === cube)
     : undefined;
   if (!found) {
-    throw new CubeEditError(`O cubo ${cube} não está neste arquivo`);
+    throw new CubeEditError(`Cube ${cube} is not in this file`);
   }
   return found as YAMLMap;
 }
@@ -65,8 +65,8 @@ function list(cube: YAMLMap, key: 'measures' | 'dimensions' | 'segments'): YAMLM
 function member(cube: YAMLMap, key: 'measures' | 'dimensions', name: string): YAMLMap {
   const found = list(cube, key).find((m) => m.get('name') === name);
   if (!found) {
-    const kind = key === 'measures' ? 'measure' : 'dimension';
-    throw new CubeEditError(`A ${kind} ${name} não existe no cubo ${String(cube.get('name'))}`);
+    const kind = key === 'measures' ? 'Measure' : 'Dimension';
+    throw new CubeEditError(`${kind} ${name} does not exist in cube ${String(cube.get('name'))}`);
   }
   return found;
 }
@@ -74,24 +74,24 @@ function member(cube: YAMLMap, key: 'measures' | 'dimensions', name: string): YA
 // A new member name: valid, and not taken by any member of the cube.
 function checkNewName(cube: YAMLMap, name: string) {
   if (!NAME.test(name)) {
-    throw new CubeEditError(`O nome ${name} é inválido: use letras, números e _, sem começar por número`);
+    throw new CubeEditError(`The name ${name} is invalid: use letters, digits and _, not starting with a digit`);
   }
   const taken = (['measures', 'dimensions', 'segments'] as const)
     .some((key) => list(cube, key).some((m) => m.get('name') === name));
   if (taken) {
-    throw new CubeEditError(`O nome ${name} já é usado por outro membro do cubo`);
+    throw new CubeEditError(`The name ${name} is already used by another member of the cube`);
   }
 }
 
 function checkSql(type: MeasureType, sql: unknown) {
   if (measureNeedsSql(type) && !(typeof sql === 'string' && sql.trim())) {
-    throw new CubeEditError(`Uma measure do tipo ${type} precisa de SQL (a coluna ou a expressão)`);
+    throw new CubeEditError(`A ${type} measure needs SQL (the column or an expression)`);
   }
 }
 
 export function setMeasureType(text: string, cube: string, measure: string, type: MeasureType, sql?: string): string {
   if (!MEASURE_TYPES.includes(type)) {
-    throw new CubeEditError(`O tipo ${type} não é um tipo de measure`);
+    throw new CubeEditError(`${type} is not a measure type`);
   }
   const doc = load(text);
   const m = member(cubeOf(doc, cube), 'measures', measure);
@@ -108,7 +108,7 @@ export type NewMeasure = { name: string; type: MeasureType; sql?: string; title?
 
 export function addMeasure(text: string, cube: string, measure: NewMeasure): string {
   if (!MEASURE_TYPES.includes(measure.type)) {
-    throw new CubeEditError(`O tipo ${measure.type} não é um tipo de measure`);
+    throw new CubeEditError(`${measure.type} is not a measure type`);
   }
   const doc = load(text);
   const c = cubeOf(doc, cube);
@@ -132,7 +132,7 @@ export function addMeasure(text: string, cube: string, measure: NewMeasure): str
 
 export function setDimensionType(text: string, cube: string, dimension: string, type: DimensionType): string {
   if (!DIMENSION_TYPES.includes(type)) {
-    throw new CubeEditError(`O tipo ${type} não pode ser escolhido aqui (geo pede latitude e longitude)`);
+    throw new CubeEditError(`${type} cannot be chosen here (geo takes latitude and longitude)`);
   }
   const doc = load(text);
   member(cubeOf(doc, cube), 'dimensions', dimension).set('type', type);

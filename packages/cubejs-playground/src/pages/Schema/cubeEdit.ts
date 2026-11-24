@@ -24,16 +24,16 @@ export function cubeEditBlock({ cube, file, routed }: {
   routed: boolean;
 }): string | null {
   if (cube.type === 'view') {
-    return 'Views não são editadas aqui: abra o arquivo da view';
+    return "Views are not edited here: open the view's file";
   }
   if (!routed || !file?.id || file.version == null) {
-    return 'Este cubo é editado pelo seu arquivo';
+    return 'This cube is edited in its file';
   }
   if (file.editable === false) {
-    return 'O arquivo deste cubo é somente leitura';
+    return "This cube's file is read-only";
   }
   if (!/\.ya?ml$/i.test(file.fileName)) {
-    return 'Só cubos em arquivos YAML são editados aqui: abra o arquivo';
+    return 'Only cubes in YAML files are edited here: open the file';
   }
   return null;
 }
@@ -47,7 +47,7 @@ export function editFailure(e: unknown): { message: string; problems: string[] }
     return { message: e.message, problems: [] };
   }
   if (e instanceof ApiError && e.status === 409) {
-    return { message: 'O arquivo mudou desde que foi aberto: tente de novo', problems: [] };
+    return { message: 'The file changed since it was opened: try again', problems: [] };
   }
   if (e instanceof ApiError) {
     return { message: e.message, problems: problemLines(e.problems ?? []) };

@@ -155,7 +155,7 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
 
 export type OpenBlock = { disabled: boolean; hint?: string; warning?: string };
 
-// Whether "Abrir no Playground" works for a cube, and what to tell the user.
+// Whether "Open in Playground" works for a cube, and what to tell the user.
 // `released` is null until the connections of the chosen workspace are known.
 export function openBlock(
   cube: { dataSource: string; measures?: unknown[]; dimensions?: unknown[] },
@@ -167,16 +167,16 @@ export function openBlock(
   }
 ): OpenBlock {
   if (!(cube.measures?.length || cube.dimensions?.length)) {
-    return { disabled: true, hint: 'O cubo não tem membros' };
+    return { disabled: true, hint: 'The cube has no members' };
   }
   if (ctx.owner && !ctx.workspaces.length) {
-    return { disabled: true, hint: 'Crie um workspace nesta organização para consultar' };
+    return { disabled: true, hint: 'Create a workspace in this organization to query it' };
   }
   const workspace = ctx.workspaces.find((w) => w.id === ctx.chosen);
   if (workspace && ctx.released && !ctx.released.includes(cube.dataSource)) {
     return {
       disabled: false,
-      warning: `libere a conexão ${cube.dataSource} para o workspace ${workspace.name}`,
+      warning: `Release the connection ${cube.dataSource} to the workspace ${workspace.name}`,
     };
   }
   return { disabled: false };

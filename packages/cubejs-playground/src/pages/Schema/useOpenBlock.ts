@@ -5,7 +5,7 @@ import { openBlock, OpenBlock, OrgNode } from './api';
 import type { modelApi } from './api';
 import type { TreeCube } from './tree';
 
-// Whether "Abrir no Playground" works for a cube of `org`: the workspaces of
+// Whether "Open in Playground" works for a cube of `org`: the workspaces of
 // the organization and the connections released to the chosen one.
 export function useOpenBlock(
   api: ReturnType<typeof modelApi>,

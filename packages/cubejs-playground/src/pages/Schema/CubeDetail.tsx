@@ -1,5 +1,8 @@
-import { useState } from 'react';
-import { Button, Descriptions, Input, Modal, Select, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { ReactNode, useState } from 'react';
+import { EditOutlined, PlusOutlined } from '@ant-design/icons';
+import {
+  Button, Descriptions, Form, Input, Modal, Select, Space, Table, Tag, Tooltip, Typography, message,
+} from 'antd';
 
 import { Alert } from '../../atoms';
 import type { OpenBlock } from './api';
@@ -37,7 +40,7 @@ type Dialog = { kind: 'measure'; member: TreeMember }
 
 type Fields = { name: string; type: string; sql: string; title: string };
 
-// The change a dialog's fields make, or an error thrown by the edit.
+// The change a dialog's fields make; the edit throws what the file refuses.
 function changeOf(cube: string, dialog: Dialog, f: Fields): CubeChange {
   if (dialog.kind === 'measure') {
     const name = shortName(dialog.member.name);
@@ -57,6 +60,14 @@ function changeOf(cube: string, dialog: Dialog, f: Fields): CubeChange {
     }
     return next;
   };
+}
+
+function dialogTitle(cube: string, dialog: Dialog): string {
+  if (dialog.kind === 'new-measure') {
+    return `Add measure to ${cube}`;
+  }
+  const kind = dialog.kind === 'measure' ? 'measure' : 'dimension';
+  return `Edit ${kind} ${shortName(dialog.member.name)}`;
 }
 
 function MemberDialog({
@@ -81,19 +92,13 @@ function MemberDialog({
   const isMeasure = dialog.kind !== 'dimension';
   const geo = dialog.kind === 'dimension' && member?.type === 'geo';
   const askSql = isMeasure && measureNeedsSql(fields.type as MeasureType);
-  let title = `Nova measure em ${cube}`;
-  if (dialog.kind === 'measure') {
-    title = `Measure ${fields.name}`;
-  } else if (dialog.kind === 'dimension') {
-    title = `Dimension ${member ? shortName(member.name) : ''}`;
-  }
 
   const save = async () => {
     setSaving(true);
     setFailure(null);
     try {
       await onEdit(changeOf(cube, dialog, fields));
-      message.success('Cubo salvo');
+      message.success(`${cube} saved`);
       onClose();
     } catch (e) {
       setFailure(editFailure(e));
@@ -102,68 +107,66 @@ function MemberDialog({
     }
   };
 
-  const label = (text: string) => <Typography.Text strong style={{ display: 'block', margin: '12px 0 4px' }}>{text}</Typography.Text>;
-
   return (
     <Modal
       visible
-      title={title}
-      okText="Salvar"
-      cancelText="Cancelar"
+      title={dialogTitle(cube, dialog)}
+      okText="Save"
+      cancelText="Cancel"
       confirmLoading={saving}
       onOk={save}
       onCancel={onClose}
       destroyOnClose
     >
-      {dialog.kind !== 'measure' && (
-        <>
-          {label('Nome')}
-          <Input aria-label="Nome" value={fields.name} onChange={(e) => set('name')(e.target.value)} />
-          {dialog.kind === 'dimension' && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              As referências a ela neste cubo são renomeadas junto. Outros cubos, views e consultas salvas
-              que usam o nome antigo precisam ser ajustados.
-            </Typography.Text>
-          )}
-        </>
-      )}
-      {label('Tipo')}
-      <Select
-        aria-label="Tipo"
-        style={{ width: '100%' }}
-        value={fields.type}
-        disabled={geo}
-        onChange={set('type')}
-        options={(isMeasure ? MEASURE_TYPES : DIMENSION_TYPES).map((t) => ({ value: t, label: t }))}
-      />
-      {geo && (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          Uma dimension geo tem latitude e longitude: o tipo dela muda no arquivo.
-        </Typography.Text>
-      )}
-      {askSql && (
-        <>
-          {label(dialog.kind === 'measure' ? 'SQL (se a measure ainda não tiver)' : 'SQL')}
-          <Input
-            aria-label="SQL"
-            placeholder="{CUBE}.coluna"
-            value={fields.sql}
-            onChange={(e) => set('sql')(e.target.value)}
+      <Form layout="vertical" requiredMark={false} onFinish={save}>
+        {dialog.kind !== 'measure' && (
+          <Form.Item
+            label="Name"
+            extra={dialog.kind === 'dimension'
+              ? 'References to it in this cube are renamed too. Other cubes, views and saved queries that use the old name must be updated.'
+              : undefined}
+          >
+            <Input aria-label="Name" value={fields.name} onChange={(e) => set('name')(e.target.value)} />
+          </Form.Item>
+        )}
+        <Form.Item
+          label="Type"
+          extra={geo ? 'A geo dimension takes latitude and longitude: change its type in the file.' : undefined}
+        >
+          <Select
+            aria-label="Type"
+            value={fields.type}
+            disabled={geo}
+            onChange={set('type')}
+            options={(isMeasure ? MEASURE_TYPES : DIMENSION_TYPES).map((t) => ({ value: t, label: t }))}
           />
-        </>
-      )}
-      {dialog.kind === 'new-measure' && (
-        <>
-          {label('Título (opcional)')}
-          <Input aria-label="Título" value={fields.title} onChange={(e) => set('title')(e.target.value)} />
-        </>
-      )}
+        </Form.Item>
+        {askSql && (
+          <Form.Item
+            label="SQL"
+            extra={dialog.kind === 'measure'
+              ? 'Only needed when the measure has no SQL yet.'
+              : 'The column or expression to aggregate, e.g. {CUBE}.amount.'}
+          >
+            <Input
+              aria-label="SQL"
+              placeholder="{CUBE}.column"
+              value={fields.sql}
+              onChange={(e) => set('sql')(e.target.value)}
+            />
+          </Form.Item>
+        )}
+        {dialog.kind === 'new-measure' && (
+          <Form.Item label="Title" extra="Optional.">
+            <Input aria-label="Title" value={fields.title} onChange={(e) => set('title')(e.target.value)} />
+          </Form.Item>
+        )}
+      </Form>
       {failure && (
         <Alert
           type="error"
           message={failure.message}
           description={failure.problems.length ? failure.problems.map((p) => <div key={p}>{p}</div>) : undefined}
-          style={{ marginTop: 16 }}
         />
       )}
     </Modal>
@@ -179,37 +182,64 @@ const nameColumn = {
     <>
       {name}
       {member.public === false && (
-        <Tooltip title="Os usuários de consulta não veem este membro">
-          <Tag style={{ marginLeft: 8 }}>oculto</Tag>
+        <Tooltip title="Query users do not see this member">
+          <Tag style={{ marginLeft: 8 }}>hidden</Tag>
         </Tooltip>
       )}
     </>
   ),
 };
 
+// The row's edit button: a pencil at the end of the row.
 const editColumn = (edit: ((member: TreeMember) => void) | null) => (edit
   ? [{
     title: '',
     key: 'edit',
-    width: 80,
+    width: 48,
+    align: 'right' as const,
     render: (_: unknown, member: TreeMember) => (
-      <Button size="small" type="link" onClick={() => edit(member)}>Editar</Button>
+      <Tooltip title="Edit">
+        <Button
+          type="text"
+          size="small"
+          icon={<EditOutlined />}
+          aria-label={`Edit ${shortName(member.name)}`}
+          onClick={() => edit(member)}
+        />
+      </Tooltip>
     ),
   }]
   : []);
 
 const memberColumns = (withPrimaryKey: boolean) => [
   nameColumn,
-  { title: 'Type', dataIndex: 'type', key: 'type' },
+  { title: 'Type', dataIndex: 'type', key: 'type', width: 140 },
   ...(withPrimaryKey
     ? [{
       title: 'PK',
       dataIndex: 'primaryKey',
       key: 'primaryKey',
+      width: 60,
       render: (value?: boolean) => (value ? 'yes' : ''),
     }]
     : [{ title: 'Title', dataIndex: 'title', key: 'title' }]),
 ];
+
+// A section's heading: its name and count, and its action on the right.
+function SectionHeader({ title, count, action }: { title: string; count: number; action?: ReactNode }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '24px 0 8px',
+    }}
+    >
+      <Space size={8} align="center">
+        <Typography.Title level={5} style={{ margin: 0 }}>{title}</Typography.Title>
+        <Tag style={{ margin: 0 }}>{count}</Tag>
+      </Space>
+      {action}
+    </div>
+  );
+}
 
 export function CubeDetail({
   cube, errors, open, onOpen, editBlock = null, onEdit,
@@ -245,20 +275,21 @@ export function CubeDetail({
 
       <Tooltip title={open.disabled ? open.hint : ''}>
         <span>
-          <Button
-            type="primary"
-            disabled={open.disabled}
-            onClick={onOpen}
-            style={{ marginBottom: 24 }}
-          >
-            Abrir no Playground
+          <Button type="primary" disabled={open.disabled} onClick={onOpen}>
+            Open in Playground
           </Button>
         </span>
       </Tooltip>
 
+      {onEdit && editBlock && cube.type === 'cube' && (
+        <Typography.Paragraph type="secondary" style={{ marginTop: 16, marginBottom: 0 }}>
+          {editBlock}
+        </Typography.Paragraph>
+      )}
+
       {cube.joins && cube.joins.length > 0 && (
         <>
-          <Typography.Title level={5}>Joins ({cube.joins.length})</Typography.Title>
+          <SectionHeader title="Joins" count={cube.joins.length} />
           <Table
             size="small"
             rowKey="name"
@@ -268,30 +299,26 @@ export function CubeDetail({
               { title: 'Cube', dataIndex: 'name', key: 'name' },
               { title: 'Relationship', dataIndex: 'relationship', key: 'relationship' },
             ]}
-            style={{ marginBottom: 24 }}
           />
         </>
       )}
 
       {cube.includes && cube.includes.length > 0 && (
         <>
-          <Typography.Title level={5}>Includes ({cube.includes.length})</Typography.Title>
+          <SectionHeader title="Includes" count={cube.includes.length} />
           <Typography.Paragraph>{cube.includes.join(', ')}</Typography.Paragraph>
         </>
       )}
 
-      {onEdit && editBlock && cube.type === 'cube' && (
-        <Typography.Paragraph type="secondary">{editBlock}</Typography.Paragraph>
-      )}
-
-      <Typography.Title level={5}>
-        Measures ({measures.length})
-        {canEdit && (
-          <Button size="small" style={{ marginLeft: 12 }} onClick={() => setDialog({ kind: 'new-measure' })}>
-            Nova measure
+      <SectionHeader
+        title="Measures"
+        count={measures.length}
+        action={canEdit ? (
+          <Button size="small" icon={<PlusOutlined />} onClick={() => setDialog({ kind: 'new-measure' })}>
+            Add measure
           </Button>
-        )}
-      </Typography.Title>
+        ) : undefined}
+      />
       <Table
         size="small"
         rowKey="name"
@@ -303,9 +330,7 @@ export function CubeDetail({
         ]}
       />
 
-      <Typography.Title level={5} style={{ marginTop: 24 }}>
-        Dimensions ({dimensions.length})
-      </Typography.Title>
+      <SectionHeader title="Dimensions" count={dimensions.length} />
       <Table
         size="small"
         rowKey="name"
@@ -317,9 +342,7 @@ export function CubeDetail({
         ]}
       />
 
-      <Typography.Title level={5} style={{ marginTop: 24 }}>
-        Segments ({segments.length})
-      </Typography.Title>
+      <SectionHeader title="Segments" count={segments.length} />
       <Table
         size="small"
         rowKey="name"

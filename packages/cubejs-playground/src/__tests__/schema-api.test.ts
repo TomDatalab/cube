@@ -132,14 +132,14 @@ describe('openBlock', () => {
   it('asks an owner for a workspace', () => {
     const block = openBlock(cube, { owner: true, workspaces: [], chosen: null, released: null });
     expect(block.disabled).toBe(true);
-    expect(block.hint).toBe('Crie um workspace nesta organização para consultar');
+    expect(block.hint).toBe('Create a workspace in this organization to query it');
     expect(openBlock(cube, { owner: false, workspaces: [], chosen: null, released: null }).disabled).toBe(false);
   });
 
   it('warns when the connection is not released to the chosen workspace', () => {
     const block = openBlock(cube, { owner: true, workspaces, chosen: 'w1', released: ['other'] });
     expect(block.disabled).toBe(false);
-    expect(block.warning).toBe('libere a conexão sales_db para o workspace Main');
+    expect(block.warning).toBe('Release the connection sales_db to the workspace Main');
     expect(openBlock(cube, { owner: true, workspaces, chosen: 'w1', released: ['sales_db'] }).warning).toBeUndefined();
   });
 });
