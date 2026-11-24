@@ -39,7 +39,7 @@ import { useRbac } from '../hooks/rbac';
 import { useWorkspace } from '../hooks/workspace';
 import { chooseOrganizationScope } from '../shared/auth';
 import {
-  otherScopeSections, rememberCubeToOpen, ScopeSection, sectionsOf, takeCubeToOpen, worthGrouping,
+  filterSectionsOf, otherScopeSections, rememberCubeToOpen, ScopeSection, sectionsOf, takeCubeToOpen, worthGrouping,
 } from '../shared/meta-groups';
 
 import {
@@ -444,21 +444,26 @@ export function QueryBuilderSidePanel({
   // Every section of the current tab, for the filter and to decide whether
   // grouping says anything. An organization with nothing to query but errors
   // (only admins get error counts) keeps its section, so they see it.
-  const allSections = metaGroups
-    ? sectionsOf(cubesOrViews, metaGroups, { keepEmpty: true })
+  const sectionsOfType = (type: 'cubes' | 'views') => (metaGroups
+    ? sectionsOf(type === 'cubes' ? cubes : views, metaGroups, { keepEmpty: true })
       .filter((section) => section.items.length || (section.errors ?? 0) > 0)
-    : [];
-  const allOtherSections = allScopeGroups && metaGroups
-    ? otherScopeSections(allScopeGroups, metaGroups, selectedType)
-    : [];
-  const isGrouped = worthGrouping(allSections) || allOtherSections.length > 0;
+    : []);
+  const otherSectionsOfType = (type: 'cubes' | 'views') => (allScopeGroups && metaGroups
+    ? otherScopeSections(allScopeGroups, metaGroups, type)
+    : []);
+  const sectionsByType = {
+    cubes: { own: sectionsOfType('cubes'), other: otherSectionsOfType('cubes') },
+    views: { own: sectionsOfType('views'), other: otherSectionsOfType('views') },
+  };
+  // Cubes and views share the grouping and the organization filter: grouped
+  // on both tabs when either is, and the filter offers every organization
+  // of either tab, counting the current tab's items.
+  const isGrouped = Object.values(sectionsByType)
+    .some(({ own, other }) => worthGrouping(own) || other.length > 0);
   // The organizations in the order of every scope's groups (Platform first),
   // then whatever only the current model has (Other).
   const sectionOrder = (allScopeGroups || []).map((group) => group.slug);
-  const filterSections = [
-    ...allSections.map((section) => ({ slug: section.slug, name: section.name, count: section.items.length })),
-    ...allOtherSections,
-  ].sort((a, b) => orderOf(sectionOrder, a.slug) - orderOf(sectionOrder, b.slug));
+  const filterSections = filterSectionsOf(sectionsByType, selectedType, sectionOrder);
   const activeOrganization = isGrouped
     && filterSections.some((section) => section.slug === organizationFilter)
     ? organizationFilter
@@ -635,6 +640,9 @@ export function QueryBuilderSidePanel({
       );
     };
 
+    const filterName = filterSections.find((section) => section.slug === activeOrganization)?.name
+      ?? activeOrganization;
+
     // The current model's sections and the other organizations' in one
     // order: Platform, then the organizations by name, then Other.
     const ordered = sections
@@ -662,6 +670,11 @@ export function QueryBuilderSidePanel({
               }}
             />
           ))}
+        {ordered && !ordered.length && activeOrganization && !narrowed ? (
+          <DataSourceLabel qa="NothingInOrganization">
+            No {selectedType} in {filterName}
+          </DataSourceLabel>
+        ) : null}
         {ordered
           ? ordered.map((entry) => entry.node)
           : shownCubes.map(renderCube)}

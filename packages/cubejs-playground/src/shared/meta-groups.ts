@@ -214,3 +214,40 @@ export function takeCubeToOpen(): string | null {
     return null;
   }
 }
+
+export type FilterSection = { slug: string; name: string; count: number };
+
+// The organizations the filter offers, shared by the Cubes and Views tabs:
+// every organization with something on either tab (from the current model,
+// `own`, or another one, `other`), counting only the `shown` tab's items,
+// in `order` (slugs; one it does not name goes last).
+export function filterSectionsOf(
+  byType: Record<'cubes' | 'views', {
+    own: { slug: string; name: string; items: unknown[] }[];
+    other: ScopeSection[];
+  }>,
+  shown: 'cubes' | 'views',
+  order: string[]
+): FilterSection[] {
+  const result: FilterSection[] = [];
+  (['cubes', 'views'] as const).forEach((type) => {
+    const { own, other } = byType[type];
+    [
+      ...own.map((section) => ({ slug: section.slug, name: section.name, count: section.items.length })),
+      ...other,
+    ].forEach(({ slug, name, count }) => {
+      const counted = type === shown ? count : 0;
+      const existing = result.find((section) => section.slug === slug);
+      if (existing) {
+        existing.count += counted;
+      } else {
+        result.push({ slug, name, count: counted });
+      }
+    });
+  });
+  const rank = (slug: string) => {
+    const at = order.indexOf(slug);
+    return at === -1 ? order.length : at;
+  };
+  return result.sort((a, b) => rank(a.slug) - rank(b.slug));
+}

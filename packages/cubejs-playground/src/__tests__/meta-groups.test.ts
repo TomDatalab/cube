@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  cubeCountByDataSource, fetchMetaGroups, MetaGroup, mergeMetaGroups, otherScopeSections,
+  cubeCountByDataSource, fetchMetaGroups, filterSectionsOf, MetaGroup, mergeMetaGroups, otherScopeSections,
   rememberCubeToOpen, sectionsOf, takeCubeToOpen, worthGrouping,
 } from '../shared/meta-groups';
 
@@ -153,5 +153,32 @@ describe('cube to open', () => {
     rememberCubeToOpen('eventos');
     expect(takeCubeToOpen()).toBe('eventos');
     expect(takeCubeToOpen()).toBeNull();
+  });
+});
+
+describe('filterSectionsOf', () => {
+  const own = (slug: string, name: string, n: number) => ({ slug, name, items: Array(n).fill(0) });
+  const other = (slug: string, name: string, count: number) => ({
+    slug, name, errors: 0, count, dataSources: [],
+  });
+  const byType = {
+    cubes: { own: [own('_platform', 'Platform', 4)], other: [other('digital', 'Digital', 25)] },
+    views: { own: [own('_platform', 'Platform', 1)], other: [other('bossa', 'bossa', 2)] },
+  };
+  const order = ['_platform', 'bossa', 'digital'];
+
+  it('offers the organizations of both tabs, counting the shown one', () => {
+    expect(filterSectionsOf(byType, 'views', order)).toEqual([
+      { slug: '_platform', name: 'Platform', count: 1 },
+      { slug: 'bossa', name: 'bossa', count: 2 },
+      { slug: 'digital', name: 'Digital', count: 0 },
+    ]);
+    expect(filterSectionsOf(byType, 'cubes', order).map((s) => s.count)).toEqual([4, 0, 25]);
+  });
+
+  it('puts what the order does not name last', () => {
+    const withOther = { ...byType, cubes: { ...byType.cubes, own: [own('_other', 'Other', 1), ...byType.cubes.own] } };
+    expect(filterSectionsOf(withOther, 'cubes', order).map((s) => s.slug))
+      .toEqual(['_platform', 'bossa', 'digital', '_other']);
   });
 });
