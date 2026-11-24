@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { nextChoice } from '../components/Header/workspaceChoice';
+import { adminOptions, nextChoice } from '../components/Header/workspaceChoice';
 
 const w1 = [{ value: 'w1' }];
 
@@ -26,5 +26,15 @@ describe('nextChoice', () => {
   it('picks the first workspace when nothing is chosen yet (non-admin)', () => {
     expect(nextChoice({ current: null, currentVisible: false, firstPage: w1, isAdmin: false }))
       .toEqual({ choose: 'w1' });
+  });
+});
+
+describe('adminOptions', () => {
+  it('lists Platform and each organization', () => {
+    expect(adminOptions([{ name: 'Digital', slug: 'digital' }, { name: 'ON', slug: 'on' }])).toEqual([
+      { value: '_platform', label: 'Platform (admin)' },
+      { value: 'digital', label: 'Digital (admin)' },
+      { value: 'on', label: 'ON (admin)' },
+    ]);
   });
 });

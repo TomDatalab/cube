@@ -32,8 +32,8 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { usePlaygroundContext } from '../../hooks';
-import { authHeaders, onUnauthorized } from '../../shared/auth';
-import { cubeCountByDataSource, fetchMetaGroups, MetaGroup } from '../../shared/meta-groups';
+import { authHeaders, ORGANIZATION_HEADER, onUnauthorized } from '../../shared/auth';
+import { cubeCountByDataSource, fetchMetaGroups, MetaGroup, mergeMetaGroups } from '../../shared/meta-groups';
 import { adminApi, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
@@ -200,20 +200,28 @@ export function DataSourcesPage() {
       return undefined;
     }
     let live = true;
-    fetchMetaGroups(`${basePath.replace(/\/$/, '')}/v1/meta/groups`, { headers: authHeaders() }, (url, init) => (
-      fetch(url, init).then((r) => {
-        onUnauthorized(r);
-        return r;
-      })
-    )).then((groups) => {
+    const url = `${basePath.replace(/\/$/, '')}/v1/meta/groups`;
+    const doFetch = (u: string, init: RequestInit) => fetch(u, init).then((r) => {
+      onUnauthorized(r);
+      return r;
+    });
+    // The answer is by scope: Platform with no header, then each organization.
+    Promise.all([
+      fetchMetaGroups(url, { headers: authHeaders() }, doFetch),
+      ...organizations.map((o) => fetchMetaGroups(
+        url,
+        { headers: { ...authHeaders(), [ORGANIZATION_HEADER]: o.slug } },
+        doFetch
+      )),
+    ]).then(([platform, ...perOrganization]) => {
       if (live) {
-        setMetaGroups(groups);
+        setMetaGroups(platform ? mergeMetaGroups([platform, ...perOrganization.map((g) => g || [])]) : null);
       }
     });
     return () => {
       live = false;
     };
-  }, [rbac, basePath, dataSources]);
+  }, [rbac, basePath, dataSources, organizations]);
 
   const cubeCounts = useMemo(() => cubeCountByDataSource(metaGroups || []), [metaGroups]);
   const sections = useMemo(

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  authHeaders, getSession, getWorkspace, login, logout, setWorkspace, workspaceHeaders,
+  authHeaders, chooseOrganizationScope, getOrganizationScope, getSession, getWorkspace, login, logout,
+  setWorkspace, workspaceHeaders,
 } from '../shared/auth';
 
 function answer(status: number, body: unknown) {
@@ -102,6 +103,26 @@ describe('Playground login', () => {
     setWorkspace(null);
     expect(getWorkspace()).toBeNull();
     expect(workspaceHeaders()).toEqual({});
+  });
+
+  it('workspaceHeaders sends the organization scope without a workspace', () => {
+    expect(getOrganizationScope()).toBeNull();
+    chooseOrganizationScope('acme', () => {});
+    expect(getOrganizationScope()).toBe('acme');
+    expect(sessionStorage.getItem('cubePlaygroundOrganization')).toBe('acme');
+    expect(workspaceHeaders()).toEqual({ 'X-Cube-Organization': 'acme' });
+    chooseOrganizationScope(null, () => {});
+    expect(workspaceHeaders()).toEqual({});
+  });
+
+  it('choosing a workspace clears the organization scope and vice versa', () => {
+    chooseOrganizationScope('acme', () => {});
+    setWorkspace('ws-1');
+    expect(getOrganizationScope()).toBeNull();
+    expect(workspaceHeaders()).toEqual({ 'X-Cube-Workspace': 'ws-1' });
+    chooseOrganizationScope('acme', () => {});
+    expect(getWorkspace()).toBeNull();
+    expect(workspaceHeaders()).toEqual({ 'X-Cube-Organization': 'acme' });
   });
 
   it('forgets the workspace on log out and on a new login', async () => {

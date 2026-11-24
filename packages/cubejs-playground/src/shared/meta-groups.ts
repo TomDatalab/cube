@@ -130,3 +130,18 @@ export function cubeCountByDataSource(groups: MetaGroup[]): Record<string, numbe
 export function filterOptions(groups: MetaGroup[]): { value: string; label: string }[] {
   return groups.map((g) => ({ value: g.slug, label: g.name }));
 }
+
+// The answers of several scopes as one list: Platform first, then the
+// organizations. Every organization's answer repeats the Platform group
+// (`_platform/**` is in its scope), so a slug seen before is skipped.
+export function mergeMetaGroups(groupsPerScope: MetaGroup[][]): MetaGroup[] {
+  const seen = new Set<string>();
+  const merged: MetaGroup[] = [];
+  groupsPerScope.flat().forEach((group) => {
+    if (!seen.has(group.slug)) {
+      seen.add(group.slug);
+      merged.push(group);
+    }
+  });
+  return merged;
+}

@@ -1,3 +1,13 @@
+// The admin's scopes besides workspaces: Platform, then each organization.
+export function adminOptions(
+  organizations: { name: string; slug: string }[]
+): { value: string; label: string }[] {
+  return [
+    { value: '_platform', label: 'Platform (admin)' },
+    ...organizations.map((o) => ({ value: o.slug, label: `${o.name} (admin)` })),
+  ];
+}
+
 type NextChoiceOptions = {
   current: string | null;
   // Whether the server still lets this user see `current`.
@@ -7,7 +17,7 @@ type NextChoiceOptions = {
 };
 
 // What to do once the selector has loaded: `{ choose }` switches workspace
-// (null is "Todos (admin)"), `null` keeps the current one.
+// (null is "Platform (admin)"), `null` keeps the current one.
 export function nextChoice({
   current, currentVisible, firstPage, isAdmin,
 }: NextChoiceOptions): { choose: string | null } | null {

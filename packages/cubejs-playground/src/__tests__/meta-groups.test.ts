@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  cubeCountByDataSource, fetchMetaGroups, MetaGroup, sectionsOf, worthGrouping,
+  cubeCountByDataSource, fetchMetaGroups, MetaGroup, mergeMetaGroups, sectionsOf, worthGrouping,
 } from '../shared/meta-groups';
 
 const groups: MetaGroup[] = [
@@ -87,5 +87,19 @@ describe('fetchMetaGroups', () => {
     expect(await fetchMetaGroups('/x', {}, broken)).toBeNull();
     const html = vi.fn(async () => new Response('<html>'));
     expect(await fetchMetaGroups('/x', {}, html)).toBeNull();
+  });
+});
+
+describe('mergeMetaGroups', () => {
+  it('merges the answers of every scope, keeping the Platform group once', () => {
+    const [platform, digital, on] = groups;
+    const merged = mergeMetaGroups([
+      [platform],
+      [platform, digital],
+      [{ ...platform, errors: 9 }, on],
+    ]);
+    expect(merged.map((g) => g.slug)).toEqual(['_platform', 'digital', 'on']);
+    expect(merged[0]).toEqual(platform);
+    expect(cubeCountByDataSource(merged)).toEqual({ default: 2, example: 1, sofiadb: 2 });
   });
 });

@@ -15,6 +15,7 @@ export type User = {
 export type Organization = {
   id: string;
   name: string;
+  slug: string;
   createdAt: string;
   createdBy: string | null;
 };

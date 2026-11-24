@@ -191,7 +191,7 @@ describe('the Admin page API client', () => {
 
   it('offers every other organization to move to, by name', () => {
     const org = (id: string, name: string) => ({
-      id, name, createdAt: '', createdBy: null,
+      id, name, slug: id, createdAt: '', createdBy: null,
     });
     expect(moveTargets([org('o1', 'ON'), org('o2', 'Digital'), org('o3', 'Agro')], 'o1'))
       .toEqual([org('o3', 'Agro'), org('o2', 'Digital')]);
