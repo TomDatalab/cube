@@ -1206,3 +1206,38 @@ db_test!(a_taken_slug_conflicts_on_the_slug_index, |store, _url| {
         other => panic!("expected a slug conflict, got {other:?}"),
     }
 });
+
+db_test!(spicedb_user_subjects_move_to_uuids_once, |store, _url| {
+    use cubeserver::rbac::testing::FakeAuthz;
+    use cubeserver::rbac::user_ids::{migrate_user_subjects, MARKER};
+    use cubeserver::rbac::{Authz, ObjectRef, Relationship, RelationshipFilter};
+    let ann = store.create_user(&user("ann")).await.unwrap();
+    let owner = |id: &str| Relationship {
+        resource: ObjectRef::new("organization", "o"),
+        relation: "owner",
+        subject: ObjectRef::new("user", id),
+    };
+    let authz = FakeAuthz::new();
+    authz.touch(&[owner("ann")]).await.unwrap();
+    assert!(!store.migration_applied(MARKER).await.unwrap());
+
+    assert_eq!(migrate_user_subjects(&store, &authz).await.unwrap(), 1);
+    assert!(store.migration_applied(MARKER).await.unwrap());
+    let read = || async {
+        authz
+            .read(&RelationshipFilter {
+                kind: "organization",
+                id: None,
+                relation: None,
+                subject: None,
+            })
+            .await
+            .unwrap()
+    };
+    assert_eq!(read().await, vec![owner(&ann.id)]);
+
+    // The marker makes later boots skip the pass.
+    authz.touch(&[owner("ann")]).await.unwrap();
+    assert_eq!(migrate_user_subjects(&store, &authz).await.unwrap(), 0);
+    assert_eq!(read().await.len(), 2);
+});

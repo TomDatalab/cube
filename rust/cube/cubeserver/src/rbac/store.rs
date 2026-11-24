@@ -1000,6 +1000,25 @@ impl Store {
         self.user_by_username(key).await
     }
 
+    /// Whether the one-off data migration `name` completed (`rbac_migrations`).
+    pub async fn migration_applied(&self, name: &str) -> Result<bool, StoreError> {
+        let c = self.conn().await?;
+        Ok(c.query_opt("SELECT 1 FROM rbac_migrations WHERE name = $1", &[&name])
+            .await?
+            .is_some())
+    }
+
+    /// Records that the one-off data migration `name` completed.
+    pub async fn record_migration(&self, name: &str) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        c.execute(
+            "INSERT INTO rbac_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&name],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn users(&self) -> Result<Vec<User>, StoreError> {
         let c = self.conn().await?;
         let sql = format!("SELECT {USER_COLS} FROM users ORDER BY username");
