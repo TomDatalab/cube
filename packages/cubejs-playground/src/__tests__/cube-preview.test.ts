@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { loadRows, previewHeaders, previewQueries } from '../pages/Schema/preview';
+import {
+  formatValue, isNumeric, loadRows, previewHeaders, previewQueries,
+} from '../pages/Schema/preview';
 
 const cube = {
   name: 'cables',
@@ -72,5 +74,35 @@ describe('loadRows', () => {
   it('throws the server error', async () => {
     const doFetch = vi.fn(async () => answer({ error: 'Permission denied: cables.cost' }, 403));
     await expect(loadRows('/x', {}, {}, doFetch)).rejects.toThrow('Permission denied: cables.cost');
+  });
+});
+
+describe('formatValue', () => {
+  it('shows a time as its date, with the hour when there is one', () => {
+    expect(formatValue('2025-08-13T00:00:00.000', 'time')).toBe('2025-08-13');
+    expect(formatValue('2025-08-13T14:05:09.000', 'time')).toBe('2025-08-13 14:05:09');
+    expect(formatValue('2025-08-13T14:05:00.000', 'time')).toBe('2025-08-13 14:05');
+    expect(formatValue('not a date', 'time')).toBe('not a date');
+  });
+
+  it('groups the digits of a number and keeps its decimals', () => {
+    expect(formatValue('1234567', 'number')).toBe('1,234,567');
+    expect(formatValue('1234.5', 'number')).toBe('1,234.5');
+    expect(formatValue(42, 'count')).toBe('42');
+    expect(formatValue('12abc', 'number')).toBe('12abc');
+  });
+
+  it('leaves text and booleans as they are, and null as null', () => {
+    expect(formatValue('OFS', 'string')).toBe('OFS');
+    expect(formatValue(true, 'boolean')).toBe('true');
+    expect(formatValue(null, 'string')).toBeNull();
+    expect(formatValue(undefined, 'number')).toBeNull();
+  });
+});
+
+describe('isNumeric', () => {
+  it('is true for number dimensions and every measure that counts or sums', () => {
+    expect(['number', 'count', 'count_distinct', 'countDistinct', 'sum', 'avg', 'min', 'max'].every(isNumeric)).toBe(true);
+    expect(['string', 'time', 'boolean', undefined].some(isNumeric)).toBe(false);
   });
 });

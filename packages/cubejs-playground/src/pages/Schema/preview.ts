@@ -81,3 +81,42 @@ export async function loadRows(
   }
   return body?.data ?? [];
 }
+
+const NUMERIC = new Set([
+  'number', 'count', 'count_distinct', 'countDistinct', 'count_distinct_approx', 'countDistinctApprox',
+  'sum', 'avg', 'min', 'max', 'running_total', 'runningTotal',
+]);
+
+/** Whether a member of this type holds numbers (right-aligned, grouped). */
+export const isNumeric = (type: string | undefined) => Boolean(type && NUMERIC.has(type));
+
+const TIME = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2})?(\.\d+)?Z?$/;
+
+/**
+ * A value as the preview shows it, or null for a missing one: a time as its
+ * date (and its hour when it has one), a number with grouped digits (the API
+ * sends numbers as text), anything else as text.
+ */
+export function formatValue(value: unknown, type: string | undefined): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const text = String(value);
+  if (type === 'time') {
+    const m = TIME.exec(text);
+    if (!m) {
+      return text;
+    }
+    const [, date, hm, seconds = ':00'] = m;
+    if (hm === '00:00' && seconds === ':00') {
+      return date;
+    }
+    return seconds === ':00' ? `${date} ${hm}` : `${date} ${hm}${seconds}`;
+  }
+  if (isNumeric(type) && /^-?\d+(\.\d+)?$/.test(text)) {
+    const [whole, decimals] = text.split('.');
+    const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return decimals ? `${grouped}.${decimals}` : grouped;
+  }
+  return text;
+}
