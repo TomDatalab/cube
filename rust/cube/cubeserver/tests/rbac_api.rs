@@ -7924,9 +7924,7 @@ db_test!(paths_take_the_uuid_or_the_username, |store| {
                 format!("/cube/v1/workspaces/{ws}/members/{key}"),
                 Some(json!({ "role": "viewer" })),
             ),
-            (Method::DELETE, format!("/cube/v1/workspaces/{ws}/members/{key}"), None),
             (Method::PUT, format!("/cube/v1/rules/{rule}/members/{key}"), None),
-            (Method::DELETE, format!("/cube/v1/rules/{rule}/members/{key}"), None),
             (Method::PUT, format!("{owners}/{key}"), None),
         ] {
             let (status, body) = send(&env.router, method.clone(), &path, Some(&s.admin), body).await;
@@ -7945,7 +7943,7 @@ db_test!(renaming_keeps_access_and_tokens, |store| {
     let (status, _) = send(
         &env.router,
         Method::PUT,
-        &format!("/cube/v1/users/bia/attributes"),
+        "/cube/v1/users/bia/attributes",
         Some(&s.admin),
         Some(json!({ "attributes": { "region": ["south"] } })),
     )
@@ -7974,7 +7972,7 @@ db_test!(renaming_keeps_access_and_tokens, |store| {
     let (status, body) = send(
         &env.router,
         Method::GET,
-        &format!("/cube/v1/users/bea/attributes"),
+        "/cube/v1/users/bea/attributes",
         Some(&s.admin),
         None,
     )
@@ -8208,4 +8206,132 @@ db_test!(after_a_username_swap_no_legacy_token_acts_as_the_other, |store| {
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(&env.router, Method::GET, &org, Some(&s.caio), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+db_test!(a_bootstrap_admin_or_the_sync_user_cannot_be_renamed, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    let (status, body) = patch_user(&env, &admin, ADMIN, json!({ "username": "boss" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("CUBE_RBAC_ADMINS"), "{body}");
+
+    let (status, body) = create_user_as(&env, &admin, "sofiadb-sync", "sync-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) =
+        patch_user(&env, &admin, "sofiadb-sync", json!({ "username": "sync2" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("CUBE_SYNC_USER"), "{body}");
+    assert!(store.user_by_username(ADMIN).await.unwrap().is_some());
+    assert!(store.user_by_username("sofiadb-sync").await.unwrap().is_some());
+
+    // Other changes to them, and keeping the name, still work.
+    let (status, body) = patch_user(
+        &env,
+        &admin,
+        "sofiadb-sync",
+        json!({ "username": "sofiadb-sync", "name": "Sync" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = patch_user(&env, &admin, ADMIN, json!({ "name": "Admin" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
+
+db_test!(a_member_with_no_user_row_can_still_be_removed, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &ws,
+        json!({ "description": "Readers", "type": "t", "role": "viewer" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    for orphan in ["00000000-0000-4000-8000-000000000000", "gone-user"] {
+        let subject = ObjectRef::new("user", orphan);
+        env.authz
+            .touch(&[
+                Relationship {
+                    resource: ObjectRef::new("workspace", ws.clone()),
+                    relation: "viewer",
+                    subject: subject.clone(),
+                },
+                Relationship {
+                    resource: ObjectRef::new("rule", rule.clone()),
+                    relation: "member",
+                    subject: subject.clone(),
+                },
+            ])
+            .await
+            .unwrap();
+        let (_, body) = send(
+            &env.router,
+            Method::GET,
+            &format!("/cube/v1/workspaces/{ws}/members"),
+            Some(&s.ana),
+            None,
+        )
+        .await;
+        assert_eq!(
+            body["members"],
+            json!([{ "user": orphan, "username": null, "role": "viewer" }])
+        );
+        let (status, body) = send(
+            &env.router,
+            Method::DELETE,
+            &format!("/cube/v1/workspaces/{ws}/members/{orphan}"),
+            Some(&s.ana),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(
+            rule_member(env, &s.ana, Method::DELETE, &rule, orphan).await,
+            StatusCode::NO_CONTENT
+        );
+        for kind in ["workspace", "rule"] {
+            let left = env
+                .authz
+                .read(&RelationshipFilter {
+                    kind,
+                    id: None,
+                    relation: None,
+                    subject: Some(subject.clone()),
+                })
+                .await
+                .unwrap();
+            assert!(left.is_empty(), "{orphan} {kind}: {left:?}");
+        }
+    }
+    // A malformed key is still 400.
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{ws}/members/Not%20Valid"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+});
+
+db_test!(a_legacy_token_cannot_act_as_a_newcomer_under_the_freed_name, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+    let legacy = token_for("bia", now_secs() - 1.0);
+    let (status, _) = patch_user(env, &s.admin, "bia", json!({ "username": "bea" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = create_user_as(env, &s.admin, "bia", "new-bia-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // The newcomer has a role, so acting as them would show the workspace.
+    assert_eq!(set_role(env, &s.ana, &ws, "bia", "viewer").await, StatusCode::OK);
+    let newcomer = login_token(&env.router, "bia", "new-bia-password-1").await;
+    let path = format!("/cube/v1/workspaces/{ws}");
+    let (status, _) = send(&env.router, Method::GET, &path, Some(&newcomer), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&env.router, Method::GET, &path, Some(&legacy), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 });

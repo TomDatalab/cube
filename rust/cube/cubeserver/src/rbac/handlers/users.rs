@@ -153,6 +153,9 @@ pub async fn update(
     }
     if let Some(username) = &request.username {
         validate_new_username(username)?;
+        if *username != user.username {
+            refuse_configured_rename(rbac, &user.username)?;
+        }
     }
     // Disabling the only admin would lock user management out for good. The
     // path may name the caller by username: compare ids.
@@ -178,6 +181,27 @@ pub async fn update(
         })?
         .ok_or_else(user_not_found)?;
     Ok(Json(view(&user)))
+}
+
+/// `CUBE_RBAC_ADMINS` and `CUBE_SYNC_USER` name users by username: renamed,
+/// the next start would create a new admin under the old name, and the sync
+/// routes would refuse the renamed user (and serve whoever takes the old
+/// name). 409 for those users.
+fn refuse_configured_rename(rbac: &Rbac, username: &str) -> Result<(), ApiError> {
+    let variable = if rbac.config.admins.iter().any(|a| a == username) {
+        "CUBE_RBAC_ADMINS"
+    } else if rbac.config.sync_user == username {
+        "CUBE_SYNC_USER"
+    } else {
+        return Ok(());
+    };
+    Err(ApiError::new(
+        StatusCode::CONFLICT,
+        format!(
+            "{username} is listed in {variable}: remove it from {variable} and restart, \
+             then rename the user, then add the new username to {variable}"
+        ),
+    ))
 }
 
 /// `{password}`: an admin reset. Every token the user holds stops working.

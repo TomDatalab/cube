@@ -91,7 +91,8 @@ pub async fn create(
     }
     let request = body(request)?;
     let name = resource_name(&request.name)?;
-    // `owner` names the user by UUID or by username.
+    // `owner` names the user by UUID or by username. Not `named_user`: a
+    // bad owner is a bad body (400), not a missing path resource (404).
     validate_user_id(&request.owner)?;
     let owner = rbac
         .store

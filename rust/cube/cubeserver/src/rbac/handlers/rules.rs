@@ -568,9 +568,9 @@ pub async fn remove_member(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let (rule, _) = visible_rule(rbac, &id, "manage", user).await?;
-    let member = super::named_user(rbac, &member).await?;
+    let member = super::member_subject(rbac, &member).await?;
     rbac.authz
-        .delete(&[membership(rule.id, &member.id)])
+        .delete(&[membership(rule.id, &member)])
         .await
         .map_err(authz_error)?;
     Ok(StatusCode::NO_CONTENT)

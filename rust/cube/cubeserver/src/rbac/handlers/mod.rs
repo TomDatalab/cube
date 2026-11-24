@@ -300,6 +300,20 @@ pub(crate) fn user_not_found() -> ApiError {
     ApiError::not_found("User not found")
 }
 
+/// The SpiceDB subject id a member path names, to remove it: the user's
+/// UUID ([`named_user`]), or, when no user has the key, the key itself, so
+/// a subject left without a user row can still be removed. 400 when the key
+/// is malformed.
+pub(crate) async fn member_subject(rbac: &Rbac, key: &str) -> Result<String, ApiError> {
+    validate_user_id(key)?;
+    Ok(rbac
+        .store
+        .resolve_user(key)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .map_or_else(|| key.to_string(), |user| user.id))
+}
+
 /// A user to grant something to ([`named_user`]): also 400 when the user
 /// is disabled.
 pub(crate) async fn existing_user(rbac: &Rbac, key: &str) -> Result<User, ApiError> {
