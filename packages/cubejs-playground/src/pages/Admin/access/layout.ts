@@ -86,10 +86,10 @@ export function nodeRows(n: Pick<LaidOutNode, 'permLines' | 'noteLines' | 'folda
 /**
  * Parent → children where the parent folds: an organization's workspaces
  * (a workspace's organizationId is the bare UUID of the organization node)
- * and a connection's cubes (its `connection → cube` edges). Only parents with
- * more than COLLAPSE_AT children are listed.
+ * and a connection's cubes (its `connection → cube` edges). `foldables` keeps
+ * the parents with more than COLLAPSE_AT children.
  */
-function foldables(graph: AccessGraph): Map<string, string[]> {
+function childrenOf(graph: AccessGraph): Map<string, string[]> {
   const children = new Map<string, string[]>();
   const add = (parent: string, child: string) => children.set(parent, [...(children.get(parent) || []), child]);
   const kindOf = new Map(graph.nodes.map((n) => [n.id, n.kind]));
@@ -103,10 +103,14 @@ function foldables(graph: AccessGraph): Map<string, string[]> {
       add(e.from, e.to);
     }
   });
-  return new Map([...children].filter(([, c]) => new Set(c).size > COLLAPSE_AT).map(([k, c]) => [k, [...new Set(c)]]));
+  return new Map([...children].map(([k, c]) => [k, [...new Set(c)]]));
 }
 
-/** Child → the foldable parents it hangs from. */
+function foldables(children: Map<string, string[]>): Map<string, string[]> {
+  return new Map([...children].filter(([, c]) => c.length > COLLAPSE_AT));
+}
+
+/** Child → every parent it hangs from, foldable or not. */
 function parentsOf(folds: Map<string, string[]>): Map<string, string[]> {
   const parents = new Map<string, string[]>();
   folds.forEach((cs, p) => cs.forEach((c) => parents.set(c, [...(parents.get(c) || []), p])));
@@ -128,8 +132,9 @@ export function layout(
     perms.set(g.resource, [...(perms.get(g.resource) || []), g.permission]);
   });
 
-  const folds = foldables(graph);
-  const parents = parentsOf(folds);
+  const children = childrenOf(graph);
+  const folds = foldables(children);
+  const parents = parentsOf(children);
   const collapsed = new Set([...folds.keys()].filter((k) => !expanded.has(k)));
 
   // Hidden child → the collapsed parent it is folded into.
@@ -228,9 +233,10 @@ export function expandFor(
   expanded: Set<string>
 ): Set<string> {
   const shown = new Set(drawn.map((n) => n.id));
-  const parents = parentsOf(foldables(graph));
+  const folds = foldables(childrenOf(graph));
+  const parents = parentsOf(childrenOf(graph));
   const open = path.flatMap((id, i) => {
-    const ps = shown.has(id) ? [] : parents.get(id) || [];
+    const ps = (shown.has(id) ? [] : parents.get(id) || []).filter((p) => folds.has(p));
     // Prefer the parent the path itself goes through.
     const via = ps.find((p) => p === path[i - 1]) ?? ps[0];
     return via && !expanded.has(via) ? [via] : [];

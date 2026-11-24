@@ -226,13 +226,29 @@ describe('rules, roles and cubes', () => {
     expect([...next]).toEqual(['connection:db']);
   });
 
-  it('a cube of two connections is hidden only while all of them are collapsed', () => {
+  it('a cube served by a small connection stays visible with its edge', () => {
     const g = kindGraph(COLLAPSE_AT + 1);
     g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
-    expect(layout(g, new Set()).nodes.some((n) => n.id === 'cube:org:c0')).toBe(false);
-    // db2 serves one cube, so it never folds.
-    expect(layout(g, new Set()).nodes.find((n) => n.id === 'connection:db2')!.foldable).toBe(false);
-    expect(layout(g, new Set()).nodes.some((n) => n.id === 'cube:org:c0')).toBe(false);
+    const out = layout(g, new Set());
+    expect(out.nodes.find((n) => n.id === 'connection:db2')!.foldable).toBe(false);
+    expect(out.nodes.some((n) => n.id === 'cube:org:c0')).toBe(true);
+    expect(out.nodes.some((n) => n.id === 'cube:org:c1')).toBe(false);
+    expect(out.edges.some((e) => e.from === 'connection:db2' && e.to === 'cube:org:c0')).toBe(true);
+    expect(out.edges.some((e) => e.from === 'connection:db' && e.to === 'cube:org:c0')).toBe(true);
+  });
+
+  it('a cube of two big connections is hidden until one opens', () => {
+    const g = kindGraph(COLLAPSE_AT + 1);
+    const extra = Array.from({ length: COLLAPSE_AT }, (_, i) => node(`cube:org:x${i}`, 'cube', O));
+    g.nodes.push(...extra);
+    extra.forEach((c) => g.edges.push({ from: 'connection:db2', to: c.id, label: 'serves', kind: 'derived' }));
+    g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
+    const out = layout(g, new Set());
+    expect(out.nodes.some((n) => n.id === 'cube:org:c0')).toBe(false);
+    const path = ['user:ana', 'connection:db2', 'cube:org:c0'];
+    const next = expandFor(g, out.nodes, path, new Set());
+    expect([...next]).toEqual(['connection:db2']);
+    expect(layout(g, next).nodes.some((n) => n.id === 'cube:org:c0')).toBe(true);
   });
 
   it('a role node lists its details as permission lines', () => {

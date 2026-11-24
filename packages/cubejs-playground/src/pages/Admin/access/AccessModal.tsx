@@ -349,11 +349,11 @@ export function AccessModal({ api, user, onClose }: Props) {
     setDrag(null);
   }
 
-  function flip(orgId: string) {
+  function flip(parentId: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (!next.delete(orgId)) {
-        next.add(orgId);
+      if (!next.delete(parentId)) {
+        next.add(parentId);
       }
       return next;
     });
@@ -375,7 +375,7 @@ export function AccessModal({ api, user, onClose }: Props) {
       setActive(null);
       return;
     }
-    // A reason through a collapsed organization opens it, so its path shows.
+    // A reason through a collapsed organization or connection opens it, so its path shows.
     if (graph && drawn) {
       const { nodes } = drawn;
       setExpanded((prev) => expandFor(graph, nodes, r.path, prev));
