@@ -1,12 +1,13 @@
 import { ReactNode, useState } from 'react';
-import { EditOutlined, PlusOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import {
-  Button, Descriptions, Form, Input, Modal, Select, Space, Table, Tag, Tooltip, Typography, message,
+  Button, Descriptions, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
 
 import { Alert } from '../../atoms';
 import type { OpenBlock } from './api';
 import { editFailure, shortName } from './cubeEdit';
+import { CubePreview, CubePreviewProps } from './CubePreview';
 import {
   addMeasure,
   DIMENSION_TYPES,
@@ -14,6 +15,7 @@ import {
   MEASURE_TYPES,
   MeasureType,
   measureNeedsSql,
+  removeMeasure,
   renameDimension,
   setDimensionType,
   setMeasureType,
@@ -32,6 +34,8 @@ export type CubeDetailProps = {
   editBlock?: string | null;
   // Applies a change to the cube's file and saves it; rejects on failure.
   onEdit?: (change: CubeChange) => Promise<void>;
+  // The data preview; none without it.
+  preview?: Omit<CubePreviewProps, 'cube'>;
 };
 
 type Dialog = { kind: 'measure'; member: TreeMember }
@@ -190,23 +194,56 @@ const nameColumn = {
   ),
 };
 
-// The row's edit button: a pencil at the end of the row.
-const editColumn = (edit: ((member: TreeMember) => void) | null) => (edit
+// The row's actions at its end: a pencil, and for measures a bin that asks
+// before deleting.
+const actionColumn = (
+  edit: ((member: TreeMember) => void) | null,
+  remove?: (member: TreeMember) => Promise<void>
+) => (edit
   ? [{
     title: '',
-    key: 'edit',
-    width: 48,
+    key: 'actions',
+    width: remove ? 80 : 48,
     align: 'right' as const,
     render: (_: unknown, member: TreeMember) => (
-      <Tooltip title="Edit">
-        <Button
-          type="text"
-          size="small"
-          icon={<EditOutlined />}
-          aria-label={`Edit ${shortName(member.name)}`}
-          onClick={() => edit(member)}
-        />
-      </Tooltip>
+      <Space size={0}>
+        <Tooltip title="Edit">
+          <Button
+            type="text"
+            size="small"
+            icon={<EditOutlined />}
+            aria-label={`Edit ${shortName(member.name)}`}
+            onClick={() => edit(member)}
+          />
+        </Tooltip>
+        {remove && (
+          <Popconfirm
+            title={(
+              <div style={{ maxWidth: 280 }}>
+                <div>{`Delete measure ${shortName(member.name)}?`}</div>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  Other cubes, views and saved queries that use it stop working.
+                </Typography.Text>
+              </div>
+            )}
+            okText="Delete"
+            okButtonProps={{ danger: true }}
+            cancelText="Cancel"
+            placement="left"
+            onConfirm={() => remove(member)}
+          >
+            <Tooltip title="Delete">
+              <Button
+                type="text"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                aria-label={`Delete ${shortName(member.name)}`}
+              />
+            </Tooltip>
+          </Popconfirm>
+        )}
+      </Space>
     ),
   }]
   : []);
@@ -242,10 +279,21 @@ function SectionHeader({ title, count, action }: { title: string; count: number;
 }
 
 export function CubeDetail({
-  cube, errors, open, onOpen, editBlock = null, onEdit,
+  cube, errors, open, onOpen, editBlock = null, onEdit, preview,
 }: CubeDetailProps) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const canEdit = Boolean(onEdit) && !editBlock;
+  // Deleting has no dialog: what the file refuses is shown as a message.
+  const deleteMeasure = async (member: TreeMember) => {
+    const name = shortName(member.name);
+    try {
+      await onEdit!((text) => removeMeasure(text, cube.name, name));
+      message.success(`Measure ${name} deleted`);
+    } catch (e) {
+      const failure = editFailure(e);
+      message.error([failure.message, ...failure.problems].join(' — '));
+    }
+  };
   const rejections = errors.filter((e) => e.cube === cube.name || e.file === cube.file);
   const measures = cube.measures ?? [];
   const dimensions = cube.dimensions ?? [];
@@ -287,6 +335,8 @@ export function CubeDetail({
         </Typography.Paragraph>
       )}
 
+      {preview && <CubePreview cube={cube} {...preview} />}
+
       {cube.joins && cube.joins.length > 0 && (
         <>
           <SectionHeader title="Joins" count={cube.joins.length} />
@@ -326,7 +376,7 @@ export function CubeDetail({
         dataSource={measures}
         columns={[
           ...memberColumns(false),
-          ...editColumn(canEdit ? (member) => setDialog({ kind: 'measure', member }) : null),
+          ...actionColumn(canEdit ? (member) => setDialog({ kind: 'measure', member }) : null, deleteMeasure),
         ]}
       />
 
@@ -338,7 +388,7 @@ export function CubeDetail({
         dataSource={dimensions}
         columns={[
           ...memberColumns(true),
-          ...editColumn(canEdit ? (member) => setDialog({ kind: 'dimension', member }) : null),
+          ...actionColumn(canEdit ? (member) => setDialog({ kind: 'dimension', member }) : null),
         ]}
       />
 

@@ -4,6 +4,7 @@ import {
   addMeasure,
   CubeEditError,
   measureNeedsSql,
+  removeMeasure,
   renameDimension,
   setDimensionType,
   setMeasureType,
@@ -141,5 +142,34 @@ describe('file layout', () => {
 
   it('refuses a file that is not valid YAML', () => {
     expect(() => setMeasureType('cubes: [', 'c', 'count', 'sum', 'x')).toThrow(CubeEditError);
+  });
+});
+
+describe('removeMeasure', () => {
+  it('removes the measure and keeps the rest of the file', () => {
+    const out = removeMeasure(FILE, 'cables', 'fibers');
+    expect(out).not.toContain('name: fibers');
+    expect(out).toContain('  measures:\n  - name: count\n    type: count\n  segments:');
+    expect(out).toContain('# how many fibres');
+  });
+
+  it('drops the measures key when it removes the last one', () => {
+    const one = 'cubes:\n- name: c\n  sql_table: t\n  measures:\n  - name: count\n    type: count\n';
+    expect(removeMeasure(one, 'c', 'count')).toBe('cubes:\n- name: c\n  sql_table: t\n');
+  });
+
+  it('refuses a measure another member of the cube uses', () => {
+    const used = FILE.replace('  segments:', "  - name: ratio\n    sql: '{fibers} / {count}'\n    type: number\n  segments:");
+    expect(() => removeMeasure(used, 'cables', 'fibers')).toThrow(/ratio/);
+    expect(() => removeMeasure(used, 'cables', 'count')).toThrow(/ratio/);
+  });
+
+  it('refuses a measure a pre-aggregation of the cube uses', () => {
+    const rolled = `${FILE.split('- name: other')[0]}  pre_aggregations:\n  - name: main\n    measures:\n    - CUBE.fibers\n`;
+    expect(() => removeMeasure(rolled, 'cables', 'fibers')).toThrow(/main/);
+  });
+
+  it('refuses an unknown measure', () => {
+    expect(() => removeMeasure(FILE, 'cables', 'nope')).toThrow(/nope/);
   });
 });

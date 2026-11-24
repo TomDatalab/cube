@@ -170,3 +170,49 @@ export function renameDimension(text: string, cube: string, from: string, to: st
   }));
   return save(doc, text);
 }
+
+// Whether `sql` refers to the member `name` of `cube`: `{name}`,
+// `{CUBE.name}` or `{<cube>.name}`.
+function refersTo(sql: string, cube: string, name: string): boolean {
+  const owner = `(?:CUBE|${cube.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`;
+  return new RegExp(`\\{(${owner}\\.)?${name}\\}`).test(sql);
+}
+
+/**
+ * Removes a measure. Refused while another member of the cube (its SQL) or
+ * one of the cube's pre-aggregations uses it; uses from other cubes, views
+ * and outside the model are not seen here.
+ */
+export function removeMeasure(text: string, cube: string, measure: string): string {
+  const doc = load(text);
+  const c = cubeOf(doc, cube);
+  const target = member(c, 'measures', measure);
+  const users: string[] = [];
+  (['measures', 'dimensions', 'segments'] as const).forEach((key) => list(c, key).forEach((m) => {
+    const sql = m.get('sql');
+    if (m !== target && typeof sql === 'string' && refersTo(sql, cube, measure)) {
+      users.push(String(m.get('name')));
+    }
+  }));
+  const rollups = c.get('pre_aggregations');
+  if (isSeq(rollups)) {
+    (rollups as YAMLSeq).items.filter(isMap).forEach((p) => {
+      const measures = (p as YAMLMap).get('measures');
+      const names = isSeq(measures)
+        ? (measures as YAMLSeq).items.map((i) => String((i as { value?: unknown }).value ?? i))
+        : [];
+      if (names.some((n) => n === measure || n.endsWith(`.${measure}`))) {
+        users.push(`pre-aggregation ${String((p as YAMLMap).get('name'))}`);
+      }
+    });
+  }
+  if (users.length) {
+    throw new CubeEditError(`Measure ${measure} is used by ${users.join(', ')}: change those first`);
+  }
+  const measures = c.get('measures') as YAMLSeq;
+  measures.items = measures.items.filter((m) => m !== target);
+  if (!measures.items.length) {
+    c.delete('measures');
+  }
+  return save(doc, text);
+}
