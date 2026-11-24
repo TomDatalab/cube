@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, Connection, Member, Role, ROLES, Workspace,
+  AdminApi, Connection, Member, memberName, Role, ROLES, Workspace,
 } from './api';
 import { RemoteSelect, userOptions } from './RemoteSelect';
 
@@ -23,6 +23,7 @@ export function WorkspacePanel({
   const isMounted = useIsMounted();
   const [members, setMembers] = useState<Member[] | null>(null);
   const [newMember, setNewMember] = useState<string | undefined>();
+  const [newMemberName, setNewMemberName] = useState<string | undefined>();
   const [newRole, setNewRole] = useState<Role>('viewer');
 
   async function loadMembers() {
@@ -69,7 +70,7 @@ export function WorkspacePanel({
         pagination={false}
         style={{ marginTop: 8 }}
         columns={[
-          { title: 'User', dataIndex: 'user' },
+          { title: 'User', render: (_, m) => memberName(m) },
           {
             title: 'Role',
             render: (_, m) => (
@@ -80,7 +81,7 @@ export function WorkspacePanel({
                 style={{ width: 120 }}
                 onChange={(role: Role) => act(
                   () => api.setMember(workspace.id, m.user, role),
-                  `${m.user} is now ${role}`,
+                  `${memberName(m)} is now ${role}`,
                   loadMembers
                 )}
               />
@@ -91,10 +92,10 @@ export function WorkspacePanel({
             align: 'right',
             render: (_, m) => (
               <Popconfirm
-                title={`Remove ${m.user} from ${workspace.name}?`}
+                title={`Remove ${memberName(m)} from ${workspace.name}?`}
                 onConfirm={() => act(
                   () => api.removeMember(workspace.id, m.user),
-                  `${m.user} removed`,
+                  `${memberName(m)} removed`,
                   loadMembers
                 )}
               >
@@ -112,7 +113,10 @@ export function WorkspacePanel({
           placeholder="User"
           style={{ width: 200 }}
           value={newMember}
-          onChange={setNewMember}
+          onChange={(v, label) => {
+            setNewMember(v);
+            setNewMemberName(label);
+          }}
           fetchOptions={newMemberOptions}
         />
         <Select
@@ -128,9 +132,10 @@ export function WorkspacePanel({
           disabled={!newMember}
           onClick={() => act(
             () => api.setMember(workspace.id, newMember!, newRole),
-            `${newMember} added as ${newRole}`,
+            `${newMemberName ?? newMember} added as ${newRole}`,
             async () => {
               setNewMember(undefined);
+              setNewMemberName(undefined);
               await loadMembers();
             }
           )}

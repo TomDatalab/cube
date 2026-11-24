@@ -10,7 +10,7 @@ import { useState } from 'react';
 import { AccessModal } from './access/AccessModal';
 import { AdminApi, PAGE_SIZE, User } from './api';
 import { AttributesModal } from './AttributesModal';
-import { MembershipTree, USER_DRAG_TYPE } from './MembershipTree';
+import { MembershipTree, USER_DRAG_NAME_TYPE, USER_DRAG_TYPE } from './MembershipTree';
 import { RuleTree } from './RuleTree';
 import { useSearch } from './useSearch';
 
@@ -71,7 +71,7 @@ export function UsersTab({ api, currentUser }: Props) {
   async function toggle(user: User, enabled: boolean) {
     try {
       await api.updateUser(user.id, { disabled: !enabled });
-      message.success(`${user.id} ${enabled ? 'enabled' : 'disabled'}`);
+      message.success(`${user.username} ${enabled ? 'enabled' : 'disabled'}`);
       reload();
     } catch (e: any) {
       message.error(e.message);
@@ -86,9 +86,9 @@ export function UsersTab({ api, currentUser }: Props) {
   const modalOpen = creating || editing != null || resetting != null;
   let title = 'New user';
   if (editing) {
-    title = `Edit ${editing.id}`;
+    title = `Edit ${editing.username}`;
   } else if (resetting) {
-    title = `Reset the password of ${resetting.id}`;
+    title = `Reset the password of ${resetting.username}`;
   }
 
   return (
@@ -131,6 +131,7 @@ export function UsersTab({ api, currentUser }: Props) {
             draggable: true,
             onDragStart: (e) => {
               e.dataTransfer.setData(USER_DRAG_TYPE, user.id);
+              e.dataTransfer.setData(USER_DRAG_NAME_TYPE, user.username);
               e.dataTransfer.effectAllowed = 'copy';
             },
             style: { cursor: 'grab' },
@@ -145,13 +146,18 @@ export function UsersTab({ api, currentUser }: Props) {
             },
             {
               title: 'Username',
-              dataIndex: 'id',
-              render: (id) => (
+              dataIndex: 'username',
+              render: (username, user) => (
                 <Space size={6}>
-                  <Typography.Text copyable>{id}</Typography.Text>
-                  {id === currentUser ? <Tag style={{ marginRight: 0 }}>you</Tag> : null}
+                  <Typography.Text copyable>{username}</Typography.Text>
+                  {user.id === currentUser ? <Tag style={{ marginRight: 0 }}>you</Tag> : null}
                 </Space>
               ),
+            },
+            {
+              title: 'Id',
+              dataIndex: 'id',
+              render: (id) => <Typography.Text type="secondary" copyable>{id}</Typography.Text>,
             },
             { title: 'Name', dataIndex: 'name', render: (v) => v || '—' },
             {
@@ -188,9 +194,10 @@ export function UsersTab({ api, currentUser }: Props) {
                   <Tooltip title="Edit">
                     <Button
                       size="small"
-                      aria-label={`Edit ${user.id}`}
+                      aria-label={`Edit ${user.username}`}
                       icon={<EditOutlined />}
                       onClick={() => open(setEditing, user, {
+                        username: user.username,
                         name: user.name || '',
                         email: user.email || '',
                       })}
@@ -199,7 +206,7 @@ export function UsersTab({ api, currentUser }: Props) {
                   <Tooltip title="Access">
                     <Button
                       size="small"
-                      aria-label={`Access of ${user.id}`}
+                      aria-label={`Access of ${user.username}`}
                       icon={<SafetyCertificateOutlined />}
                       onClick={() => setAccessing(user)}
                     />
@@ -207,7 +214,7 @@ export function UsersTab({ api, currentUser }: Props) {
                   <Tooltip title="Attributes">
                     <Button
                       size="small"
-                      aria-label={`Attributes of ${user.id}`}
+                      aria-label={`Attributes of ${user.username}`}
                       icon={<TagsOutlined />}
                       onClick={() => setAttributing(user)}
                     />
@@ -215,7 +222,7 @@ export function UsersTab({ api, currentUser }: Props) {
                   <Tooltip title="Reset password">
                     <Button
                       size="small"
-                      aria-label={`Reset the password of ${user.id}`}
+                      aria-label={`Reset the password of ${user.username}`}
                       icon={<LockOutlined />}
                       onClick={() => open(setResetting, user)}
                     />
@@ -242,28 +249,36 @@ export function UsersTab({ api, currentUser }: Props) {
             onFinish={(values) => {
               if (creating) {
                 const user = {
-                  id: values.id,
+                  username: values.username,
                   password: values.password,
                   ...optional({ name: values.name, email: values.email }),
                 };
-                return run(() => api.createUser(user), `User ${values.id} created`);
+                return run(() => api.createUser(user), `User ${values.username} created`);
               }
               if (editing) {
+                // The username goes only when it changed: a rename is the one
+                // edit the server can refuse (taken, or a pinned account).
+                const renamed = values.username && values.username !== editing.username
+                  ? { username: values.username }
+                  : {};
                 return run(
-                  () => api.updateUser(editing.id, optional({ name: values.name, email: values.email })),
-                  `${editing.id} saved`
+                  () => api.updateUser(editing.id, {
+                    ...renamed,
+                    ...optional({ name: values.name, email: values.email }),
+                  }),
+                  `${renamed.username ?? editing.username} saved`
                 );
               }
               return run(
                 () => api.setPassword(resetting!.id, values.password),
-                `New password set for ${resetting!.id}; their sessions ended`
+                `New password set for ${resetting!.username}; their sessions ended`
               );
             }}
           >
-            {creating ? (
+            {creating || editing ? (
               <Form.Item
                 label="Username"
-                name="id"
+                name="username"
                 rules={[{ required: true, message: 'Enter a username' }]}
               >
                 <Input autoComplete="off" />

@@ -128,6 +128,7 @@ function OrganizationCard({
   const [connections, setConnections] = useState<Connection[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [owner, setOwner] = useState<string | undefined>();
+  const [ownerName, setOwnerName] = useState<string | undefined>();
   const [dataSource, setDataSource] = useState<string | undefined>();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   // The organization each connection is about to move to.
@@ -208,20 +209,23 @@ function OrganizationCard({
           placeholder="User"
           style={{ width: 200 }}
           value={owner}
-          onChange={setOwner}
+          onChange={(v, label) => {
+            setOwner(v);
+            setOwnerName(label);
+          }}
           fetchOptions={userOptions(api)}
         />
         <Button
           size="small"
           disabled={!owner}
-          onClick={() => act(() => api.addOwner(org.id, owner!), `${owner} is an owner of ${org.name}`)}
+          onClick={() => act(() => api.addOwner(org.id, owner!), `${ownerName ?? owner} is an owner of ${org.name}`)}
         >
           Make owner
         </Button>
         <Popconfirm
-          title={`Remove ${owner} as an owner of ${org.name}?`}
+          title={`Remove ${ownerName ?? owner} as an owner of ${org.name}?`}
           disabled={!owner}
-          onConfirm={() => act(() => api.removeOwner(org.id, owner!), `${owner} is no longer an owner`)}
+          onConfirm={() => act(() => api.removeOwner(org.id, owner!), `${ownerName ?? owner} is no longer an owner`)}
         >
           <Button size="small" danger disabled={!owner}>Remove owner</Button>
         </Popconfirm>

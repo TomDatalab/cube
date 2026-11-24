@@ -74,7 +74,7 @@ export function AttributesModal({ api, user, onClose }: Props) {
     setError(null);
     try {
       await api.setUserAttributes(user!.id, attributes);
-      message.success(`Attributes of ${user!.id} saved`);
+      message.success(`Attributes of ${user!.username} saved`);
       onClose();
     } catch (e: any) {
       setError(e.message);
@@ -85,7 +85,7 @@ export function AttributesModal({ api, user, onClose }: Props) {
 
   return (
     <Modal
-      title={user ? `Attributes of ${user.id}` : 'Attributes'}
+      title={user ? `Attributes of ${user.username}` : 'Attributes'}
       visible={user != null}
       onCancel={onClose}
       onOk={() => form.submit()}

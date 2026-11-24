@@ -16,7 +16,7 @@ function session(platformAdmin: boolean, ownedOrganizations = owned) {
   return {
     token: 'jwt',
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-    user: { id: 'u', name: null, platformAdmin, ownedOrganizations },
+    user: { id: 'u', username: 'u', name: null, platformAdmin, ownedOrganizations },
   };
 }
 

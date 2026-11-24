@@ -19,6 +19,8 @@ export type Session = {
   expiresAt: string;
   user: {
     id: string;
+    // What people see; `id` is the UUID the server's calls name the user by.
+    username: string;
     name: string | null;
     platformAdmin: boolean;
     // The organizations the user owns: they open the Data Model page.
@@ -77,6 +79,10 @@ export function getSession(): Session | null {
     if (session.token && Date.parse(session.expiresAt) > Date.now()) {
       hadSession = true;
       lastToken = session.token;
+      // Stored by an older page, before users had a username.
+      if (session.user && session.user.username == null) {
+        session.user.username = session.user.id;
+      }
       return session;
     }
   } catch {
@@ -236,6 +242,7 @@ export async function login(
     expiresAt: body.expiresAt,
     user: {
       ...body.user,
+      username: body.user?.username ?? body.user?.id,
       platformAdmin: Boolean(body.user?.platformAdmin),
       // Older servers do not send the list.
       ownedOrganizations: body.user?.ownedOrganizations ?? [],

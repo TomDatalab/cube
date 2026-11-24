@@ -6,7 +6,7 @@ import { DragEvent, useEffect, useRef, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, Member, PAGE_SIZE, Role, ROLES, WorkspaceListing,
+  AdminApi, Member, memberName, PAGE_SIZE, Role, ROLES, WorkspaceListing,
 } from './api';
 import { groupByOrganization } from './membershipGroups';
 import { useSearch } from './useSearch';
@@ -14,6 +14,8 @@ import { useSearch } from './useSearch';
 // The drag payload of a user row: its id. A custom type, so text dragged in
 // from elsewhere is not taken for a user.
 export const USER_DRAG_TYPE = 'application/x-cube-user';
+// The dragged user's username, for the messages; the id is the call's.
+export const USER_DRAG_NAME_TYPE = 'application/x-cube-username';
 
 type Props = {
   api: AdminApi;
@@ -98,14 +100,15 @@ export function MembershipTree({ api }: Props) {
     if (!user) {
       return;
     }
+    const username = e.dataTransfer.getData(USER_DRAG_NAME_TYPE) || user;
     setOpen(new Set(open).add(ws.id));
     const current = members[ws.id] || await loadMembers(ws.id);
     if (current?.some((m) => m.user === user)) {
-      message.info(`${user} is already in ${ws.name}`);
+      message.info(`${username} is already in ${ws.name}`);
       return;
     }
     if (current) {
-      act(ws.id, () => api.setMember(ws.id, user, 'viewer'), `${user} added to ${ws.name} as viewer`);
+      act(ws.id, () => api.setMember(ws.id, user, 'viewer'), `${username} added to ${ws.name} as viewer`);
     }
   }
 
@@ -179,7 +182,7 @@ export function MembershipTree({ api }: Props) {
                             display: 'flex', alignItems: 'center', gap: 8, marginTop: 4,
                           }}
                         >
-                          <Typography.Text style={{ minWidth: 120 }}>{m.user}</Typography.Text>
+                          <Typography.Text style={{ minWidth: 120 }}>{memberName(m)}</Typography.Text>
                           <Select
                             size="small"
                             value={m.role}
@@ -188,15 +191,15 @@ export function MembershipTree({ api }: Props) {
                             onChange={(role: Role) => act(
                               ws.id,
                               () => api.setMember(ws.id, m.user, role),
-                              `${m.user} is now ${role} in ${ws.name}`
+                              `${memberName(m)} is now ${role} in ${ws.name}`
                             )}
                           />
                           <Popconfirm
-                            title={`Remove ${m.user} from ${ws.name}?`}
+                            title={`Remove ${memberName(m)} from ${ws.name}?`}
                             onConfirm={() => act(
                               ws.id,
                               () => api.removeMember(ws.id, m.user),
-                              `${m.user} removed from ${ws.name}`
+                              `${memberName(m)} removed from ${ws.name}`
                             )}
                           >
                             <Button
@@ -204,7 +207,7 @@ export function MembershipTree({ api }: Props) {
                               type="text"
                               danger
                               icon={<CloseOutlined />}
-                              aria-label={`Remove ${m.user}`}
+                              aria-label={`Remove ${memberName(m)}`}
                             />
                           </Popconfirm>
                         </div>

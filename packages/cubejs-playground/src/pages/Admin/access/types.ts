@@ -31,7 +31,7 @@ export type Grant = {
 };
 
 export type AccessGraph = {
-  user: { id: string; name: string | null; disabled: boolean };
+  user: { id: string; username: string; name: string | null; disabled: boolean };
   platformAdmin: boolean;
   nodes: AccessNode[];
   edges: AccessEdge[];

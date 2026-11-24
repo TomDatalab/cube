@@ -6,9 +6,9 @@ import { CSSProperties, DragEvent, useEffect, useRef, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, PAGE_SIZE, Rule, WorkspaceListing,
+  AdminApi, memberName, PAGE_SIZE, Rule, RuleMember, WorkspaceListing,
 } from './api';
-import { USER_DRAG_TYPE } from './MembershipTree';
+import { USER_DRAG_NAME_TYPE, USER_DRAG_TYPE } from './MembershipTree';
 import { groupByOrganization } from './membershipGroups';
 import { useSearch } from './useSearch';
 
@@ -62,7 +62,7 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     q, setQ, page, setPage, result, loading, error,
   } = useSearch((term, p) => api.searchWorkspaces({ q: term, page: p }), []);
   const [rules, setRules] = useState<Record<string, Rule[]>>({});
-  const [members, setMembers] = useState<Record<string, string[]>>({});
+  const [members, setMembers] = useState<Record<string, RuleMember[]>>({});
   const [openWorkspaces, setOpenWorkspaces] = useState<Set<string>>(new Set());
   const [openRules, setOpenRules] = useState<Set<string>>(new Set());
   // `ws:<id>` or `rule:<id>`: what a drag hovers.
@@ -83,7 +83,7 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     }
   }
 
-  async function loadMembers(rule: string): Promise<string[] | null> {
+  async function loadMembers(rule: string): Promise<RuleMember[] | null> {
     try {
       const list = await api.ruleMembers(rule);
       if (isMounted()) {
@@ -182,10 +182,11 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     if (!user) {
       return;
     }
+    const username = e.dataTransfer.getData(USER_DRAG_NAME_TYPE) || user;
     setOpenRules(new Set(openRules).add(rule.id));
     const current = members[rule.id] || await loadMembers(rule.id);
-    if (current?.includes(user)) {
-      message.info(`${user} is already in ${rule.description}`);
+    if (current?.some((m) => m.user === user)) {
+      message.info(`${username} is already in ${rule.description}`);
       return;
     }
     if (!current) {
@@ -193,17 +194,18 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     }
     try {
       await api.addRuleMember(rule.id, user);
-      message.success(`${user} added to ${rule.description} (${rule.roleName} in ${rule.workspaceName})`);
+      message.success(`${username} added to ${rule.description} (${rule.roleName} in ${rule.workspaceName})`);
     } catch (err: any) {
       message.error(err.message);
     }
     await loadMembers(rule.id);
   }
 
-  async function removeMember(rule: Rule, user: string) {
+  async function removeMember(rule: Rule, member: RuleMember) {
+    const { user } = member;
     try {
       await api.removeRuleMember(rule.id, user);
-      message.success(`${user} removed from ${rule.description}`);
+      message.success(`${memberName(member)} removed from ${rule.description}`);
     } catch (err: any) {
       message.error(err.message);
     }
@@ -241,19 +243,19 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
         </div>
         {expanded ? (
           <div style={{ paddingLeft: 20 }}>
-            {list?.map((user) => (
-              <div key={user} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                <Typography.Text style={{ minWidth: 120 }}>{user}</Typography.Text>
+            {list?.map((member) => (
+              <div key={member.user} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                <Typography.Text style={{ minWidth: 120 }}>{memberName(member)}</Typography.Text>
                 <Popconfirm
-                  title={`Remove ${user} from ${rule.description}?`}
-                  onConfirm={() => removeMember(rule, user)}
+                  title={`Remove ${memberName(member)} from ${rule.description}?`}
+                  onConfirm={() => removeMember(rule, member)}
                 >
                   <Button
                     size="small"
                     type="text"
                     danger
                     icon={<CloseOutlined />}
-                    aria-label={`Remove ${user} from ${rule.description}`}
+                    aria-label={`Remove ${memberName(member)} from ${rule.description}`}
                   />
                 </Popconfirm>
               </div>

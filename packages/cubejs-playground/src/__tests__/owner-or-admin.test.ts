@@ -17,7 +17,7 @@ import { OwnerOrAdmin } from '../components/AdminOnly/OwnerOrAdmin';
 const session = (platformAdmin: boolean, owned: { id: string; slug: string; name: string }[]) => ({
   token: 't',
   expiresAt: '',
-  user: { id: 'u', name: null, platformAdmin, ownedOrganizations: owned },
+  user: { id: 'u', username: 'u', name: null, platformAdmin, ownedOrganizations: owned },
 });
 const ORG = [{ id: 'o1', slug: 'a', name: 'A' }];
 const ON = { authRequired: true };

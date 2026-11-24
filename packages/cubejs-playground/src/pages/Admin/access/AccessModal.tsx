@@ -507,7 +507,7 @@ export function AccessModal({ api, user, onClose }: Props) {
       }}
       >
         <Typography.Text type="secondary" style={{ textTransform: 'uppercase', fontSize: 12, letterSpacing: '.06em' }}>
-          What {graph.user.id} can do
+          What {graph.user.username} can do
         </Typography.Text>
         {graph.platformAdmin ? (
           <Typography.Paragraph style={{ marginTop: 8 }}>
@@ -613,7 +613,7 @@ export function AccessModal({ api, user, onClose }: Props) {
     <Modal
       title={(
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', paddingRight: 24 }}>
-          <span>Access of {userId}</span>
+          <span>Access of {user?.username}</span>
           <Space size={8} wrap>
             {summary ? <Typography.Text type="secondary" style={{ fontFamily: MONO, fontSize: 12 }}>{summary}</Typography.Text> : null}
             {graph ? (

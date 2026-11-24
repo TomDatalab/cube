@@ -107,7 +107,7 @@ export default function Header({ pathname }: Props) {
         <ThemeSwitcher />
         {session ? (
           <>
-            <User>{session.user.name || session.user.id}</User>
+            <User>{session.user.name || session.user.username || session.user.id}</User>
             <IconButton type="button" aria-label="Sair" title="Sair" onClick={logOut}>
               <LogoutOutlined />
             </IconButton>

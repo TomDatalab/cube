@@ -7,7 +7,8 @@ type Option = { value: string; label: string };
 
 type Props = {
   value?: string;
-  onChange?: (v?: string) => void;
+  // The label of the chosen option comes second, to name it in a message.
+  onChange?: (v?: string, label?: string) => void;
   fetchOptions: (q: string) => Promise<Option[]>;
   placeholder?: string;
   allowClear?: boolean;
@@ -83,7 +84,7 @@ export function RemoteSelect({
             setLabels((l) => ({ ...l, [v]: chosen.label }));
           }
         }
-        onChange?.(v);
+        onChange?.(v, v ? (shown.find((o) => o.value === v)?.label ?? labels[v]) : undefined);
       }}
       onDropdownVisibleChange={(open) => {
         // Back to the first matches once the search box is closed.
@@ -99,7 +100,7 @@ export function RemoteSelect({
 export const userOptions = (api: AdminApi) => async (q: string): Promise<Option[]> => (
   (await api.searchUsers(q, 1)).items
     .filter((u) => !u.disabled)
-    .map((u) => ({ value: u.id, label: u.name ? `${u.id} (${u.name})` : u.id }))
+    .map((u) => ({ value: u.id, label: u.name ? `${u.username} (${u.name})` : u.username }))
 );
 
 export const organizationOptions = (api: AdminApi) => async (q: string): Promise<Option[]> => (
