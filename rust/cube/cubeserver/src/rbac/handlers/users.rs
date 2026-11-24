@@ -417,6 +417,15 @@ pub(crate) async fn access(
 
 /// The cubes and views of the model index, each with its folder and the data
 /// sources it reads. Files outside every folder are left out.
+///
+/// A cube reads its own data source. A view reads, as enforcement does
+/// (`member_to_data_source`: the data source of the cube owning each included
+/// member), the data sources of its member cubes, the last segment of each
+/// `join_path`; the cubes a path only passes through add nothing. They are
+/// looked up in the view's folder, then in Platform's. Unlike enforcement,
+/// which maps member by member, the index lists the cubes per `join_path`, so
+/// a path whose include brings no member still counts; when a member cube is
+/// not found the view's own `data_source` stands in.
 fn access_cubes(index: &crate::model_index::ModelIndex) -> Vec<access::AccessCube> {
     use cubemodel::ownership::{Owner, PLATFORM_FOLDER};
     let folder_of = |owner: &Owner| match owner {
@@ -429,7 +438,7 @@ fn access_cubes(index: &crate::model_index::ModelIndex) -> Vec<access::AccessCub
         .iter()
         .filter_map(|c| folder_of(&c.owner).map(|f| (f, c)))
         .collect();
-    // Names are unique per folder, not across them: a view's includes are
+    // Names are unique per folder, not across them: a view's member cubes are
     // looked up in its own folder, then in Platform's.
     let find = |folder: &str, name: &str| {
         [folder, PLATFORM_FOLDER].into_iter().find_map(|f| {
@@ -443,9 +452,9 @@ fn access_cubes(index: &crate::model_index::ModelIndex) -> Vec<access::AccessCub
         .iter()
         .map(|(folder, cube)| {
             let own = BTreeSet::from([cube.data_source.clone()]);
-            let data_sources = if cube.kind == "view" && !cube.includes.is_empty() {
+            let data_sources = if cube.kind == "view" && !cube.member_cubes.is_empty() {
                 let found: Option<BTreeSet<String>> = cube
-                    .includes
+                    .member_cubes
                     .iter()
                     .map(|name| find(folder, name).map(|c| c.data_source.clone()))
                     .collect();

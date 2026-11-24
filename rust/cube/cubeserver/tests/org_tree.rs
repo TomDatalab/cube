@@ -1147,3 +1147,66 @@ tree_test!(access_graph_lists_connections_cubes_and_rules, |store| {
     // `u` reads `default`, which is no connection of ann's graph.
     assert!(!nodes.iter().any(|n| n["id"] == "cube:_platform:u"), "{graph}");
 });
+
+// A view reads the data sources of the cubes that own its members, not of
+// the cubes its join path only passes through.
+tree_test!(a_view_over_a_join_path_reads_only_its_member_cubes, |store| {
+    let mut env = env_with(store.clone(), true).await;
+    let mut config = (*env.state.config).clone();
+    config.data_sources.push(("ondb".into(), "postgres".into()));
+    env.state.config = Arc::new(config);
+    env.router = cubeserver::build_app(env.state.clone());
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let _ = user(&env, &admin, "ann").await;
+    let body = ok(
+        &env,
+        &admin,
+        Method::POST,
+        "/cube/v1/organizations",
+        Some(json!({ "name": "Digital", "owner": "ann" })),
+    )
+    .await;
+    let org = body["id"].as_str().unwrap().to_string();
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
+    env.rbac
+        .set_data_source_names(vec!["default".into(), "sofiadb".into(), "ondb".into()]);
+    for name in ["sofiadb", "ondb"] {
+        assign(&env, &admin, name, digital.id).await;
+    }
+    // `a` (ondb, never released) joins `b` (sofiadb, released); the view
+    // brings only b's members.
+    env.write(
+        "digital/m.yml",
+        "cubes:\n  - name: a\n    sql_table: t\n    data_source: ondb\n    joins:\n      - name: b\n        sql: \"1=1\"\n        relationship: many_to_one\n    measures:\n      - name: n\n        type: count\n  - name: b\n    sql_table: t\n    data_source: sofiadb\n    measures:\n      - name: n\n        type: count\nviews:\n  - name: w\n    cubes:\n      - join_path: a.b\n        includes: \"*\"\n",
+    );
+    cubeserver::rbac::ownership::refresh_policy(&env.state).await.unwrap();
+    let ws = workspace_with(&env, &admin, digital.id, "sofiadb", &["ann"]).await;
+    let _ = (org, ws);
+
+    let graph = ok(&env, &admin, Method::GET, "/cube/v1/users/ann/access", None).await;
+    let view = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "cube:digital:w")
+        .unwrap_or_else(|| panic!("no view node: {graph}"));
+    let notes = view["notes"].to_string();
+    assert!(!notes.contains("spans"), "{notes}");
+    assert!(
+        graph["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["resource"] == "cube:digital:w" && g["permission"] == "query"),
+        "{graph}"
+    );
+    // The cube `a` itself stays out of reach.
+    assert!(
+        !graph["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["resource"] == "cube:digital:a" && g["permission"] == "query"),
+        "{graph}"
+    );
+});
