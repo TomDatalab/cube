@@ -20,6 +20,7 @@ pub mod model_store;
 pub mod ownership;
 pub mod restrictions;
 pub mod data_sources;
+pub mod scope;
 pub mod secrets;
 pub mod slug;
 pub mod store;
