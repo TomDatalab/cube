@@ -259,7 +259,67 @@ const LABEL_H = 18;
 const LABEL_GAP = 8;
 
 export type EdgeLabel = { x: number; y: number; w: number };
-export type EdgeGeometry = { edge: LaidOutEdge; d: string; label: EdgeLabel | null };
+/** `points`: where the edge goes, start to end, level across every column it skips. */
+export type EdgeGeometry = { edge: LaidOutEdge; d: string; points: Point[]; label: EdgeLabel | null };
+
+/** How far a line keeps from a box it passes. */
+const CLEARANCE = 6;
+
+/**
+ * The waypoints of an edge from `from` to `to`: straight to the target
+ * when nothing stands between them; otherwise, for each column of boxes in
+ * between, an entry and an exit at the height of the gap (between two boxes,
+ * above the first or below the last) nearest to where the edge would pass.
+ */
+function route(from: LaidOutNode, to: LaidOutNode, nodes: LaidOutNode[]): Point[] {
+  const start = { x: from.x + NODE_W, y: from.y + from.h / 2 };
+  const end = { x: to.x, y: to.y + to.h / 2 };
+  if (end.x <= start.x) {
+    return [start, end];
+  }
+  // The boxes between the two, grouped into columns (overlapping x ranges).
+  const between = nodes
+    .filter((n) => n !== from && n !== to && n.x < end.x && n.x + NODE_W > start.x)
+    .sort((a, b) => a.x - b.x);
+  const columns: { x1: number; x2: number; boxes: LaidOutNode[] }[] = [];
+  between.forEach((n) => {
+    const last = columns[columns.length - 1];
+    if (last && n.x < last.x2) {
+      last.x2 = Math.max(last.x2, n.x + NODE_W);
+      last.boxes.push(n);
+    } else {
+      columns.push({ x1: n.x, x2: n.x + NODE_W, boxes: [n] });
+    }
+  });
+  const points = [start];
+  columns.forEach((col) => {
+    const t = ((col.x1 + col.x2) / 2 - start.x) / (end.x - start.x);
+    const want = start.y + (end.y - start.y) * Math.min(1, Math.max(0, t));
+    const spans = col.boxes
+      .map((b) => [b.y - CLEARANCE, b.y + b.h + CLEARANCE] as const)
+      .sort((a, b) => a[0] - b[0]);
+    // Free heights: above everything, each gap, below everything.
+    const lanes = [spans[0][0] - GAP / 2];
+    let reach = spans[0][1];
+    spans.slice(1).forEach(([top, bottom]) => {
+      if (top > reach) {
+        lanes.push((reach + top) / 2);
+      }
+      reach = Math.max(reach, bottom);
+    });
+    lanes.push(reach + GAP / 2);
+    const y = lanes.reduce((best, lane) => (Math.abs(lane - want) < Math.abs(best - want) ? lane : best));
+    points.push({ x: col.x1 - CLEARANCE, y }, { x: col.x2 + CLEARANCE, y });
+  });
+  points.push(end);
+  return points;
+}
+
+/** An S-curve leaving `a` and reaching `b` level. */
+function curve(a: Point, b: Point): string {
+  const mx = (a.x + b.x) / 2;
+  return ` C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`;
+}
 
 function cubic(t: number, a: number, b: number, c: number, d: number) {
   const u = 1 - t;
@@ -280,12 +340,16 @@ export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGe
     if (!from || !to) {
       return;
     }
-    const x1 = from.x + NODE_W;
-    const y1 = from.y + from.h / 2;
-    const x2 = to.x;
-    const y2 = to.y + to.h / 2;
+    const points = route(from, to, nodes);
+    // Curves between columns, level lines across the columns it skips.
+    let d = `M${points[0].x},${points[0].y}`;
+    for (let i = 1; i < points.length; i++) {
+      d += i % 2 === 0 ? ` L${points[i].x},${points[i].y}` : curve(points[i - 1], points[i]);
+    }
+    // The label goes on the last curve, just before the target.
+    const { x: x1, y: y1 } = points[points.length - 2];
+    const { x: x2, y: y2 } = points[points.length - 1];
     const dx = (x2 - x1) * 0.5;
-    const d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
     let label: EdgeLabel | null = null;
     if (edge.showLabel) {
       const w = edge.label.length * 6.4 + 12;
@@ -306,7 +370,7 @@ export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGe
       }
       label = { x: cubic(t, x1, x1 + dx, x2 - dx, x2), y: cubic(t, y1, y1, y2, y2), w };
     }
-    out.push({ edge, d, label });
+    out.push({ edge, d, points, label });
   });
 
   const labels = out.flatMap((g) => (g.label ? [g.label] : [])).sort((a, b) => a.y - b.y);
@@ -327,6 +391,7 @@ export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGe
 // ---- dragging, zoom and pan ----
 
 export type Point = { x: number; y: number };
+/** How far each dragged node was moved from where the layout puts it. */
 export type Positions = Record<string, Point>;
 /** Screen = world * k + (x, y). */
 export type View = { x: number; y: number; k: number };
@@ -341,9 +406,23 @@ export function movedBeyond(dx: number, dy: number): boolean {
   return Math.hypot(dx, dy) >= DRAG_THRESHOLD;
 }
 
-/** Nodes at their dragged position, if any; the others where layout put them. */
+/**
+ * Dragged nodes moved by their offset from where the layout puts them, the
+ * others where it puts them. An offset, not a place: when expanding or
+ * collapsing moves a node along its column, a node dragged before moves with
+ * it rather than staying behind on top of the nodes that moved.
+ */
 export function applyPositions(nodes: LaidOutNode[], positions: Positions): LaidOutNode[] {
-  return nodes.map((n) => (positions[n.id] ? { ...n, ...positions[n.id] } : n));
+  return nodes.map((n) => {
+    const offset = positions[n.id];
+    return offset ? { ...n, x: n.x + offset.x, y: n.y + offset.y } : n;
+  });
+}
+
+/** The nodes in drawing order: the one being dragged last, on top. */
+export function drawOrder(nodes: LaidOutNode[], dragged: string | undefined): LaidOutNode[] {
+  const top = dragged ? nodes.find((n) => n.id === dragged) : undefined;
+  return top ? [...nodes.filter((n) => n !== top), top] : nodes;
 }
 
 export function bounds(nodes: LaidOutNode[], geometry: EdgeGeometry[]): Bounds {

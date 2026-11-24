@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyPositions,
+  drawOrder,
   bounds,
   clampScale,
   COLLAPSE_AT,
@@ -156,6 +157,31 @@ describe('access layout', () => {
     });
   });
 
+  it('routes an edge that skips a column through a gap, never behind a box', () => {
+    // user → workspace skips the organization column, whose box sits right
+    // where a straight curve would pass.
+    const g = graphWith(3);
+    g.edges.push({ from: 'user:ana', to: 'workspace:w1', label: 'editor', kind: 'direct' });
+    const out = layout(g, new Set());
+    const geo = edgeGeometry(out.nodes, out.edges)
+      .find((e) => e.edge.from === 'user:ana' && e.edge.to === 'workspace:w1')!;
+    const org = out.nodes.find((n) => n.id === OID)!;
+    // Across the organization column the edge runs level, outside every box.
+    // (entry and exit flank the column, a few pixels off its boxes)
+    const across = geo.points.filter((p) => p.x >= org.x - 10 && p.x <= org.x + NODE_W + 10);
+    expect(across.length).toBeGreaterThanOrEqual(2);
+    across.forEach((p) => expect(p.y < org.y || p.y > org.y + org.h).toBe(true));
+    expect(geo.d).toContain(' L');
+    expect(geo.points[0]).toEqual({ x: out.nodes[0].x + NODE_W, y: out.nodes[0].y + out.nodes[0].h / 2 });
+  });
+
+  it('draws an edge between neighbouring columns as one curve', () => {
+    const out = layout(graphWith(2), new Set());
+    const geo = edgeGeometry(out.nodes, out.edges).find((e) => e.edge.from === 'user:ana')!;
+    expect(geo.points).toHaveLength(2);
+    expect(geo.d).not.toContain(' L');
+  });
+
   it('opens the organizations a reason passes through', () => {
     const g = graphWith(COLLAPSE_AT + 1);
     const drawn = layout(g, new Set());
@@ -278,21 +304,42 @@ describe('dragging nodes', () => {
     expect(movedBeyond(-5, 0)).toBe(true);
   });
 
-  it('moves only the dragged nodes, whatever the layout', () => {
+  it('moves only the dragged nodes, by how far they were dragged', () => {
     const out = layout(graphWith(2), new Set());
+    const org = out.nodes.find((n) => n.id === OID)!;
     const moved = applyPositions(out.nodes, { [OID]: { x: 5, y: 900 }, 'workspace:gone': { x: 1, y: 1 } });
-    expect(moved.find((n) => n.id === OID)).toMatchObject({ x: 5, y: 900 });
+    expect(moved.find((n) => n.id === OID)).toMatchObject({ x: org.x + 5, y: org.y + 900 });
     expect(moved.find((n) => n.id === 'user:ana')).toEqual(out.nodes.find((n) => n.id === 'user:ana'));
     expect(moved).toHaveLength(out.nodes.length);
   });
 
+  it('a dragged node follows the layout when it moves the node', () => {
+    // Expanding or collapsing moves nodes down or up their column: a node
+    // dragged before keeps where it was dragged to relative to its place,
+    // so it does not land on the nodes that moved around it.
+    const out = layout(graphWith(2), new Set());
+    const reflowed = out.nodes.map((n) => ({ ...n, y: n.y + 100 }));
+    const before = applyPositions(out.nodes, { [OID]: { x: 0, y: 30 } }).find((n) => n.id === OID)!;
+    const after = applyPositions(reflowed, { [OID]: { x: 0, y: 30 } }).find((n) => n.id === OID)!;
+    expect(after.y - before.y).toBe(100);
+  });
+
+  it('draws the dragged node last, on top of the others', () => {
+    const out = layout(graphWith(2), new Set());
+    const order = drawOrder(out.nodes, OID).map((n) => n.id);
+    expect(order[order.length - 1]).toBe(OID);
+    expect(order).toHaveLength(out.nodes.length);
+    expect(drawOrder(out.nodes, undefined)).toEqual(out.nodes);
+  });
+
   it('bounds enclose dragged nodes', () => {
     const out = layout(graphWith(2), new Set());
-    const moved = applyPositions(out.nodes, { [OID]: { x: -300, y: 2000 } });
+    const moved = applyPositions(out.nodes, { [OID]: { x: -700, y: 2000 } });
     const org = moved.find((n) => n.id === OID)!;
     const b = bounds(moved, edgeGeometry(moved, out.edges));
-    expect(b.minX).toBeLessThanOrEqual(-300);
-    expect(b.maxY).toBeGreaterThanOrEqual(2000 + org.h);
+    expect(b.minX).toBeLessThanOrEqual(org.x);
+    expect(org.x).toBeLessThan(0);
+    expect(b.maxY).toBeGreaterThanOrEqual(org.y + org.h);
     expect(b.maxX).toBeGreaterThanOrEqual(1160 + NODE_W);
   });
 });

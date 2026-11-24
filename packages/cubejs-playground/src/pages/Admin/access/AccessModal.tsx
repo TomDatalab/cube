@@ -7,7 +7,7 @@ import {
 
 import { AdminApi, User } from '../api';
 import {
-  applyPositions, bounds, edgeGeometry, EdgeGeometry, expandFor, fitView, highlight, layout, LaidOutNode,
+  applyPositions, bounds, drawOrder, edgeGeometry, EdgeGeometry, expandFor, fitView, highlight, layout, LaidOutNode,
   movedBeyond, NODE_W, nodeRows, Point, Positions, View, zoomAt,
 } from './layout';
 import { AccessEdge, AccessGraph, AccessNodeKind, Reason } from './types';
@@ -29,6 +29,8 @@ const FG = 'var(--pg-graph-fg, #1f1d3a)';
 const DERIVED = 'var(--pg-graph-derived, #9c9ab8)';
 const PANEL = 'var(--pg-graph-panel, #f6f6fb)';
 const NODE_BG = 'var(--pg-graph-node, #fff)';
+// How much a node the user cannot access fades.
+const DIM_OPACITY = 0.55;
 
 const KIND_COLOR: Record<AccessNodeKind, string> = {
   user: 'var(--pg-graph-user, #1f1d3a)',
@@ -126,7 +128,7 @@ function Node({
   const tx = node.x + 16;
   const pill = node.hiddenCount ? `+${node.hiddenCount} ${node.kind === 'connection' ? 'cubes' : 'workspaces'}` : 'collapse';
   return (
-    <g onPointerDown={onPointerDown} opacity={node.dim ? 0.55 : 1} style={{ cursor: grabbing ? 'grabbing' : 'grab' }}>
+    <g onPointerDown={onPointerDown} style={{ cursor: grabbing ? 'grabbing' : 'grab' }}>
       <clipPath id={clip}>
         <rect x={node.x + 8} y={node.y} width={NODE_W - 16} height={node.h} />
       </clipPath>
@@ -139,29 +141,33 @@ function Node({
         style={{ fill: NODE_BG, stroke: hl ? ACCENT : LINE }}
         strokeWidth={hl ? 2 : 1}
       />
-      <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} style={{ fill: color }} />
-      <g clipPath={`url(#${clip})`}>
-        <text x={tx} y={node.y + rows.kindY} fontSize={10.5} style={{ fill: color }} fontFamily={MONO}>
-          {node.kind}
-        </text>
-        <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} style={{ fill: FG }}>
-          {node.label}
-          <title>{node.name}</title>
-        </text>
-        {node.permLines.length ? (
-          <text fontSize={11.5} style={{ fill: MUTED }} fontFamily={MONO}>
-            {node.permLines.map((line, i) => ({ line, y: node.y + rows.permY[i] })).map(({ line, y }) => (
-              <tspan key={y} x={tx} y={y}>{line}</tspan>
-            ))}
+      {/* Dimmed (no access): its contents fade, its background stays opaque,
+          so what lies behind it never shows through. */}
+      <g opacity={node.dim ? DIM_OPACITY : 1}>
+        <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} style={{ fill: color }} />
+        <g clipPath={`url(#${clip})`}>
+          <text x={tx} y={node.y + rows.kindY} fontSize={10.5} style={{ fill: color }} fontFamily={MONO}>
+            {node.kind}
           </text>
-        ) : null}
-        {node.noteLines.length ? (
-          <text fontSize={10.5} style={{ fill: MUTED }} fontStyle="italic">
-            {node.noteLines.map((line, i) => ({ line, y: node.y + rows.noteY[i] })).map(({ line, y }) => (
-              <tspan key={y} x={tx} y={y}>{line}</tspan>
-            ))}
+          <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} style={{ fill: FG }}>
+            {node.label}
+            <title>{node.name}</title>
           </text>
-        ) : null}
+          {node.permLines.length ? (
+            <text fontSize={11.5} style={{ fill: MUTED }} fontFamily={MONO}>
+              {node.permLines.map((line, i) => ({ line, y: node.y + rows.permY[i] })).map(({ line, y }) => (
+                <tspan key={y} x={tx} y={y}>{line}</tspan>
+              ))}
+            </text>
+          ) : null}
+          {node.noteLines.length ? (
+            <text fontSize={10.5} style={{ fill: MUTED }} fontStyle="italic">
+              {node.noteLines.map((line, i) => ({ line, y: node.y + rows.noteY[i] })).map(({ line, y }) => (
+                <tspan key={y} x={tx} y={y}>{line}</tspan>
+              ))}
+            </text>
+          ) : null}
+        </g>
       </g>
       {rows.pillY != null ? (
         <g
@@ -199,7 +205,8 @@ export function AccessModal({ api, user, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [active, setActive] = useState<Reason | null>(null);
-  // Where nodes were dragged to, by node id; kept across expand/collapse.
+  // How far nodes were dragged from their place, by node id; kept across
+  // expand/collapse, so a dragged node moves with its column.
   const [positions, setPositions] = useState<Positions>({});
   // Null until the graph is first fitted into the viewport.
   const [view, setView] = useState<View | null>(null);
@@ -307,7 +314,8 @@ export function AccessModal({ api, user, onClose }: Props) {
       node: node?.id,
       toggle: !!(e.target as Element).closest?.('[data-toggle]'),
       start: svgPoint(e),
-      origin: node ? { x: node.x, y: node.y } : { x: v.x, y: v.y },
+      // A node: its offset so far; the view: its translation.
+      origin: node ? positions[node.id] || { x: 0, y: 0 } : { x: v.x, y: v.y },
       moved: false,
     });
   }
@@ -431,7 +439,7 @@ export function AccessModal({ api, user, onClose }: Props) {
                 <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
               ))}
             </g>
-            {nodes.map((n, i) => (
+            {drawOrder(nodes, drag?.moved ? drag.node : undefined).map((n, i) => (
               <Node
                 key={n.id}
                 node={n}
