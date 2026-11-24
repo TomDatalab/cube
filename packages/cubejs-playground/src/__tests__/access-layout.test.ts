@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyPositions,
   drawOrder,
+  graphHeight,
   bounds,
   clampScale,
   COLLAPSE_AT,
@@ -157,48 +158,16 @@ describe('access layout', () => {
     });
   });
 
-  it('routes an edge that skips a column through a gap, never behind a box', () => {
-    // user → workspace skips the organization column, whose box sits right
-    // where a straight curve would pass.
+  it('draws every edge as one curve straight between its nodes', () => {
+    // Edges are drawn over the boxes, so they need not go around them.
     const g = graphWith(3);
     g.edges.push({ from: 'user:ana', to: 'workspace:w1', label: 'editor', kind: 'direct' });
     const out = layout(g, new Set());
-    const geo = edgeGeometry(out.nodes, out.edges)
-      .find((e) => e.edge.from === 'user:ana' && e.edge.to === 'workspace:w1')!;
-    const org = out.nodes.find((n) => n.id === OID)!;
-    // Across the organization column the edge runs level, outside every box.
-    // (entry and exit flank the column, a few pixels off its boxes)
-    const across = geo.points.filter((p) => p.x >= org.x - 10 && p.x <= org.x + NODE_W + 10);
-    expect(across.length).toBeGreaterThanOrEqual(2);
-    across.forEach((p) => expect(p.y < org.y || p.y > org.y + org.h).toBe(true));
-    expect(geo.d).toContain(' L');
-    expect(geo.points[0]).toEqual({ x: out.nodes[0].x + NODE_W, y: out.nodes[0].y + out.nodes[0].h / 2 });
-  });
-
-  it('while a node is dragged, only its own edges move', () => {
-    // Routing around the boxes as they were when the drag began: an edge
-    // that merely passes the dragged box keeps its path until the drop.
-    const g = graphWith(3);
-    g.edges.push({ from: 'user:ana', to: 'workspace:w1', label: 'editor', kind: 'direct' });
-    const out = layout(g, new Set());
-    const before = applyPositions(out.nodes, {});
-    const during = applyPositions(out.nodes, { [OID]: { x: 0, y: 60 } });
-    const id = (e: { edge: { from: string; to: string } }) => `${e.edge.from}>${e.edge.to}`;
-    const still = new Map(edgeGeometry(before, out.edges).map((e) => [id(e), e.points]));
-    const frozen = edgeGeometry(during, out.edges, before);
-    frozen.forEach((e) => {
-      if (e.edge.from === OID || e.edge.to === OID) {
-        expect(e.points).not.toEqual(still.get(id(e)));
-      } else {
-        expect(e.points).toEqual(still.get(id(e)));
-      }
-    });
-  });
-
-  it('draws an edge between neighbouring columns as one curve', () => {
-    const out = layout(graphWith(2), new Set());
-    const geo = edgeGeometry(out.nodes, out.edges).find((e) => e.edge.from === 'user:ana')!;
-    expect(geo.points).toHaveLength(2);
+    const user = out.nodes.find((n) => n.id === 'user:ana')!;
+    const w1 = out.nodes.find((n) => n.id === 'workspace:w1')!;
+    const geo = edgeGeometry(out.nodes, out.edges).find((e) => e.edge.from === 'user:ana' && e.edge.to === 'workspace:w1')!;
+    expect(geo.d.startsWith(`M${user.x + NODE_W},${user.y + user.h / 2} C`)).toBe(true);
+    expect(geo.d.endsWith(`${w1.x},${w1.y + w1.h / 2}`)).toBe(true);
     expect(geo.d).not.toContain(' L');
   });
 
@@ -399,5 +368,19 @@ describe('zoom and pan', () => {
     expect(fitView({
       minX: 10, minY: 10, maxX: 110, maxY: 60,
     }, 1000, 600).k).toBe(1);
+  });
+});
+
+describe('graph height', () => {
+  it('fills the screen in full screen, below the title bar', () => {
+    expect(graphHeight({ full: true, narrow: false, screen: 1000 })).toBe(1000 - 140);
+    expect(graphHeight({ full: true, narrow: true, screen: 1000 })).toBe(1000 - 140);
+    // Never smaller than the narrow view.
+    expect(graphHeight({ full: true, narrow: false, screen: 300 })).toBe(420);
+  });
+
+  it('keeps its fixed height in the dialog', () => {
+    expect(graphHeight({ full: false, narrow: false, screen: 1000 })).toBe(600);
+    expect(graphHeight({ full: false, narrow: true, screen: 1000 })).toBe(420);
   });
 });

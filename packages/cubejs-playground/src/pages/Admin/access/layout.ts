@@ -259,67 +259,7 @@ const LABEL_H = 18;
 const LABEL_GAP = 8;
 
 export type EdgeLabel = { x: number; y: number; w: number };
-/** `points`: where the edge goes, start to end, level across every column it skips. */
-export type EdgeGeometry = { edge: LaidOutEdge; d: string; points: Point[]; label: EdgeLabel | null };
-
-/** How far a line keeps from a box it passes. */
-const CLEARANCE = 6;
-
-/**
- * The waypoints of an edge from `from` to `to`: straight to the target
- * when nothing stands between them; otherwise, for each column of boxes in
- * between, an entry and an exit at the height of the gap (between two boxes,
- * above the first or below the last) nearest to where the edge would pass.
- */
-function route(from: LaidOutNode, to: LaidOutNode, obstacles: LaidOutNode[]): Point[] {
-  const start = { x: from.x + NODE_W, y: from.y + from.h / 2 };
-  const end = { x: to.x, y: to.y + to.h / 2 };
-  if (end.x <= start.x) {
-    return [start, end];
-  }
-  // The boxes between the two, grouped into columns (overlapping x ranges).
-  const between = obstacles
-    .filter((n) => n.id !== from.id && n.id !== to.id && n.x < end.x && n.x + NODE_W > start.x)
-    .sort((a, b) => a.x - b.x);
-  const columns: { x1: number; x2: number; boxes: LaidOutNode[] }[] = [];
-  between.forEach((n) => {
-    const last = columns[columns.length - 1];
-    if (last && n.x < last.x2) {
-      last.x2 = Math.max(last.x2, n.x + NODE_W);
-      last.boxes.push(n);
-    } else {
-      columns.push({ x1: n.x, x2: n.x + NODE_W, boxes: [n] });
-    }
-  });
-  const points = [start];
-  columns.forEach((col) => {
-    const t = ((col.x1 + col.x2) / 2 - start.x) / (end.x - start.x);
-    const want = start.y + (end.y - start.y) * Math.min(1, Math.max(0, t));
-    const spans = col.boxes
-      .map((b) => [b.y - CLEARANCE, b.y + b.h + CLEARANCE] as const)
-      .sort((a, b) => a[0] - b[0]);
-    // Free heights: above everything, each gap, below everything.
-    const lanes = [spans[0][0] - GAP / 2];
-    let reach = spans[0][1];
-    spans.slice(1).forEach(([top, bottom]) => {
-      if (top > reach) {
-        lanes.push((reach + top) / 2);
-      }
-      reach = Math.max(reach, bottom);
-    });
-    lanes.push(reach + GAP / 2);
-    const y = lanes.reduce((best, lane) => (Math.abs(lane - want) < Math.abs(best - want) ? lane : best));
-    points.push({ x: col.x1 - CLEARANCE, y }, { x: col.x2 + CLEARANCE, y });
-  });
-  points.push(end);
-  return points;
-}
-
-/** An S-curve leaving `a` and reaching `b` level. */
-function curve(a: Point, b: Point): string {
-  const mx = (a.x + b.x) / 2;
-  return ` C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`;
-}
+export type EdgeGeometry = { edge: LaidOutEdge; d: string; label: EdgeLabel | null };
 
 function cubic(t: number, a: number, b: number, c: number, d: number) {
   const u = 1 - t;
@@ -329,15 +269,9 @@ function cubic(t: number, a: number, b: number, c: number, d: number) {
 /**
  * The path of each edge between its nodes (wherever they are), and its label:
  * on the curve just before the target, pushed down off any label it would
- * cover. Edges go around the boxes of `obstacles` (the nodes by default);
- * while a node is dragged the caller passes the nodes as they were when the
- * drag began, so edges that only pass the dragged box keep their path.
+ * cover.
  */
-export function edgeGeometry(
-  nodes: LaidOutNode[],
-  edges: LaidOutEdge[],
-  obstacles: LaidOutNode[] = nodes
-): EdgeGeometry[] {
+export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGeometry[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const out: EdgeGeometry[] = [];
   edges.forEach((edge) => {
@@ -346,16 +280,12 @@ export function edgeGeometry(
     if (!from || !to) {
       return;
     }
-    const points = route(from, to, obstacles);
-    // Curves between columns, level lines across the columns it skips.
-    let d = `M${points[0].x},${points[0].y}`;
-    for (let i = 1; i < points.length; i++) {
-      d += i % 2 === 0 ? ` L${points[i].x},${points[i].y}` : curve(points[i - 1], points[i]);
-    }
-    // The label goes on the last curve, just before the target.
-    const { x: x1, y: y1 } = points[points.length - 2];
-    const { x: x2, y: y2 } = points[points.length - 1];
+    const x1 = from.x + NODE_W;
+    const y1 = from.y + from.h / 2;
+    const x2 = to.x;
+    const y2 = to.y + to.h / 2;
     const dx = (x2 - x1) * 0.5;
+    const d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
     let label: EdgeLabel | null = null;
     if (edge.showLabel) {
       const w = edge.label.length * 6.4 + 12;
@@ -376,7 +306,7 @@ export function edgeGeometry(
       }
       label = { x: cubic(t, x1, x1 + dx, x2 - dx, x2), y: cubic(t, y1, y1, y2, y2), w };
     }
-    out.push({ edge, d, points, label });
+    out.push({ edge, d, label });
   });
 
   const labels = out.flatMap((g) => (g.label ? [g.label] : [])).sort((a, b) => a.y - b.y);
@@ -392,6 +322,22 @@ export function edgeGeometry(
     placed.push(l);
   });
   return out;
+}
+
+// ---- size ----
+
+/** Room the full-screen view keeps for its title bar and padding. */
+const FULL_SCREEN_CHROME = 140;
+
+/**
+ * The graph's height: fixed in the dialog (shorter on a narrow screen), the
+ * screen less the title bar in full screen, never below the narrow height.
+ */
+export function graphHeight({ full, narrow, screen }: { full: boolean; narrow: boolean; screen: number }): number {
+  if (full) {
+    return Math.max(420, screen - FULL_SCREEN_CHROME);
+  }
+  return narrow ? 420 : 600;
 }
 
 // ---- dragging, zoom and pan ----

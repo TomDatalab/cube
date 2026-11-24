@@ -7,7 +7,8 @@ import {
 
 import { AdminApi, User } from '../api';
 import {
-  applyPositions, bounds, drawOrder, edgeGeometry, EdgeGeometry, expandFor, fitView, highlight, layout, LaidOutNode,
+  applyPositions, bounds, drawOrder, edgeGeometry, EdgeGeometry, expandFor, fitView, graphHeight, highlight, layout,
+  LaidOutNode,
   movedBeyond, NODE_W, nodeRows, Point, Positions, View, zoomAt,
 } from './layout';
 import { AccessEdge, AccessGraph, AccessNodeKind, Reason } from './types';
@@ -208,17 +209,19 @@ export function AccessModal({ api, user, onClose }: Props) {
   // How far nodes were dragged from their place, by node id; kept across
   // expand/collapse, so a dragged node moves with its column.
   const [positions, setPositions] = useState<Positions>({});
-  // The offsets when the current node drag began: edges are routed around
-  // the boxes as they were then, so only the dragged node's edges follow
-  // the pointer; null when no node is being dragged.
-  const [routedOn, setRoutedOn] = useState<Positions | null>(null);
   // Null until the graph is first fitted into the viewport.
   const [view, setView] = useState<View | null>(null);
   const [svg, setSvg] = useState<SVGSVGElement | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const narrow = useNarrow();
-  const viewHeight = narrow ? 420 : 600;
+  // Full screen: the dialog's content fills the screen (Fullscreen API).
+  const content = useRef<HTMLDivElement>(null);
+  const [full, setFull] = useState(false);
+  const canFullScreen = typeof document !== 'undefined' && Boolean(document.fullscreenEnabled);
+  const viewHeight = graphHeight({
+    full, narrow, screen: typeof window !== 'undefined' ? window.innerHeight : 0,
+  });
   const userId = user?.id;
 
   useEffect(() => {
@@ -227,7 +230,6 @@ export function AccessModal({ api, user, onClose }: Props) {
     setExpanded(new Set());
     setActive(null);
     setPositions({});
-    setRoutedOn(null);
     setView(null);
     if (!userId) {
       return undefined;
@@ -249,16 +251,47 @@ export function AccessModal({ api, user, onClose }: Props) {
       return null;
     }
     const nodes = applyPositions(drawn.nodes, positions);
-    const obstacles = routedOn ? applyPositions(drawn.nodes, routedOn) : nodes;
-    const geometry = edgeGeometry(nodes, drawn.edges, obstacles);
+    const geometry = edgeGeometry(nodes, drawn.edges);
     return { nodes, geometry, box: bounds(nodes, geometry) };
-  }, [drawn, positions, routedOn]);
+  }, [drawn, positions]);
 
   function fit() {
     const width = viewport.current?.clientWidth || 0;
     if (placed && width > 0) {
       setView(fitView(placed.box, width, viewHeight));
     }
+  }
+
+  // What goes full screen: the dialog's whole content (title bar and its
+  // buttons included), or just the graph and its panel outside a dialog.
+  function fullScreenTarget(): Element | null {
+    return content.current?.closest('.ant-modal-content') ?? content.current;
+  }
+
+  function toggleFullScreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      fullScreenTarget()?.requestFullscreen().catch(() => undefined);
+    }
+  }
+
+  // Entering or leaving full screen (the button, Esc or F11) resizes the
+  // graph and fits it again.
+  useEffect(() => {
+    const onChange = () => {
+      setFull(document.fullscreenElement != null && document.fullscreenElement === fullScreenTarget());
+      setView(null);
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  function close() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    }
+    onClose();
   }
 
   // The graph opens fitted (once the viewport has a width).
@@ -315,7 +348,6 @@ export function AccessModal({ api, user, onClose }: Props) {
     e.stopPropagation();
     svg.setPointerCapture(e.pointerId);
     const v = view || IDENTITY;
-    setRoutedOn(node ? positions : null);
     setDrag({
       pointerId: e.pointerId,
       node: node?.id,
@@ -362,8 +394,6 @@ export function AccessModal({ api, user, onClose }: Props) {
       flip(drag.node);
     }
     setDrag(null);
-    // Dropped: every edge is routed around the boxes where they now are.
-    setRoutedOn(null);
   }
 
   function flip(parentId: string) {
@@ -443,11 +473,6 @@ export function AccessModal({ api, user, onClose }: Props) {
             ))}
           </defs>
           <g transform={`translate(${v.x},${v.y}) scale(${v.k})`}>
-            <g>
-              {edges.map((g) => (
-                <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
-              ))}
-            </g>
             {drawOrder(nodes, drag?.moved ? drag.node : undefined).map((n, i) => (
               <Node
                 key={n.id}
@@ -459,6 +484,13 @@ export function AccessModal({ api, user, onClose }: Props) {
                 onPointerDown={(e) => startDrag(e, n)}
               />
             ))}
+            {/* Edges over the boxes, so none hides behind one; they let the
+                pointer through to the box or canvas below. */}
+            <g style={{ pointerEvents: 'none' }}>
+              {edges.map((g) => (
+                <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
+              ))}
+            </g>
           </g>
         </svg>
       </div>
@@ -592,18 +624,23 @@ export function AccessModal({ api, user, onClose }: Props) {
                 <Button size="small" disabled={!Object.keys(positions).length} onClick={() => setPositions({})}>
                   Reset layout
                 </Button>
+                {canFullScreen ? (
+                  <Button size="small" aria-pressed={full} onClick={toggleFullScreen}>
+                    {full ? 'Exit full screen' : 'Full screen'}
+                  </Button>
+                ) : null}
               </Space>
             ) : null}
           </Space>
         </div>
       )}
       visible={user != null}
-      onCancel={onClose}
+      onCancel={close}
       footer={null}
       width="90vw"
       destroyOnClose
     >
-      {body}
+      <div ref={content}>{body}</div>
     </Modal>
   );
 }
