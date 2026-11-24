@@ -395,7 +395,72 @@ pub(crate) async fn access(
     input.connections = connections;
     input.releases = releases;
     input.configured = data_source_types(&state).await?.into_keys().collect();
+
+    // Configured data sources that are no organization's connection.
+    let rows: BTreeSet<String> = rbac
+        .store
+        .all_connections()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    input.platform_sources = input
+        .configured
+        .iter()
+        .filter(|name| !rows.contains(*name))
+        .cloned()
+        .collect();
+    input.cubes = access_cubes(&*crate::handlers::tree::index(&state).await?);
     Ok(Json(access::build(&input)))
+}
+
+/// The cubes and views of the model index, each with its folder and the data
+/// sources it reads. Files outside every folder are left out.
+fn access_cubes(index: &crate::model_index::ModelIndex) -> Vec<access::AccessCube> {
+    use cubemodel::ownership::{Owner, PLATFORM_FOLDER};
+    let folder_of = |owner: &Owner| match owner {
+        Owner::Platform => Some(PLATFORM_FOLDER.to_string()),
+        Owner::Organization(slug) => Some(slug.clone()),
+        Owner::Unowned(_) => None,
+    };
+    let owned: Vec<(String, &crate::model_index::IndexedCube)> = index
+        .cubes
+        .iter()
+        .filter_map(|c| folder_of(&c.owner).map(|f| (f, c)))
+        .collect();
+    // Names are unique per folder, not across them: a view's includes are
+    // looked up in its own folder, then in Platform's.
+    let find = |folder: &str, name: &str| {
+        [folder, PLATFORM_FOLDER].into_iter().find_map(|f| {
+            owned
+                .iter()
+                .find(|(of, c)| of == f && c.kind == "cube" && c.name == name)
+                .map(|(_, c)| c)
+        })
+    };
+    owned
+        .iter()
+        .map(|(folder, cube)| {
+            let own = BTreeSet::from([cube.data_source.clone()]);
+            let data_sources = if cube.kind == "view" && !cube.includes.is_empty() {
+                let found: Option<BTreeSet<String>> = cube
+                    .includes
+                    .iter()
+                    .map(|name| find(folder, name).map(|c| c.data_source.clone()))
+                    .collect();
+                found.unwrap_or(own)
+            } else {
+                own
+            };
+            access::AccessCube {
+                name: cube.name.clone(),
+                view: cube.kind == "view",
+                folder: folder.clone(),
+                data_sources,
+            }
+        })
+        .collect()
 }
 
 fn user_not_found() -> ApiError {

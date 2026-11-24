@@ -1065,3 +1065,85 @@ tree_test!(boot_services_compile_the_platform_scope_when_organizations_share_a_n
         .unwrap_err();
     assert!(err.contains("nope"), "{err}");
 });
+
+tree_test!(access_graph_lists_connections_cubes_and_rules, |store| {
+    use cubeserver::rbac::store::ConnectionOrigin;
+    let env = env_with(store.clone(), true).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let _ = user(&env, &admin, "ann").await;
+    let body = ok(
+        &env,
+        &admin,
+        Method::POST,
+        "/cube/v1/organizations",
+        Some(json!({ "name": "Digital", "owner": "ann" })),
+    )
+    .await;
+    let org = body["id"].as_str().unwrap().to_string();
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
+    store
+        .create_connection("sofiadb", digital.id, ConnectionOrigin::Assigned)
+        .await
+        .unwrap();
+    env.rbac.set_data_source_names(vec!["default".into(), "sofiadb".into()]);
+    env.write("digital/a.yml", CUBE_A);
+    env.write("digital/v.yml", VIEW_V);
+    env.write("_platform/u.yml", CUBE_U);
+    cubeserver::rbac::ownership::refresh_policy(&env.state).await.unwrap();
+
+    // A workspace of Digital, a custom role, and a rule giving it to ann.
+    let ws = ok(
+        &env,
+        &admin,
+        Method::POST,
+        &format!("/cube/v1/organizations/{org}/workspaces"),
+        Some(json!({ "name": "Ops" })),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let role = ok(
+        &env,
+        &admin,
+        Method::POST,
+        &format!("/cube/v1/organizations/{org}/roles"),
+        Some(json!({ "name": "Analyst", "permissions": ["query"] })),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rule = ok(
+        &env,
+        &admin,
+        Method::POST,
+        &format!("/cube/v1/workspaces/{ws}/rules"),
+        Some(json!({ "description": "Analysts", "type": "finance", "roleId": role })),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ok(&env, &admin, Method::PUT, &format!("/cube/v1/rules/{rule}/members/ann"), None).await;
+
+    let graph = ok(&env, &admin, Method::GET, "/cube/v1/users/ann/access", None).await;
+    let nodes = graph["nodes"].as_array().unwrap();
+    let node = |id: &str| -> &Value {
+        nodes
+            .iter()
+            .find(|n| n["id"] == id)
+            .unwrap_or_else(|| panic!("no node {id}: {graph}"))
+    };
+    // Digital's connection is not released to ann's workspace.
+    let notes = node("connection:sofiadb")["notes"].to_string();
+    assert!(notes.contains("no access"), "{notes}");
+    node("organization:_platform");
+    node(&format!("rule:{rule}"));
+    node(&format!("role:{role}"));
+    // The cube and the view over it, both in Digital's folder.
+    node("cube:digital:a");
+    node("cube:digital:v");
+    // `u` reads `default`, which is no connection of ann's graph.
+    assert!(!nodes.iter().any(|n| n["id"] == "cube:_platform:u"), "{graph}");
+});
