@@ -352,14 +352,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ),
             );
 
-            // The SQL API shares the orchestrator, so a statement sent
-            // over the Postgres protocol hits the same cache and queue as
-            // the REST API.
-            let executor = Arc::new(cubeserver::sql_api::OrchestratedExecutor::new(
-                planner,
-                orchestrated.api().clone(),
-                "default".to_string(),
-            ));
             // A data source the SQL API cannot render for would fall back
             // to the default dialect, so the SQL API does not start.
             if !unplannable.is_empty() {
@@ -367,7 +359,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "The SQL API did not start: {} data source(s) have no SQL dialect",
                     unplannable.len()
                 );
-            } else {
+            } else if cubeserver::sql_api::enabled() {
                 // With RBAC the SQL API serves one scope, `CUBE_SQL_API_SCOPE`
                 // (the Platform by default); an unknown organization leaves
                 // it stopped and the rest of the server serving.
@@ -380,24 +372,46 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 {
                     Err(err) => eprintln!("The SQL API did not start: {err}"),
-                    Ok(sql_path) => match cubeserver::sql_api::start(
+                    // Its executor plans on the same folder cubesql compiles.
+                    Ok(sql_path) => match cubeserver::sql_api::sql_api_planner(
+                        &planner,
+                        &boot_path,
                         &sql_path,
                         dialect,
                         data_source_dialects.clone(),
                         planner_workers,
-                        executor,
-                    )
-                    .await
-                    {
-                        Ok(Some(api)) => {
-                            println!("🐘 SQL API is listening on the Postgres protocol");
-                            if model_runtime.is_some() {
-                                println!("🐘 SQL API serves {}", sql_scope.key());
-                            }
-                            sql_api = Some(Arc::new(api));
-                        }
-                        Ok(None) => {}
+                    ) {
                         Err(err) => eprintln!("The SQL API did not start: {err}"),
+                        Ok(sql_planner) => {
+                            // The SQL API shares the orchestrator, so a statement
+                            // sent over the Postgres protocol hits the same cache
+                            // and queue as the REST API.
+                            let executor =
+                                Arc::new(cubeserver::sql_api::OrchestratedExecutor::new(
+                                    sql_planner,
+                                    orchestrated.api().clone(),
+                                    "default".to_string(),
+                                ));
+                            match cubeserver::sql_api::start(
+                                &sql_path,
+                                dialect,
+                                data_source_dialects.clone(),
+                                planner_workers,
+                                executor,
+                            )
+                            .await
+                            {
+                                Ok(Some(api)) => {
+                                    println!("🐘 SQL API is listening on the Postgres protocol");
+                                    if model_runtime.is_some() {
+                                        println!("🐘 SQL API serves {}", sql_scope.key());
+                                    }
+                                    sql_api = Some(Arc::new(api));
+                                }
+                                Ok(None) => {}
+                                Err(err) => eprintln!("The SQL API did not start: {err}"),
+                            }
+                        }
                     },
                 }
             }

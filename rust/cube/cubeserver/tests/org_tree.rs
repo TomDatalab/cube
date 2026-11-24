@@ -1026,6 +1026,35 @@ tree_test!(boot_services_compile_the_platform_scope_when_organizations_share_a_n
         .await
         .unwrap();
     ModelMetaService::load(&on_path, false).expect("ON's scope compiles");
+    // ... and its executor plans ON's cubes, which the boot planner lacks.
+    let dialects: std::collections::HashMap<_, _> = ["sofiadb", "ondb"]
+        .map(|ds| (ds.to_string(), cubeplanner::Dialect::Postgres))
+        .into();
+    let load = |path: &str| {
+        std::sync::Arc::new(
+            cubeserver::planner_adapter::PlannerQueryService::load_with_dialects(
+                path,
+                cubeplanner::Dialect::Postgres,
+                dialects.clone(),
+                1,
+                cubemodel::TemplateContext::default(),
+            )
+            .unwrap(),
+        )
+    };
+    let boot = load(&platform);
+    let sql = cubeserver::sql_api::sql_api_planner(
+        &boot,
+        &platform,
+        &on_path,
+        cubeplanner::Dialect::Postgres,
+        dialects.clone(),
+        1,
+    )
+    .unwrap();
+    let query = json!({ "measures": ["a.n"] });
+    sql.plan_value(&query, &json!({})).await.expect("plans ON's cube a");
+    assert!(boot.plan_value(&query, &json!({})).await.is_err());
     // An organization that does not exist is refused, not served empty.
     let err = boot_model_path(Some(&*runtime), &live, &ModelScope::Organization("nope".into()))
         .await
