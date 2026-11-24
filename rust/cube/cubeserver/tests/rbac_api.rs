@@ -8163,12 +8163,13 @@ db_test!(a_legacy_token_is_void_once_its_username_changes, |store| {
     let legacy = token_for("bia", now_secs() - 1.0);
     let (status, _) = send(&env.router, Method::GET, &workspace, Some(&legacy), None).await;
     assert_eq!(status, StatusCode::OK);
+    // Issued before the rename, under the name she is about to take.
+    let renamed = token_for("bea", now_secs() - 1.0);
 
     let (status, _) = patch_user(env, &s.admin, "bia", json!({ "username": "bea" })).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(meta(&env.router, Some(&legacy)).await, StatusCode::UNAUTHORIZED);
     // Not even under her new name; the UUID token is unaffected.
-    let renamed = token_for("bea", now_secs() - 1.0);
     assert_eq!(meta(&env.router, Some(&renamed)).await, StatusCode::UNAUTHORIZED);
     let (status, _) = send(&env.router, Method::GET, &workspace, Some(&s.bia), None).await;
     assert_eq!(status, StatusCode::OK);
