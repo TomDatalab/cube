@@ -5,6 +5,7 @@ use cubeserver::auth_adapter::CubeAuthService;
 use cubeserver::health_adapter::DriverHealthService;
 use cubeserver::meta_adapter::ModelMetaService;
 use cubeserver::planner_adapter::PlannerQueryService;
+use cubeserver::rbac::scope::ModelScope;
 use cubeserver::services::{
     AlwaysHealthy, HealthServiceRef, MetaServiceRef, QueryServiceRef, UnimplementedQueryService,
 };
@@ -251,18 +252,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.playground_path = None;
     }
 
+    // With RBAC a cube name is unique per organization, so the whole model
+    // (`schema_path`, kept for the model index) may not compile: the boot
+    // meta and planner compile the Platform scope instead.
+    let boot_path = match cubeserver::rbac::model_runtime::boot_model_path(
+        model_runtime.as_deref(),
+        &config.schema_path,
+        &ModelScope::Platform,
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("RBAC error: cannot write the Platform model scope: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // A model that does not compile must not take the server down silently:
     // the error is reported and `/v1/meta` answers 503 until it is fixed.
-    let meta: MetaServiceRef = match ModelMetaService::load(&config.schema_path, config.dev_mode) {
+    let meta: MetaServiceRef = match ModelMetaService::load(&boot_path, config.dev_mode) {
         Ok(service) => {
-            println!("📦 Data model loaded from {}", config.schema_path);
+            println!("📦 Data model loaded from {boot_path}");
             Arc::new(service)
         }
         Err(err) => {
-            eprintln!(
-                "Failed to compile the data model in {}:\n{}",
-                config.schema_path, err
-            );
+            eprintln!("Failed to compile the data model in {boot_path}:\n{err}");
             Arc::new(bootstrap::NotConfiguredMeta)
         }
     };
@@ -304,7 +319,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(2);
     let planner = match &default_dialect {
         Ok(dialect) => PlannerQueryService::load_with_dialects(
-            &config.schema_path,
+            &boot_path,
             *dialect,
             data_source_dialects.clone(),
             planner_workers,
@@ -353,21 +368,37 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     unplannable.len()
                 );
             } else {
-                match cubeserver::sql_api::start(
+                // With RBAC the SQL API serves one scope, `CUBE_SQL_API_SCOPE`
+                // (the Platform by default); an unknown organization leaves
+                // it stopped and the rest of the server serving.
+                let sql_scope = cubeserver::sql_api::sql_api_scope(&env);
+                match cubeserver::rbac::model_runtime::boot_model_path(
+                    model_runtime.as_deref(),
                     &config.schema_path,
-                    dialect,
-                    data_source_dialects.clone(),
-                    planner_workers,
-                    executor,
+                    &sql_scope,
                 )
                 .await
                 {
-                    Ok(Some(api)) => {
-                        println!("🐘 SQL API is listening on the Postgres protocol");
-                        sql_api = Some(Arc::new(api));
-                    }
-                    Ok(None) => {}
                     Err(err) => eprintln!("The SQL API did not start: {err}"),
+                    Ok(sql_path) => match cubeserver::sql_api::start(
+                        &sql_path,
+                        dialect,
+                        data_source_dialects.clone(),
+                        planner_workers,
+                        executor,
+                    )
+                    .await
+                    {
+                        Ok(Some(api)) => {
+                            println!("🐘 SQL API is listening on the Postgres protocol");
+                            if model_runtime.is_some() {
+                                println!("🐘 SQL API serves {}", sql_scope.key());
+                            }
+                            sql_api = Some(Arc::new(api));
+                        }
+                        Ok(None) => {}
+                        Err(err) => eprintln!("The SQL API did not start: {err}"),
+                    },
                 }
             }
 
@@ -478,6 +509,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         health: health.clone(),
         query,
         pre_aggregations: Arc::new(cubeserver::services::UnimplementedPreAggregationService),
+        // `/v1/convert-query` and `/v1/cubesql` (platform admins only with
+        // RBAC) convert against the SQL API's scope.
         sql_conversion: match &sql_api {
             Some(api) => Arc::new(cubeserver::sql_api::SqlApiConversionService::new(
                 api.clone(),

@@ -27,6 +27,16 @@ use cubesqlbridge::{
 use serde_json::Value;
 
 use crate::planner_adapter::PlannerQueryService;
+use crate::rbac::scope::ModelScope;
+
+/// The scope the SQL API serves with RBAC on, from `CUBE_SQL_API_SCOPE`:
+/// the Platform unless it names an organization's slug.
+pub fn sql_api_scope(env: &cubeconfig::Env) -> ModelScope {
+    match env.get("CUBE_SQL_API_SCOPE").map(str::trim) {
+        None | Some(cubemodel::ownership::PLATFORM_FOLDER) => ModelScope::Platform,
+        Some(slug) => ModelScope::Organization(slug.to_string()),
+    }
+}
 
 /// Runs the SQL API's queries through the orchestrator.
 pub struct OrchestratedExecutor {
@@ -375,5 +385,23 @@ mod tests {
         // With RBAC on a login JWT must never open the Postgres-wire API:
         // the SQL API is built without an authenticator.
         assert!(sql_api_config("model").authenticator.is_none());
+    }
+
+    #[test]
+    fn sql_api_scope_defaults_to_platform() {
+        assert_eq!(sql_api_scope(&cubeconfig::Env::new()), ModelScope::Platform);
+        let empty = cubeconfig::Env::new().with("CUBE_SQL_API_SCOPE", " ");
+        assert_eq!(sql_api_scope(&empty), ModelScope::Platform);
+        let platform = cubeconfig::Env::new().with("CUBE_SQL_API_SCOPE", "_platform");
+        assert_eq!(sql_api_scope(&platform), ModelScope::Platform);
+    }
+
+    #[test]
+    fn sql_api_scope_reads_a_slug() {
+        let env = cubeconfig::Env::new().with("CUBE_SQL_API_SCOPE", "digital");
+        assert_eq!(
+            sql_api_scope(&env),
+            ModelScope::Organization("digital".into())
+        );
     }
 }

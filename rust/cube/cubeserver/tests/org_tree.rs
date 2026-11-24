@@ -992,3 +992,43 @@ tree_test!(generate_into_platform_refuses_a_name_any_org_has, |store| {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!env.model.path().join("_platform/users.yml").exists());
 });
+
+tree_test!(boot_services_compile_the_platform_scope_when_organizations_share_a_name, |store| {
+    use cubeserver::meta_adapter::ModelMetaService;
+    use cubeserver::rbac::model_runtime::boot_model_path;
+    use cubeserver::rbac::scope::ModelScope;
+    let (env, _admin, digital, on) = two_orgs(&store).await;
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![
+                put_in(None, "u.yml", CUBE_U),
+                put_in(Some(digital), "a.yml", &titled("a", "A Digital", "sofiadb")),
+                put_in(Some(on), "a.yml", &titled("a", "A ON", "ondb")),
+            ])
+        })
+        .await
+        .unwrap();
+    let runtime = env.runtime.clone().unwrap();
+    let live = runtime.live_path().to_string_lossy().into_owned();
+    // The whole model has two cubes named `a`: it does not compile.
+    assert!(ModelMetaService::load(&live, false).is_err());
+
+    // What `main` compiles at boot with RBAC on: the Platform scope.
+    let platform = boot_model_path(Some(&*runtime), &live, &ModelScope::Platform)
+        .await
+        .unwrap();
+    assert_ne!(platform, live);
+    ModelMetaService::load(&platform, false).expect("the Platform scope compiles");
+    // The SQL API may serve one organization's scope instead.
+    let on_path = boot_model_path(Some(&*runtime), &live, &ModelScope::Organization("on".into()))
+        .await
+        .unwrap();
+    ModelMetaService::load(&on_path, false).expect("ON's scope compiles");
+    // An organization that does not exist is refused, not served empty.
+    let err = boot_model_path(Some(&*runtime), &live, &ModelScope::Organization("nope".into()))
+        .await
+        .unwrap_err();
+    assert!(err.contains("nope"), "{err}");
+});

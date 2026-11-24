@@ -124,6 +124,17 @@ impl ModelRuntime {
         Ok(path)
     }
 
+    /// Whether `scope` exists: an organization only if it has a slug.
+    pub fn has_scope(&self, scope: &ModelScope) -> bool {
+        match scope {
+            ModelScope::Organization(slug) => {
+                let current = self.current.read().unwrap_or_else(|e| e.into_inner());
+                current.slugs.contains(slug)
+            }
+            ModelScope::All | ModelScope::Platform => true,
+        }
+    }
+
     pub fn live_path(&self) -> &Path {
         &self.live
     }
@@ -216,5 +227,41 @@ impl std::fmt::Debug for ModelRuntime {
             .field("live", &self.live)
             .field("version", &self.version())
             .finish()
+    }
+}
+
+/// The folder a boot service (meta, planner, SQL API) compiles. Without RBAC
+/// it is `schema_path`; with RBAC it is `scope`'s folder, since the whole
+/// model may hold the same cube name once per organization.
+pub async fn boot_model_path(
+    runtime: Option<&ModelRuntime>,
+    schema_path: &str,
+    scope: &ModelScope,
+) -> Result<String, String> {
+    let Some(runtime) = runtime else {
+        return Ok(schema_path.to_string());
+    };
+    if !runtime.has_scope(scope) {
+        return Err(format!("no organization {}", scope.key()));
+    }
+    let path = runtime.scope_path(scope).await.map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn boot_model_path_without_rbac_is_the_schema_path() {
+        for scope in [
+            ModelScope::Platform,
+            ModelScope::Organization("digital".into()),
+        ] {
+            assert_eq!(
+                boot_model_path(None, "model", &scope).await.unwrap(),
+                "model"
+            );
+        }
     }
 }
