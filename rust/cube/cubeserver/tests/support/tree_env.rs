@@ -270,3 +270,25 @@ pub fn install_policy(orgs: &[(&str, &[&str])], platform: &[&str]) {
         generation: 0,
     })));
 }
+
+/// `GET path` as `token`, in workspace `workspace` (`X-Cube-Workspace`).
+pub async fn get_in_workspace(
+    env: &Env,
+    token: &str,
+    workspace: &str,
+    path: &str,
+) -> (StatusCode, Value, String) {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(header::HOST, "localhost:4000")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("x-cube-workspace", workspace)
+        .body(Body::empty())
+        .unwrap();
+    let response = env.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null), text)
+}

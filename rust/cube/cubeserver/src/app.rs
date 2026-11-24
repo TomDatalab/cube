@@ -177,6 +177,10 @@ pub fn build_app(state: AppState) -> Router {
     let mut authenticated = Router::new()
         .route(&format!("{base}/v1/meta"), get(handlers::meta::meta))
         .route(
+            &format!("{base}/v1/meta/groups"),
+            get(handlers::meta_groups::groups),
+        )
+        .route(
             &format!("{base}/v1/connectors"),
             get(handlers::connectors::list),
         )

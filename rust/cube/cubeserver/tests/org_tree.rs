@@ -363,3 +363,130 @@ tree_test!(files_carry_their_organization, |store| {
     assert_eq!(org("_platform/u.yml"), "_platform");
     assert_eq!(org("stray/x.yml"), Value::Null);
 });
+
+tree_test!(meta_groups_split_the_visible_cubes_by_organization, |store| {
+    use cubeserver::rbac::store::ConnectionOrigin;
+    let env = env_with(store.clone(), true).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    create_org(&env, &admin, "Digital").await;
+    create_org(&env, &admin, "ON").await;
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
+    store
+        .create_connection("sofiadb", digital.id, ConnectionOrigin::Assigned)
+        .await
+        .unwrap();
+    env.rbac.set_data_source_names(vec!["default".into(), "sofiadb".into()]);
+    env.write("digital/a.yml", CUBE_A);
+    env.write("_platform/u.yml", CUBE_U);
+    // sofiadb is not ON's: rejected, counted on ON's group.
+    env.write("on/b.yml", CUBE_B);
+    cubeserver::rbac::ownership::refresh_policy(&env.state).await.unwrap();
+
+    let (status, _, _) = send(&env.router, Method::GET, "/cube/v1/meta/groups", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body, _) = get(&env, &admin, "/cube/v1/meta/groups").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({ "groups": [
+            { "slug": "_platform", "id": null, "name": "Platform", "errors": 0,
+              "dataSources": [{ "name": "default", "cubes": ["u"] }] },
+            { "slug": "digital", "id": digital.id, "name": "Digital", "errors": 0,
+              "dataSources": [{ "name": "sofiadb", "cubes": ["a"] }] },
+            { "slug": "on", "id": store.organization_by_slug("on").await.unwrap().unwrap().id,
+              "name": "ON", "errors": 1, "dataSources": [] },
+        ] })
+    );
+});
+
+tree_test!(meta_groups_show_a_member_only_their_workspace, |store| {
+    let env = env_with(store.clone(), true).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    create_org(&env, &admin, "Digital").await;
+    create_org(&env, &admin, "ON").await;
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
+    env.rbac.set_data_source_names(vec!["default".into(), "sofiadb".into()]);
+    let (status, _, text) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/connections/sofiadb/organization",
+        Some(&admin),
+        Some(json!({ "organizationId": digital.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    env.write("digital/a.yml", CUBE_A);
+    env.write("_platform/u.yml", CUBE_U);
+    env.write("on/b.yml", CUBE_B);
+    cubeserver::rbac::ownership::refresh_policy(&env.state).await.unwrap();
+
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/users",
+        Some(&admin),
+        Some(json!({ "id": "ann", "name": "Ann", "email": "a@example.org",
+                     "password": "ann-password-1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{}/workspaces", digital.id),
+        Some(&admin),
+        Some(json!({ "name": "Ops" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ws = body["id"].as_str().unwrap().to_string();
+    for (method, path, payload) in [
+        (Method::PUT, format!("/cube/v1/workspaces/{ws}/members/ann"), Some(json!({ "role": "viewer" }))),
+        (Method::PUT, format!("/cube/v1/workspaces/{ws}/connections/sofiadb"), None),
+    ] {
+        let (status, _, text) = send(&env.router, method, &path, Some(&admin), payload).await;
+        assert!(status.is_success(), "{path}: {status} {text}");
+    }
+    let ann = login(&env, "ann", "ann-password-1").await;
+
+    let (meta_status, meta, _) = get_in_workspace(&env, &ann, &ws, "/cube/v1/meta").await;
+    assert_eq!(meta_status, StatusCode::OK, "{meta}");
+    let (status, body, _) = get_in_workspace(&env, &ann, &ws, "/cube/v1/meta/groups").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Only what the workspace's meta shows, and no error counts.
+    assert_eq!(
+        body,
+        json!({ "groups": [
+            { "slug": "digital", "id": digital.id, "name": "Digital", "errors": null,
+              "dataSources": [{ "name": "sofiadb", "cubes": ["a"] }] },
+        ] }),
+        "meta: {meta}"
+    );
+
+    // Without a workspace header: whatever `/meta` answers, the groups hold
+    // the same cubes.
+    let (status, body, _) = get(&env, &ann, "/cube/v1/meta/groups").await;
+    let (meta_status, meta, _) = get(&env, &ann, "/cube/v1/meta").await;
+    assert_eq!(status, meta_status, "{body}");
+    if status.is_success() {
+        let mut shown: Vec<&str> = meta["cubes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        let mut grouped: Vec<&str> = body["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["dataSources"].as_array().unwrap())
+            .flat_map(|d| d["cubes"].as_array().unwrap())
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        shown.sort();
+        grouped.sort();
+        assert_eq!(grouped, shown);
+        assert!(body["groups"].as_array().unwrap().iter().all(|g| g["errors"].is_null()));
+    }
+});

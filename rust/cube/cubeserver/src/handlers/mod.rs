@@ -5,6 +5,7 @@ pub mod data_sources_rbac;
 pub mod graphql;
 pub mod health;
 pub mod meta;
+pub mod meta_groups;
 pub mod playground;
 pub mod preaggs;
 pub mod tree;

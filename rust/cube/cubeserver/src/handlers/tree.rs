@@ -30,7 +30,7 @@ pub struct TreeQuery {
     offset: Option<i64>,
 }
 
-async fn index(state: &AppState) -> Result<std::sync::Arc<ModelIndex>, ApiError> {
+pub(crate) async fn index(state: &AppState) -> Result<std::sync::Arc<ModelIndex>, ApiError> {
     let cache = state.model_index.clone();
     let path = PathBuf::from(&state.config.schema_path);
     tokio::task::spawn_blocking(move || cache.get(&path))
@@ -50,7 +50,7 @@ fn store_error(e: crate::rbac::store::StoreError) -> ApiError {
 /// Whether something owned by `o` shows under the node of `node`. What no
 /// organization owns shows under `_platform`, so the admin sees why it is
 /// refused.
-fn belongs(node: &Owner, o: &Owner) -> bool {
+pub(crate) fn belongs(node: &Owner, o: &Owner) -> bool {
     match node {
         Owner::Platform => matches!(o, Owner::Platform | Owner::Unowned(_)),
         _ => node == o,
