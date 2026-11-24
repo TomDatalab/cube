@@ -13,7 +13,8 @@ import { SchemaFormat } from '../../types';
 import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
-import { CubeDetail } from './CubeDetail';
+import { CubeChange, CubeDetail } from './CubeDetail';
+import { cubeEditBlock, cubeFileOf } from './cubeEdit';
 import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
 import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
@@ -69,16 +70,45 @@ const SEARCH_MIN_CHARS = 2;
 
 // A cube's panel: its members come with the model, and the button needs the
 // organization's workspaces.
-function CubePanel({ api, org, owner, cube, errors, onOpen }: {
+// Its members are edited in its file: read fresh, changed, saved with the
+// version read (a concurrent change makes the save a 409, not a loss).
+function CubePanel({
+  api, org, owner, cube, errors, files, onOpen, onSaved,
+}: {
   api: ReturnType<typeof modelApi>;
   org: OrgNode | undefined;
   owner: boolean;
   cube: TreeCube;
   errors: OrgDetail['errors'];
+  files: OrgDetail['files'];
   onOpen: () => void;
+  onSaved: (detail: OrgDetail) => void;
 }) {
   const open = useOpenBlock(api, org, owner, cube);
-  return <CubeDetail cube={cube} errors={errors} open={open} onOpen={onOpen} />;
+  const file = cubeFileOf(files, cube);
+  const routed = Boolean(org && (org.slug === PLATFORM || org.id));
+  const editBlock = cubeEditBlock({ cube, file, routed });
+  const onEdit = async (change: CubeChange) => {
+    if (!org || !file?.id) {
+      return;
+    }
+    const current = await api.file(org, file.id);
+    const next = change(current.content);
+    if (next === current.content) {
+      return;
+    }
+    onSaved(await api.save(org, file.id, next, current.version ?? file.version ?? 0));
+  };
+  return (
+    <CubeDetail
+      cube={cube}
+      errors={errors}
+      open={open}
+      onOpen={onOpen}
+      editBlock={editBlock}
+      onEdit={onEdit}
+    />
+  );
 }
 
 export function SchemaPage({ history }: RouterProps) {
@@ -478,7 +508,12 @@ export function SchemaPage({ history }: RouterProps) {
           owner={!rbac.isAdmin}
           cube={cube}
           errors={detail.errors || []}
+          files={detail.files || []}
           onOpen={() => history.push(buildQueryUrl(cube))}
+          onSaved={(saved) => {
+            setDetails((current) => ({ ...current, [selected.slug]: saved }));
+            refreshOrgs();
+          }}
         />
       );
     }
