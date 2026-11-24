@@ -187,7 +187,8 @@ export function layout(
     };
     nextY[n.kind] += h + GAP;
     if (collapsed.has(n.id)) {
-      laid.hiddenCount = folds.get(n.id)!.length;
+      // A child still drawn under another, open parent is not hidden here.
+      laid.hiddenCount = folds.get(n.id)!.filter((c) => hidden.has(c)).length;
     }
     nodes.push(laid);
   });

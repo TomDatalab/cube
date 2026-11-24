@@ -237,6 +237,14 @@ describe('rules, roles and cubes', () => {
     expect(out.edges.some((e) => e.from === 'connection:db' && e.to === 'cube:org:c0')).toBe(true);
   });
 
+  it('a collapsed connection counts only the cubes it hides', () => {
+    const g = kindGraph(COLLAPSE_AT + 1);
+    g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
+    const out = layout(g, new Set());
+    // c0 stays visible through db2: db hides the others only.
+    expect(out.nodes.find((n) => n.id === 'connection:db')!.hiddenCount).toBe(COLLAPSE_AT);
+  });
+
   it('a cube of two big connections is hidden until one opens', () => {
     const g = kindGraph(COLLAPSE_AT + 1);
     const extra = Array.from({ length: COLLAPSE_AT }, (_, i) => node(`cube:org:x${i}`, 'cube', O));
