@@ -22,3 +22,4 @@ export * from './is-first-render';
 export * from './uniq-id';
 export * from './shown-member-name';
 export * from './dimension-values';
+export * from './meta-groups';

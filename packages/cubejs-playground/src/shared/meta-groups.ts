@@ -1,0 +1,132 @@
+// `GET <api>/meta/groups`: the cubes and views `/meta` shows, by the
+// organization whose model folder holds them and, inside it, by data source.
+// The query builder's side panel and the Data Source page group with it, as
+// the Data Model page does.
+
+export const PLATFORM_GROUP = '_platform';
+// A cube the server could not place (its index lags a model reload).
+export const OTHER_GROUP = '_other';
+
+export type MetaGroup = {
+  slug: string;
+  id: string | null;
+  name: string;
+  // Rejected cubes and model errors of the group: platform admins only
+  // (everyone without RBAC); `null` otherwise.
+  errors: number | null;
+  dataSources: { name: string; cubes: string[] }[];
+};
+
+export type CubeSection<T> = {
+  // Unique among the sections: the group's slug.
+  key: string;
+  slug: string;
+  name: string;
+  errors: number | null;
+  // Every item of the section, in the order they came in.
+  items: T[];
+  // The same items by data source, in the server's order of data sources.
+  dataSources: { name: string; items: T[] }[];
+};
+
+// The groups, or `null` when the server has no such route (an older server,
+// or another Cube API) or cannot answer: the caller then lists without
+// groups.
+export async function fetchMetaGroups(
+  url: string,
+  init: RequestInit,
+  doFetch: (url: string, init: RequestInit) => Promise<Response> = fetch
+): Promise<MetaGroup[] | null> {
+  try {
+    const response = await doFetch(url, init);
+    if (!response.ok) {
+      return null;
+    }
+    const body = await response.json();
+    return Array.isArray(body?.groups) ? body.groups : null;
+  } catch {
+    return null;
+  }
+}
+
+// `items` split by `groups`, keeping the groups' order (Platform first) and
+// each item's order in `items`. An item no group names goes to "Other", last.
+// Groups with none of the items are left out unless `keepEmpty`.
+export function sectionsOf<T extends { name: string }>(
+  items: T[],
+  groups: MetaGroup[],
+  { keepEmpty = false }: { keepEmpty?: boolean } = {}
+): CubeSection<T>[] {
+  const placeOf = new Map<string, { group: number; dataSource: number }>();
+  groups.forEach((group, g) => {
+    group.dataSources.forEach((ds, d) => {
+      ds.cubes.forEach((cube) => placeOf.set(cube, { group: g, dataSource: d }));
+    });
+  });
+
+  const sections: CubeSection<T>[] = groups.map((group) => ({
+    key: group.slug,
+    slug: group.slug,
+    name: group.name,
+    errors: group.errors,
+    items: [],
+    dataSources: group.dataSources.map((ds) => ({ name: ds.name, items: [] })),
+  }));
+  const other: T[] = [];
+
+  items.forEach((item) => {
+    const place = placeOf.get(item.name);
+    if (!place) {
+      other.push(item);
+      return;
+    }
+    const section = sections[place.group];
+    section.items.push(item);
+    section.dataSources[place.dataSource].items.push(item);
+  });
+
+  const result = sections
+    .map((section) => ({
+      ...section,
+      dataSources: section.dataSources.filter((ds) => ds.items.length),
+    }))
+    .filter((section) => keepEmpty || section.items.length);
+
+  if (other.length) {
+    const existing = result.find((s) => s.slug === OTHER_GROUP);
+    if (existing) {
+      existing.items.push(...other);
+      existing.dataSources.push({ name: '', items: other });
+    } else {
+      result.push({
+        key: OTHER_GROUP,
+        slug: OTHER_GROUP,
+        name: 'Other',
+        errors: null,
+        items: other,
+        dataSources: [{ name: '', items: other }],
+      });
+    }
+  }
+  return result;
+}
+
+// Whether grouping says anything: more than one organization, or one with
+// more than one data source.
+export function worthGrouping<T>(sections: CubeSection<T>[]): boolean {
+  return sections.length > 1 || (sections[0]?.dataSources.length ?? 0) > 1;
+}
+
+// How many cubes and views read each data source, over every group.
+export function cubeCountByDataSource(groups: MetaGroup[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  groups.forEach((group) => group.dataSources.forEach((ds) => {
+    counts[ds.name] = (counts[ds.name] || 0) + ds.cubes.length;
+  }));
+  return counts;
+}
+
+// The organizations a filter offers, in the groups' order.
+export function filterOptions(groups: MetaGroup[]): { value: string; label: string }[] {
+  return groups.map((g) => ({ value: g.slug, label: g.name }));
+}

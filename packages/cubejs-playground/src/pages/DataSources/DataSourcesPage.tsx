@@ -16,6 +16,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  Empty,
 } from 'antd';
 import {
   ApiOutlined,
@@ -26,17 +27,20 @@ import {
   EditOutlined,
   HolderOutlined,
   PlusOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { usePlaygroundContext } from '../../hooks';
-import { onUnauthorized } from '../../shared/auth';
-import { adminApi, ownerLabel, Organization } from '../Admin/api';
+import { authHeaders, onUnauthorized } from '../../shared/auth';
+import { cubeCountByDataSource, fetchMetaGroups, MetaGroup } from '../../shared/meta-groups';
+import { adminApi, Organization } from '../Admin/api';
 import envVarsDbMap from '../../shared/env-vars-db-map';
 import { playgroundKeyHeaders, setPlaygroundKey } from '../../shared/helpers';
 import Base64Upload from '../ConnectionWizard/components/Base64Upload';
 import { connectionLabel, DATA_SOURCE_DRAG_TYPE, deleteConfirmation } from './organizationDrop';
 import { OrganizationDropPanel } from './OrganizationDropPanel';
+import { dataSourceSections } from './sections';
 import { Content, Header } from '../components/Ui';
 
 const { Title, Text, Paragraph } = Typography;
@@ -162,6 +166,10 @@ export function DataSourcesPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState<string | null>(null);
   const [form] = Form.useForm();
+  // With RBAC on: the model's cubes by organization and data source, for
+  // the cube counts and the problems of each organization.
+  const [metaGroups, setMetaGroups] = useState<MetaGroup[] | null>(null);
+  const [organizationFilter, setOrganizationFilter] = useState<string>('');
 
   const databases = useMemo(() => databasesFor(connectors), [connectors]);
   const databaseOf = (driver: string) => databases.find((db) => db.driver === driver);
@@ -184,6 +192,34 @@ export function DataSourcesPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Again after every load: a data source added, moved or deleted changes
+  // which cubes compile.
+  useEffect(() => {
+    if (!rbac) {
+      return undefined;
+    }
+    let live = true;
+    fetchMetaGroups(`${basePath.replace(/\/$/, '')}/v1/meta/groups`, { headers: authHeaders() }, (url, init) => (
+      fetch(url, init).then((r) => {
+        onUnauthorized(r);
+        return r;
+      })
+    )).then((groups) => {
+      if (live) {
+        setMetaGroups(groups);
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [rbac, basePath, dataSources]);
+
+  const cubeCounts = useMemo(() => cubeCountByDataSource(metaGroups || []), [metaGroups]);
+  const sections = useMemo(
+    () => dataSourceSections(dataSources, organizations, metaGroups),
+    [dataSources, organizations, metaGroups]
+  );
 
   useEffect(() => {
     if (!rbac) {
@@ -382,14 +418,14 @@ export function DataSourcesPage() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {statusTag(ds)}
               {ds.id ? (
-              <Text
-                type="secondary"
-                copyable={{ text: ds.id, tooltips: ['Copy id', 'Copied'] }}
-                style={{ fontFamily: 'monospace', fontSize: 11 }}
-                title={ds.id}
-              >
-                {ds.id.slice(0, 8)}
-              </Text>
+                <Text
+                  type="secondary"
+                  copyable={{ text: ds.id, tooltips: ['Copy id', 'Copied'] }}
+                  style={{ fontFamily: 'monospace', fontSize: 11 }}
+                  title={ds.id}
+                >
+                  {ds.id.slice(0, 8)}
+                </Text>
               ) : null}
             </div>
           ) : null}
@@ -412,18 +448,16 @@ export function DataSourcesPage() {
         </Space>
       )),
     },
+    // The sections below say the owner; the column says how many of the
+    // model's cubes and views read the data source.
     ...(rbac ? [{
-      title: 'Owner',
-      key: 'owner',
-      width: 100,
-      filters: [
-        ...organizations.map((o) => ({ text: o.name, value: o.name })),
-        { text: 'Platform', value: 'Platform' },
-      ],
-      onFilter: (value: string | number | boolean, ds: DataSource) => ownerLabel(ds) === value,
-      render: (_: unknown, ds: DataSource) => (ds.organization
-        ? ownerLabel(ds)
-        : <Tag title="Without an organization: for platform admins only">Platform</Tag>),
+      title: 'Cubes',
+      key: 'cubes',
+      width: 64,
+      align: 'right' as const,
+      render: (_: unknown, ds: DataSource) => (metaGroups ? (
+        <span title={`Cubes and views on ${ds.name}`}>{cubeCounts[ds.name] || 0}</span>
+      ) : '—'),
     }] : []),
     ...(rbac ? [{
       title: 'Connection',
@@ -756,24 +790,82 @@ export function DataSourcesPage() {
 
         <Row gutter={[24, 24]}>
           <Col xs={24} xl={rbac ? 15 : 24}>
-            <Table<DataSource>
-              rowKey="name"
-              loading={loading}
-              dataSource={dataSources}
-              columns={columns}
-              pagination={false}
-              // Fixed widths, the Connection column takes the rest and ends
-              // in an ellipsis: no sideways scrolling.
-              tableLayout={rbac ? 'fixed' : undefined}
-              onRow={(ds) => (draggable(ds) ? {
-                draggable: true,
-                onDragStart: (e) => {
-                  e.dataTransfer.setData(DATA_SOURCE_DRAG_TYPE, ds.name);
-                  e.dataTransfer.effectAllowed = 'move';
-                },
-                style: { cursor: 'grab' },
-              } : {})}
-            />
+            {rbac ? (
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Select
+                  size="small"
+                  aria-label="Organization"
+                  data-testid="data-source-organization-filter"
+                  style={{ width: 240 }}
+                  value={sections.some((sec) => sec.key === organizationFilter) ? organizationFilter : ''}
+                  onChange={setOrganizationFilter}
+                  options={[
+                    { value: '', label: 'All organizations' },
+                    ...sections.map((sec) => ({
+                      value: sec.key,
+                      label: `${sec.name} (${sec.dataSources.length})`,
+                    })),
+                  ]}
+                />
+                {sections
+                  .filter((sec) => !organizationFilter || sec.key === organizationFilter
+                    || !sections.some((other) => other.key === organizationFilter))
+                  .map((sec) => (
+                    <section key={sec.key} data-testid="data-source-section" data-organization={sec.key}>
+                      <Space align="baseline" size={8} style={{ marginBottom: 8 }} wrap>
+                        <Title level={5} style={{ margin: 0 }}>{sec.name}</Title>
+                        <Text type="secondary">
+                          {sec.dataSources.length} data source{sec.dataSources.length === 1 ? '' : 's'}
+                          {metaGroups ? ` · ${sec.cubes} cube${sec.cubes === 1 ? '' : 's'}` : ''}
+                        </Text>
+                        {sec.errors ? (
+                          <Tooltip title="Cubes of this organization were rejected: see Data Model for why">
+                            <Tag color="red" icon={<WarningOutlined />}>
+                              {sec.errors} problem{sec.errors === 1 ? '' : 's'}
+                            </Tag>
+                          </Tooltip>
+                        ) : null}
+                      </Space>
+                      {sec.dataSources.length ? (
+                        <Table<DataSource>
+                          rowKey="name"
+                          size="small"
+                          loading={loading}
+                          dataSource={sec.dataSources}
+                          columns={columns}
+                          pagination={false}
+                          // Fixed widths, the Connection column takes the rest
+                          // and ends in an ellipsis: no sideways scrolling.
+                          tableLayout="fixed"
+                          onRow={(ds) => (draggable(ds) ? {
+                            draggable: true,
+                            onDragStart: (e) => {
+                              e.dataTransfer.setData(DATA_SOURCE_DRAG_TYPE, ds.name);
+                              e.dataTransfer.effectAllowed = 'move';
+                            },
+                            style: { cursor: 'grab' },
+                          } : {})}
+                        />
+                      ) : (
+                        <Empty
+                          image={Empty.PRESENTED_IMAGE_SIMPLE}
+                          description={sec.key === 'platform'
+                            ? 'No Platform data sources'
+                            : 'No data sources: drag one onto this organization in the Organizations panel'}
+                        />
+                      )}
+                    </section>
+                  ))}
+              </Space>
+            ) : (
+              <Table<DataSource>
+                rowKey="name"
+                loading={loading}
+                dataSource={dataSources}
+                columns={columns}
+                pagination={false}
+              />
+            )}
           </Col>
           {rbac ? (
             // Beside the table, as Admin → Users; below it on narrow screens.

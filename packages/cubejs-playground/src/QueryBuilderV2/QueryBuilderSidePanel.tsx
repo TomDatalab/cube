@@ -23,13 +23,26 @@ import {
   useRef,
   useState,
 } from 'react';
-import { EditOutlined, LoadingOutlined, StarFilled, StarOutlined } from '@ant-design/icons';
+import {
+  DatabaseOutlined,
+  EditOutlined,
+  LoadingOutlined,
+  StarFilled,
+  StarOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
+import { Select } from 'antd';
 
-import { useDebouncedValue, useFilteredCubes, useEvent, useLocalStorage } from './hooks';
+import { sectionsOf, worthGrouping } from '../shared/meta-groups';
+
+import {
+  useDebouncedValue, useFilteredCubes, useEvent, useLocalStorage, useMetaGroups,
+} from './hooks';
 import { useQueryBuilderContext } from './context';
 import { EditQueryDialogForm } from './components/EditQueryDialogForm';
 import { SidePanelCubeItem } from './components/SidePanelCubeItem';
 import { validateQuery } from './utils';
+import { ChevronIcon } from './icons/ChevronIcon';
 
 const DEFAULT_SIDEBAR_SIZE = 315;
 
@@ -46,6 +59,44 @@ const CountBadge = tasty(Badge, {
     padding: '0 1ow',
   },
 });
+
+// An organization's header in the cube list: opens and closes its cubes.
+const GroupButton = tasty(Button, {
+  qa: 'OrganizationGroup',
+  type: 'secondary',
+  size: 'small',
+  styles: {
+    radius: 0,
+    border: '#clear',
+    color: '#dark',
+    fill: {
+      '': '#dark.04',
+      hovered: '#dark.08',
+      pressed: '#dark.06',
+    },
+    padding: '.75x 1x',
+    display: 'grid',
+    gridTemplateColumns: '16px 1fr auto auto',
+    gap: '1x',
+    placeItems: 'center start',
+    textAlign: 'left',
+    preset: 't3m',
+  },
+});
+
+const DataSourceLabel = tasty(Text, {
+  qa: 'DataSourceGroup',
+  preset: 'c2',
+  styles: {
+    display: 'flex',
+    gap: '.5x',
+    placeItems: 'center',
+    color: '#dark-03',
+    padding: '.5x 1x .25x 2x',
+  },
+});
+
+const ORGANIZATION_FILTER_KEY = 'QueryBuilder:Sidebar:organization';
 
 type Props = {
   defaultSelectedType?: 'cubes' | 'views';
@@ -80,7 +131,18 @@ export function QueryBuilderSidePanel({
     isMetaLoading,
     memberViewType,
     disableSidebarResizing,
+    apiUrl,
+    apiToken,
   } = useQueryBuilderContext();
+
+  // The cubes by organization and data source, as the Data Model page shows
+  // them; `null` when the API cannot say (the list is then flat).
+  const metaGroups = useMetaGroups(apiUrl, apiToken, meta);
+  const [organizationFilter, setOrganizationFilter] = useLocalStorage<string>(
+    ORGANIZATION_FILTER_KEY,
+    ''
+  );
+  const [closedGroups, setClosedGroups] = useState<Set<string>>(new Set());
 
   const contentRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -314,58 +376,156 @@ export function QueryBuilderSidePanel({
     }
   });
 
-  const cubeList = useMemo(() => (
-    <Flex gap="1bw" flow="column" padding="0 0 2x 0">
-      {missingCubes
-        .filter((cubeName) => (appliedFilterString ? filteredCubes.includes(cubeName) : true))
-        .map((cubeName) => (
-          <SidePanelCubeItem
-            key={cubeName}
-            isOpen={openCubes.has(cubeName)}
-            filterString={appliedFilterString}
-            cubeName={cubeName}
-            mode={viewMode}
-            rightIcon="arrow"
-            onHierarchyToggle={onHierarchyToggle}
-            onMemberToggle={(name) => {
-              onMemberToggle(cubeName, name);
-            }}
-          />
-        ))}
-      {cubesOrViews
-        .filter((cube) => {
-          // If filter is applied, show only filtered cubes
-          if (appliedFilterString) {
-            return filteredCubes.includes(cube.name);
-          }
+  // Every section of the current tab, for the filter and to decide whether
+  // grouping says anything. An organization with nothing to query but errors
+  // (only admins get error counts) keeps its section, so they see it.
+  const allSections = metaGroups
+    ? sectionsOf(cubesOrViews, metaGroups, { keepEmpty: true })
+      .filter((section) => section.items.length || (section.errors ?? 0) > 0)
+    : [];
+  const isGrouped = worthGrouping(allSections);
+  const activeOrganization = isGrouped
+    && allSections.some((section) => section.slug === organizationFilter)
+    ? organizationFilter
+    : '';
 
-          // In query mode, show only used cubes
-          if (viewMode === 'query') {
-            return usedCubes.includes(cube.name);
-          }
+  const organizationSelect = isGrouped && allSections.length > 1 ? (
+    <Select
+      size="small"
+      data-qa="OrganizationFilter"
+      aria-label="Organization"
+      value={activeOrganization}
+      style={{ width: '100%' }}
+      options={[
+        { value: '', label: 'All organizations' },
+        ...allSections.map((section) => ({
+          value: section.slug,
+          label: `${section.name} (${section.items.length})`,
+        })),
+      ]}
+      onChange={(value: string) => setOrganizationFilter(value)}
+    />
+  ) : null;
 
-          return true;
-        })
-        .map((cube) => (
-          <SidePanelCubeItem
-            key={cube.name}
-            isNonJoinable={!allJoinableCubes.includes(cube) && !usedCubes.includes(cube.name)}
-            isOpen={openCubes.has(cube.name)}
-            filterString={appliedFilterString}
-            cubeName={cube.name}
-            mode={viewMode}
-            rightIcon={isQueryEmpty ? 'arrow' : 'plus'}
-            onToggle={(isOpen) => {
-              onCubeToggle(cube.name, isOpen);
-            }}
-            onMemberToggle={(name) => {
-              onMemberToggle(cube.name, name);
-            }}
-            onHierarchyToggle={onHierarchyToggle}
-          />
-        ))}
-    </Flex>
-  ),
+  function toggleGroup(slug: string) {
+    const next = new Set(closedGroups);
+    if (next.has(slug)) {
+      next.delete(slug);
+    } else {
+      next.add(slug);
+    }
+    setClosedGroups(next);
+  }
+
+  const cubeList = useMemo(() => {
+    const shownCubes = cubesOrViews.filter((cube) => {
+      // If filter is applied, show only filtered cubes
+      if (appliedFilterString) {
+        return filteredCubes.includes(cube.name);
+      }
+
+      // In query mode, show only used cubes
+      if (viewMode === 'query') {
+        return usedCubes.includes(cube.name);
+      }
+
+      return true;
+    });
+
+    const renderCube = (cube: (typeof cubesOrViews)[number]) => (
+      <SidePanelCubeItem
+        key={cube.name}
+        isNonJoinable={!allJoinableCubes.includes(cube) && !usedCubes.includes(cube.name)}
+        isOpen={openCubes.has(cube.name)}
+        filterString={appliedFilterString}
+        cubeName={cube.name}
+        mode={viewMode}
+        rightIcon={isQueryEmpty ? 'arrow' : 'plus'}
+        onToggle={(isOpen) => {
+          onCubeToggle(cube.name, isOpen);
+        }}
+        onMemberToggle={(name) => {
+          onMemberToggle(cube.name, name);
+        }}
+        onHierarchyToggle={onHierarchyToggle}
+      />
+    );
+
+    // Searching or showing the query's cubes: every group open, and only
+    // the ones with something to show.
+    const narrowed = Boolean(appliedFilterString) || viewMode === 'query';
+    const sections = isGrouped && metaGroups
+      ? sectionsOf(shownCubes, metaGroups, { keepEmpty: true }).filter((section) => (
+        (!activeOrganization || section.slug === activeOrganization)
+        && (section.items.length || (!narrowed && (section.errors ?? 0) > 0))
+      ))
+      : null;
+
+    return (
+      <Flex gap="1bw" flow="column" padding="0 0 2x 0">
+        {missingCubes
+          .filter((cubeName) => (appliedFilterString ? filteredCubes.includes(cubeName) : true))
+          .map((cubeName) => (
+            <SidePanelCubeItem
+              key={cubeName}
+              isOpen={openCubes.has(cubeName)}
+              filterString={appliedFilterString}
+              cubeName={cubeName}
+              mode={viewMode}
+              rightIcon="arrow"
+              onHierarchyToggle={onHierarchyToggle}
+              onMemberToggle={(name) => {
+                onMemberToggle(cubeName, name);
+              }}
+            />
+          ))}
+        {sections
+          ? sections.map((section) => {
+            const isOpen = narrowed || !closedGroups.has(section.slug);
+            const errors = section.errors ?? 0;
+            return (
+              <Flex key={section.key} gap="1bw" flow="column" data-qa="OrganizationSection" data-qaval={section.slug}>
+                <GroupButton
+                  qaVal={section.slug}
+                  aria-expanded={isOpen}
+                  onPress={() => toggleGroup(section.slug)}
+                >
+                  <ChevronIcon direction={isOpen ? 'bottom' : 'right'} />
+                  <Text ellipsis preset="t3m" title={section.name}>{section.name}</Text>
+                  {errors > 0 ? (
+                    <TooltipProvider
+                      title={`${errors} problem${errors === 1 ? '' : 's'} in this organization's model: its rejected cubes are left out. See Data Model.`}
+                    >
+                      <Text color="#danger-text" aria-label={`${errors} problems`}>
+                        <WarningOutlined /> {errors}
+                      </Text>
+                    </TooltipProvider>
+                  ) : <span />}
+                  <CountBadge radius="1r">{section.items.length}</CountBadge>
+                </GroupButton>
+                {isOpen && !section.items.length ? (
+                  <DataSourceLabel>Nothing to query here</DataSourceLabel>
+                ) : null}
+                {isOpen && selectedType === 'cubes'
+                  ? section.dataSources.map((ds) => (
+                    <Flex key={ds.name} gap="1bw" flow="column">
+                      {ds.name ? (
+                        <DataSourceLabel title={`Data source ${ds.name}`}>
+                          <DatabaseOutlined /> {ds.name} · {ds.items.length}
+                        </DataSourceLabel>
+                      ) : null}
+                      {ds.items.map(renderCube)}
+                    </Flex>
+                  ))
+                  : null}
+                {isOpen && selectedType === 'views' ? section.items.map(renderCube) : null}
+              </Flex>
+            );
+          })
+          : shownCubes.map(renderCube)}
+      </Flex>
+    );
+  },
   [
     viewMode,
     queryStats,
@@ -373,6 +533,10 @@ export function QueryBuilderSidePanel({
     appliedFilterString,
     memberViewType,
     selectedType,
+    metaGroups,
+    isGrouped,
+    activeOrganization,
+    [...closedGroups.values()].join(),
   ]);
 
   const onApplyQuery = useCallback(async (appliedQuery) => {
@@ -465,6 +629,8 @@ export function QueryBuilderSidePanel({
       {!usedCubes.length ? <>{customTypeSwitcher ?? typeSwitcher}</> : topBar}
 
       {searchInput}
+
+      {organizationSelect}
 
       {appliedFilterString && !filteredCubes.length ? (
         <Space
