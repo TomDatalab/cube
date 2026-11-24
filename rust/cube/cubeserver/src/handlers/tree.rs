@@ -290,7 +290,20 @@ pub(crate) async fn org_detail_for(
         let defs = rows
             .as_ref()
             .map(|(rows, slugs)| {
-                crate::rbac::model_validate::definitions(&crate::rbac::model_snapshot::sources(rows, slugs))
+                // The node's own scope: another organization may define the
+                // same names.
+                let scope = match &owner {
+                    Some(Owner::Organization(slug)) => {
+                        crate::rbac::scope::ModelScope::Organization(slug.clone())
+                    }
+                    _ => crate::rbac::scope::ModelScope::Platform,
+                };
+                let org_slugs = slugs.values().cloned().collect();
+                crate::rbac::model_validate::definitions_in(
+                    &crate::rbac::model_snapshot::sources(rows, slugs),
+                    &scope,
+                    &org_slugs,
+                )
             })
             .unwrap_or_default();
         errors = crate::rbac::model_redact::redact(&problems, &[], slug, &defs)

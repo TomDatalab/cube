@@ -769,6 +769,26 @@ api_test!(owner_sees_only_own_errors_in_detail, |store| {
     // Digital's model shows it, with the full message for a platform admin.
     let (_, full) = call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{digital}/model"), None).await;
     assert!(full.to_string().contains("digital/ruim.yml"), "{full}");
+
+    // A broken `_platform/` file is in ON's scope: the owner gets the
+    // generic line, nothing of the file.
+    let broken = put_in(None, "ruim.yml", "cubes: [ {", None);
+    store.model_write("ann", |_| Ok::<_, WriteError>(vec![broken])).await.unwrap().unwrap();
+    env.runtime.clone().unwrap().refresh().await.unwrap();
+    let (status, body) = call(&env, Method::GET, &token, &format!("/cube/v1/organizations/{on}/model"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let errors: Vec<&Value> = body["errors"].as_array().unwrap().iter()
+        .filter(|e| !e["message"].as_str().unwrap().starts_with("sofiadb:"))
+        .collect();
+    assert_eq!(
+        errors,
+        [&json!({ "file": "", "cube": "", "message": "Há um problema no modelo fora da sua organização; avise o administrador" })],
+        "{body}"
+    );
+    assert!(!body.to_string().contains("ruim.yml") && !body.to_string().contains("digital"), "{body}");
+    // The admin, on the same node, keeps the full path.
+    let (_, full) = call(&env, Method::GET, &admin, &format!("/cube/v1/organizations/{on}/model"), None).await;
+    assert!(full.to_string().contains("_platform/ruim.yml"), "{full}");
 });
 
 // ---- the permission matrix of the spec ----
