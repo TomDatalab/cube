@@ -271,6 +271,8 @@ pub(crate) async fn access(
         connections: vec![],
         releases: vec![],
         configured: BTreeSet::new(),
+        platform_sources: vec![],
+        cubes: vec![],
     };
     if platform_admin {
         return Ok(Json(access::build(&input)));

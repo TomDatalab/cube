@@ -89,6 +89,13 @@ const WS_ORDER: &[&str] = WS_OWNER;
 
 const NOTE_ASSIGNED: &str = "assigned by a platform admin: only platform admins edit it";
 const NOTE_MISSING: &str = "data source missing";
+const NOTE_UNRELEASED: &str = "no access: not released to a workspace of the user";
+const NOTE_PLATFORM: &str = "platform admins only";
+const NOTE_VIEW: &str = "view";
+const NOTE_VIEW_DENIED: &str = "no access: spans a data source the user cannot query";
+
+/// The Platform: the data sources and cubes in no organization.
+const PLATFORM: &str = "_platform";
 
 pub struct AccessInput {
     pub user: User,
@@ -106,6 +113,18 @@ pub struct AccessInput {
     pub releases: Vec<(String, Uuid)>,
     /// Data source names in `cube.yml`.
     pub configured: BTreeSet<String>,
+    /// Configured data sources that are in no organization, sorted.
+    pub platform_sources: Vec<String>,
+    pub cubes: Vec<AccessCube>,
+}
+
+pub struct AccessCube {
+    pub name: String,
+    pub view: bool,
+    /// `_platform` or an organization slug; unowned files are left out by the caller.
+    pub folder: String,
+    /// Every data source the cube reads: its own; for a view, those of the cubes it includes (in its folder's scope).
+    pub data_sources: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -124,6 +143,8 @@ pub struct Node {
     pub name: String,
     pub organization_id: Option<String>,
     pub notes: Vec<String>,
+    /// A role's permissions.
+    pub details: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -235,6 +256,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             .unwrap_or_else(|| input.user.id.clone()),
         organization_id: None,
         notes: vec![],
+        details: vec![],
     };
     let mut graph = AccessGraph {
         user: GraphUser {
@@ -323,14 +345,23 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                 perms: perms.to_vec(),
             });
     }
-    // Workspaces: the role of each rule the user is a member of.
+    // Workspaces: the role of each rule the user is a member of, through the
+    // rule's node; the role is a node of its own, shared by its rules.
+    let mut rule_nodes: Vec<(&Rule, &Workspace)> = Vec::new();
+    let mut role_nodes: BTreeMap<String, Node> = BTreeMap::new();
     for rule in &input.rules {
         let Some(ws) = workspaces.get(&rule.workspace_id.to_string()) else {
             continue;
         };
-        let (role, perms, note): (String, Vec<&'static str>, Option<String>) = match rule.role_ref()
-        {
+        let (role_id, role, perms, note, role_org): (
+            String,
+            String,
+            Vec<&'static str>,
+            Option<String>,
+            Option<String>,
+        ) = match rule.role_ref() {
             RuleRole::Builtin(r) => (
+                format!("role:builtin:{r}"),
                 r.to_string(),
                 match r {
                     "owner" => WS_OWNER,
@@ -340,25 +371,35 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                 }
                 .to_vec(),
                 None,
+                None,
             ),
             RuleRole::Custom(id) => {
                 let Some(role) = input.roles.iter().find(|r| r.id == id) else {
                     continue;
                 };
                 (
+                    format!("role:{id}"),
                     role.name.clone(),
                     role_perms(&role.permissions),
                     restriction_note(&role.restrictions),
+                    Some(role.organization_id.to_string()),
                 )
             }
         };
         let node = format!("workspace:{}", ws.id);
-        edges.add(
-            &user_id,
-            &node,
-            &format!("{role} via rule {}", rule.description),
-            "derived",
-        );
+        let rule_node = format!("rule:{}", rule.id);
+        rule_nodes.push((rule, ws));
+        role_nodes.entry(role_id.clone()).or_insert_with(|| Node {
+            id: role_id.clone(),
+            kind: "role".into(),
+            name: role.clone(),
+            organization_id: role_org,
+            notes: note.clone().into_iter().collect(),
+            details: perms.iter().map(|p| p.to_string()).collect(),
+        });
+        edges.add(&user_id, &rule_node, "member", "direct");
+        edges.add(&rule_node, &role_id, "role", "derived");
+        edges.add(&rule_node, &node, &role, "derived");
         ws_sources
             .entry(ws.id.to_string())
             .or_default()
@@ -368,7 +409,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                     rule.description,
                     note.map(|n| format!(" {n}")).unwrap_or_default()
                 ),
-                path: vec![user_id.clone(), node.clone()],
+                path: vec![user_id.clone(), rule_node.clone(), node.clone()],
                 perms: perms.to_vec(),
             });
         // `organization#rule`: the rule's members see its organization.
@@ -379,7 +420,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
                 .or_default()
                 .push(Source {
                     text: format!("member of the rule {}", rule.description),
-                    path: vec![user_id.clone(), node, org_node],
+                    path: vec![user_id.clone(), rule_node, node, org_node],
                     perms: ORG_MEMBER.to_vec(),
                 });
         }
@@ -408,6 +449,8 @@ pub fn build(input: &AccessInput) -> AccessGraph {
     // the workspaces they are released to.
     let mut conn_sources: BTreeMap<String, Vec<Source>> = BTreeMap::new();
     let mut conn_in_graph: BTreeSet<String> = BTreeSet::new();
+    // Released to a workspace where the user holds `query`.
+    let mut released_to_user: BTreeSet<String> = BTreeSet::new();
     let rows: HashMap<&str, &ConnectionRow> = input
         .connections
         .iter()
@@ -453,6 +496,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             continue;
         }
         conn_in_graph.insert(row.name.clone());
+        released_to_user.insert(row.name.clone());
         if !input.configured.contains(&row.name) {
             continue;
         }
@@ -475,14 +519,37 @@ pub fn build(input: &AccessInput) -> AccessGraph {
     for name in conn_sources.keys() {
         conn_in_graph.insert(name.clone());
     }
+    // Every connection of an organization in the graph, with or without access.
+    for c in input
+        .connections
+        .iter()
+        .filter(|c| org_sources.contains_key(&c.organization_id.to_string()))
+    {
+        conn_in_graph.insert(c.name.clone());
+    }
 
-    // Nodes and grants, in the documented order.
+    // Nodes and grants, in column order: user, organization, rule, role,
+    // workspace, connection, cube.
     let mut org_list: Vec<&Organization> = org_sources
         .keys()
         .filter_map(|k| orgs.get(k).copied())
         .collect();
     org_list.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
-    for org in org_list {
+    let platform_node = format!("organization:{PLATFORM}");
+    let platform =
+        !input.platform_sources.is_empty() || input.cubes.iter().any(|c| c.folder == PLATFORM);
+    if platform {
+        edges.add(&user_id, &platform_node, "platform", "derived");
+        graph.nodes.push(Node {
+            id: platform_node.clone(),
+            kind: "organization".into(),
+            name: "Platform".into(),
+            organization_id: None,
+            notes: vec![],
+            details: vec![],
+        });
+    }
+    for org in &org_list {
         let id = format!("organization:{}", org.id);
         graph
             .grants
@@ -493,6 +560,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             name: org.name.clone(),
             organization_id: None,
             notes: vec![],
+            details: vec![],
         });
     }
 
@@ -501,6 +569,44 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             .map(|o| o.name.clone())
             .unwrap_or_default()
     };
+    rule_nodes.sort_by(|(ra, wa), (rb, wb)| {
+        (
+            org_name(wa.organization_id),
+            &wa.name,
+            &ra.description,
+            ra.id,
+        )
+            .cmp(&(
+                org_name(wb.organization_id),
+                &wb.name,
+                &rb.description,
+                rb.id,
+            ))
+    });
+    rule_nodes.dedup_by_key(|(r, _)| r.id);
+    for (rule, ws) in &rule_nodes {
+        graph.nodes.push(Node {
+            id: format!("rule:{}", rule.id),
+            kind: "rule".into(),
+            name: rule.description.clone(),
+            organization_id: Some(ws.organization_id.to_string()),
+            notes: vec![],
+            details: vec![],
+        });
+    }
+    // Built-in roles first (owner, editor, viewer), then by name.
+    let builtin_rank = |id: &str| match id {
+        "role:builtin:owner" => 0,
+        "role:builtin:editor" => 1,
+        "role:builtin:viewer" => 2,
+        _ => 3,
+    };
+    let mut roles: Vec<Node> = role_nodes.into_values().collect();
+    roles.sort_by(|a, b| {
+        (builtin_rank(&a.id), &a.name, &a.id).cmp(&(builtin_rank(&b.id), &b.name, &b.id))
+    });
+    graph.nodes.extend(roles);
+
     let mut ws_list: Vec<&Workspace> = ws_sources
         .keys()
         .filter_map(|k| workspaces.get(k).copied())
@@ -512,7 +618,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             b.id,
         ))
     });
-    for ws in ws_list {
+    for ws in &ws_list {
         let id = format!("workspace:{}", ws.id);
         graph
             .grants
@@ -523,9 +629,26 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             name: ws.name.clone(),
             organization_id: Some(ws.organization_id.to_string()),
             notes: vec![],
+            details: vec![],
         });
     }
 
+    // Connections: the Platform's first (platform admins query them), then
+    // the organizations'.
+    let mut conn_nodes: BTreeSet<&str> = BTreeSet::new();
+    for name in &input.platform_sources {
+        let id = format!("connection:{name}");
+        edges.add(&platform_node, &id, "of", "derived");
+        conn_nodes.insert(name);
+        graph.nodes.push(Node {
+            id,
+            kind: "connection".into(),
+            name: name.clone(),
+            organization_id: Some(PLATFORM.into()),
+            notes: vec![NOTE_PLATFORM.into()],
+            details: vec![],
+        });
+    }
     for name in &conn_in_graph {
         let Some(row) = rows.get(name.as_str()) else {
             continue;
@@ -538,18 +661,115 @@ pub fn build(input: &AccessInput) -> AccessGraph {
         if !input.configured.contains(name) {
             notes.push(NOTE_MISSING.to_string());
         }
-        if let Some(sources) = conn_sources.get(name) {
-            graph
+        match conn_sources.get(name) {
+            Some(sources) => graph
                 .grants
-                .extend(grants_of(&id, &["manage", "query"], sources));
+                .extend(grants_of(&id, &["manage", "query"], sources)),
+            None => {
+                if !released_to_user.contains(name) {
+                    notes.push(NOTE_UNRELEASED.to_string());
+                }
+                let org_key = row.organization_id.to_string();
+                if org_sources.contains_key(&org_key) {
+                    edges.add(&format!("organization:{org_key}"), &id, "of", "derived");
+                }
+            }
         }
+        conn_nodes.insert(name);
         graph.nodes.push(Node {
             id,
             kind: "connection".into(),
             name: name.clone(),
             organization_id: Some(row.organization_id.to_string()),
             notes,
+            details: vec![],
         });
+    }
+
+    // Cubes: those of the Platform and of the user's organizations, hanging
+    // off the connections of their data sources; queried only when every one
+    // of them is.
+    let mut folders: Vec<(&str, String)> = Vec::new();
+    if platform {
+        folders.push((PLATFORM, PLATFORM.to_string()));
+    }
+    let mut cube_orgs: Vec<&Organization> = org_list.clone();
+    for ws in &ws_list {
+        if let Some(org) = orgs.get(&ws.organization_id.to_string()) {
+            if !cube_orgs.iter().any(|o| o.id == org.id) {
+                cube_orgs.push(org);
+            }
+        }
+    }
+    cube_orgs.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
+    folders.extend(
+        cube_orgs
+            .iter()
+            .map(|o| (o.slug.as_str(), o.id.to_string())),
+    );
+    for (folder, org_id) in &folders {
+        let mut cubes: Vec<&AccessCube> = input
+            .cubes
+            .iter()
+            .filter(|c| c.folder == *folder)
+            .filter(|c| {
+                !c.data_sources.is_empty()
+                    && c.data_sources
+                        .iter()
+                        .all(|d| conn_nodes.contains(d.as_str()))
+            })
+            .collect();
+        cubes.sort_by(|a, b| a.name.cmp(&b.name));
+        for cube in cubes {
+            let id = format!("cube:{folder}:{}", cube.name);
+            let mut reasons: Vec<Source> = Vec::new();
+            let mut queried = true;
+            for d in &cube.data_sources {
+                let conn = format!("connection:{d}");
+                edges.add(&conn, &id, "serves", "derived");
+                let via: Vec<&Source> = conn_sources
+                    .get(d)
+                    .map(|s| s.iter().filter(|s| s.perms.contains(&"query")).collect())
+                    .unwrap_or_default();
+                queried &= !via.is_empty();
+                for s in via {
+                    let mut path = s.path.clone();
+                    path.push(id.clone());
+                    reasons.push(Source {
+                        text: s.text.clone(),
+                        path,
+                        perms: vec!["query"],
+                    });
+                }
+            }
+            let mut notes = Vec::new();
+            if cube.view {
+                notes.push(NOTE_VIEW.to_string());
+            }
+            if queried {
+                graph.grants.extend(grants_of(&id, &["query"], &reasons));
+            } else if *folder == PLATFORM
+                || (!cube.view
+                    && cube
+                        .data_sources
+                        .iter()
+                        .any(|d| input.platform_sources.contains(d)))
+            {
+                notes.push(NOTE_PLATFORM.to_string());
+            } else if cube.view {
+                notes.push(NOTE_VIEW_DENIED.to_string());
+            } else {
+                notes.push(NOTE_UNRELEASED.to_string());
+            }
+            graph.nodes.push(Node {
+                id,
+                kind: "cube".into(),
+                name: cube.name.clone(),
+                organization_id: Some(org_id.clone()),
+                notes,
+                details: vec![],
+            });
+        }
     }
     graph.edges = edges.list;
     graph
@@ -624,7 +844,53 @@ mod tests {
             connections: vec![],
             releases: vec![],
             configured: BTreeSet::new(),
+            platform_sources: vec![],
+            cubes: vec![],
         }
+    }
+
+    const P: Uuid = Uuid::from_u128(10);
+
+    fn other_org() -> Organization {
+        Organization {
+            id: P,
+            name: "Pinnacle".into(),
+            slug: "pinnacle".into(),
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }
+    }
+
+    fn cube(name: &str, folder: &str, view: bool, sources: &[&str]) -> AccessCube {
+        AccessCube {
+            name: name.into(),
+            view,
+            folder: folder.into(),
+            data_sources: sources.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn rule(id: u128, workspace_id: Uuid, role: Option<&str>, role_id: Option<Uuid>) -> Rule {
+        Rule {
+            id: Uuid::from_u128(id),
+            workspace_id,
+            description: format!("Rule {id}"),
+            r#type: "t".into(),
+            role: role.map(Into::into),
+            role_id,
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }
+    }
+
+    fn node<'a>(g: &'a AccessGraph, id: &str) -> Option<&'a Node> {
+        g.nodes.iter().find(|n| n.id == id)
+    }
+
+    fn has_edge(g: &AccessGraph, from: &str, to: &str, label: &str, kind: &str) -> bool {
+        g.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.label == label && e.kind == kind)
     }
 
     fn grant<'a>(g: &'a AccessGraph, resource: &str, perm: &str) -> Option<&'a Grant> {
@@ -705,10 +971,14 @@ mod tests {
         );
         let r = &grant(&g, &id, "edit").unwrap().reasons;
         assert_eq!(r[0].text, "editor through the rule Analysts");
+        let rule = format!("rule:{}", Uuid::from_u128(3));
+        assert!(has_edge(&g, "user:ana", &rule, "member", "direct"));
+        assert!(has_edge(&g, &rule, &id, "editor", "derived"));
         assert!(g
             .edges
             .iter()
-            .any(|e| e.label == "editor via rule Analysts" && e.kind == "derived"));
+            .all(|e| !(e.from == "user:ana" && e.to == id)));
+        assert_eq!(r[0].path, ["user:ana".to_string(), rule, id.clone()]);
         assert_eq!(perms(&g, &format!("organization:{O}")), ["view"]);
     }
 
@@ -940,6 +1210,8 @@ mod tests {
     fn a_platform_admin_is_a_single_node() {
         let mut i = input(vec![rel("organization", O, "owner")]);
         i.platform_admin = true;
+        i.platform_sources = vec!["default".into()];
+        i.cubes = vec![cube("u", "_platform", false, &["default"])];
         let g = build(&i);
         assert!(g.platform_admin);
         assert_eq!(g.nodes.len(), 1);
@@ -953,5 +1225,231 @@ mod tests {
         let g = build(&i);
         assert!(g.user.disabled);
         assert!(!g.grants.is_empty());
+    }
+
+    #[test]
+    fn every_connection_of_a_users_organization_is_shown() {
+        let mut i = input(vec![rel("organization", O, "member")]);
+        i.connections = vec![conn("c", ConnectionOrigin::Assigned)];
+        i.configured.insert("c".into());
+        let g = build(&i);
+        let n = node(&g, "connection:c").unwrap();
+        assert!(n.notes.contains(&NOTE_UNRELEASED.to_string()));
+        assert_eq!(
+            NOTE_UNRELEASED,
+            "no access: not released to a workspace of the user"
+        );
+        assert!(perms(&g, "connection:c").is_empty());
+        assert!(has_edge(
+            &g,
+            &format!("organization:{O}"),
+            "connection:c",
+            "of",
+            "derived"
+        ));
+    }
+
+    #[test]
+    fn the_platform_is_shown_for_admins_only() {
+        let mut i = input(vec![rel("organization", O, "member")]);
+        i.platform_sources = vec!["default".into()];
+        i.cubes = vec![cube("u", "_platform", false, &["default"])];
+        let g = build(&i);
+        let p = node(&g, "organization:_platform").unwrap();
+        assert_eq!(p.name, "Platform");
+        assert!(has_edge(
+            &g,
+            "user:ana",
+            "organization:_platform",
+            "platform",
+            "derived"
+        ));
+        let c = node(&g, "connection:default").unwrap();
+        assert_eq!(c.notes, ["platform admins only"]);
+        assert!(node(&g, "cube:_platform:u").is_some());
+        for id in [
+            "organization:_platform",
+            "connection:default",
+            "cube:_platform:u",
+        ] {
+            assert!(perms(&g, id).is_empty(), "{id} has a grant");
+        }
+        // Placed first in the organization column.
+        assert_eq!(g.nodes[1].id, "organization:_platform");
+    }
+
+    #[test]
+    fn a_rule_and_its_role_are_nodes() {
+        let x = Uuid::from_u128(4);
+        let mut i = input(vec![]);
+        i.rules = vec![rule(3, W, None, Some(x))];
+        i.roles = vec![Role {
+            id: x,
+            organization_id: O,
+            name: "Analyst".into(),
+            permissions: vec!["view".into(), "query".into()],
+            restrictions: Restrictions {
+                row_filters: vec![],
+                blocked_members: vec!["orders.margin".into()],
+            },
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        let g = build(&i);
+        let r = format!("rule:{}", Uuid::from_u128(3));
+        let role = format!("role:{x}");
+        let w = format!("workspace:{W}");
+        assert_eq!(node(&g, &r).unwrap().kind, "rule");
+        let rn = node(&g, &role).unwrap();
+        assert_eq!(rn.kind, "role");
+        assert_eq!(rn.notes, ["(blocks: orders.margin)"]);
+        assert_eq!(rn.details, ["view", "query"]);
+        assert!(has_edge(&g, "user:ana", &r, "member", "direct"));
+        assert!(has_edge(&g, &r, &role, "role", "derived"));
+        assert!(has_edge(&g, &r, &w, "Analyst", "derived"));
+        assert_eq!(perms(&g, &w), ["view", "query"]);
+        let reasons = &grant(&g, &w, "query").unwrap().reasons;
+        assert_eq!(reasons[0].path, ["user:ana".to_string(), r, w.clone()]);
+        assert!(perms(&g, &role).is_empty());
+        // Column order: user, organization, rule, role, workspace.
+        let kinds: Vec<_> = g.nodes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds, ["user", "organization", "rule", "role", "workspace"]);
+    }
+
+    #[test]
+    fn a_builtin_rule_role_is_one_shared_node() {
+        let w2 = Uuid::from_u128(5);
+        let mut i = input(vec![]);
+        i.workspaces.push(Workspace {
+            id: w2,
+            organization_id: O,
+            name: "Sales".into(),
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        });
+        i.rules = vec![
+            rule(3, W, Some("viewer"), None),
+            rule(6, w2, Some("viewer"), None),
+        ];
+        let g = build(&i);
+        let roles: Vec<_> = g.nodes.iter().filter(|n| n.kind == "role").collect();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].id, "role:builtin:viewer");
+        assert_eq!(roles[0].details, ["view", "query", "read objects"]);
+        assert_eq!(g.nodes.iter().filter(|n| n.kind == "rule").count(), 2);
+    }
+
+    #[test]
+    fn cubes_hang_off_their_connections() {
+        let mut i = input(vec![rel("workspace", W, "viewer")]);
+        i.organizations.push(other_org());
+        i.connections = vec![
+            conn("c", ConnectionOrigin::Assigned),
+            ConnectionRow {
+                name: "c2".into(),
+                organization_id: P,
+                origin: ConnectionOrigin::Assigned,
+            },
+        ];
+        i.releases = vec![("c".into(), W)];
+        i.configured.extend(["c".to_string(), "c2".to_string()]);
+        i.cubes = vec![
+            cube("a", "acme", false, &["c"]),
+            cube("b", "pinnacle", false, &["c2"]),
+        ];
+        let g = build(&i);
+        let a = node(&g, "cube:acme:a").unwrap();
+        assert_eq!(a.kind, "cube");
+        assert!(a.notes.is_empty());
+        assert!(has_edge(
+            &g,
+            "connection:c",
+            "cube:acme:a",
+            "serves",
+            "derived"
+        ));
+        let r = &grant(&g, "cube:acme:a", "query").unwrap().reasons;
+        assert_eq!(
+            r[0].path,
+            [
+                "user:ana".to_string(),
+                format!("workspace:{W}"),
+                "connection:c".to_string(),
+                "cube:acme:a".to_string()
+            ]
+        );
+        assert!(node(&g, "cube:pinnacle:b").is_none());
+        assert_eq!(g.nodes.last().unwrap().kind, "cube");
+    }
+
+    #[test]
+    fn same_name_in_two_organizations_is_two_cubes() {
+        let mut i = input(vec![
+            rel("organization", O, "member"),
+            rel("organization", P, "member"),
+        ]);
+        i.organizations.push(other_org());
+        i.connections = vec![
+            conn("c", ConnectionOrigin::Assigned),
+            ConnectionRow {
+                name: "c2".into(),
+                organization_id: P,
+                origin: ConnectionOrigin::Assigned,
+            },
+        ];
+        i.configured.extend(["c".to_string(), "c2".to_string()]);
+        i.cubes = vec![
+            cube("x", "pinnacle", false, &["c2"]),
+            cube("x", "acme", false, &["c"]),
+        ];
+        let g = build(&i);
+        let cubes: Vec<_> = g
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "cube")
+            .map(|n| n.id.as_str())
+            .collect();
+        // Sorted by organization (Acme before Pinnacle).
+        assert_eq!(cubes, ["cube:acme:x", "cube:pinnacle:x"]);
+    }
+
+    #[test]
+    fn a_view_spanning_an_unreleased_connection_has_no_query() {
+        let mut i = input(vec![
+            rel("organization", O, "member"),
+            rel("workspace", W, "viewer"),
+        ]);
+        i.connections = vec![
+            conn("c", ConnectionOrigin::Assigned),
+            conn("d", ConnectionOrigin::Assigned),
+        ];
+        i.releases = vec![("c".into(), W)];
+        i.configured.extend(["c".to_string(), "d".to_string()]);
+        i.cubes = vec![cube("v", "acme", true, &["c", "d"])];
+        let g = build(&i);
+        let v = node(&g, "cube:acme:v").unwrap();
+        assert_eq!(
+            v.notes,
+            [
+                "view",
+                "no access: spans a data source the user cannot query"
+            ]
+        );
+        assert!(perms(&g, "cube:acme:v").is_empty());
+        assert!(has_edge(
+            &g,
+            "connection:c",
+            "cube:acme:v",
+            "serves",
+            "derived"
+        ));
+        assert!(has_edge(
+            &g,
+            "connection:d",
+            "cube:acme:v",
+            "serves",
+            "derived"
+        ));
+        assert!(grant(&g, "connection:c", "query").is_some());
     }
 }
