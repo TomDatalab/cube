@@ -11,7 +11,7 @@ const GENERIC_LINE: &str =
 
 /// The message for a cube or view name taken elsewhere on the platform.
 pub fn duplicate_name_message(name: &str) -> String {
-    format!("O nome de cubo {name} já está em uso na plataforma; escolha outro")
+    format!("O nome de cubo {name} já está em uso na sua organização ou no Platform; escolha outro")
 }
 
 /// The name in the loader's "Found duplicate cube name 'x'." message.

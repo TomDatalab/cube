@@ -66,16 +66,13 @@ impl TenantRuntime {
     }
 }
 
-/// `tenant` as it serves `scope` from `path`: its app id, orchestrator id
-/// and pre-aggregation schema carry the scope's key, so two scopes never
-/// share a cache or a pre-aggregation table.
+/// `tenant` as it serves `scope` from `path`: its app id and orchestrator id
+/// carry the scope's key, so two scopes never share a cache.
 fn scoped_tenant(mut tenant: ResolvedTenant, scope: &ModelScope, path: std::path::PathBuf) -> ResolvedTenant {
     let key = scope.key();
     tenant.app_id = format!("{}@{key}", tenant.app_id);
     tenant.orchestrator_id = format!("{}@{key}", tenant.orchestrator_id);
-    if *scope != ModelScope::All {
-        tenant.pre_aggregations_schema = format!("{}_{key}", tenant.pre_aggregations_schema);
-    }
+    // Pre-aggregation tables are not yet separated per scope (deferred).
     tenant.model_path = path;
     tenant
 }

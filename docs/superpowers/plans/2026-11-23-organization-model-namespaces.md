@@ -167,4 +167,5 @@
 
 - The SQL API serving every organization at once (e.g. one Postgres database name per organization). Needs `cubesqlbridge` to hold several models per process.
 - Renaming or migrating existing cubes.
+- Per-organization pre-aggregation schemas (Design rule 4): two organizations defining the same pre-aggregation on connections to the same database would share its table. Needs the planned pre-aggregation descriptions to carry the scope's schema, quoted (slugs contain `-`) and ≤63 bytes.
 - The `sofiadb` connection now owned by ON with Digital's 24 cubes rejected: a data decision, separate from this change.

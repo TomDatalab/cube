@@ -632,7 +632,7 @@ api_test!(owner_sees_no_foreign_path_on_duplicate, |store| {
         Some(json!({ "content": cube_on("fatos", "sofiadb"), "version": row.version }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!body.to_string().contains("digital"), "{body}");
-    assert!(body.to_string().contains("O nome de cubo fatos já está em uso na plataforma; escolha outro"), "{body}");
+    assert!(body.to_string().contains("O nome de cubo fatos já está em uso na sua organização ou no Platform; escolha outro"), "{body}");
 });
 
 api_test!(owner_generate_does_not_adopt_foreign, |store| {
@@ -708,7 +708,7 @@ api_test!(owner_does_not_adopt_foreign_generated_or_own_sync_file, |store| {
     .await
     .unwrap_err();
     assert_eq!(err.status, StatusCode::BAD_REQUEST, "{err:?}");
-    assert_eq!(err.body.error, "O nome de cubo dados já está em uso na plataforma; escolha outro");
+    assert_eq!(err.body.error, "O nome de cubo dados já está em uso na sua organização ou no Platform; escolha outro");
     // Digital's generated file is another organization's name: ON gets its
     // own cube and Digital's file stays as it was.
     let files = cubeserver::rbac::handlers::model::generate_into_model(
