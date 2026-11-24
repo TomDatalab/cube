@@ -76,6 +76,7 @@ export function OrganizationsTab({ api, onShowWorkspaces }: Props) {
         onRow={(o) => ({ onClick: () => setSelected(o), style: { cursor: 'pointer' } })}
         columns={[
           { title: 'Organization', dataIndex: 'name' },
+          { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
           { title: 'Created by', dataIndex: 'createdBy', render: (v) => v || '—' },
           { title: 'Created', dataIndex: 'createdAt', render: (v) => new Date(v).toLocaleString() },
         ]}
