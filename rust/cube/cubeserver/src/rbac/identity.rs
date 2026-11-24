@@ -31,11 +31,11 @@ pub fn validate_user_id(id: &str) -> Result<(), ApiError> {
     }
 }
 
-/// A username to create or rename to: a valid user id that does not parse
-/// as a UUID, so it is never mistaken for another user's id.
+/// A username to create or rename to: a valid user id that is not shaped
+/// like one ([`super::store::is_uuid`]), so it is never mistaken for an id.
 pub fn validate_new_username(username: &str) -> Result<(), ApiError> {
     validate_user_id(username)?;
-    if uuid::Uuid::parse_str(username).is_ok() {
+    if super::store::is_uuid(username) {
         return Err(ApiError::bad_request(
             "Invalid username: it cannot be a UUID",
         ));

@@ -336,19 +336,24 @@ fn user_from(r: &Row) -> User {
     }
 }
 
-/// A username that parses as a UUID could be taken for another user's id.
+/// Whether `s` is a user id: a UUID in its canonical text form only (36
+/// characters, lower-case hex, hyphenated), exactly what the `users_uuid`
+/// migration treats as one. The one test for "is this a UUID or a
+/// username" everywhere (store, identity, SpiceDB subjects, token `sub`).
+pub fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
+}
+
+/// A username shaped like a user id could be taken for another user's id.
 fn check_username(username: &str) -> Result<(), StoreError> {
-    if Uuid::parse_str(username).is_ok() {
+    if is_uuid(username) {
         return Err(StoreError::Invalid("A username cannot be a UUID".into()));
     }
     Ok(())
-}
-
-/// The canonical (lower-case hyphenated) form of `key` when it is a UUID.
-fn uuid_key(key: &str) -> Option<String> {
-    Uuid::parse_str(key)
-        .ok()
-        .map(|u| u.hyphenated().to_string())
 }
 
 fn org_from(r: &Row) -> Organization {
@@ -965,11 +970,11 @@ impl Store {
 
     shared_creates!(Self::conn);
 
-    /// The user with this id (a UUID, in any case). A username finds nothing.
+    /// The user with this id (see [`is_uuid`]). A username finds nothing.
     pub async fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
-        let Some(id) = uuid_key(id) else {
+        if !is_uuid(id) {
             return Ok(None);
-        };
+        }
         let c = self.conn().await?;
         let sql = format!("SELECT {USER_COLS} FROM users WHERE id = $1");
         Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(user_from))
@@ -984,13 +989,15 @@ impl Store {
             .map(user_from))
     }
 
-    /// `key` names a user by id when it parses as a UUID, else by username.
+    /// `key` names a user by id when it [`is_uuid`] and a user has that id,
+    /// else by username.
     pub async fn resolve_user(&self, key: &str) -> Result<Option<User>, StoreError> {
-        if uuid_key(key).is_some() {
-            self.user(key).await
-        } else {
-            self.user_by_username(key).await
+        if is_uuid(key) {
+            if let Some(user) = self.user(key).await? {
+                return Ok(Some(user));
+            }
         }
+        self.user_by_username(key).await
     }
 
     pub async fn users(&self) -> Result<Vec<User>, StoreError> {
@@ -1118,9 +1125,9 @@ impl Store {
         if let Some(username) = &username {
             check_username(username)?;
         }
-        let Some(id) = uuid_key(id) else {
+        if !is_uuid(id) {
             return Ok(None);
-        };
+        }
         let c = self.conn().await?;
         let sql = format!(
             "UPDATE users SET username = COALESCE($2, username), name = COALESCE($3, name), \

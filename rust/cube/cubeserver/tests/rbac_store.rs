@@ -107,11 +107,14 @@ db_test!(resolve_user_takes_a_uuid_or_a_username, |store, _url| {
     let ann = store.create_user(&user("ann")).await.unwrap();
     let by_id = store.resolve_user(&ann.id).await.unwrap().unwrap();
     assert_eq!(by_id.username, "ann");
+    // Only the canonical form (lower-case, hyphenated) is an id.
     let upper = ann.id.to_uppercase();
-    assert_eq!(
-        store.resolve_user(&upper).await.unwrap().unwrap().id,
-        ann.id
-    );
+    assert!(store.resolve_user(&upper).await.unwrap().is_none());
+    assert!(store
+        .user(&ann.id.replace('-', ""))
+        .await
+        .unwrap()
+        .is_none());
     let by_name = store.resolve_user("ann").await.unwrap().unwrap();
     assert_eq!(by_name.id, ann.id);
     assert!(store.resolve_user("nobody").await.unwrap().is_none());
@@ -166,6 +169,40 @@ db_test!(
     }
 );
 
+db_test!(
+    resolve_user_falls_back_to_the_username_when_no_id_matches,
+    |store, url| {
+        // Not creatable through the store; a row written another way.
+        let id = Uuid::new_v4().to_string();
+        let name = Uuid::new_v4().to_string();
+        connect(&url)
+            .await
+            .execute(
+                "INSERT INTO users (id, username, password_hash) VALUES ($1, $2, 'h')",
+                &[&id, &name],
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.resolve_user(&name).await.unwrap().unwrap().id, id);
+        assert_eq!(
+            store.resolve_user(&id).await.unwrap().unwrap().username,
+            name
+        );
+    }
+);
+
+db_test!(only_the_canonical_uuid_form_is_a_uuid, |_store, _url| {
+    use cubeserver::rbac::store::is_uuid;
+    let id = Uuid::new_v4();
+    assert!(is_uuid(&id.hyphenated().to_string()));
+    assert!(!is_uuid(&id.hyphenated().to_string().to_uppercase()));
+    assert!(!is_uuid(&id.simple().to_string()));
+    assert!(!is_uuid(&id.braced().to_string()));
+    assert!(!is_uuid(&id.urn().to_string()));
+    assert!(!is_uuid("ann"));
+    assert!(!is_uuid("0123456789abcdef-0123456789abcdef-01"));
+});
+
 db_test!(a_username_shaped_like_a_uuid_is_refused, |store, _url| {
     let shaped = Uuid::new_v4().to_string();
     match store.create_user(&user(&shaped)).await {
@@ -176,7 +213,7 @@ db_test!(a_username_shaped_like_a_uuid_is_refused, |store, _url| {
     let ann = store.create_user(&user("ann")).await.unwrap();
     assert!(matches!(
         store
-            .update_user(&ann.id, Some(shaped.to_uppercase()), None, None, None)
+            .update_user(&ann.id, Some(Uuid::new_v4().to_string()), None, None, None)
             .await,
         Err(StoreError::Invalid(_))
     ));
@@ -184,6 +221,11 @@ db_test!(a_username_shaped_like_a_uuid_is_refused, |store, _url| {
     // The API-side check says the same.
     assert!(cubeserver::rbac::identity::validate_new_username(&shaped).is_err());
     assert!(cubeserver::rbac::identity::validate_new_username("ann").is_ok());
+    // Only the canonical form is refused: 32 hex digits stay a username.
+    let hex = Uuid::new_v4().simple().to_string();
+    assert!(cubeserver::rbac::identity::validate_new_username(&hex).is_ok());
+    let hexy = store.create_user(&user(&hex)).await.unwrap();
+    assert_eq!(store.resolve_user(&hex).await.unwrap().unwrap().id, hexy.id);
 });
 
 db_test!(
@@ -211,7 +253,9 @@ db_test!(
              name text NOT NULL, values text[] NOT NULL,
              PRIMARY KEY (user_id, name));
          INSERT INTO users (id, name, password_hash) VALUES ('ann', 'Ann', 'h');
-         INSERT INTO user_attributes VALUES ('ann', 'region', '{Sul}');",
+         INSERT INTO user_attributes VALUES ('ann', 'region', '{Sul}');
+         INSERT INTO users (id, password_hash)
+             VALUES ('abcdef0123456789abcdef0123456789', 'h');",
         )
         .await
         .unwrap();
@@ -225,6 +269,11 @@ db_test!(
         assert_eq!(ann.name.as_deref(), Some("Ann"));
         let regions = Attributes::from([("region".to_string(), vec!["Sul".to_string()])]);
         assert_eq!(migrated.user_attributes(&ann.id).await.unwrap(), regions);
+        // 32 hex digits are a username, not an id: a fresh UUID, found by name.
+        let hex = "abcdef0123456789abcdef0123456789";
+        let hexy = migrated.resolve_user(hex).await.unwrap().unwrap();
+        assert_eq!(hexy.username, hex);
+        assert!(cubeserver::rbac::store::is_uuid(&hexy.id), "{}", hexy.id);
         drop(migrated);
 
         let again = cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1)
@@ -232,6 +281,7 @@ db_test!(
             .unwrap();
         let still = again.user_by_username("ann").await.unwrap().unwrap();
         assert_eq!(still.id, ann.id, "a second run keeps the id");
+        assert_eq!(again.resolve_user(hex).await.unwrap().unwrap().id, hexy.id);
         assert_eq!(again.user_attributes(&ann.id).await.unwrap(), regions);
         let markers: i64 = raw
             .query_one(

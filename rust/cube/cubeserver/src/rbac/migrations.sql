@@ -183,7 +183,8 @@ BEGIN
     ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
     UPDATE users SET username = id WHERE username IS NULL;
     ALTER TABLE users ALTER COLUMN username SET NOT NULL;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_username_key') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'users_username_key' AND conrelid = 'users'::regclass) THEN
         ALTER TABLE users ADD CONSTRAINT users_username_key UNIQUE (username);
     END IF;
 
@@ -197,6 +198,7 @@ BEGIN
         FOREIGN KEY (user_id) REFERENCES users (id)
         ON DELETE CASCADE ON UPDATE CASCADE;
 
+    -- The same test as `store::is_uuid`: canonical form only.
     UPDATE users SET id = gen_random_uuid()::text
     WHERE id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 
