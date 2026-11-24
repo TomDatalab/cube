@@ -228,6 +228,7 @@ export function RulesTab({ api }: Props) {
                 </Typography.Text>
               ),
             },
+            { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
             { title: 'Type', dataIndex: 'type' },
             {
               title: 'Role',

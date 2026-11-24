@@ -183,6 +183,7 @@ export function RolesTab({ api }: Props) {
           locale={{ emptyText: 'No roles yet: rules use the built-in ones below' }}
           columns={[
             { title: 'Role', dataIndex: 'name' },
+            { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
             {
               title: 'Permissions',
               dataIndex: 'permissions',

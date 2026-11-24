@@ -148,7 +148,7 @@ export function UsersTab({ api, currentUser }: Props) {
               dataIndex: 'id',
               render: (id) => (
                 <Space size={6}>
-                  {id}
+                  <Typography.Text copyable>{id}</Typography.Text>
                   {id === currentUser ? <Tag style={{ marginRight: 0 }}>you</Tag> : null}
                 </Space>
               ),
