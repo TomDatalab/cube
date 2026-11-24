@@ -25,6 +25,8 @@ use crate::meta_adapter::ModelMetaService;
 use crate::model_index::{model_stamp, ModelStamp};
 use crate::orchestrator_adapter::{orchestrator, OrchestratedQueryService};
 use crate::planner_adapter::PlannerQueryService;
+use crate::rbac::model_runtime::ModelRuntime;
+use crate::rbac::scope::ModelScope;
 use crate::services::{MetaServiceRef, QueryServiceRef};
 
 /// Everything that answers one tenant's requests, compiled from its model.
@@ -41,6 +43,41 @@ pub struct TenantRuntime {
     /// The model directory's stamp (newest mtime and file set) when this
     /// runtime was compiled; `None` forces a reload.
     model_stamp: Option<ModelStamp>,
+    /// With RBAC, the scope this runtime compiles.
+    scope: Option<ModelScope>,
+    /// A newer scope folder that did not compile: this runtime keeps serving
+    /// instead, and is not compiled again for that folder until a reload.
+    failed_path: Option<std::path::PathBuf>,
+}
+
+impl TenantRuntime {
+    /// The same runtime with `model_stamp` and `failed_path` set.
+    fn marked(&self, model_stamp: Option<ModelStamp>, failed_path: Option<std::path::PathBuf>) -> Self {
+        Self {
+            tenant: self.tenant.clone(),
+            meta: self.meta.clone(),
+            query: self.query.clone(),
+            graphql: self.graphql.clone(),
+            generation: self.generation,
+            model_stamp,
+            scope: self.scope.clone(),
+            failed_path,
+        }
+    }
+}
+
+/// `tenant` as it serves `scope` from `path`: its app id, orchestrator id
+/// and pre-aggregation schema carry the scope's key, so two scopes never
+/// share a cache or a pre-aggregation table.
+fn scoped_tenant(mut tenant: ResolvedTenant, scope: &ModelScope, path: std::path::PathBuf) -> ResolvedTenant {
+    let key = scope.key();
+    tenant.app_id = format!("{}@{key}", tenant.app_id);
+    tenant.orchestrator_id = format!("{}@{key}", tenant.orchestrator_id);
+    if *scope != ModelScope::All {
+        tenant.pre_aggregations_schema = format!("{}_{key}", tenant.pre_aggregations_schema);
+    }
+    tenant.model_path = path;
+    tenant
 }
 
 impl std::fmt::Debug for TenantRuntime {
@@ -91,6 +128,9 @@ pub struct TenantRegistry {
     dev_mode: bool,
     runtimes: RwLock<HashMap<String, Arc<TenantRuntime>>>,
     generation: AtomicU64,
+    /// With RBAC, where each scope's folder of the current version is, so a
+    /// reload compiles a scope runtime on the newest one.
+    scope_paths: Option<Arc<ModelRuntime>>,
 }
 
 impl std::fmt::Debug for TenantRegistry {
@@ -119,7 +159,22 @@ impl TenantRegistry {
             dev_mode,
             runtimes: RwLock::new(HashMap::new()),
             generation: AtomicU64::new(0),
+            scope_paths: None,
         }
+    }
+
+    /// Reloads scope runtimes ([`Self::resolve_scoped`]) on `runtime`'s
+    /// current folders.
+    pub fn with_scope_paths(mut self, runtime: Arc<ModelRuntime>) -> Self {
+        self.scope_paths = Some(runtime);
+        self
+    }
+
+    /// The tenant of `security_context`, without compiling its model.
+    pub fn tenant_for(&self, security_context: &Value) -> Result<ResolvedTenant, ApiError> {
+        self.config
+            .for_security_context(security_context)
+            .map_err(|e| ApiError::forbidden(e.to_string()))
     }
 
     /// Refuses to plan for a tenant whose data source falls back to the
@@ -148,10 +203,7 @@ impl TenantRegistry {
 
     /// The runtime for `security_context`, compiling it on first use.
     pub async fn resolve(&self, security_context: &Value) -> Result<Arc<TenantRuntime>, ApiError> {
-        let tenant = self
-            .config
-            .for_security_context(security_context)
-            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+        let tenant = self.tenant_for(security_context)?;
 
         if let Some(runtime) = self.runtimes.read().await.get(&tenant.app_id) {
             return Ok(runtime.clone());
@@ -159,7 +211,7 @@ impl TenantRegistry {
 
         // Compile outside the write lock so a slow model does not block other
         // tenants, then insert only if nobody else got there first.
-        let compiled = Arc::new(self.compile(tenant).await?);
+        let compiled = Arc::new(self.compile(tenant, None).await?);
 
         let mut runtimes = self.runtimes.write().await;
         Ok(runtimes
@@ -168,8 +220,59 @@ impl TenantRegistry {
             .clone())
     }
 
+    /// The runtime of `scope` for `security_context`, compiled from `path`
+    /// (the scope's folder of the current model version). One compiled on an
+    /// older folder is compiled again; if that fails it keeps serving.
+    pub async fn resolve_scoped(
+        &self,
+        security_context: &Value,
+        scope: &ModelScope,
+        path: std::path::PathBuf,
+    ) -> Result<Arc<TenantRuntime>, ApiError> {
+        let tenant = scoped_tenant(self.tenant_for(security_context)?, scope, path.clone());
+        let previous = self.runtimes.read().await.get(&tenant.app_id).cloned();
+        if let Some(runtime) = &previous {
+            if runtime.tenant.model_path == path || runtime.failed_path.as_ref() == Some(&path) {
+                return Ok(runtime.clone());
+            }
+        }
+
+        let app_id = tenant.app_id.clone();
+        match self.compile(tenant, Some(scope.clone())).await {
+            Ok(compiled) => {
+                let mut runtimes = self.runtimes.write().await;
+                // Another request may have compiled the same folder first.
+                if let Some(current) = runtimes.get(&app_id) {
+                    if current.tenant.model_path == path {
+                        return Ok(current.clone());
+                    }
+                }
+                let compiled = Arc::new(compiled);
+                runtimes.insert(app_id, compiled.clone());
+                Ok(compiled)
+            }
+            Err(err) => match previous {
+                Some(runtime) => {
+                    tracing::error!(
+                        tenant = %app_id,
+                        error = %err.body.error,
+                        "the data model did not reload; keeping the previous one"
+                    );
+                    let kept = Arc::new(runtime.marked(runtime.model_stamp.clone(), Some(path)));
+                    self.runtimes.write().await.insert(app_id, kept.clone());
+                    Ok(kept)
+                }
+                None => Err(err),
+            },
+        }
+    }
+
     /// Compiles a tenant's model and builds its services.
-    async fn compile(&self, tenant: ResolvedTenant) -> Result<TenantRuntime, ApiError> {
+    async fn compile(
+        &self,
+        tenant: ResolvedTenant,
+        scope: Option<ModelScope>,
+    ) -> Result<TenantRuntime, ApiError> {
         let model_path = tenant.model_path.clone();
         let generation = self.generation.fetch_add(1, Ordering::SeqCst);
 
@@ -241,6 +344,8 @@ impl TenantRegistry {
             query,
             graphql: Arc::new(GraphQLSchemaCache::default()),
             generation,
+            scope,
+            failed_path: None,
         })
     }
 
@@ -261,7 +366,20 @@ impl TenantRegistry {
                 continue;
             }
 
-            match self.compile(runtime.tenant.clone()).await {
+            // A scope runtime compiles its scope's newest folder.
+            let mut tenant = runtime.tenant.clone();
+            if let (Some(scope), Some(paths)) = (&runtime.scope, &self.scope_paths) {
+                match paths.scope_path(scope).await {
+                    Ok(path) => tenant.model_path = path,
+                    Err(e) => {
+                        tracing::error!(tenant = %tenant.app_id, error = %e, "the model scope could not be written");
+                        failures.push((tenant.app_id.clone(), crate::rbac::unavailable()));
+                        continue;
+                    }
+                }
+            }
+
+            match self.compile(tenant, runtime.scope.clone()).await {
                 Ok(compiled) => {
                     let app_id = compiled.tenant.app_id.clone();
                     self.runtimes
@@ -290,14 +408,7 @@ impl TenantRegistry {
         {
             let mut runtimes = self.runtimes.write().await;
             for runtime in runtimes.values_mut() {
-                *runtime = Arc::new(TenantRuntime {
-                    tenant: runtime.tenant.clone(),
-                    meta: runtime.meta.clone(),
-                    query: runtime.query.clone(),
-                    graphql: runtime.graphql.clone(),
-                    generation: runtime.generation,
-                    model_stamp: None,
-                });
+                *runtime = Arc::new(runtime.marked(None, None));
             }
         }
 

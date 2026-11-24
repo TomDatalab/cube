@@ -14,6 +14,17 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const CUBE_AUTHORIZATION_HEADER: &str = "x-cube-authorization";
 /// RBAC: the workspace a data request runs in.
 pub const WORKSPACE_HEADER: &str = "x-cube-workspace";
+/// RBAC: the organization whose model a platform admin reads.
+pub const ORGANIZATION_HEADER: &str = "x-cube-organization";
+
+/// A trimmed, non-empty header value.
+fn header_value(req: &Request, name: &str) -> Option<String> {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
 
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -53,11 +64,12 @@ pub async fn auth_middleware(
 
     // With RBAC on, every request speaks for a user: a missing or invalid
     // token is 401, and the user is checked against the users table.
-    let (authenticated, user, platform_admin, workspace) = match &state.rbac {
+    let (authenticated, user, platform_admin, workspace, organization) = match &state.rbac {
         None => (
             authenticated.map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?,
             None,
             false,
+            None,
             None,
         ),
         Some(rbac) => {
@@ -69,13 +81,9 @@ pub async fn auth_middleware(
                 crate::rbac::identity::resolve_identity(rbac, &authenticated.security_context)
                     .await
                     .map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?;
-            let workspace = req
-                .headers()
-                .get(WORKSPACE_HEADER)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
-            (authenticated, Some(user), platform_admin, workspace)
+            let workspace = header_value(&req, WORKSPACE_HEADER);
+            let organization = header_value(&req, ORGANIZATION_HEADER);
+            (authenticated, Some(user), platform_admin, workspace, organization)
         }
     };
 
@@ -84,6 +92,7 @@ pub async fn auth_middleware(
         security_context: authenticated.security_context,
         signed_with_playground_auth_secret: authenticated.signed_with_playground_auth_secret,
         workspace,
+        organization,
         user,
         platform_admin,
         token_verified: authenticated.token_verified,

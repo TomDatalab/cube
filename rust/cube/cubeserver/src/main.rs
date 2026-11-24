@@ -396,6 +396,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(reason) = &default_dialect {
         registry = registry.with_unplannable_default(reason.clone());
     }
+    // With RBAC each organization is compiled from its own folder.
+    if let Some(runtime) = &model_runtime {
+        registry = registry.with_scope_paths(runtime.clone());
+    }
     let tenants = Arc::new(registry);
     if cube_config.has_tenants() {
         println!("🏘️  Multi-tenant mode: a model is compiled per tenant on first use");

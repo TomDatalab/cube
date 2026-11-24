@@ -125,6 +125,7 @@ impl SubscriptionServer {
                                 .signed_with_playground_auth_secret,
                             // Only RBAC reads it, as it does the header.
                             workspace: workspace.filter(|_| self.state.rbac.is_some()),
+                            organization: None,
                             user,
                             platform_admin,
                             token_verified: authenticated.token_verified,

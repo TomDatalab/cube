@@ -49,6 +49,31 @@ macro_rules! api_test {
     };
 }
 
+/// The cube names of organization `slug`'s model, as a platform admin
+/// reads it (`X-Cube-Organization`).
+async fn cube_names_in(env: &Env, token: &str, slug: &str) -> Vec<String> {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .uri("/cube/v1/meta")
+        .header(axum::http::header::HOST, "localhost:4000")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(cubeserver::handlers::auth::ORGANIZATION_HEADER, slug)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = env.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["cubes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
 async fn cube_names(env: &Env, token: &str) -> Vec<String> {
     let (status, body, _) = get(env, token, "/cube/v1/meta").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -474,7 +499,7 @@ api_test!(generate_writes_rows, |store| {
     assert_eq!(row.organization_id, Some(org_id));
     assert_eq!(row.content, files[0]["content"].as_str().unwrap());
     assert_eq!(rows.files.len(), 2);
-    assert!(cube_names(&env, &admin).await.contains(&"fatos".to_string()));
+    assert!(cube_names_in(&env, &admin, &slug).await.contains(&"fatos".to_string()));
 });
 
 api_test!(generate_from_a_default_schema_key, |store| {
@@ -496,7 +521,7 @@ api_test!(generate_from_a_default_schema_key, |store| {
     .await
     .unwrap();
     assert_eq!(files[0]["fileName"], "digital/fatos.yml");
-    assert!(cube_names(&env, &admin).await.contains(&"fatos".to_string()));
+    assert!(cube_names_in(&env, &admin, &slug).await.contains(&"fatos".to_string()));
 });
 
 api_test!(generate_is_all_or_nothing, |store| {

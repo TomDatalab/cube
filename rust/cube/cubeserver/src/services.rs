@@ -23,6 +23,9 @@ pub struct RequestContext {
     pub signed_with_playground_auth_secret: bool,
     /// RBAC only: the `X-Cube-Workspace` header.
     pub workspace: Option<String>,
+    /// RBAC only: the `X-Cube-Organization` header, the scope a platform
+    /// admin without a workspace asks for.
+    pub organization: Option<String>,
     /// RBAC only: the user the token speaks for (`sub`, checked against the
     /// users table on every request).
     pub user: Option<String>,

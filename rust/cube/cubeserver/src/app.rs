@@ -53,10 +53,120 @@ impl AppState {
         &self,
         ctx: &RequestContext,
     ) -> Result<Option<Arc<crate::tenants::TenantRuntime>>, ApiError> {
-        match &self.tenants {
-            Some(registry) => registry.resolve(&ctx.security_context).await.map(Some),
-            None => Ok(None),
+        let Some(registry) = &self.tenants else {
+            return Ok(None);
+        };
+        // With RBAC every request reads the model of its scope only.
+        if let (Some(_), Some(model)) = (&self.rbac, &self.model_runtime) {
+            let scope = self.scope_for(ctx).await?;
+            let path = model.scope_path(&scope).await.map_err(|e| {
+                tracing::error!(scope = scope.key(), error = %e, "cannot write the model scope");
+                crate::rbac::unavailable()
+            })?;
+            return registry
+                .resolve_scoped(&ctx.security_context, &scope, path)
+                .await
+                .map(Some);
         }
+        registry.resolve(&ctx.security_context).await.map(Some)
+    }
+
+    /// The model scope of a request with RBAC on: the organization of its
+    /// workspace; for a platform admin without one the organization named by
+    /// `X-Cube-Organization`, or the Platform; for anyone else the one
+    /// organization their workspaces are in (400 when there are several).
+    /// `X-Cube-Organization` from anyone but a platform admin must name the
+    /// scope they get (403 otherwise).
+    pub async fn scope_for(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<crate::rbac::scope::ModelScope, ApiError> {
+        use crate::rbac::enforce::WORKSPACE_REQUIRED;
+        use crate::rbac::scope::ModelScope;
+        let Some(rbac) = &self.rbac else {
+            return Ok(ModelScope::All);
+        };
+        let store_error = |e: crate::rbac::store::StoreError| {
+            tracing::error!("RBAC store failed: {e}");
+            crate::rbac::unavailable()
+        };
+        let slug_of = |org: uuid::Uuid| async move {
+            let organization = rbac.store.organization(org).await.map_err(store_error)?;
+            organization
+                .map(|o| o.slug)
+                .ok_or_else(|| ApiError::not_found("organization not found"))
+        };
+
+        let user = ctx.user.as_deref().ok_or_else(crate::rbac::unauthenticated)?;
+        let scope = match ctx.workspace.as_deref() {
+            Some(workspace) => {
+                // Anyone but a platform admin is checked here, before a model
+                // is compiled for an organization that is not theirs.
+                let denied = || {
+                    ApiError::forbidden(format!(
+                        "Permission denied: query on workspace {workspace}"
+                    ))
+                };
+                let id = workspace.parse::<uuid::Uuid>().map_err(|_| denied())?;
+                if !ctx.platform_admin {
+                    rbac.require(&crate::rbac::handlers::workspaces::workspace_ref(id), "query", user)
+                        .await?;
+                }
+                let row = rbac.store.workspace(id).await.map_err(store_error)?;
+                let row = match row {
+                    Some(row) => row,
+                    None if ctx.platform_admin => {
+                        return Err(ApiError::not_found("workspace not found"))
+                    }
+                    None => return Err(denied()),
+                };
+                ModelScope::Organization(slug_of(row.organization_id).await?)
+            }
+            None if ctx.platform_admin => {
+                return match ctx.organization.as_deref() {
+                    None => Ok(ModelScope::Platform),
+                    Some(slug) if slug == ModelScope::Platform.key() => Ok(ModelScope::Platform),
+                    Some(slug) => match rbac.store.organization_by_slug(slug).await {
+                        Ok(Some(_)) => Ok(ModelScope::Organization(slug.to_string())),
+                        Ok(None) => Err(ApiError::not_found("organization not found")),
+                        Err(e) => Err(store_error(e)),
+                    },
+                };
+            }
+            None => {
+                let ids: Vec<uuid::Uuid> = rbac
+                    .authz
+                    .lookup_resources("workspace", "view", user)
+                    .await
+                    .map_err(crate::rbac::authz_error)?
+                    .iter()
+                    .filter_map(|id| id.parse().ok())
+                    .collect();
+                let organizations: std::collections::BTreeSet<uuid::Uuid> = rbac
+                    .store
+                    .workspaces_by_ids(&ids)
+                    .await
+                    .map_err(store_error)?
+                    .into_iter()
+                    .map(|w| w.organization_id)
+                    .collect();
+                let mut organizations = organizations.into_iter();
+                match (organizations.next(), organizations.next()) {
+                    (Some(org), None) => ModelScope::Organization(slug_of(org).await?),
+                    _ => return Err(ApiError::bad_request(WORKSPACE_REQUIRED)),
+                }
+            }
+        };
+        if !ctx.platform_admin {
+            if let Some(asked) = ctx.organization.as_deref() {
+                if asked != scope.key() {
+                    return Err(ApiError::forbidden(
+                        "Permission denied: X-Cube-Organization is not the organization of this request",
+                    ));
+                }
+            }
+        }
+        Ok(scope)
     }
 
     /// The data model this request reads.
@@ -121,6 +231,16 @@ impl AppState {
     /// A tenant rule may narrow them (`api_scopes` in `cube.yml`); otherwise
     /// the auth service decides, as in Node.js.
     pub async fn api_scopes_for(&self, ctx: &RequestContext) -> Result<Vec<String>, ApiError> {
+        // With RBAC they do not depend on the scope, so no model is compiled
+        // (and no workspace is needed) to know them.
+        if let (Some(_), Some(registry)) = (&self.rbac, &self.tenants) {
+            return Ok(registry
+                .tenant_for(&ctx.security_context)?
+                .api_scopes
+                .iter()
+                .map(|scope| scope.as_str().to_string())
+                .collect());
+        }
         if let Some(runtime) = self.runtime_for(ctx).await? {
             return Ok(runtime
                 .tenant
@@ -294,10 +414,13 @@ pub fn build_app(state: AppState) -> Router {
     ];
     if rbac_routes.is_some() {
         // The management routes edit with PATCH, and data requests name
-        // their workspace.
+        // their workspace (or, for a platform admin, their organization).
         methods.push(Method::PATCH);
         headers.push(header::HeaderName::from_static(
             handlers::auth::WORKSPACE_HEADER,
+        ));
+        headers.push(header::HeaderName::from_static(
+            handlers::auth::ORGANIZATION_HEADER,
         ));
     }
     let cors = CorsLayer::new()

@@ -490,3 +490,293 @@ tree_test!(meta_groups_show_a_member_only_their_workspace, |store| {
         assert!(body["groups"].as_array().unwrap().iter().all(|g| g["errors"].is_null()));
     }
 });
+
+/// `GET path` as `token` with extra headers.
+async fn get_with(
+    env: &Env,
+    token: &str,
+    headers: &[(&str, &str)],
+    path: &str,
+) -> (StatusCode, Value, String) {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(axum::http::header::HOST, "localhost:4000")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = env.router.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null), text)
+}
+
+fn titled(name: &str, title: &str, data_source: &str) -> String {
+    format!(
+        "cubes:\n  - name: {name}\n    title: {title}\n    sql_table: t\n    data_source: {data_source}\n    measures:\n      - name: n\n        type: count\n"
+    )
+}
+
+fn put_in(org: Option<uuid::Uuid>, path: &str, content: &str) -> cubeserver::rbac::model_store::ModelChange {
+    cubeserver::rbac::model_store::ModelChange::Put {
+        id: None,
+        organization_id: org,
+        path: path.into(),
+        content: content.into(),
+        expected_version: None,
+        managed_by: None,
+    }
+}
+
+/// The titles of the cubes named `name` in a meta answer.
+fn titles_of(meta: &Value, name: &str) -> Vec<String> {
+    meta["cubes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{meta}"))
+        .iter()
+        .filter(|c| c["name"] == name)
+        .map(|c| c["title"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+async fn ok(env: &Env, admin: &str, method: Method, path: &str, body: Option<Value>) -> Value {
+    let (status, body, text) = send(&env.router, method, path, Some(admin), body).await;
+    assert!(status.is_success(), "{path}: {status} {text}");
+    body
+}
+
+/// A workspace of `org` with `connection` released to it and `members`.
+async fn workspace_with(
+    env: &Env,
+    admin: &str,
+    org: uuid::Uuid,
+    connection: &str,
+    members: &[&str],
+) -> String {
+    let body = ok(
+        env,
+        admin,
+        Method::POST,
+        &format!("/cube/v1/organizations/{org}/workspaces"),
+        Some(json!({ "name": "Ops" })),
+    )
+    .await;
+    let ws = body["id"].as_str().unwrap().to_string();
+    ok(env, admin, Method::PUT, &format!("/cube/v1/workspaces/{ws}/connections/{connection}"), None).await;
+    for member in members {
+        ok(
+            env,
+            admin,
+            Method::PUT,
+            &format!("/cube/v1/workspaces/{ws}/members/{member}"),
+            Some(json!({ "role": "viewer" })),
+        )
+        .await;
+    }
+    ws
+}
+
+async fn user(env: &Env, admin: &str, id: &str) -> String {
+    let password = format!("{id}-password-1");
+    ok(
+        env,
+        admin,
+        Method::POST,
+        "/cube/v1/users",
+        Some(json!({ "id": id, "name": id, "email": format!("{id}@example.org"),
+                     "password": password })),
+    )
+    .await;
+    login(env, id, &password).await
+}
+
+async fn assign(env: &Env, admin: &str, connection: &str, org: uuid::Uuid) {
+    ok(
+        env,
+        admin,
+        Method::PUT,
+        &format!("/cube/v1/connections/{connection}/organization"),
+        Some(json!({ "organizationId": org })),
+    )
+    .await;
+}
+
+/// Digital (connection `sofiadb`) and ON (connection `ondb`), with their
+/// ids, on a model served from the database.
+async fn two_orgs(store: &cubeserver::rbac::store::Store) -> (Env, String, uuid::Uuid, uuid::Uuid) {
+    let mut env = env_live(store.clone()).await;
+    let mut config = (*env.state.config).clone();
+    config.data_sources.push(("ondb".into(), "postgres".into()));
+    env.state.config = Arc::new(config);
+    env.router = cubeserver::build_app(env.state.clone());
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    create_org(&env, &admin, "Digital").await;
+    create_org(&env, &admin, "ON").await;
+    let digital = store.organization_by_slug("digital").await.unwrap().unwrap().id;
+    let on = store.organization_by_slug("on").await.unwrap().unwrap().id;
+    env.rbac
+        .set_data_source_names(vec!["default".into(), "sofiadb".into(), "ondb".into()]);
+    assign(&env, &admin, "sofiadb", digital).await;
+    assign(&env, &admin, "ondb", on).await;
+    (env, admin, digital, on)
+}
+
+tree_test!(two_organizations_serve_the_same_cube_name, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![
+                put_in(None, "u.yml", CUBE_U),
+                put_in(Some(digital), "a.yml", &titled("a", "A Digital", "sofiadb")),
+                put_in(Some(on), "a.yml", &titled("a", "A ON", "ondb")),
+            ])
+        })
+        .await
+        .unwrap();
+    let ann = user(&env, &admin, "ann").await;
+    let bia = user(&env, &admin, "bia").await;
+    let ws_digital = workspace_with(&env, &admin, digital, "sofiadb", &["ann"]).await;
+    let ws_on = workspace_with(&env, &admin, on, "ondb", &["bia"]).await;
+
+    let (status, meta, _) = get_in_workspace(&env, &ann, &ws_digital, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A Digital"], "{meta}");
+    let (status, meta, _) = get_in_workspace(&env, &bia, &ws_on, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A ON"], "{meta}");
+    // A member of one organization's workspaces needs no header.
+    let (status, meta, _) = get(&env, &bia, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A ON"], "{meta}");
+    // ... and naming their own organization changes nothing.
+    let (status, meta, _) =
+        get_with(&env, &bia, &[("x-cube-organization", "on")], "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A ON"], "{meta}");
+
+    // A platform admin picks the organization, or gets the Platform.
+    let (status, meta, _) =
+        get_with(&env, &admin, &[("x-cube-organization", "on")], "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A ON"], "{meta}");
+    let (status, meta, _) =
+        get_with(&env, &admin, &[("x-cube-organization", "digital")], "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A Digital"], "{meta}");
+    let (status, meta, _) = get(&env, &admin, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert!(titles_of(&meta, "a").is_empty(), "{meta}");
+    assert_eq!(titles_of(&meta, "u").len(), 1, "{meta}");
+    let (status, meta, _) =
+        get_with(&env, &admin, &[("x-cube-organization", "_platform")], "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert!(titles_of(&meta, "a").is_empty(), "{meta}");
+    let (status, _, text) =
+        get_with(&env, &admin, &[("x-cube-organization", "nope")], "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+    // An admin in a workspace gets the workspace's organization.
+    let (status, meta, _) = get_in_workspace(&env, &admin, &ws_on, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A ON"], "{meta}");
+});
+
+tree_test!(member_with_workspaces_in_two_orgs_needs_a_workspace, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![
+                put_in(Some(digital), "a.yml", &titled("a", "A Digital", "sofiadb")),
+                put_in(Some(on), "a.yml", &titled("a", "A ON", "ondb")),
+            ])
+        })
+        .await
+        .unwrap();
+    let ann = user(&env, &admin, "ann").await;
+    let ws_digital = workspace_with(&env, &admin, digital, "sofiadb", &["ann"]).await;
+    workspace_with(&env, &admin, on, "ondb", &["ann"]).await;
+
+    let (status, body, text) = get(&env, &ann, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert_eq!(body["error"], cubeserver::rbac::enforce::WORKSPACE_REQUIRED);
+    let (status, _, text) = get_with(
+        &env,
+        &ann,
+        &[("x-cube-workspace", &ws_digital), ("x-cube-organization", "on")],
+        "/cube/v1/meta",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+    // In a workspace the request is served by that organization.
+    let (status, meta, _) = get_in_workspace(&env, &ann, &ws_digital, "/cube/v1/meta").await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(titles_of(&meta, "a"), ["A Digital"], "{meta}");
+});
+
+tree_test!(moving_a_connection_moves_its_cubes_between_scopes, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    let writer = env.writer.clone().unwrap();
+    writer
+        .write("admin", "seed", |_| {
+            Ok(vec![
+                put_in(None, "u.yml", CUBE_U),
+                put_in(Some(digital), "b.yml", CUBE_B),
+            ])
+        })
+        .await
+        .unwrap();
+    let names = |meta: &Value| -> Vec<String> {
+        meta["cubes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{meta}"))
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let meta_of = |slug: &'static str| {
+        let (env, admin) = (&env, admin.clone());
+        async move {
+            let (status, meta, _) =
+                get_with(env, &admin, &[("x-cube-organization", slug)], "/cube/v1/meta").await;
+            assert_eq!(status, StatusCode::OK, "{slug}: {meta}");
+            names(&meta)
+        }
+    };
+    assert!(meta_of("digital").await.contains(&"b".to_string()));
+    assert!(!meta_of("on").await.contains(&"b".to_string()));
+
+    assign(&env, &admin, "sofiadb", on).await;
+    let id = store
+        .model_rows()
+        .await
+        .unwrap()
+        .files
+        .iter()
+        .find(|f| f.path == "b.yml")
+        .unwrap()
+        .id;
+    writer
+        .write("admin", "move", |_| {
+            Ok(vec![cubeserver::rbac::model_store::ModelChange::Move {
+                id,
+                organization_id: Some(on),
+            }])
+        })
+        .await
+        .unwrap();
+
+    // No restart: both scopes show the move.
+    let on_names = meta_of("on").await;
+    assert!(on_names.contains(&"b".to_string()), "{on_names:?}");
+    assert!(on_names.contains(&"u".to_string()), "{on_names:?}");
+    let digital_names = meta_of("digital").await;
+    assert!(!digital_names.contains(&"b".to_string()), "{digital_names:?}");
+});

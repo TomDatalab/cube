@@ -133,6 +133,7 @@ async fn build_env(store: cubeserver::rbac::store::Store, real_meta: bool, live:
         data_sources: vec![("sofiadb".into(), "postgres".into())],
         ..ServerConfig::default()
     };
+    let scope_paths = runtime.clone();
     let tenants = real_meta.then(|| {
         let cube_config = cubeconfig::CubeConfig::load_or_env(
             "/nonexistent-cube-yml-dir",
@@ -141,13 +142,18 @@ async fn build_env(store: cubeserver::rbac::store::Store, real_meta: bool, live:
                 .with("CUBEJS_DB_TYPE", "postgres"),
         )
         .expect("config from the environment");
-        Arc::new(cubeserver::tenants::TenantRegistry::new(
+        let registry = cubeserver::tenants::TenantRegistry::new(
             Arc::new(cube_config),
             cubeplanner::Dialect::Postgres,
             Some("postgres".to_string()),
             1,
             false,
-        ))
+        );
+        // As `main` does: each scope is reloaded on its newest folder.
+        Arc::new(match scope_paths {
+            Some(runtime) => registry.with_scope_paths(runtime),
+            None => registry,
+        })
     });
     let writer = runtime.as_ref().map(|runtime| {
         Arc::new(cubeserver::rbac::model_writer::ModelWriter::new(
