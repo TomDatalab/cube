@@ -6,6 +6,7 @@ import {
 import { useMemo, useRef, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
+import { IdText } from './IdText';
 import {
   AdminApi, OrgRole, PAGE_SIZE, Role, ROLES, Rule, RuleGrant,
 } from './api';
@@ -228,7 +229,7 @@ export function RulesTab({ api }: Props) {
                 </Typography.Text>
               ),
             },
-            { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
+            { title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
             { title: 'Type', dataIndex: 'type' },
             {
               title: 'Role',

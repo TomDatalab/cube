@@ -1,9 +1,10 @@
 import {
-  Alert, Button, Input, message, Popconfirm, Space, Table, Typography,
+  Alert, Button, Input, message, Popconfirm, Space, Table,
 } from 'antd';
 import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
+import { IdText } from './IdText';
 import {
   AdminApi, Connection, PAGE_SIZE, Workspace, WorkspaceListing,
 } from './api';
@@ -123,7 +124,7 @@ export function WorkspacesTab({ api, organization, onOrganizationChange }: Props
         columns={[
           { title: 'Workspace', dataIndex: 'name' },
           { title: 'Organization', dataIndex: 'organizationName' },
-          { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
+          { title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
           {
             title: '',
             align: 'right',

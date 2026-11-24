@@ -7,6 +7,7 @@ import {
 } from 'antd';
 import { useState } from 'react';
 
+import { IdText } from './IdText';
 import { AccessModal } from './access/AccessModal';
 import { AdminApi, PAGE_SIZE, User } from './api';
 import { AttributesModal } from './AttributesModal';
@@ -174,7 +175,7 @@ export function UsersTab({ api, currentUser }: Props) {
             {
               title: 'Id',
               dataIndex: 'id',
-              render: (id) => <Typography.Text type="secondary" copyable>{id}</Typography.Text>,
+              render: (id) => <IdText id={id} />,
             },
             { title: 'Name', dataIndex: 'name', render: (v) => v || '—' },
             {
@@ -182,7 +183,7 @@ export function UsersTab({ api, currentUser }: Props) {
               dataIndex: 'email',
               // long addresses end in an ellipsis; the whole one is the title
               render: (v) => (v ? (
-                <Typography.Text ellipsis={{ tooltip: v }} style={{ maxWidth: 190 }}>
+                <Typography.Text ellipsis={{ tooltip: v }} style={{ maxWidth: 110 }}>
                   {v}
                 </Typography.Text>
               ) : '—'),

@@ -4,6 +4,7 @@ import {
 import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
+import { IdText } from './IdText';
 import {
   AdminApi, Connection, DataSource, moveTargets, Organization, PAGE_SIZE, Workspace,
 } from './api';
@@ -76,7 +77,7 @@ export function OrganizationsTab({ api, onShowWorkspaces }: Props) {
         onRow={(o) => ({ onClick: () => setSelected(o), style: { cursor: 'pointer' } })}
         columns={[
           { title: 'Organization', dataIndex: 'name' },
-          { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
+          { title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
           { title: 'Created by', dataIndex: 'createdBy', render: (v) => v || '—' },
           { title: 'Created', dataIndex: 'createdAt', render: (v) => new Date(v).toLocaleString() },
         ]}

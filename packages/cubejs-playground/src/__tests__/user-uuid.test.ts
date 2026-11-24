@@ -147,7 +147,9 @@ describe('the Users tab', () => {
     expect(headers).toContain('Id');
     const row = document.body.querySelector('tbody tr:not([aria-hidden])')!;
     expect(row.textContent).toContain('ana');
-    expect(row.textContent).toContain(UUID);
+    // Shown short so it does not widen the table; copied whole.
+    expect(row.textContent).toContain(UUID.slice(0, 8));
+    expect(row.textContent).not.toContain(UUID);
     // "you" is found by id, not by name.
     expect(row.textContent).toContain('you');
   });

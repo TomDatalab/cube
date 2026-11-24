@@ -6,6 +6,7 @@ import {
 import { useEffect, useState } from 'react';
 
 import { useIsMounted } from '../../hooks';
+import { IdText } from './IdText';
 import {
   AdminApi, ModelCube, OrgRole, Permission, PERMISSION_LABELS, PERMISSIONS, restrictionSummary, withImplied,
 } from './api';
@@ -183,7 +184,7 @@ export function RolesTab({ api }: Props) {
           locale={{ emptyText: 'No roles yet: rules use the built-in ones below' }}
           columns={[
             { title: 'Role', dataIndex: 'name' },
-            { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
+            { title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
             {
               title: 'Permissions',
               dataIndex: 'permissions',
@@ -244,6 +245,8 @@ export function RolesTab({ api }: Props) {
         dataSource={BUILTIN}
         columns={[
           { title: 'Role', dataIndex: 'name' },
+          // A built-in role has no UUID: rules name it by this key.
+          { title: 'Id', dataIndex: 'name', render: (v) => <IdText id={v} /> },
           {
             title: 'Permissions',
             dataIndex: 'permissions',
