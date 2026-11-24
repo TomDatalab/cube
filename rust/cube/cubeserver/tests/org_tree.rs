@@ -40,6 +40,7 @@ macro_rules! tree_test {
 const CUBE_A: &str = "cubes:\n  - name: a\n    sql_table: t\n    data_source: sofiadb\n    measures:\n      - name: n\n        type: count\n    dimensions:\n      - name: id\n        sql: id\n        type: number\n";
 const CUBE_B: &str = "cubes:\n  - name: b\n    sql_table: t\n    data_source: sofiadb\n    measures:\n      - name: n\n        type: count\n";
 const CUBE_U: &str = "cubes:\n  - name: u\n    sql_table: t\n    data_source: default\n    measures:\n      - name: n\n        type: count\n";
+const VIEW_V: &str = "views:\n  - name: v\n    cubes:\n      - join_path: a\n        includes: \"*\"\n";
 const CUBE_ORDERS: &str = "cubes:\n  - name: orders\n    sql_table: t\n    data_source: default\n    measures:\n      - name: n\n        type: count\n";
 
 tree_test!(tree_is_for_platform_admins, |store| {
@@ -373,6 +374,7 @@ tree_test!(meta_groups_split_the_visible_cubes_by_organization, |store| {
             Ok(vec![
                 put_in(None, "u.yml", CUBE_U),
                 put_in(Some(digital), "a.yml", CUBE_A),
+                put_in(Some(digital), "v.yml", VIEW_V),
                 put_in(Some(on), "b.yml", &titled("b", "B", "ondb")),
             ])
         })
@@ -385,7 +387,7 @@ tree_test!(meta_groups_split_the_visible_cubes_by_organization, |store| {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     let platform = json!({ "slug": "_platform", "id": null, "name": "Platform", "errors": 0,
-                           "dataSources": [{ "name": "default", "cubes": ["u"] }] });
+                           "dataSources": [{ "name": "default", "cubes": ["u"] }], "views": [] });
     let groups = |org: Option<&'static str>| {
         let (env, admin) = (&env, admin.clone());
         async move {
@@ -402,14 +404,16 @@ tree_test!(meta_groups_split_the_visible_cubes_by_organization, |store| {
         json!({ "groups": [
             platform,
             { "slug": "digital", "id": digital, "name": "Digital", "errors": 0,
-              "dataSources": [{ "name": "sofiadb", "cubes": ["a"] }] },
+              "dataSources": [{ "name": "default", "cubes": ["v"] },
+                              { "name": "sofiadb", "cubes": ["a"] }],
+              "views": ["v"] },
         ] })
     );
     assert_eq!(
         groups(Some("on")).await,
         json!({ "groups": [
             platform,
-            { "slug": "on", "id": on, "name": "ON", "errors": 1, "dataSources": [] },
+            { "slug": "on", "id": on, "name": "ON", "errors": 1, "dataSources": [], "views": [] },
         ] })
     );
     // Without a header the admin is served the Platform's model.
@@ -475,7 +479,7 @@ tree_test!(meta_groups_show_a_member_only_their_workspace, |store| {
         body,
         json!({ "groups": [
             { "slug": "digital", "id": digital.id, "name": "Digital", "errors": null,
-              "dataSources": [{ "name": "sofiadb", "cubes": ["a"] }] },
+              "dataSources": [{ "name": "sofiadb", "cubes": ["a"] }], "views": [] },
         ] }),
         "meta: {meta}"
     );
@@ -909,9 +913,9 @@ tree_test!(meta_groups_in_org_scope, |store| {
         body,
         json!({ "groups": [
             { "slug": "_platform", "id": null, "name": "Platform", "errors": 0,
-              "dataSources": [{ "name": "default", "cubes": ["u"] }] },
+              "dataSources": [{ "name": "default", "cubes": ["u"] }], "views": [] },
             { "slug": "on", "id": on, "name": "ON", "errors": 0,
-              "dataSources": [{ "name": "ondb", "cubes": ["a"] }] },
+              "dataSources": [{ "name": "ondb", "cubes": ["a"] }], "views": [] },
         ] })
     );
 });

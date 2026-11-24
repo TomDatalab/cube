@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  cubeCountByDataSource, fetchMetaGroups, MetaGroup, mergeMetaGroups, sectionsOf, worthGrouping,
+  cubeCountByDataSource, fetchMetaGroups, MetaGroup, mergeMetaGroups, otherScopeSections,
+  rememberCubeToOpen, sectionsOf, takeCubeToOpen, worthGrouping,
 } from '../shared/meta-groups';
 
 const groups: MetaGroup[] = [
@@ -101,5 +102,56 @@ describe('mergeMetaGroups', () => {
     expect(merged.map((g) => g.slug)).toEqual(['_platform', 'digital', 'on']);
     expect(merged[0]).toEqual(platform);
     expect(cubeCountByDataSource(merged)).toEqual({ default: 2, example: 1, sofiadb: 2 });
+  });
+});
+
+describe('otherScopeSections', () => {
+  const [platform, digital, on] = groups;
+  const bossa: MetaGroup = {
+    slug: 'bossa',
+    id: 'o3',
+    name: 'bossa',
+    errors: 0,
+    dataSources: [{ name: 'bossa_sfdb', cubes: ['eventos', 'resumo'] }],
+    views: ['resumo'],
+  };
+  const all = [platform, digital, on, bossa];
+
+  it('lists the organizations the current model does not serve', () => {
+    const sections = otherScopeSections(all, [platform, digital], 'cubes');
+    expect(sections.map((s) => s.slug)).toEqual(['on', 'bossa']);
+    expect(sections[1]).toEqual({
+      slug: 'bossa',
+      name: 'bossa',
+      errors: 0,
+      count: 1,
+      dataSources: [{ name: 'bossa_sfdb', names: ['eventos'] }],
+    });
+  });
+
+  it('never lists the Platform, which every model serves', () => {
+    expect(otherScopeSections(all, [], 'cubes').map((s) => s.slug)).toEqual(['digital', 'on', 'bossa']);
+  });
+
+  it('keeps cubes and views apart', () => {
+    const sections = otherScopeSections(all, [platform], 'views');
+    // Digital and ON have no views but errors, which the admin still sees.
+    expect(sections.map((s) => [s.slug, s.count])).toEqual([['digital', 0], ['on', 0], ['bossa', 1]]);
+  });
+
+  it('filters by name and then drops what has nothing to show', () => {
+    const sections = otherScopeSections(all, [platform], 'cubes', 'even');
+    expect(sections.map((s) => [s.slug, s.dataSources])).toEqual([
+      ['digital', [{ name: 'sofiadb', names: ['eventos'] }]],
+      ['bossa', [{ name: 'bossa_sfdb', names: ['eventos'] }]],
+    ]);
+  });
+});
+
+describe('cube to open', () => {
+  it('is taken once', () => {
+    rememberCubeToOpen('eventos');
+    expect(takeCubeToOpen()).toBe('eventos');
+    expect(takeCubeToOpen()).toBeNull();
   });
 });

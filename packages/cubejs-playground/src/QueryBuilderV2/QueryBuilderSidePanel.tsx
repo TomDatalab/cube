@@ -13,6 +13,8 @@ import {
   TooltipProvider,
   ResizablePanel,
   ClearIcon,
+  CubeIcon,
+  ViewIcon,
 } from '@cube-dev/ui-kit';
 import {
   ReactNode,
@@ -33,10 +35,15 @@ import {
 } from '@ant-design/icons';
 import { Select } from 'antd';
 
-import { sectionsOf, worthGrouping } from '../shared/meta-groups';
+import { useRbac } from '../hooks/rbac';
+import { useWorkspace } from '../hooks/workspace';
+import { chooseOrganizationScope } from '../shared/auth';
+import {
+  otherScopeSections, rememberCubeToOpen, ScopeSection, sectionsOf, takeCubeToOpen, worthGrouping,
+} from '../shared/meta-groups';
 
 import {
-  useDebouncedValue, useFilteredCubes, useEvent, useLocalStorage, useMetaGroups,
+  useAllScopeGroups, useDebouncedValue, useFilteredCubes, useEvent, useLocalStorage, useMetaGroups,
 } from './hooks';
 import { useQueryBuilderContext } from './context';
 import { EditQueryDialogForm } from './components/EditQueryDialogForm';
@@ -96,7 +103,38 @@ const DataSourceLabel = tasty(Text, {
   },
 });
 
+// A cube or view of an organization whose model is not the current one.
+const OtherScopeButton = tasty(Button, {
+  qa: 'OtherScopeCube',
+  type: 'secondary',
+  size: 'small',
+  styles: {
+    radius: 0,
+    border: '#clear',
+    color: '#dark-03',
+    fill: {
+      '': '#clear',
+      hovered: '#purple.08',
+      pressed: '#purple.12',
+    },
+    padding: '.75x 1x',
+    display: 'grid',
+    gridTemplateColumns: '16px 1fr',
+    gap: '1x',
+    placeItems: 'center start',
+    textAlign: 'left',
+    preset: 't3',
+  },
+});
+
 const ORGANIZATION_FILTER_KEY = 'QueryBuilder:Sidebar:organization';
+
+// Where a section sorts: by its place among every scope's groups; one they
+// do not name (Other) last.
+function orderOf(order: string[], slug: string): number {
+  const at = order.indexOf(slug);
+  return at === -1 ? order.length : at;
+}
 
 type Props = {
   defaultSelectedType?: 'cubes' | 'views';
@@ -138,6 +176,16 @@ export function QueryBuilderSidePanel({
   // The cubes by organization and data source, as the Data Model page shows
   // them; `null` when the API cannot say (the list is then flat).
   const metaGroups = useMetaGroups(apiUrl, apiToken, meta);
+  // A platform admin outside a workspace sees every organization: the
+  // current model's cubes to query, the others' by name, each opening in its
+  // organization's model (a query reads one model).
+  const rbac = useRbac();
+  const workspace = useWorkspace();
+  const allScopeGroups = useAllScopeGroups(
+    apiUrl,
+    rbac.enabled && Boolean(rbac.session?.user.platformAdmin) && !workspace,
+    meta
+  );
   const [organizationFilter, setOrganizationFilter] = useLocalStorage<string>(
     ORGANIZATION_FILTER_KEY,
     ''
@@ -285,6 +333,23 @@ export function QueryBuilderSidePanel({
   ),
   [selectedType, meta, cubes.length, views.length]);
 
+  // Back from switching to another organization's model to query one of
+  // its cubes: open that cube, on its tab, once the meta has it.
+  useEffect(() => {
+    if (!cubesAndViews.length) {
+      return;
+    }
+    const name = takeCubeToOpen();
+    const item = name ? cubesAndViews.find((c) => c.name === name) : undefined;
+    if (!item) {
+      return;
+    }
+    setSelectedType(item.type === 'view' ? 'views' : 'cubes');
+    setViewMode('all');
+    setOpenCubes((open) => new Set([...open, item.name]));
+    setScrollToCubeName(item.name);
+  }, [cubesAndViews.length]);
+
   const searchInput = useMemo(() => {
     const description = `Search ${selectedType === 'cubes' ? 'cubes' : 'views'} and members`;
 
@@ -383,13 +448,23 @@ export function QueryBuilderSidePanel({
     ? sectionsOf(cubesOrViews, metaGroups, { keepEmpty: true })
       .filter((section) => section.items.length || (section.errors ?? 0) > 0)
     : [];
-  const isGrouped = worthGrouping(allSections);
+  const allOtherSections = allScopeGroups && metaGroups
+    ? otherScopeSections(allScopeGroups, metaGroups, selectedType)
+    : [];
+  const isGrouped = worthGrouping(allSections) || allOtherSections.length > 0;
+  // The organizations in the order of every scope's groups (Platform first),
+  // then whatever only the current model has (Other).
+  const sectionOrder = (allScopeGroups || []).map((group) => group.slug);
+  const filterSections = [
+    ...allSections.map((section) => ({ slug: section.slug, name: section.name, count: section.items.length })),
+    ...allOtherSections,
+  ].sort((a, b) => orderOf(sectionOrder, a.slug) - orderOf(sectionOrder, b.slug));
   const activeOrganization = isGrouped
-    && allSections.some((section) => section.slug === organizationFilter)
+    && filterSections.some((section) => section.slug === organizationFilter)
     ? organizationFilter
     : '';
 
-  const organizationSelect = isGrouped && allSections.length > 1 ? (
+  const organizationSelect = isGrouped && filterSections.length > 1 ? (
     <Select
       size="small"
       data-qa="OrganizationFilter"
@@ -398,9 +473,9 @@ export function QueryBuilderSidePanel({
       style={{ width: '100%' }}
       options={[
         { value: '', label: 'All organizations' },
-        ...allSections.map((section) => ({
+        ...filterSections.map((section) => ({
           value: section.slug,
-          label: `${section.name} (${section.items.length})`,
+          label: `${section.name} (${section.count})`,
         })),
       ]}
       onChange={(value: string) => setOrganizationFilter(value)}
@@ -460,6 +535,114 @@ export function QueryBuilderSidePanel({
         && (section.items.length || (!narrowed && (section.errors ?? 0) > 0))
       ))
       : null;
+    // Another model's cubes are not in the query, so "query" mode shows none.
+    const otherSections = allScopeGroups && metaGroups && viewMode !== 'query'
+      ? otherScopeSections(allScopeGroups, metaGroups, selectedType, appliedFilterString)
+        .filter((section) => !activeOrganization || section.slug === activeOrganization)
+      : [];
+
+    const renderErrors = (errors: number) => (errors > 0 ? (
+      <TooltipProvider
+        title={`${errors} problem${errors === 1 ? '' : 's'} in this organization's model: its rejected cubes are left out. See Data Model.`}
+      >
+        <Text color="#danger-text" aria-label={`${errors} problems`}>
+          <WarningOutlined /> {errors}
+        </Text>
+      </TooltipProvider>
+    ) : <span />);
+
+    const renderOtherSection = (section: ScopeSection) => {
+      const isOpen = narrowed || !closedGroups.has(section.slug);
+      const Icon = selectedType === 'views' ? ViewIcon : CubeIcon;
+      return (
+        <Flex key={section.slug} gap="1bw" flow="column" data-qa="OrganizationSection" data-qaval={section.slug}>
+          <GroupButton
+            qaVal={section.slug}
+            aria-expanded={isOpen}
+            onPress={() => toggleGroup(section.slug)}
+          >
+            <ChevronIcon direction={isOpen ? 'bottom' : 'right'} />
+            <Text ellipsis preset="t3m" title={section.name}>{section.name}</Text>
+            {renderErrors(section.errors ?? 0)}
+            <CountBadge radius="1r">{section.count}</CountBadge>
+          </GroupButton>
+          {isOpen && !section.count ? (
+            <DataSourceLabel>Nothing to query here</DataSourceLabel>
+          ) : null}
+          {isOpen ? section.dataSources.map((ds) => (
+            <Flex key={ds.name} gap="1bw" flow="column">
+              {ds.name && selectedType === 'cubes' ? (
+                <DataSourceLabel title={`Data source ${ds.name}`}>
+                  <DatabaseOutlined /> {ds.name} · {ds.names.length}
+                </DataSourceLabel>
+              ) : null}
+              {ds.names.map((name) => (
+                <TooltipProvider
+                  key={name}
+                  title={`Opens ${section.name}'s model to query ${name}`}
+                  placement="right"
+                >
+                  <OtherScopeButton
+                    qaVal={name}
+                    onPress={() => {
+                      rememberCubeToOpen(name);
+                      chooseOrganizationScope(section.slug);
+                    }}
+                  >
+                    <Icon color="#dark-03" />
+                    <Text ellipsis>{name}</Text>
+                  </OtherScopeButton>
+                </TooltipProvider>
+              ))}
+            </Flex>
+          )) : null}
+        </Flex>
+      );
+    };
+
+    const renderSection = (section: NonNullable<typeof sections>[number]) => {
+      const isOpen = narrowed || !closedGroups.has(section.slug);
+      const errors = section.errors ?? 0;
+      return (
+        <Flex key={section.key} gap="1bw" flow="column" data-qa="OrganizationSection" data-qaval={section.slug}>
+          <GroupButton
+            qaVal={section.slug}
+            aria-expanded={isOpen}
+            onPress={() => toggleGroup(section.slug)}
+          >
+            <ChevronIcon direction={isOpen ? 'bottom' : 'right'} />
+            <Text ellipsis preset="t3m" title={section.name}>{section.name}</Text>
+            {renderErrors(errors)}
+            <CountBadge radius="1r">{section.items.length}</CountBadge>
+          </GroupButton>
+          {isOpen && !section.items.length ? (
+            <DataSourceLabel>Nothing to query here</DataSourceLabel>
+          ) : null}
+          {isOpen && selectedType === 'cubes'
+            ? section.dataSources.map((ds) => (
+              <Flex key={ds.name} gap="1bw" flow="column">
+                {ds.name ? (
+                  <DataSourceLabel title={`Data source ${ds.name}`}>
+                    <DatabaseOutlined /> {ds.name} · {ds.items.length}
+                  </DataSourceLabel>
+                ) : null}
+                {ds.items.map(renderCube)}
+              </Flex>
+            ))
+            : null}
+          {isOpen && selectedType === 'views' ? section.items.map(renderCube) : null}
+        </Flex>
+      );
+    };
+
+    // The current model's sections and the other organizations' in one
+    // order: Platform, then the organizations by name, then Other.
+    const ordered = sections
+      ? [
+        ...sections.map((section) => ({ slug: section.slug, node: renderSection(section) })),
+        ...otherSections.map((section) => ({ slug: section.slug, node: renderOtherSection(section) })),
+      ].sort((a, b) => orderOf(sectionOrder, a.slug) - orderOf(sectionOrder, b.slug))
+      : null;
 
     return (
       <Flex gap="1bw" flow="column" padding="0 0 2x 0">
@@ -479,49 +662,8 @@ export function QueryBuilderSidePanel({
               }}
             />
           ))}
-        {sections
-          ? sections.map((section) => {
-            const isOpen = narrowed || !closedGroups.has(section.slug);
-            const errors = section.errors ?? 0;
-            return (
-              <Flex key={section.key} gap="1bw" flow="column" data-qa="OrganizationSection" data-qaval={section.slug}>
-                <GroupButton
-                  qaVal={section.slug}
-                  aria-expanded={isOpen}
-                  onPress={() => toggleGroup(section.slug)}
-                >
-                  <ChevronIcon direction={isOpen ? 'bottom' : 'right'} />
-                  <Text ellipsis preset="t3m" title={section.name}>{section.name}</Text>
-                  {errors > 0 ? (
-                    <TooltipProvider
-                      title={`${errors} problem${errors === 1 ? '' : 's'} in this organization's model: its rejected cubes are left out. See Data Model.`}
-                    >
-                      <Text color="#danger-text" aria-label={`${errors} problems`}>
-                        <WarningOutlined /> {errors}
-                      </Text>
-                    </TooltipProvider>
-                  ) : <span />}
-                  <CountBadge radius="1r">{section.items.length}</CountBadge>
-                </GroupButton>
-                {isOpen && !section.items.length ? (
-                  <DataSourceLabel>Nothing to query here</DataSourceLabel>
-                ) : null}
-                {isOpen && selectedType === 'cubes'
-                  ? section.dataSources.map((ds) => (
-                    <Flex key={ds.name} gap="1bw" flow="column">
-                      {ds.name ? (
-                        <DataSourceLabel title={`Data source ${ds.name}`}>
-                          <DatabaseOutlined /> {ds.name} · {ds.items.length}
-                        </DataSourceLabel>
-                      ) : null}
-                      {ds.items.map(renderCube)}
-                    </Flex>
-                  ))
-                  : null}
-                {isOpen && selectedType === 'views' ? section.items.map(renderCube) : null}
-              </Flex>
-            );
-          })
+        {ordered
+          ? ordered.map((entry) => entry.node)
           : shownCubes.map(renderCube)}
       </Flex>
     );
@@ -534,6 +676,7 @@ export function QueryBuilderSidePanel({
     memberViewType,
     selectedType,
     metaGroups,
+    allScopeGroups,
     isGrouped,
     activeOrganization,
     [...closedGroups.values()].join(),

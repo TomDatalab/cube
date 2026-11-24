@@ -1,7 +1,8 @@
 //! `GET /v1/meta/groups` — the cubes and views `/v1/meta` shows the caller,
 //! grouped by the organization whose folder holds them and, inside it, by
 //! data source. The Playground's query builder and its Data Source page list
-//! them this way.
+//! them this way. `views` names the group's views (they are in `dataSources`
+//! too), so a list of another scope's groups can tell cubes from views.
 //!
 //! It answers whoever may read `/v1/meta`, with the same scope and the same
 //! workspace: it only groups what that meta shows, so it names no cube the
@@ -54,6 +55,18 @@ pub async fn groups(
     let visible: Vec<&str> = meta["cubes"]
         .as_array()
         .map(|cubes| cubes.iter().filter_map(|c| c["name"].as_str()).collect())
+        .unwrap_or_default();
+    // Which of them are views: a list built from the groups alone (another
+    // organization's, which the caller's meta does not hold) tells them apart.
+    let views: std::collections::HashSet<&str> = meta["cubes"]
+        .as_array()
+        .map(|cubes| {
+            cubes
+                .iter()
+                .filter(|c| c["type"] == "view")
+                .filter_map(|c| c["name"].as_str())
+                .collect()
+        })
         .unwrap_or_default();
 
     // A name is unique within a scope, not across them: each cube is looked
@@ -147,6 +160,14 @@ pub async fn groups(
             },
             (slug, None) => (Value::Null, slug.to_string()),
         };
+        let mut group_views: Vec<&str> = sources
+            .values()
+            .flatten()
+            .map(String::as_str)
+            .filter(|name| views.contains(name))
+            .collect();
+        group_views.sort_unstable();
+        let group_views = json!(group_views);
         let data_sources: Vec<Value> = sources
             .into_iter()
             .map(|(ds, mut cubes)| {
@@ -159,7 +180,7 @@ pub async fn groups(
             rank(&slug),
             name.to_lowercase(),
             json!({ "slug": slug, "id": id, "name": name, "errors": errors,
-                    "dataSources": data_sources }),
+                    "dataSources": data_sources, "views": group_views }),
         ));
     }
     groups.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
