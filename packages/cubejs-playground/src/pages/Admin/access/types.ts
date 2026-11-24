@@ -1,4 +1,4 @@
-export type AccessNodeKind = 'user' | 'organization' | 'workspace' | 'connection';
+export type AccessNodeKind = 'user' | 'organization' | 'rule' | 'role' | 'workspace' | 'connection' | 'cube';
 
 export type AccessNode = {
   id: string;
@@ -6,6 +6,8 @@ export type AccessNode = {
   name: string;
   organizationId: string | null;
   notes: string[];
+  /** A role's permissions; empty for the other kinds. Absent from older servers. */
+  details?: string[];
 };
 
 export type AccessEdge = {

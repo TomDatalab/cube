@@ -172,6 +172,81 @@ describe('access layout', () => {
   });
 });
 
+function kindGraph(cubes: number): AccessGraph {
+  const cs = Array.from({ length: cubes }, (_, i) => node(`cube:org:c${i}`, 'cube', O));
+  const nodes = [
+    node('user:ana', 'user'),
+    node(OID, 'organization'),
+    node('rule:r', 'rule', O),
+    { ...node('role:r1', 'role', O), details: ['manage', 'query'] },
+    node('workspace:w', 'workspace', O),
+    node('connection:db', 'connection', O),
+    node('connection:db2', 'connection', O),
+    ...cs,
+  ];
+  return {
+    user: { id: 'ana', name: null, disabled: false },
+    platformAdmin: false,
+    nodes,
+    edges: [
+      { from: 'user:ana', to: 'rule:r', label: 'member', kind: 'direct' },
+      { from: 'rule:r', to: 'role:r1', label: 'role', kind: 'direct' },
+      { from: 'rule:r', to: 'workspace:w', label: 'Role', kind: 'direct' },
+      { from: 'workspace:w', to: 'connection:db', label: 'released', kind: 'derived' },
+      ...cs.map((c) => ({ from: 'connection:db', to: c.id, label: 'serves', kind: 'derived' as const })),
+    ],
+    grants: [{ resource: 'connection:db', permission: 'query', reasons: [] }],
+  };
+}
+
+describe('rules, roles and cubes', () => {
+  it('columns follow user, organization, rule, role, workspace, connection, cube', () => {
+    const g = kindGraph(2);
+    const x = (out: ReturnType<typeof layout>, id: string) => out.nodes.find((n) => n.id === id)!.x;
+    const out = layout(g, new Set());
+    const xs = [
+      'user:ana', OID, 'rule:r', 'role:r1', 'workspace:w', 'connection:db', 'cube:org:c0',
+    ].map((id) => x(out, id));
+    expect(xs).toEqual([20, 400, 780, 1160, 1540, 1920, 2300]);
+    g.nodes = g.nodes.filter((n) => n.kind !== 'rule');
+    const without = layout(g, new Set());
+    expect(x(without, 'role:r1')).toBe(780);
+  });
+
+  it('a connection with more than COLLAPSE_AT cubes collapses them', () => {
+    const g = kindGraph(COLLAPSE_AT + 16);
+    const out = layout(g, new Set());
+    const db = out.nodes.find((n) => n.id === 'connection:db')!;
+    expect(db.foldable).toBe(true);
+    expect(db.hiddenCount).toBe(COLLAPSE_AT + 16);
+    expect(out.nodes.some((n) => n.kind === 'cube')).toBe(false);
+    expect(out.edges.some((e) => e.to.startsWith('cube:'))).toBe(false);
+    expect(layout(g, new Set(['connection:db'])).nodes.filter((n) => n.kind === 'cube')).toHaveLength(COLLAPSE_AT + 16);
+    const next = expandFor(g, out.nodes, ['user:ana', 'connection:db', 'cube:org:c3'], new Set());
+    expect([...next]).toEqual(['connection:db']);
+  });
+
+  it('a cube of two connections is hidden only while all of them are collapsed', () => {
+    const g = kindGraph(COLLAPSE_AT + 1);
+    g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
+    expect(layout(g, new Set()).nodes.some((n) => n.id === 'cube:org:c0')).toBe(false);
+    // db2 serves one cube, so it never folds.
+    expect(layout(g, new Set()).nodes.find((n) => n.id === 'connection:db2')!.foldable).toBe(false);
+    expect(layout(g, new Set()).nodes.some((n) => n.id === 'cube:org:c0')).toBe(false);
+  });
+
+  it('a role node lists its details as permission lines', () => {
+    const out = layout(kindGraph(1), new Set());
+    expect(out.nodes.find((n) => n.id === 'role:r1')!.permLines).toEqual(['manage · query']);
+  });
+
+  it('marks only access-less connections and cubes dim', () => {
+    const out = layout(kindGraph(1), new Set());
+    const dim = out.nodes.filter((n) => n.dim).map((n) => n.id).sort();
+    expect(dim).toEqual(['connection:db2', 'cube:org:c0']);
+  });
+});
+
 describe('dragging nodes', () => {
   it('tells a click from a drag', () => {
     expect(movedBeyond(2, 3)).toBe(false);

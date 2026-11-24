@@ -33,8 +33,11 @@ const NODE_BG = 'var(--pg-graph-node, #fff)';
 const KIND_COLOR: Record<AccessNodeKind, string> = {
   user: 'var(--pg-graph-user, #1f1d3a)',
   organization: 'var(--pg-graph-organization, #2f7d6d)',
+  rule: 'var(--pg-graph-rule, #8a5cc2)',
+  role: 'var(--pg-graph-role, #c2477a)',
   workspace: 'var(--pg-graph-workspace, #6a66f0)',
   connection: 'var(--pg-graph-connection, #b8641e)',
+  cube: 'var(--pg-graph-cube, #3a7bb8)',
 };
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -121,9 +124,9 @@ function Node({
   const rows = nodeRows(node);
   const clip = `access-clip-${index}`;
   const tx = node.x + 16;
-  const pill = node.hiddenCount ? `+${node.hiddenCount} workspaces` : 'collapse';
+  const pill = node.hiddenCount ? `+${node.hiddenCount} ${node.kind === 'connection' ? 'cubes' : 'workspaces'}` : 'collapse';
   return (
-    <g onPointerDown={onPointerDown} style={{ cursor: grabbing ? 'grabbing' : 'grab' }}>
+    <g onPointerDown={onPointerDown} opacity={node.dim ? 0.55 : 1} style={{ cursor: grabbing ? 'grabbing' : 'grab' }}>
       <clipPath id={clip}>
         <rect x={node.x + 8} y={node.y} width={NODE_W - 16} height={node.h} />
       </clipPath>
