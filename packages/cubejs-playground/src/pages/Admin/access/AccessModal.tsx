@@ -208,6 +208,10 @@ export function AccessModal({ api, user, onClose }: Props) {
   // How far nodes were dragged from their place, by node id; kept across
   // expand/collapse, so a dragged node moves with its column.
   const [positions, setPositions] = useState<Positions>({});
+  // The offsets when the current node drag began: edges are routed around
+  // the boxes as they were then, so only the dragged node's edges follow
+  // the pointer; null when no node is being dragged.
+  const [routedOn, setRoutedOn] = useState<Positions | null>(null);
   // Null until the graph is first fitted into the viewport.
   const [view, setView] = useState<View | null>(null);
   const [svg, setSvg] = useState<SVGSVGElement | null>(null);
@@ -223,6 +227,7 @@ export function AccessModal({ api, user, onClose }: Props) {
     setExpanded(new Set());
     setActive(null);
     setPositions({});
+    setRoutedOn(null);
     setView(null);
     if (!userId) {
       return undefined;
@@ -244,9 +249,10 @@ export function AccessModal({ api, user, onClose }: Props) {
       return null;
     }
     const nodes = applyPositions(drawn.nodes, positions);
-    const geometry = edgeGeometry(nodes, drawn.edges);
+    const obstacles = routedOn ? applyPositions(drawn.nodes, routedOn) : nodes;
+    const geometry = edgeGeometry(nodes, drawn.edges, obstacles);
     return { nodes, geometry, box: bounds(nodes, geometry) };
-  }, [drawn, positions]);
+  }, [drawn, positions, routedOn]);
 
   function fit() {
     const width = viewport.current?.clientWidth || 0;
@@ -309,6 +315,7 @@ export function AccessModal({ api, user, onClose }: Props) {
     e.stopPropagation();
     svg.setPointerCapture(e.pointerId);
     const v = view || IDENTITY;
+    setRoutedOn(node ? positions : null);
     setDrag({
       pointerId: e.pointerId,
       node: node?.id,
@@ -355,6 +362,8 @@ export function AccessModal({ api, user, onClose }: Props) {
       flip(drag.node);
     }
     setDrag(null);
+    // Dropped: every edge is routed around the boxes where they now are.
+    setRoutedOn(null);
   }
 
   function flip(parentId: string) {

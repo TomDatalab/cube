@@ -271,15 +271,15 @@ const CLEARANCE = 6;
  * between, an entry and an exit at the height of the gap (between two boxes,
  * above the first or below the last) nearest to where the edge would pass.
  */
-function route(from: LaidOutNode, to: LaidOutNode, nodes: LaidOutNode[]): Point[] {
+function route(from: LaidOutNode, to: LaidOutNode, obstacles: LaidOutNode[]): Point[] {
   const start = { x: from.x + NODE_W, y: from.y + from.h / 2 };
   const end = { x: to.x, y: to.y + to.h / 2 };
   if (end.x <= start.x) {
     return [start, end];
   }
   // The boxes between the two, grouped into columns (overlapping x ranges).
-  const between = nodes
-    .filter((n) => n !== from && n !== to && n.x < end.x && n.x + NODE_W > start.x)
+  const between = obstacles
+    .filter((n) => n.id !== from.id && n.id !== to.id && n.x < end.x && n.x + NODE_W > start.x)
     .sort((a, b) => a.x - b.x);
   const columns: { x1: number; x2: number; boxes: LaidOutNode[] }[] = [];
   between.forEach((n) => {
@@ -329,9 +329,15 @@ function cubic(t: number, a: number, b: number, c: number, d: number) {
 /**
  * The path of each edge between its nodes (wherever they are), and its label:
  * on the curve just before the target, pushed down off any label it would
- * cover.
+ * cover. Edges go around the boxes of `obstacles` (the nodes by default);
+ * while a node is dragged the caller passes the nodes as they were when the
+ * drag began, so edges that only pass the dragged box keep their path.
  */
-export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGeometry[] {
+export function edgeGeometry(
+  nodes: LaidOutNode[],
+  edges: LaidOutEdge[],
+  obstacles: LaidOutNode[] = nodes
+): EdgeGeometry[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const out: EdgeGeometry[] = [];
   edges.forEach((edge) => {
@@ -340,7 +346,7 @@ export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGe
     if (!from || !to) {
       return;
     }
-    const points = route(from, to, nodes);
+    const points = route(from, to, obstacles);
     // Curves between columns, level lines across the columns it skips.
     let d = `M${points[0].x},${points[0].y}`;
     for (let i = 1; i < points.length; i++) {

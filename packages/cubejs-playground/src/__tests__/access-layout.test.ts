@@ -175,6 +175,26 @@ describe('access layout', () => {
     expect(geo.points[0]).toEqual({ x: out.nodes[0].x + NODE_W, y: out.nodes[0].y + out.nodes[0].h / 2 });
   });
 
+  it('while a node is dragged, only its own edges move', () => {
+    // Routing around the boxes as they were when the drag began: an edge
+    // that merely passes the dragged box keeps its path until the drop.
+    const g = graphWith(3);
+    g.edges.push({ from: 'user:ana', to: 'workspace:w1', label: 'editor', kind: 'direct' });
+    const out = layout(g, new Set());
+    const before = applyPositions(out.nodes, {});
+    const during = applyPositions(out.nodes, { [OID]: { x: 0, y: 60 } });
+    const id = (e: { edge: { from: string; to: string } }) => `${e.edge.from}>${e.edge.to}`;
+    const still = new Map(edgeGeometry(before, out.edges).map((e) => [id(e), e.points]));
+    const frozen = edgeGeometry(during, out.edges, before);
+    frozen.forEach((e) => {
+      if (e.edge.from === OID || e.edge.to === OID) {
+        expect(e.points).not.toEqual(still.get(id(e)));
+      } else {
+        expect(e.points).toEqual(still.get(id(e)));
+      }
+    });
+  });
+
   it('draws an edge between neighbouring columns as one curve', () => {
     const out = layout(graphWith(2), new Set());
     const geo = edgeGeometry(out.nodes, out.edges).find((e) => e.edge.from === 'user:ana')!;
