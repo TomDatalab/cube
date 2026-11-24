@@ -132,7 +132,9 @@ pub struct AccessCube {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphUser {
+    /// The UUID.
     pub id: String,
+    pub username: String,
     pub name: Option<String>,
     pub disabled: bool,
 }
@@ -255,7 +257,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             .user
             .name
             .clone()
-            .unwrap_or_else(|| input.user.id.clone()),
+            .unwrap_or_else(|| input.user.username.clone()),
         organization_id: None,
         notes: vec![],
         details: vec![],
@@ -263,6 +265,7 @@ pub fn build(input: &AccessInput) -> AccessGraph {
     let mut graph = AccessGraph {
         user: GraphUser {
             id: input.user.id.clone(),
+            username: input.user.username.clone(),
             name: input.user.name.clone(),
             disabled: input.user.disabled,
         },
@@ -829,6 +832,7 @@ mod tests {
             disabled,
             created_at: Utc::now(),
             password_changed_at: Utc::now(),
+            username_changed_at: None,
         }
     }
 

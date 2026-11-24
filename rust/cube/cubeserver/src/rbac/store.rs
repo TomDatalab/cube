@@ -76,6 +76,9 @@ pub struct User {
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub password_changed_at: DateTime<Utc>,
+    /// When the username last changed; `None` if it never did. A token that
+    /// names the user by username (`sub`, legacy) issued before it is void.
+    pub username_changed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,8 +321,8 @@ pub struct StoredObject {
     pub updated_by: String,
 }
 
-const USER_COLS: &str =
-    "id, name, email, password_hash, disabled, created_at, password_changed_at, username";
+const USER_COLS: &str = "id, name, email, password_hash, disabled, created_at, \
+                         password_changed_at, username, username_changed_at";
 const OBJECT_COLS: &str = "id, workspace_id, type, name, content_type, content, version, \
                            created_at, created_by, updated_at, updated_by";
 
@@ -333,6 +336,7 @@ fn user_from(r: &Row) -> User {
         created_at: r.get(5),
         password_changed_at: r.get(6),
         username: r.get(7),
+        username_changed_at: r.get(8),
     }
 }
 
@@ -1000,6 +1004,14 @@ impl Store {
         self.user_by_username(key).await
     }
 
+    /// The users with these ids, in no particular order; unknown ids are
+    /// left out.
+    pub async fn users_by_ids(&self, ids: &[String]) -> Result<Vec<User>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {USER_COLS} FROM users WHERE id = ANY($1)");
+        Ok(c.query(&sql, &[&ids]).await?.iter().map(user_from).collect())
+    }
+
     /// Whether the one-off data migration `name` completed (`rbac_migrations`).
     pub async fn migration_applied(&self, name: &str) -> Result<bool, StoreError> {
         let c = self.conn().await?;
@@ -1150,7 +1162,9 @@ impl Store {
         let c = self.conn().await?;
         let sql = format!(
             "UPDATE users SET username = COALESCE($2, username), name = COALESCE($3, name), \
-             email = COALESCE($4, email), disabled = COALESCE($5, disabled) \
+             email = COALESCE($4, email), disabled = COALESCE($5, disabled), \
+             username_changed_at = CASE WHEN $2::text IS NOT NULL AND $2 <> username \
+                                        THEN now() ELSE username_changed_at END \
              WHERE id = $1 RETURNING {USER_COLS}"
         );
         Ok(

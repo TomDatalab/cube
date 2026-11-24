@@ -24,7 +24,6 @@ use super::workspaces::{visible_workspace, workspace_ref, ROLES};
 use super::{body, caller, existing_user, resource_id, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::rbac::identity::validate_user_id;
 use crate::rbac::store::{Rule, RuleListing, RuleRole, Workspace};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
@@ -525,7 +524,8 @@ async fn read_members(rbac: &Rbac, rule: Uuid) -> Result<Vec<String>, ApiError> 
     Ok(members)
 }
 
-/// → `{members: [{user}]}`: `view` on the workspace.
+/// → `{members: [{user, username}]}`, `user` the UUID: `view` on the
+/// workspace.
 pub async fn members(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -533,10 +533,11 @@ pub async fn members(
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let (rule, _) = visible_rule(rbac, &id, "view", user).await?;
-    let members: Vec<Value> = read_members(rbac, rule.id)
-        .await?
+    let members = read_members(rbac, rule.id).await?;
+    let names = super::workspaces::usernames(rbac, &members).await?;
+    let members: Vec<Value> = members
         .into_iter()
-        .map(|user| json!({ "user": user }))
+        .map(|user| json!({ "username": names.get(&user), "user": user }))
         .collect();
     Ok(Json(json!({ "members": members })))
 }
@@ -554,7 +555,9 @@ pub async fn add_member(
         .touch(&[membership(rule.id, &member.id)])
         .await
         .map_err(authz_error)?;
-    Ok(Json(json!({ "user": member.id })))
+    Ok(Json(
+        json!({ "user": member.id, "username": member.username }),
+    ))
 }
 
 /// `manage` on the workspace: the user leaves the rule.
@@ -565,9 +568,9 @@ pub async fn remove_member(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let (rule, _) = visible_rule(rbac, &id, "manage", user).await?;
-    validate_user_id(&member)?;
+    let member = super::named_user(rbac, &member).await?;
     rbac.authz
-        .delete(&[membership(rule.id, &member)])
+        .delete(&[membership(rule.id, &member.id)])
         .await
         .map_err(authz_error)?;
     Ok(StatusCode::NO_CONTENT)

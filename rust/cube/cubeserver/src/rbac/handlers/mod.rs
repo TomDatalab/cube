@@ -284,16 +284,26 @@ pub(crate) fn resource_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
-/// A user to grant something to: 400 when the id is malformed or the user
-/// is disabled, 404 when unknown.
-pub(crate) async fn existing_user(rbac: &Rbac, id: &str) -> Result<User, ApiError> {
-    validate_user_id(id)?;
-    let user = rbac
-        .store
-        .user(id)
+/// The user a path segment or body field names, by UUID or by username
+/// (`Store::resolve_user`): 400 when the key is malformed, 404 when no user
+/// has it. Everything downstream takes the returned `User.id`.
+pub(crate) async fn named_user(rbac: &Rbac, key: &str) -> Result<User, ApiError> {
+    validate_user_id(key)?;
+    rbac.store
+        .resolve_user(key)
         .await
         .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(|| ApiError::not_found("User not found"))?;
+        .ok_or_else(user_not_found)
+}
+
+pub(crate) fn user_not_found() -> ApiError {
+    ApiError::not_found("User not found")
+}
+
+/// A user to grant something to ([`named_user`]): also 400 when the user
+/// is disabled.
+pub(crate) async fn existing_user(rbac: &Rbac, key: &str) -> Result<User, ApiError> {
+    let user = named_user(rbac, key).await?;
     if user.disabled {
         return Err(ApiError::bad_request("User is disabled"));
     }

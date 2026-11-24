@@ -204,3 +204,8 @@ BEGIN
 
     INSERT INTO rbac_migrations (name) VALUES ('users_uuid');
 END $$;
+
+-- When the username last changed (NULL: never). A token naming the user by
+-- username (a legacy `sub`) issued before it no longer authenticates, so a
+-- name given up by a rename cannot be picked up by someone else's old token.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changed_at timestamptz;

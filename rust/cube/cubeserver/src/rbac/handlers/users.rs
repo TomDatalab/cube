@@ -1,7 +1,8 @@
 //! User management, for platform admins: `/v1/users`.
 //!
-//! Responses carry `{id, name, email, disabled, createdAt}`, never the
-//! password hash.
+//! Responses carry `{id, username, name, email, disabled, createdAt}`
+//! (`id` the UUID), never the password hash. A user in the path is named by
+//! UUID or by username.
 
 use std::collections::BTreeSet;
 
@@ -17,14 +18,12 @@ use uuid::Uuid;
 
 use super::organizations::user_ref;
 use super::workspaces::workspace_ref;
-use super::{body, rbac_of, store_error, SearchParams};
+use super::{body, named_user, rbac_of, store_error, user_not_found, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::data_source_types;
 use crate::rbac::access::{self, AccessInput};
-use crate::rbac::identity::{
-    hash_password, user_token_claims, validate_new_username, validate_user_id,
-};
+use crate::rbac::identity::{hash_password, user_token_claims, validate_new_username};
 use crate::rbac::restrictions::{validated_attributes, Attributes};
 use crate::rbac::store::{NewUser, StoreError, User};
 use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
@@ -33,7 +32,9 @@ use crate::services::RequestContext;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateUser {
-    id: String,
+    username: Option<String>,
+    /// The username, as the field was called before users had a UUID.
+    id: Option<String>,
     name: Option<String>,
     email: Option<String>,
     password: String,
@@ -42,6 +43,7 @@ pub struct CreateUser {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateUser {
+    username: Option<String>,
     name: Option<String>,
     email: Option<String>,
     disabled: Option<bool>,
@@ -56,6 +58,7 @@ pub struct SetPassword {
 fn view(user: &User) -> Value {
     json!({
         "id": user.id,
+        "username": user.username,
         "name": user.name,
         "email": user.email,
         "disabled": user.disabled,
@@ -75,7 +78,8 @@ fn require_admin<'a>(state: &'a AppState, ctx: &RequestContext) -> Result<&'a Rb
     Ok(rbac)
 }
 
-/// `{id, name?, email?, password}` → 201 with the user.
+/// `{username, name?, email?, password}` → 201 with the user. `id` is
+/// accepted in place of `username` (its old name).
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -83,20 +87,27 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_new_username(&request.id)?;
+    let username = match (request.username, request.id) {
+        (Some(u), Some(id)) if u != id => {
+            return Err(ApiError::bad_request("Give username or id, not both"))
+        }
+        (Some(u), _) | (None, Some(u)) => u,
+        (None, None) => return Err(ApiError::bad_request("The username is required")),
+    };
+    validate_new_username(&username)?;
 
     let password = request.password;
     let password_hash = rbac.run_hashing(move || hash_password(&password)).await??;
     let user = rbac
         .store
         .create_user(&NewUser {
-            username: request.id,
+            username,
             name: request.name,
             email: request.email,
             password_hash,
         })
         .await
-        .map_err(|e| store_error(e, "A user with this id already exists"))?;
+        .map_err(|e| store_error(e, "A user with this username already exists"))?;
     Ok((StatusCode::CREATED, Json(view(&user))))
 }
 
@@ -121,7 +132,9 @@ pub(crate) async fn list(
     }
 }
 
-/// `{name?, email?, disabled?}`: disabling locks the user out at once.
+/// `{username?, name?, email?, disabled?}`: disabling locks the user out at
+/// once. A rename keeps the user's id, and so their access and their tokens;
+/// a username taken by another user is 409.
 pub async fn update(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -130,19 +143,39 @@ pub async fn update(
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_user_id(&id)?;
-    if request.name.is_none() && request.email.is_none() && request.disabled.is_none() {
+    let user = named_user(rbac, &id).await?;
+    if request.username.is_none()
+        && request.name.is_none()
+        && request.email.is_none()
+        && request.disabled.is_none()
+    {
         return Err(ApiError::bad_request("Nothing to update"));
     }
-    // Disabling the only admin would lock user management out for good.
-    if request.disabled == Some(true) && ctx.user.as_deref() == Some(id.as_str()) {
+    if let Some(username) = &request.username {
+        validate_new_username(username)?;
+    }
+    // Disabling the only admin would lock user management out for good. The
+    // path may name the caller by username: compare ids.
+    if request.disabled == Some(true) && ctx.user.as_deref() == Some(user.id.as_str()) {
         return Err(ApiError::bad_request("You cannot disable your own account"));
     }
     let user = rbac
         .store
-        .update_user(&id, None, request.name, request.email, request.disabled)
+        .update_user(
+            &user.id,
+            request.username,
+            request.name,
+            request.email,
+            request.disabled,
+        )
         .await
-        .map_err(|e| store_error(e, "This email is already in use"))?
+        .map_err(|e| match e {
+            StoreError::Conflict(c) if c.contains("username") => ApiError::new(
+                StatusCode::CONFLICT,
+                "A user with this username already exists",
+            ),
+            e => store_error(e, "This email is already in use"),
+        })?
         .ok_or_else(user_not_found)?;
     Ok(Json(view(&user)))
 }
@@ -156,12 +189,12 @@ pub async fn set_password(
 ) -> Result<StatusCode, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_user_id(&id)?;
+    let user = named_user(rbac, &id).await?;
 
     let password = request.password;
     let hash = rbac.run_hashing(move || hash_password(&password)).await??;
     rbac.store
-        .set_password_hash(&id, &hash)
+        .set_password_hash(&user.id, &hash)
         .await
         .map_err(|e| match e {
             StoreError::NotFound => user_not_found(),
@@ -178,13 +211,7 @@ pub async fn issue_token(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    validate_user_id(&id)?;
-    let user = rbac
-        .store
-        .user(&id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(user_not_found)?;
+    let user = named_user(rbac, &id).await?;
     if user.disabled {
         return Err(ApiError::new(StatusCode::CONFLICT, "The user is disabled"));
     }
@@ -196,17 +223,6 @@ pub async fn issue_token(
     })))
 }
 
-/// The user in the path, or 404.
-async fn known_user(rbac: &Rbac, id: &str) -> Result<(), ApiError> {
-    validate_user_id(id)?;
-    rbac.store
-        .user(id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .map(|_| ())
-        .ok_or_else(user_not_found)
-}
-
 /// → `{attributes: {name: [values]}}`. Platform admins only.
 pub(crate) async fn attributes(
     State(state): State<AppState>,
@@ -214,10 +230,10 @@ pub(crate) async fn attributes(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    known_user(rbac, &id).await?;
+    let user = named_user(rbac, &id).await?;
     let attributes = rbac
         .store
-        .user_attributes(&id)
+        .user_attributes(&user.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     Ok(Json(json!({ "attributes": attributes })))
@@ -232,10 +248,10 @@ pub(crate) async fn set_attributes(
     request: Result<Json<AttributesBody>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    known_user(rbac, &id).await?;
+    let user = named_user(rbac, &id).await?;
     let attributes = validated_attributes(body(request)?.attributes)?;
     rbac.store
-        .set_user_attributes(&id, &attributes)
+        .set_user_attributes(&user.id, &attributes)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     Ok(Json(json!({ "attributes": attributes })))
@@ -254,13 +270,8 @@ pub(crate) async fn access(
     Path(id): Path<String>,
 ) -> Result<Json<access::AccessGraph>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    validate_user_id(&id)?;
-    let user = rbac
-        .store
-        .user(&id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(user_not_found)?;
+    let user = named_user(rbac, &id).await?;
+    let id = user.id.clone();
     let platform_admin = rbac.is_platform_admin(&id).await?;
     let mut input = AccessInput {
         user,
@@ -472,8 +483,4 @@ fn access_cubes(index: &crate::model_index::ModelIndex) -> Vec<access::AccessCub
             }
         })
         .collect()
-}
-
-fn user_not_found() -> ApiError {
-    ApiError::not_found("User not found")
 }

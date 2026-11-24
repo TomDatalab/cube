@@ -800,7 +800,8 @@ db_test!(user_listing_never_shows_password_hashes, |store| {
     let admin = admin_token(&env).await;
     let (status, created) = create_user_as(&env, &admin, "ann", "ann-password-1").await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    assert_eq!(created["id"], "ann");
+    assert_eq!(created["username"], "ann");
+    assert!(cubeserver::rbac::store::is_uuid(created["id"].as_str().unwrap()), "{created}");
     assert_eq!(created["disabled"], json!(false));
 
     let (status, list) = send(
@@ -816,7 +817,7 @@ db_test!(user_listing_never_shows_password_hashes, |store| {
         .as_array()
         .unwrap()
         .iter()
-        .map(|u| u["id"].as_str().unwrap())
+        .map(|u| u["username"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["admin", "ann"]);
 
@@ -1365,7 +1366,7 @@ db_test!(role_change_replaces_the_old_role, |store| {
     assert_eq!(status, StatusCode::OK, "{members}");
     assert_eq!(
         members,
-        json!({ "members": [{ "user": "bia", "role": "viewer" }] })
+        json!({ "members": [{ "user": uuid_of(env, "bia").await, "username": "bia", "role": "viewer" }] })
     );
     assert!(!env.authz.check(&ws, "edit", &uuid_of(env, "bia").await).await.unwrap());
     assert!(env.authz.check(&ws, "view", &uuid_of(env, "bia").await).await.unwrap());
@@ -3945,7 +3946,7 @@ db_test!(
             inner.clone(),
             env.rbac.clone(),
         ));
-        let ids = user_ids(env, &["bia", "caio"]).await;
+        let ids = user_ids(env, &["bia", "caio", ADMIN]).await;
         let ctx = |user: &str, platform_admin: bool| RequestContext {
             request_id: "req-1-span-1".into(),
             user: Some(ids[user].clone()),
@@ -4736,7 +4737,7 @@ db_test!(users_search_and_paging, |store| {
         .as_array()
         .unwrap()
         .iter()
-        .map(|u| u["id"].as_str().unwrap())
+        .map(|u| u["username"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["bia"]);
     assert_eq!(list["total"], 1);
@@ -4869,7 +4870,8 @@ db_test!(access_graph_is_for_platform_admins, |store| {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     let (status, body) = access_graph(&s.env, &s.admin, "ana").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["user"]["id"], "ana");
+    assert_eq!(body["user"]["id"], json!(uuid_of(&s.env, "ana").await));
+    assert_eq!(body["user"]["username"], "ana");
     assert_eq!(body["platformAdmin"], false);
 });
 
@@ -5143,7 +5145,10 @@ db_test!(
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{members}");
-        assert_eq!(members["members"], json!([{ "user": "bia" }]));
+        assert_eq!(
+            members["members"],
+            json!([{ "user": uuid_of(env, "bia").await, "username": "bia" }])
+        );
 
         // A new type is only a label: the role stays.
         let (status, body) =
@@ -7773,3 +7778,434 @@ async fn backfill_fills_existing_rows() {
     db.drop_db().await;
     result.unwrap();
 }
+
+// ---- users named by UUID or username ----
+
+async fn patch_user(env: &Env, token: &str, user: &str, body: Value) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::PATCH,
+        &format!("/cube/v1/users/{user}"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+db_test!(paths_take_the_uuid_or_the_username, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let bia = uuid_of(env, "bia").await;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+
+    // /users/:id/...
+    for key in [bia.as_str(), "bia"] {
+        for (method, path, body) in [
+            (Method::GET, format!("/cube/v1/users/{key}/attributes"), None),
+            (
+                Method::PUT,
+                format!("/cube/v1/users/{key}/attributes"),
+                Some(json!({ "attributes": { "region": ["south"] } })),
+            ),
+            (Method::GET, format!("/cube/v1/users/{key}/access"), None),
+            (Method::POST, format!("/cube/v1/users/{key}/tokens"), None),
+            (
+                Method::PUT,
+                format!("/cube/v1/users/{key}/password"),
+                Some(json!({ "password": "bia-password-2" })),
+            ),
+            (
+                Method::PATCH,
+                format!("/cube/v1/users/{key}"),
+                Some(json!({ "name": "Bia" })),
+            ),
+        ] {
+            let (status, body) = send(&env.router, method.clone(), &path, Some(&s.admin), body).await;
+            assert!(status.is_success(), "{method} {path}: {status} {body}");
+        }
+    }
+    let (_, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/users/{bia}/access"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(body["user"]["id"], json!(bia));
+    assert_eq!(body["user"]["username"], "bia");
+
+    // A member set by username is removed by UUID, and the other way round;
+    // SpiceDB names the UUID either way.
+    let user_ref = || ObjectRef::new("user", bia.clone());
+    let workspace = ObjectRef::new("workspace", ws.clone());
+    assert_eq!(set_role(env, &s.ana, &ws, "bia", "viewer").await, StatusCode::OK);
+    assert!(env.authz.check(&workspace, "view", &bia).await.unwrap());
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{ws}/members/{bia}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!env.authz.check(&workspace, "view", &bia).await.unwrap());
+    assert_eq!(set_role(env, &s.ana, &ws, &bia, "viewer").await, StatusCode::OK);
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{ws}/members/bia"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!env.authz.check(&workspace, "view", &bia).await.unwrap());
+
+    // Rule members.
+    let (status, rule) = create_rule(
+        env,
+        &s.ana,
+        &ws,
+        json!({ "description": "Readers", "type": "t", "role": "viewer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rule}");
+    let rule = rule["id"].as_str().unwrap().to_string();
+    assert_eq!(rule_member(env, &s.ana, Method::PUT, &rule, "bia").await, StatusCode::OK);
+    assert!(env.authz.check(&workspace, "view", &bia).await.unwrap());
+    assert_eq!(
+        rule_member(env, &s.ana, Method::DELETE, &rule, &bia).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(!env.authz.check(&workspace, "view", &bia).await.unwrap());
+
+    // Organization owners, and the owner of a new organization.
+    let org = ObjectRef::new("organization", s.org_a.clone());
+    let owners = format!("/cube/v1/organizations/{}/owners", s.org_a);
+    let (status, _) = send(&env.router, Method::PUT, &format!("{owners}/{bia}"), Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(env.authz.check(&org, "admin", &bia).await.unwrap());
+    let (status, _) = send(&env.router, Method::DELETE, &format!("{owners}/bia"), Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!env.authz.check(&org, "admin", &bia).await.unwrap());
+    for key in [bia.as_str(), "bia"] {
+        let id = create_org(env, &s.admin, &format!("Owned by {key}"), key).await;
+        let owned = ObjectRef::new("organization", id);
+        assert!(env.authz.check(&owned, "admin", &bia).await.unwrap(), "{key}");
+    }
+    let subjects: Vec<String> = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "organization",
+            id: None,
+            relation: Some("owner"),
+            subject: Some(user_ref()),
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.subject.id)
+        .collect();
+    assert_eq!(subjects.len(), 2);
+    assert!(subjects.iter().all(|s| *s == bia), "{subjects:?}");
+
+    // Unknown either way: 404.
+    let ghost = "00000000-0000-4000-8000-000000000000";
+    for key in ["ghost", ghost] {
+        for (method, path, body) in [
+            (Method::GET, format!("/cube/v1/users/{key}/attributes"), None),
+            (Method::GET, format!("/cube/v1/users/{key}/access"), None),
+            (Method::POST, format!("/cube/v1/users/{key}/tokens"), None),
+            (Method::PATCH, format!("/cube/v1/users/{key}"), Some(json!({ "name": "x" }))),
+            (
+                Method::PUT,
+                format!("/cube/v1/workspaces/{ws}/members/{key}"),
+                Some(json!({ "role": "viewer" })),
+            ),
+            (Method::DELETE, format!("/cube/v1/workspaces/{ws}/members/{key}"), None),
+            (Method::PUT, format!("/cube/v1/rules/{rule}/members/{key}"), None),
+            (Method::DELETE, format!("/cube/v1/rules/{rule}/members/{key}"), None),
+            (Method::PUT, format!("{owners}/{key}"), None),
+        ] {
+            let (status, body) = send(&env.router, method.clone(), &path, Some(&s.admin), body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+            assert_eq!(body["error"], "User not found", "{method} {path}");
+        }
+    }
+});
+
+db_test!(renaming_keeps_access_and_tokens, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let bia = uuid_of(env, "bia").await;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+    assert_eq!(set_role(env, &s.ana, &ws, "bia", "editor").await, StatusCode::OK);
+    let (status, _) = send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/users/bia/attributes"),
+        Some(&s.admin),
+        Some(json!({ "attributes": { "region": ["south"] } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let workspace = format!("/cube/v1/workspaces/{ws}");
+
+    // Taken, UUID-shaped or invalid: refused, nothing changes.
+    let (status, body) = patch_user(env, &s.admin, "bia", json!({ "username": "caio" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("username"), "{body}");
+    for bad in ["00000000-0000-4000-8000-000000000000", "Bea", "b e"] {
+        let (status, body) = patch_user(env, &s.admin, "bia", json!({ "username": bad })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    assert_eq!(uuid_of(env, "bia").await, bia);
+
+    let (status, body) = patch_user(env, &s.admin, "bia", json!({ "username": "bea" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], json!(bia));
+    assert_eq!(body["username"], "bea");
+
+    // Same id: her token, her role and her attributes stay.
+    let (status, _) = send(&env.router, Method::GET, &workspace, Some(&s.bia), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/users/bea/attributes"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["attributes"]["region"], json!(["south"]));
+
+    // She logs in with the new name only.
+    let (status, _) = login(&env.router, "bia", "bia-password-1").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = login(&env.router, "bea", "bia-password-1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["id"], json!(bia));
+    assert_eq!(body["user"]["username"], "bea");
+    let bea = body["token"].as_str().unwrap().to_string();
+    let (status, _) = send(&env.router, Method::GET, &workspace, Some(&bea), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The old name is free, and paths by it now 404.
+    let (status, _) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/users/bia/attributes",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = create_user_as(env, &s.admin, "bia", "new-bia-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_ne!(body["id"], json!(bia));
+    let newcomer = login_token(&env.router, "bia", "new-bia-password-1").await;
+    let (status, _) = send(&env.router, Method::GET, &workspace, Some(&newcomer), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{ws}/members"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body["members"],
+        json!([{ "user": bia, "username": "bea", "role": "editor" }])
+    );
+});
+
+db_test!(member_lists_carry_the_username, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let ids = user_ids(env, &["bia", "caio"]).await;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+    assert_eq!(set_role(env, &s.ana, &ws, "bia", "viewer").await, StatusCode::OK);
+    let (status, body) = send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/workspaces/{ws}/members/caio"),
+        Some(&s.ana),
+        Some(json!({ "role": "editor" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({ "user": ids["caio"], "username": "caio", "role": "editor" })
+    );
+
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/workspaces/{ws}/members"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut members = body["members"].as_array().unwrap().clone();
+    members.sort_by_key(|m| m["username"].as_str().unwrap().to_string());
+    assert_eq!(
+        members,
+        vec![
+            json!({ "user": ids["bia"], "username": "bia", "role": "viewer" }),
+            json!({ "user": ids["caio"], "username": "caio", "role": "editor" }),
+        ]
+    );
+
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &ws,
+        json!({ "description": "Readers", "type": "t", "role": "viewer" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    let (status, body) = send(
+        &env.router,
+        Method::PUT,
+        &format!("/cube/v1/rules/{rule}/members/bia"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "user": ids["bia"], "username": "bia" }));
+    let (_, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/rules/{rule}/members"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body["members"],
+        json!([{ "user": ids["bia"], "username": "bia" }])
+    );
+
+    // A user object: {id, username, name, email, disabled, createdAt}.
+    let (_, body) = send(&env.router, Method::GET, "/cube/v1/users", Some(&s.admin), None).await;
+    let bia = body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "bia")
+        .expect("bia listed")
+        .clone();
+    let mut keys: Vec<&str> = bia.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["createdAt", "disabled", "email", "id", "name", "username"]
+    );
+    assert_eq!(bia["id"], json!(ids["bia"]));
+});
+
+db_test!(create_accepts_the_legacy_id_field_as_username, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    let create = |body: Value| send(&env.router, Method::POST, "/cube/v1/users", Some(&admin), Some(body));
+
+    let (status, body) = create(json!({ "username": "dora", "password": "dora-password-1" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["username"], "dora");
+    assert!(cubeserver::rbac::store::is_uuid(body["id"].as_str().unwrap()), "{body}");
+
+    // The old field name: `id` is the username.
+    let (status, body) = create(json!({ "id": "eva", "password": "eva-password-1" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["username"], "eva");
+    assert_eq!(body["id"], json!(uuid_of(&env, "eva").await));
+    login_token(&env.router, "eva", "eva-password-1").await;
+
+    let (status, body) = create(json!({ "id": "eva", "password": "eva-password-1" })).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "A user with this username already exists");
+    let (status, _) = create(json!({ "password": "x-password-1" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) =
+        create(json!({ "username": "fia", "id": "gil", "password": "x-password-1" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = create(json!({
+        "username": "00000000-0000-4000-8000-000000000000",
+        "password": "x-password-1"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+});
+
+db_test!(an_admin_cannot_disable_themself_by_username_either, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let admin = admin_token(&env).await;
+    let id = uuid_of(&env, ADMIN).await;
+    for key in [ADMIN, id.as_str()] {
+        let (status, body) = patch_user(&env, &admin, key, json!({ "disabled": true })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{key}: {body}");
+    }
+    let user = store.user(&id).await.unwrap().unwrap();
+    assert!(!user.disabled);
+});
+
+db_test!(a_legacy_token_is_void_once_its_username_changes, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+    assert_eq!(set_role(env, &s.ana, &ws, "bia", "viewer").await, StatusCode::OK);
+    let workspace = format!("/cube/v1/workspaces/{ws}");
+    let legacy = token_for("bia", now_secs() - 1.0);
+    let (status, _) = send(&env.router, Method::GET, &workspace, Some(&legacy), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = patch_user(env, &s.admin, "bia", json!({ "username": "bea" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta(&env.router, Some(&legacy)).await, StatusCode::UNAUTHORIZED);
+    // Not even under her new name; the UUID token is unaffected.
+    let renamed = token_for("bea", now_secs() - 1.0);
+    assert_eq!(meta(&env.router, Some(&renamed)).await, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&env.router, Method::GET, &workspace, Some(&s.bia), None).await;
+    assert_eq!(status, StatusCode::OK);
+    // A name change that keeps the name is no change.
+    let ana = token_for("ana", now_secs() - 1.0);
+    let (status, _) = patch_user(env, &s.admin, "ana", json!({ "username": "ana" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta(&env.router, Some(&ana)).await, StatusCode::OK);
+});
+
+db_test!(after_a_username_swap_no_legacy_token_acts_as_the_other, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    // `ana` owns organization A; `caio` sees nothing.
+    let org = format!("/cube/v1/organizations/{}", s.org_a);
+    let ana = token_for("ana", now_secs() - 1.0);
+    let caio = token_for("caio", now_secs() - 1.0);
+    let (status, _) = send(&env.router, Method::GET, &org, Some(&ana), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&env.router, Method::GET, &org, Some(&caio), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for (from, to) in [("ana", "tmp"), ("caio", "ana"), ("tmp", "caio")] {
+        let (status, body) = patch_user(env, &s.admin, from, json!({ "username": to })).await;
+        assert_eq!(status, StatusCode::OK, "{from} → {to}: {body}");
+    }
+    // `caio`'s old token names `ana`, now his name, and the other way round:
+    // neither authenticates.
+    for token in [&ana, &caio] {
+        let (status, _) = send(&env.router, Method::GET, &org, Some(token), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // Their UUID tokens still speak for who they were issued to.
+    let (status, _) = send(&env.router, Method::GET, &org, Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&env.router, Method::GET, &org, Some(&s.caio), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+});

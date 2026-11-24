@@ -137,7 +137,8 @@ pub struct Identity {
 /// ou `iat` < password_changed_at.
 ///
 /// `sub` is the user's UUID; a token issued before users had one names the
-/// username instead, and still works until it expires.
+/// username instead, and still works until it expires, unless the username
+/// changed after it was issued (`username_changed_at`).
 pub async fn resolve_identity(
     rbac: &Rbac,
     security_context: &Value,
@@ -167,6 +168,16 @@ pub async fn resolve_identity(
     // `iat` carries milliseconds (see `issue_user_token`), so a login right
     // after a password change is not mistaken for an older token.
     if iat_millis(issued_at) < user.password_changed_at.timestamp_millis() {
+        return Err(unauthenticated());
+    }
+    // A legacy `sub` names the user by username. Once that username changed
+    // it may belong to someone else (a rename, a swap), so such a token
+    // issued before the change is void; one naming the UUID is not affected.
+    if !super::store::is_uuid(sub)
+        && user
+            .username_changed_at
+            .is_some_and(|at| iat_millis(issued_at) < at.timestamp_millis())
+    {
         return Err(unauthenticated());
     }
 

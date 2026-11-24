@@ -76,8 +76,8 @@ pub(crate) async fn visible_organization(
         .ok_or_else(not_found)
 }
 
-/// `{name, owner}` → 201. Platform admins only; the owner must be an
-/// existing, enabled user.
+/// `{name, owner}` → 201. Platform admins only; the owner (UUID or
+/// username) must be an existing, enabled user.
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -91,17 +91,15 @@ pub async fn create(
     }
     let request = body(request)?;
     let name = resource_name(&request.name)?;
+    // `owner` names the user by UUID or by username.
     validate_user_id(&request.owner)?;
     let owner = rbac
         .store
-        .user(&request.owner)
+        .resolve_user(&request.owner)
         .await
-        .map_err(|e| store_error(e, "Conflict"))?;
-    if !owner.is_some_and(|o| !o.disabled) {
-        return Err(ApiError::bad_request(
-            "The owner must be an existing, enabled user",
-        ));
-    }
+        .map_err(|e| store_error(e, "Conflict"))?
+        .filter(|o| !o.disabled)
+        .ok_or_else(|| ApiError::bad_request("The owner must be an existing, enabled user"))?;
 
     // An explicit slug that is taken is a 409. A derived one is recomputed
     // and retried when a concurrent create took it first.
@@ -146,7 +144,7 @@ pub async fn create(
             Relationship {
                 resource,
                 relation: "owner",
-                subject: user_ref(&request.owner),
+                subject: user_ref(&owner.id),
             },
         ])
         .await
@@ -321,7 +319,7 @@ pub async fn remove_owner(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let org = visible_organization(rbac, &id, "admin", user).await?;
-    validate_user_id(&owner)?;
+    let owner = super::named_user(rbac, &owner).await?;
     let owners = rbac
         .authz
         .read(&RelationshipFilter {
@@ -337,21 +335,22 @@ pub async fn remove_owner(
         .filter(|r| r.subject.kind == "user")
         .map(|r| r.subject.id.as_str())
         .collect();
-    if !owners.contains(&owner.as_str()) {
+    if !owners.contains(&owner.id.as_str()) {
         return Err(ApiError::not_found(format!(
-            "{owner} is not an owner of this organization"
+            "{} is not an owner of this organization",
+            owner.username
         )));
     }
     // Remove only while another owner is still there: two concurrent
     // removals cannot leave the organization without owners.
-    let Some(other) = owners.iter().find(|o| **o != owner.as_str()) else {
+    let Some(other) = owners.iter().find(|o| **o != owner.id.as_str()) else {
         return Err(ApiError::bad_request(
             "The last owner of an organization cannot be removed",
         ));
     };
     rbac.authz
         .write(
-            &[Update::Delete(owner_relationship(org.id, &owner))],
+            &[Update::Delete(owner_relationship(org.id, &owner.id))],
             &[Precondition::MustMatch(RelationshipFilter {
                 kind: "organization",
                 id: Some(org.id.to_string()),
