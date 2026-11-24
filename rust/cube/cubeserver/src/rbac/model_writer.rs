@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::model_snapshot::sources;
 use super::model_store::{ModelChange, ModelFile, ModelRows};
 use super::model_runtime::ModelRuntime;
-use super::model_validate::{check_scoped, definitions_in, fixed_count, new_problems, Problem};
+use super::model_validate::{check_each, definitions_in, fixed_count, new_problems, Problem};
 use super::scope::{scopes_touched, ModelScope};
 use std::collections::{BTreeMap, BTreeSet};
 use super::store::{Store, StoreError};
@@ -200,43 +200,44 @@ impl ModelWriter {
                 let after_rows = apply_in_memory(rows, &changes);
                 let after_sources = sources(&after_rows, &slugs);
                 let scopes = touched_scopes(&before_sources, &after_sources, &org_slugs);
-                let before = check_scoped(&before_sources, &scopes, &org_slugs, &self.ctx, policy.as_deref());
-                let after = check_scoped(&after_sources, &scopes, &org_slugs, &self.ctx, policy.as_deref());
-                let problems = new_problems(&before, &after);
-                if !problems.is_empty() {
-                    // Definitions of every scope where a new problem appeared.
-                    let mut defs: BTreeMap<String, String> = BTreeMap::new();
-                    for scope in &scopes {
-                        let scoped = check_scoped(
-                            &after_sources,
-                            &BTreeSet::from([scope.clone()]),
-                            &org_slugs,
-                            &self.ctx,
-                            policy.as_deref(),
-                        );
-                        if problems.iter().any(|p| scoped.problems.contains(p)) {
-                            for (name, file) in definitions_in(&after_sources, scope, &org_slugs) {
-                                match defs.get(&name) {
-                                    Some(old) if *old != file => {
-                                        // Two scopes disagree: owners must not
-                                        // be pointed at either file.
-                                        defs.insert(name, "_conflict".into());
-                                    }
-                                    _ => {
-                                        defs.insert(name, file);
-                                    }
-                                }
+                let before = check_each(&before_sources, &scopes, &org_slugs, &self.ctx, policy.as_deref());
+                let after = check_each(&after_sources, &scopes, &org_slugs, &self.ctx, policy.as_deref());
+                // New problems scope by scope, so one that already existed in
+                // another scope does not hide a new one.
+                let mut problems: BTreeSet<Problem> = BTreeSet::new();
+                let mut defs: BTreeMap<String, String> = BTreeMap::new();
+                let mut fixed_now = 0usize;
+                for (scope, after_check) in &after {
+                    let none = Default::default();
+                    let before_check = before.get(scope).unwrap_or(&none);
+                    fixed_now += fixed_count(before_check, after_check);
+                    let new = new_problems(before_check, after_check);
+                    if new.is_empty() {
+                        continue;
+                    }
+                    problems.extend(new);
+                    for (name, file) in definitions_in(&after_sources, scope, &org_slugs) {
+                        match defs.get(&name) {
+                            Some(old) if *old != file => {
+                                // Two scopes disagree: owners must not be
+                                // pointed at either file.
+                                defs.insert(name, "_conflict".into());
+                            }
+                            _ => {
+                                defs.insert(name, file);
                             }
                         }
                     }
+                }
+                if !problems.is_empty() {
                     return Err(WriteError {
                         status: StatusCode::BAD_REQUEST,
                         message: "A mudança não compila".into(),
-                        problems,
+                        problems: problems.into_iter().collect(),
                         defs,
                     });
                 }
-                fixed = fixed_count(&before, &after);
+                fixed = fixed_now;
                 Ok(changes)
             })
             .await;

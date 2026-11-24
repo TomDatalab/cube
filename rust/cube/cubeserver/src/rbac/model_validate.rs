@@ -60,6 +60,24 @@ pub fn check_scoped(
     Check { problems }
 }
 
+/// `check` of each scope's own sources, kept apart: the same problem in
+/// two scopes is two problems.
+pub fn check_each(
+    sources: &[(String, String)],
+    scopes: &BTreeSet<ModelScope>,
+    org_slugs: &BTreeSet<String>,
+    ctx: &TemplateContext,
+    policy: Option<&OwnershipPolicy>,
+) -> std::collections::BTreeMap<ModelScope, Check> {
+    scopes
+        .iter()
+        .map(|scope| {
+            let c = check(&scope_sources(sources, scope, org_slugs), ctx, policy);
+            (scope.clone(), c)
+        })
+        .collect()
+}
+
 /// `definitions` of the sources one scope compiles.
 pub fn definitions_in(
     sources: &[(String, String)],

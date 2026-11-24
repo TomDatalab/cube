@@ -1045,3 +1045,72 @@ api_test!(duplicate_inside_one_organization_is_still_refused, |store| {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains(&cubeserver::rbac::model_redact::duplicate_name_message("a")), "{body}");
 });
+
+// ---- problems are new scope by scope ----
+
+fn joiner(name: &str, target: &str) -> String {
+    format!(
+        "cubes:\n  - name: {name}\n    sql_table: t\n    data_source: default\n    joins:\n      - name: {target}\n        sql: \"1=1\"\n        relationship: many_to_one\n    measures:\n      - name: n\n        type: count\n"
+    )
+}
+
+api_test!(reassigning_a_cube_a_platform_cube_joins_is_refused, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    let (on, _) = org(&env, &store, &admin, "ON").await;
+    install_policy(&[("digital", &["sofiadb"]), ("on", &["sofiadb"])], &["default"]);
+    // Around the writer: `u` already fails in ON's scope, where `fatos` is missing.
+    let seed = vec![
+        put_in(Some(digital), "fatos.yml", &cube_on("fatos", "sofiadb"), None),
+        put_in(None, "u.yml", &joiner("u", "fatos"), None),
+    ];
+    store.model_write("ann", |_| Ok::<_, WriteError>(seed)).await.unwrap().unwrap();
+    let id = store.model_rows().await.unwrap().files.into_iter().find(|f| f.path == "fatos.yml").unwrap().id;
+    let (status, body) = call(&env, Method::PUT, &admin, &format!("/cube/v1/model/files/{id}/organization"),
+        Some(json!({ "organizationId": on }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["problems"].to_string().contains("u.yml"), "{body}");
+});
+
+api_test!(owner_cannot_join_another_organizations_cube, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (token, digital, _) = owner_org(&env, &store, &admin, "dora", "Digital").await;
+    let (on, _) = org(&env, &store, &admin, "ON").await;
+    install_policy(&[("digital", &["default"]), ("on", &["sofiadb"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![
+            put_in(Some(on), "base.yml", &cube_on("base_on", "sofiadb"), None),
+            put_in(Some(digital), "j.yml", &cube("j"), None),
+        ]))
+        .await
+        .unwrap();
+    let row = store.model_rows().await.unwrap().files.into_iter().find(|f| f.organization_id == Some(digital)).unwrap();
+    let (status, body) = call(&env, Method::PUT, &token,
+        &format!("/cube/v1/organizations/{digital}/model/files/{}", row.id),
+        Some(json!({ "content": joiner("j", "base_on"), "version": row.version }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let text = body.to_string();
+    // The owner's own file is named; ON's files and paths are not.
+    assert!(text.contains("digital/j.yml") && !text.contains("on/"), "{text}");
+});
+
+api_test!(owner_deleting_a_cube_a_platform_cube_joins_is_refused, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (token, on, _) = owner_org(&env, &store, &admin, "olga", "ON").await;
+    install_policy(&[("on", &["sofiadb"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(on), "base.yml", &cube_on("base_on", "sofiadb"), None)]))
+        .await
+        .unwrap();
+    // Around the writer: the platform cube joins a cube of one organization.
+    let seed = vec![put_in(None, "p.yml", &joiner("p", "base_on"), None)];
+    store.model_write("ann", |_| Ok::<_, WriteError>(seed)).await.unwrap().unwrap();
+    let row = store.model_rows().await.unwrap().files.into_iter().find(|f| f.organization_id == Some(on)).unwrap();
+    let (status, body) = call(&env, Method::DELETE, &token,
+        &format!("/cube/v1/organizations/{on}/model/files/{}?version={}", row.id, row.version), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("Sua mudança quebra um cubo de outra organização"), "{body}");
+});
