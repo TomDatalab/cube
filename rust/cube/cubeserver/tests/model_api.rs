@@ -590,12 +590,11 @@ async fn owner_org(
 api_test!(owner_sees_no_foreign_path_on_duplicate, |store| {
     let env = env_live(store.clone()).await;
     let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
-    let (digital, _) = org(&env, &store, &admin, "Digital").await;
     let (token, on, _) = owner_org(&env, &store, &admin, "olga", "ON").await;
-    install_policy(&[("digital", &["default"]), ("on", &["sofiadb"])], &["default"]);
+    install_policy(&[("on", &["sofiadb"])], &["default"]);
     env.writer.clone().unwrap()
         .write("ann", "seed", |_| Ok(vec![
-            put_in(Some(digital), "fatos.yml", &cube("fatos"), None),
+            put_in(None, "fatos.yml", &cube("fatos"), None),
             put_in(Some(on), "x.yml", &cube_on("outro", "sofiadb"), None),
         ]))
         .await
@@ -699,7 +698,9 @@ api_test!(owner_breaking_a_foreign_join_sees_no_names, |store| {
     let row = store.model_rows().await.unwrap().files.into_iter().find(|f| f.organization_id == Some(on)).unwrap();
     let (status, body) = call(&env, Method::DELETE, &token,
         &format!("/cube/v1/organizations/{on}/model/files/{}?version={}", row.id, row.version), None).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // The reference crosses organizations, so ON's scope never sees it: the
+    // delete compiles there and nothing of Digital is mentioned.
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     let text = body.to_string();
     assert!(!text.contains("segredo") && !text.contains("digital"), "{text}");
 });
@@ -984,4 +985,63 @@ api_test!(sync_path_taken_by_a_hand_file_names_it, |store| {
     assert!(body["error"].as_str().unwrap().contains("sofiadb/a.yml"), "{body}");
     assert!(!body["error"].as_str().unwrap().contains("sofiadb/b.yml"), "{body}");
     assert_eq!(store.model_version().await.unwrap(), version);
+});
+
+// ---- names are unique per organization ----
+
+api_test!(same_cube_name_in_two_organizations_is_allowed, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    let (on, _) = org(&env, &store, &admin, "ON").await;
+    install_policy(&[("digital", &["default"]), ("on", &["sofiadb"])], &["default"]);
+    let writer = env.writer.clone().unwrap();
+    writer
+        .write("ann", "a", |_| Ok(vec![put_in(Some(digital), "a.yml", &cube("a"), None)]))
+        .await
+        .unwrap();
+    let r = writer
+        .write("ann", "b", |_| Ok(vec![put_in(Some(on), "a.yml", &cube_on("a", "sofiadb"), None)]))
+        .await;
+    assert!(r.is_ok(), "{r:?}");
+});
+
+api_test!(platform_name_clash_with_an_organization_is_refused, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (digital, _) = org(&env, &store, &admin, "Digital").await;
+    install_policy(&[("digital", &["default"])], &["default"]);
+    let writer = env.writer.clone().unwrap();
+    writer
+        .write("ann", "a", |_| Ok(vec![put_in(Some(digital), "a.yml", &cube("a"), None)]))
+        .await
+        .unwrap();
+    let err = writer
+        .write("ann", "p", |_| Ok(vec![put_in(None, "a.yml", &cube("a"), None)]))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST, "{err:?}");
+    assert_eq!(err.message, "A mudança não compila");
+    assert!(err.problems.iter().any(|p| p.message.contains('a')), "{err:?}");
+});
+
+api_test!(duplicate_inside_one_organization_is_still_refused, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (token, on, _) = owner_org(&env, &store, &admin, "olga", "ON").await;
+    install_policy(&[("on", &["sofiadb"])], &["default"]);
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![
+            put_in(Some(on), "x.yml", &cube_on("a", "sofiadb"), None),
+            put_in(Some(on), "y.yml", &cube_on("b", "sofiadb"), None),
+        ]))
+        .await
+        .unwrap();
+    let rows = store.model_rows().await.unwrap();
+    let row = rows.files.iter().find(|f| f.path == "y.yml").unwrap();
+    let (status, body) = call(&env, Method::PUT, &token,
+        &format!("/cube/v1/organizations/{on}/model/files/{}", row.id),
+        Some(json!({ "content": cube_on("a", "sofiadb"), "version": row.version }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains(&cubeserver::rbac::model_redact::duplicate_name_message("a")), "{body}");
 });

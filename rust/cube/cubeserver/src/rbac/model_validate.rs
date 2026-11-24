@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use cubemodel::ownership::OwnershipPolicy;
+use super::scope::{scope_sources, ModelScope};
 use cubemodel::{ModelLoader, TemplateContext};
 use serde::Serialize;
 
@@ -42,6 +43,30 @@ pub fn check(
         });
     }
     Check { problems }
+}
+
+/// The union of `check` over each scope's own sources.
+pub fn check_scoped(
+    sources: &[(String, String)],
+    scopes: &BTreeSet<ModelScope>,
+    org_slugs: &BTreeSet<String>,
+    ctx: &TemplateContext,
+    policy: Option<&OwnershipPolicy>,
+) -> Check {
+    let mut problems = BTreeSet::new();
+    for scope in scopes {
+        problems.extend(check(&scope_sources(sources, scope, org_slugs), ctx, policy).problems);
+    }
+    Check { problems }
+}
+
+/// `definitions` of the sources one scope compiles.
+pub fn definitions_in(
+    sources: &[(String, String)],
+    scope: &ModelScope,
+    org_slugs: &BTreeSet<String>,
+) -> std::collections::BTreeMap<String, String> {
+    definitions(&scope_sources(sources, scope, org_slugs))
 }
 
 /// Each cube and view name of `sources` with the file defining it.
