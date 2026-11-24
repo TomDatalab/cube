@@ -8317,6 +8317,198 @@ db_test!(a_member_with_no_user_row_can_still_be_removed, |store| {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 });
 
+/// The `user` subjects `kind`/`id` relates by `relation`, sorted.
+async fn subjects_of(
+    env: &Env,
+    kind: &'static str,
+    id: &str,
+    relation: &'static str,
+) -> Vec<String> {
+    let mut ids: Vec<String> = env
+        .authz
+        .read(&RelationshipFilter {
+            kind,
+            id: Some(id.to_string()),
+            relation: Some(relation),
+            subject: None,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.subject.kind == "user")
+        .map(|r| r.subject.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+db_test!(an_orphan_member_wins_over_a_live_namesake, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let ws = workspace_id(env, &s.ana, &s.org_a, "W").await;
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &ws,
+        json!({ "description": "Readers", "type": "t", "role": "viewer" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    // A subject left by a user who is gone, then a live user under its name.
+    let orphan = ObjectRef::new("user", "bob");
+    env.authz
+        .touch(&[
+            Relationship {
+                resource: ObjectRef::new("workspace", ws.clone()),
+                relation: "viewer",
+                subject: orphan.clone(),
+            },
+            Relationship {
+                resource: ObjectRef::new("rule", rule.clone()),
+                relation: "member",
+                subject: orphan.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+    let (status, body) = create_user_as(env, &s.admin, "bob", "bob-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bob = uuid_of(env, "bob").await;
+    assert_eq!(set_role(env, &s.ana, &ws, "bob", "editor").await, StatusCode::OK);
+    assert_eq!(
+        rule_member(env, &s.ana, Method::PUT, &rule, "bob").await,
+        StatusCode::OK
+    );
+
+    // `bob` names the orphan: only it goes.
+    let (status, body) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{ws}/members/bob"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(subjects_of(env, "workspace", &ws, "viewer").await.is_empty());
+    assert_eq!(subjects_of(env, "workspace", &ws, "editor").await, [bob.clone()]);
+    assert!(subjects_of(env, "organization", &s.org_a, "member")
+        .await
+        .contains(&bob));
+    assert_eq!(
+        rule_member(env, &s.ana, Method::DELETE, &rule, "bob").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(subjects_of(env, "rule", &rule, "member").await, [bob.clone()]);
+
+    // With the orphan gone, `bob` is the live user again; so is their UUID.
+    let (status, body) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/workspaces/{ws}/members/{bob}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(subjects_of(env, "workspace", &ws, "editor").await.is_empty());
+    assert!(!subjects_of(env, "organization", &s.org_a, "member")
+        .await
+        .contains(&bob));
+    assert_eq!(
+        rule_member(env, &s.ana, Method::DELETE, &rule, "bob").await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(subjects_of(env, "rule", &rule, "member").await.is_empty());
+});
+
+db_test!(an_owner_with_no_user_row_can_still_be_removed, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let org = format!("/cube/v1/organizations/{}/owners", s.org_a);
+    let ana = uuid_of(env, "ana").await;
+    for orphan in ["00000000-0000-4000-8000-000000000000", "gone-user"] {
+        env.authz
+            .touch(&[Relationship {
+                resource: ObjectRef::new("organization", s.org_a.clone()),
+                relation: "owner",
+                subject: ObjectRef::new("user", orphan),
+            }])
+            .await
+            .unwrap();
+        let (status, body) = send(
+            &env.router,
+            Method::DELETE,
+            &format!("{org}/{orphan}"),
+            Some(&s.ana),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{orphan}: {body}");
+        assert_eq!(subjects_of(env, "organization", &s.org_a, "owner").await, [ana.clone()]);
+    }
+
+    // An orphan `bob` beside a live owner `bob`: `bob` removes the orphan.
+    env.authz
+        .touch(&[Relationship {
+            resource: ObjectRef::new("organization", s.org_a.clone()),
+            relation: "owner",
+            subject: ObjectRef::new("user", "bob"),
+        }])
+        .await
+        .unwrap();
+    let (status, body) = create_user_as(env, &s.admin, "bob", "bob-password-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bob = uuid_of(env, "bob").await;
+    let (status, body) =
+        send(&env.router, Method::PUT, &format!("{org}/bob"), Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) =
+        send(&env.router, Method::DELETE, &format!("{org}/bob"), Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let mut owners = vec![ana.clone(), bob.clone()];
+    owners.sort();
+    assert_eq!(subjects_of(env, "organization", &s.org_a, "owner").await, owners);
+    // Then `bob` is the live owner.
+    let (status, body) =
+        send(&env.router, Method::DELETE, &format!("{org}/bob"), Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(subjects_of(env, "organization", &s.org_a, "owner").await, [ana.clone()]);
+
+    // Not an owner, live or orphan: 404; malformed: 400.
+    for (key, want) in [
+        ("caio", StatusCode::NOT_FOUND),
+        ("nobody", StatusCode::NOT_FOUND),
+        ("Not%20Valid", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _) =
+            send(&env.router, Method::DELETE, &format!("{org}/{key}"), Some(&s.ana), None).await;
+        assert_eq!(status, want, "{key}");
+    }
+});
+
+db_test!(a_user_search_finds_a_pasted_uuid, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let bia = uuid_of(env, "bia").await;
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/users?q={bia}"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [bia.as_str()], "{body}");
+});
+
 db_test!(a_legacy_token_cannot_act_as_a_newcomer_under_the_freed_name, |store| {
     let s = scenario(store).await;
     let env = &s.env;

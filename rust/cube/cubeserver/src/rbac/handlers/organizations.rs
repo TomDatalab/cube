@@ -320,7 +320,10 @@ pub async fn remove_owner(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let org = visible_organization(rbac, &id, "admin", user).await?;
-    let owner = super::named_user(rbac, &owner).await?;
+    // Like a member: an owner subject with no user row is removable too.
+    let key = owner;
+    let owner =
+        super::member_subject(rbac, &key, "organization", org.id.to_string(), &["owner"]).await?;
     let owners = rbac
         .authz
         .read(&RelationshipFilter {
@@ -336,22 +339,21 @@ pub async fn remove_owner(
         .filter(|r| r.subject.kind == "user")
         .map(|r| r.subject.id.as_str())
         .collect();
-    if !owners.contains(&owner.id.as_str()) {
+    if !owners.contains(&owner.as_str()) {
         return Err(ApiError::not_found(format!(
-            "{} is not an owner of this organization",
-            owner.username
+            "{key} is not an owner of this organization"
         )));
     }
     // Remove only while another owner is still there: two concurrent
     // removals cannot leave the organization without owners.
-    let Some(other) = owners.iter().find(|o| **o != owner.id.as_str()) else {
+    let Some(other) = owners.iter().find(|o| **o != owner.as_str()) else {
         return Err(ApiError::bad_request(
             "The last owner of an organization cannot be removed",
         ));
     };
     rbac.authz
         .write(
-            &[Update::Delete(owner_relationship(org.id, &owner.id))],
+            &[Update::Delete(owner_relationship(org.id, &owner))],
             &[Precondition::MustMatch(RelationshipFilter {
                 kind: "organization",
                 id: Some(org.id.to_string()),

@@ -607,6 +607,26 @@ db_test!(
     }
 );
 
+db_test!(search_users_matches_a_pasted_id_exactly, |store, _url| {
+    let ana = store.create_user(&user("ana")).await.unwrap();
+    store.create_user(&user("bia")).await.unwrap();
+    for q in [ana.id.clone(), ana.id.to_uppercase()] {
+        let page = store
+            .search_users(&search(Some(&q), None, 0))
+            .await
+            .unwrap();
+        let names: Vec<_> = page.items.iter().map(|u| u.username.as_str()).collect();
+        assert_eq!(names, ["ana"], "{q}");
+        assert_eq!(page.total, 1);
+    }
+    // Only the whole id: a prefix of it matches no one.
+    let page = store
+        .search_users(&search(Some(&ana.id[..8]), None, 0))
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+});
+
 db_test!(search_treats_like_wildcards_literally, |store, _url| {
     store.create_user(&user("a_b")).await.unwrap();
     store.create_user(&user("axb")).await.unwrap();

@@ -459,7 +459,8 @@ pub async fn remove_member(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let ws = visible_workspace(rbac, &id, "manage", user).await?;
-    let member = super::member_subject(rbac, &member).await?;
+    let member =
+        super::member_subject(rbac, &member, "workspace", ws.id.to_string(), &ROLES).await?;
     rbac.authz
         .delete(&role_relationships(ws.id, &member))
         .await

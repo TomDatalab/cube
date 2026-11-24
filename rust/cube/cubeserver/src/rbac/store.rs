@@ -1042,7 +1042,8 @@ impl Store {
         let q = s.escaped();
         const WHERE: &str = "($1::text IS NULL OR username ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
-             OR email ILIKE '%' || $1 || '%' ESCAPE '\\')";
+             OR email ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR id = lower($1))";
         let sql = format!(
             "SELECT {USER_COLS} FROM users WHERE {WHERE} ORDER BY username LIMIT $2 OFFSET $3"
         );

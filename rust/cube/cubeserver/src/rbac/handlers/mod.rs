@@ -22,7 +22,7 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
 use crate::rbac::store::{Search, StoreError, User};
-use crate::rbac::{unauthenticated, Rbac};
+use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
 use crate::services::RequestContext;
 
 /// Routes reachable without a token (`POST /v1/auth/login`).
@@ -300,12 +300,33 @@ pub(crate) fn user_not_found() -> ApiError {
     ApiError::not_found("User not found")
 }
 
-/// The SpiceDB subject id a member path names, to remove it: the user's
-/// UUID ([`named_user`]), or, when no user has the key, the key itself, so
-/// a subject left without a user row can still be removed. 400 when the key
-/// is malformed.
-pub(crate) async fn member_subject(rbac: &Rbac, key: &str) -> Result<String, ApiError> {
+/// The SpiceDB subject id a member path names, to remove it from `kind`
+/// `id` by one of `relations`. The key itself when that resource relates a
+/// subject with exactly this id: a subject left without a user row (an
+/// orphan) is removed, even when a live user has since taken its name.
+/// Otherwise the user's UUID ([`named_user`]), or the key when no user has
+/// it. 400 when the key is malformed.
+pub(crate) async fn member_subject(
+    rbac: &Rbac,
+    key: &str,
+    kind: &'static str,
+    id: String,
+    relations: &[&str],
+) -> Result<String, ApiError> {
     validate_user_id(key)?;
+    let literal = rbac
+        .authz
+        .read(&RelationshipFilter {
+            kind,
+            id: Some(id),
+            relation: None,
+            subject: Some(organizations::user_ref(key)),
+        })
+        .await
+        .map_err(authz_error)?;
+    if literal.iter().any(|r| relations.contains(&r.relation)) {
+        return Ok(key.to_string());
+    }
     Ok(rbac
         .store
         .resolve_user(key)
