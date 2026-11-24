@@ -139,7 +139,7 @@ describe('the Users tab', () => {
   });
 
   it('shows the username and an Id column with the UUID', async () => {
-    act(() => root.render(createElement(UsersTab, { api, currentUser: UUID })));
+    act(() => root.render(createElement(UsersTab, { api, currentUser: { id: UUID, username: 'ana' } })));
     await flush();
 
     const headers = [...document.body.querySelectorAll('th')].map((th) => th.textContent);
@@ -150,6 +150,30 @@ describe('the Users tab', () => {
     expect(row.textContent).toContain(UUID);
     // "you" is found by id, not by name.
     expect(row.textContent).toContain('you');
+  });
+
+  const self = () => ({
+    you: document.body.querySelector('tbody tr:not([aria-hidden])')!.textContent!.includes('you'),
+    locked: (document.body.querySelector('tbody .ant-switch') as HTMLButtonElement).disabled,
+  });
+
+  it('knows the user of a session stored before ids were UUIDs', async () => {
+    // That session's id is the username.
+    act(() => root.render(createElement(UsersTab, { api, currentUser: { id: 'ana', username: 'ana' } })));
+    await flush();
+
+    expect(self()).toEqual({ you: true, locked: true });
+  });
+
+  it('matches a UUID session by id only', async () => {
+    // Someone else, whose session still carries the name `ana` had.
+    act(() => root.render(createElement(UsersTab, { api, currentUser: { id: UUID2, username: 'ana' } })));
+    await flush();
+    expect(self()).toEqual({ you: false, locked: false });
+
+    act(() => root.render(createElement(UsersTab, { api, currentUser: { id: UUID, username: 'old' } })));
+    await flush();
+    expect(self()).toEqual({ you: true, locked: true });
   });
 
   it('sends the new username to rename, by id', async () => {

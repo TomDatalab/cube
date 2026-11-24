@@ -64,7 +64,7 @@ export function AdminPage() {
             {section === 'users' ? (
               <UsersTab
                 api={api}
-                currentUser={session?.user.id ?? null}
+                currentUser={session ? { id: session.user.id, username: session.user.username } : null}
               />
             ) : null}
           </>

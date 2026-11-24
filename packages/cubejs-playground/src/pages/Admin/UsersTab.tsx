@@ -16,8 +16,25 @@ import { useSearch } from './useSearch';
 
 type Props = {
   api: AdminApi;
-  currentUser: string | null;
+  // The session's user: `id` and `username`.
+  currentUser: { id: string; username: string } | null;
 };
+
+// `is_uuid` in `cubeserver/src/rbac/store.rs`.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Whether `user` is the session's. A session stored before users had UUIDs
+ * carries the username as its id (until the next login): match that one by
+ * username. A UUID session is matched by id only, so a rename cannot point
+ * it at whoever takes the old name.
+ */
+export function isCurrentUser(user: User, current: Props['currentUser']): boolean {
+  if (!current) {
+    return false;
+  }
+  return user.id === current.id || (!UUID.test(current.id) && user.username === current.username);
+}
 
 // `MIN_PASSWORD_LENGTH` in `cubeserver/src/rbac/identity.rs`.
 const MIN_PASSWORD = 10;
@@ -150,7 +167,7 @@ export function UsersTab({ api, currentUser }: Props) {
               render: (username, user) => (
                 <Space size={6}>
                   <Typography.Text copyable>{username}</Typography.Text>
-                  {user.id === currentUser ? <Tag style={{ marginRight: 0 }}>you</Tag> : null}
+                  {isCurrentUser(user, currentUser) ? <Tag style={{ marginRight: 0 }}>you</Tag> : null}
                 </Space>
               ),
             },
@@ -177,7 +194,7 @@ export function UsersTab({ api, currentUser }: Props) {
                   size="small"
                   checked={!user.disabled}
                   // A platform admin cannot lock themselves out.
-                  disabled={user.id === currentUser}
+                  disabled={isCurrentUser(user, currentUser)}
                   onChange={(enabled) => toggle(user, enabled)}
                 />
               ),
