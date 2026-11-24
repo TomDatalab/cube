@@ -30,7 +30,8 @@ fn owner_folder(path: &str) -> Option<&str> {
     path.split_once('/').map(|(folder, _)| folder)
 }
 
-fn in_scope(path: &str, scope: &ModelScope, org_slugs: &BTreeSet<String>) -> bool {
+/// Whether `scope` compiles the file at `path` (relative to the model root).
+pub fn in_scope(path: &str, scope: &ModelScope, org_slugs: &BTreeSet<String>) -> bool {
     let owner = owner_folder(path);
     match scope {
         ModelScope::All => true,

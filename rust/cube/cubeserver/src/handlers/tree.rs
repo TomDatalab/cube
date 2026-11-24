@@ -61,9 +61,19 @@ fn clamp_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(0, MAX_LIMIT)
 }
 
+/// The key of the scope a node's model is compiled in (`_all` for the one
+/// node without RBAC).
+pub(crate) fn scope_key(node: &Owner) -> &str {
+    match node {
+        Owner::Organization(slug) => slug,
+        Owner::Platform => PLATFORM_FOLDER,
+        Owner::Unowned(_) => crate::rbac::scope::ModelScope::All.key(),
+    }
+}
+
 fn counts(index: &ModelIndex, owner: &Owner, connections: usize) -> (Value, usize) {
     let errors = index.rejected.iter().filter(|(o, _)| belongs(owner, o)).count()
-        + index.errors.len();
+        + index.errors_in(scope_key(owner)).count();
     let cubes = index.cubes.iter().filter(|c| belongs(owner, &c.owner)).count();
     let files = index.files.iter().filter(|f| belongs(owner, &f.owner)).count();
     (
@@ -198,6 +208,8 @@ pub(crate) async fn org_detail_for(
     let index = index(state).await?;
     // `None`: no policy, everything is in the one node.
     let mine = |o: &Owner| owner.as_ref().is_none_or(|owner| belongs(owner, o));
+    let all = Owner::Unowned(String::new());
+    let key = scope_key(owner.as_ref().unwrap_or(&all));
 
     let cubes: Vec<Value> = index
         .cubes
@@ -259,7 +271,7 @@ pub(crate) async fn org_detail_for(
         .iter()
         .filter(|(o, _)| mine(o))
         .map(|(_, r)| r)
-        .chain(index.errors.iter())
+        .chain(index.errors_in(key))
         .map(|r| json!({ "file": r.file, "cube": r.cube, "message": r.message }))
         .collect();
     if owner_only {
@@ -268,7 +280,7 @@ pub(crate) async fn org_detail_for(
             .iter()
             .filter(|(o, _)| mine(o))
             .map(|(_, r)| r)
-            .chain(index.errors.iter())
+            .chain(index.errors_in(key))
             .map(|r| crate::rbac::model_validate::Problem {
                 file: r.file.clone(),
                 cube: r.cube.clone(),

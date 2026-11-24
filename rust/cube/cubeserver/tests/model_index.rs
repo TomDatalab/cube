@@ -67,3 +67,69 @@ fn a_new_policy_rebuilds_the_index() {
     assert_eq!(index.rejected.len(), 1);
 }
 
+
+/// Digital's `a` on sofiadb, ON's `a` on ondb, and Platform's `u`.
+fn two_orgs_model() -> (tempfile::TempDir, OwnershipPolicy) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = |ds: &str| format!("cubes:\n  - name: a\n    sql_table: t\n    data_source: {ds}\n    measures:\n      - name: n\n        type: count\n");
+    write(&dir, "digital/a.yml", &a("sofiadb"));
+    write(&dir, "on/a.yml", &a("ondb"));
+    write(&dir, "_platform/u.yml", "cubes:\n  - name: u\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n");
+    let policy = OwnershipPolicy {
+        organizations: [("digital", "sofiadb"), ("on", "ondb")]
+            .iter()
+            .map(|(s, d)| (s.to_string(), [d.to_string()].into_iter().collect()))
+            .collect(),
+        platform: ["default".to_string()].into_iter().collect(),
+        generation: 0,
+    };
+    (dir, policy)
+}
+
+fn write(dir: &tempfile::TempDir, name: &str, content: &str) {
+    let path = dir.path().join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+#[test]
+fn load_scoped_keeps_both_owners() {
+    use cubeserver::model_index::ModelIndex;
+    let (dir, policy) = two_orgs_model();
+    let slugs = policy.organizations.keys().cloned().collect();
+    let index = ModelIndex::load_scoped(dir.path(), Some(&policy), &slugs);
+    let owners_of = |name: &str| -> Vec<Owner> {
+        index.cubes.iter().filter(|c| c.name == name).map(|c| c.owner.clone()).collect()
+    };
+    let mut a_owners = owners_of("a");
+    a_owners.sort_by_key(|o| format!("{o:?}"));
+    assert_eq!(
+        a_owners,
+        [Owner::Organization("digital".into()), Owner::Organization("on".into())],
+        "{:?}",
+        index.errors
+    );
+    // Every scope compiles `_platform/`: its cube is listed once.
+    assert_eq!(owners_of("u"), [Owner::Platform]);
+    let digital = index
+        .cubes
+        .iter()
+        .find(|c| c.owner == Owner::Organization("digital".into()))
+        .unwrap();
+    assert_eq!(digital.data_source, "sofiadb");
+    assert_eq!(index.files.len(), 3);
+    assert!(index.errors.is_empty() && index.rejected.is_empty());
+}
+
+#[test]
+fn a_platform_error_is_kept_per_scope_and_reported_once() {
+    use cubeserver::model_index::ModelIndex;
+    let (dir, policy) = two_orgs_model();
+    write(&dir, "_platform/bad.yml", "cubes:\n  - name: u\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n");
+    let slugs = policy.organizations.keys().cloned().collect();
+    let index = ModelIndex::load_scoped(dir.path(), Some(&policy), &slugs);
+    for key in ["digital", "on", "_platform"] {
+        assert!(index.errors_in(key).count() >= 1, "{key}: {:?}", index.errors);
+    }
+    assert_eq!(index.unique_errors().len(), index.errors_in("on").count(), "{:?}", index.errors);
+}

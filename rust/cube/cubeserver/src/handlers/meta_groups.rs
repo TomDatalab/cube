@@ -20,6 +20,7 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::auth::{assert_api_scope, ForContext};
 use crate::handlers::tree::{belongs, index};
+use crate::rbac::scope::ModelScope;
 use crate::services::RequestContext;
 
 /// The one group without RBAC: every cube is in it.
@@ -55,8 +56,25 @@ pub async fn groups(
         .map(|cubes| cubes.iter().filter_map(|c| c["name"].as_str()).collect())
         .unwrap_or_default();
 
+    // A name is unique within a scope, not across them: each cube is looked
+    // up among the owners of the request's scope only.
+    let scope = state.scope_for(&ctx).await?;
+    let in_scope = |owner: &Owner| match &scope {
+        ModelScope::All => true,
+        ModelScope::Platform => matches!(owner, Owner::Platform | Owner::Unowned(_)),
+        ModelScope::Organization(slug) => match owner {
+            Owner::Platform => true,
+            Owner::Organization(o) => o == slug,
+            Owner::Unowned(_) => false,
+        },
+    };
     let index = index(&state).await?;
-    let indexed: HashMap<&str, _> = index.cubes.iter().map(|c| (c.name.as_str(), c)).collect();
+    let indexed: HashMap<&str, _> = index
+        .cubes
+        .iter()
+        .filter(|c| in_scope(&c.owner))
+        .map(|c| (c.name.as_str(), c))
+        .collect();
 
     // slug -> data source -> cube names.
     let mut grouped: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
@@ -95,12 +113,16 @@ pub async fn groups(
         let rejected = if slug == MODEL_GROUP {
             index.rejected.len()
         } else {
-            index.rejected.iter().filter(|(o, _)| belongs(&owner, o)).count()
+            index
+                .rejected
+                .iter()
+                .filter(|(o, _)| in_scope(o) && belongs(&owner, o))
+                .count()
         };
-        rejected + index.errors.len()
+        rejected + index.errors_in(scope.key()).count()
     };
     if show_errors && state.rbac.is_some() {
-        for (owner, _) in &index.rejected {
+        for (owner, _) in index.rejected.iter().filter(|(o, _)| in_scope(o)) {
             let slug = match owner {
                 Owner::Organization(slug) => slug.clone(),
                 Owner::Platform | Owner::Unowned(_) => PLATFORM_FOLDER.to_string(),

@@ -365,39 +365,55 @@ tree_test!(files_carry_their_organization, |store| {
 });
 
 tree_test!(meta_groups_split_the_visible_cubes_by_organization, |store| {
-    use cubeserver::rbac::store::ConnectionOrigin;
-    let env = env_with(store.clone(), true).await;
-    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
-    create_org(&env, &admin, "Digital").await;
-    create_org(&env, &admin, "ON").await;
-    let digital = store.organization_by_slug("digital").await.unwrap().unwrap();
-    store
-        .create_connection("sofiadb", digital.id, ConnectionOrigin::Assigned)
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![
+                put_in(None, "u.yml", CUBE_U),
+                put_in(Some(digital), "a.yml", CUBE_A),
+                put_in(Some(on), "b.yml", &titled("b", "B", "ondb")),
+            ])
+        })
         .await
         .unwrap();
-    env.rbac.set_data_source_names(vec!["default".into(), "sofiadb".into()]);
-    env.write("digital/a.yml", CUBE_A);
-    env.write("_platform/u.yml", CUBE_U);
-    // sofiadb is not ON's: rejected, counted on ON's group.
-    env.write("on/b.yml", CUBE_B);
-    cubeserver::rbac::ownership::refresh_policy(&env.state).await.unwrap();
+    // ondb is no longer ON's: its cube is rejected, counted on ON's group.
+    assign(&env, &admin, "ondb", digital).await;
 
     let (status, _, _) = send(&env.router, Method::GET, "/cube/v1/meta/groups", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (status, body, _) = get(&env, &admin, "/cube/v1/meta/groups").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    let platform = json!({ "slug": "_platform", "id": null, "name": "Platform", "errors": 0,
+                           "dataSources": [{ "name": "default", "cubes": ["u"] }] });
+    let groups = |org: Option<&'static str>| {
+        let (env, admin) = (&env, admin.clone());
+        async move {
+            let headers: Vec<(&str, &str)> =
+                org.map(|o| ("x-cube-organization", o)).into_iter().collect();
+            let (status, body, _) = get_with(env, &admin, &headers, "/cube/v1/meta/groups").await;
+            assert_eq!(status, StatusCode::OK, "{org:?}: {body}");
+            body
+        }
+    };
+    // Each organization's groups: the Platform's and its own.
     assert_eq!(
-        body,
+        groups(Some("digital")).await,
         json!({ "groups": [
-            { "slug": "_platform", "id": null, "name": "Platform", "errors": 0,
-              "dataSources": [{ "name": "default", "cubes": ["u"] }] },
-            { "slug": "digital", "id": digital.id, "name": "Digital", "errors": 0,
+            platform,
+            { "slug": "digital", "id": digital, "name": "Digital", "errors": 0,
               "dataSources": [{ "name": "sofiadb", "cubes": ["a"] }] },
-            { "slug": "on", "id": store.organization_by_slug("on").await.unwrap().unwrap().id,
-              "name": "ON", "errors": 1, "dataSources": [] },
         ] })
     );
+    assert_eq!(
+        groups(Some("on")).await,
+        json!({ "groups": [
+            platform,
+            { "slug": "on", "id": on, "name": "ON", "errors": 1, "dataSources": [] },
+        ] })
+    );
+    // Without a header the admin is served the Platform's model.
+    assert_eq!(groups(None).await, json!({ "groups": [platform] }));
 });
 
 tree_test!(meta_groups_show_a_member_only_their_workspace, |store| {
@@ -830,4 +846,149 @@ tree_test!(an_organization_without_files_serves_an_empty_model, |store| {
         assert!(!text.contains(&cache), "{who} shows the cache dir: {text}");
         assert!(!text.contains("scopes/"), "{who} shows a scope folder: {text}");
     }
+});
+
+/// Digital's `a` (on sofiadb, with a dimension only it has) and ON's `a` (on
+/// ondb), written to the database.
+async fn same_name_in_two_orgs(env: &Env, digital: uuid::Uuid, on: uuid::Uuid) {
+    let digital_a = format!(
+        "{}    dimensions:\n      - name: only_digital\n        sql: x\n        type: string\n",
+        titled("a", "A Digital", "sofiadb")
+    );
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![
+                put_in(None, "u.yml", CUBE_U),
+                put_in(Some(digital), "a.yml", &digital_a),
+                put_in(Some(on), "a.yml", &titled("a", "A ON", "ondb")),
+            ])
+        })
+        .await
+        .unwrap();
+}
+
+tree_test!(tree_lists_same_name_in_two_orgs, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    same_name_in_two_orgs(&env, digital, on).await;
+
+    let (status, body, _) = get(&env, &admin, "/playground/tree").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let orgs = body["organizations"].as_array().unwrap();
+    let by = |slug: &str| orgs.iter().find(|o| o["slug"] == slug).unwrap().clone();
+    for slug in ["digital", "on", "_platform"] {
+        assert_eq!(by(slug)["counts"]["cubes"], 1, "{slug}: {body}");
+        assert_eq!(by(slug)["errors"], 0, "{slug}: {body}");
+    }
+
+    for (slug, source) in [("digital", "sofiadb"), ("on", "ondb")] {
+        let (status, body, _) = get(&env, &admin, &format!("/playground/tree/{slug}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cubes = body["cubes"].as_array().unwrap();
+        assert_eq!(cubes.len(), 1, "{slug}: {body}");
+        assert_eq!(cubes[0]["name"], "a");
+        assert_eq!(cubes[0]["dataSource"], source);
+        assert_eq!(cubes[0]["file"], format!("{slug}/a.yml"));
+        // Only the databases' answers may fail here (no database runs).
+        assert!(
+            body["errors"].as_array().unwrap().iter().all(|e| e["file"] == ""),
+            "{slug}: {body}"
+        );
+    }
+});
+
+tree_test!(meta_groups_in_org_scope, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    same_name_in_two_orgs(&env, digital, on).await;
+
+    let (status, body, _) =
+        get_with(&env, &admin, &[("x-cube-organization", "on")], "/cube/v1/meta/groups").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({ "groups": [
+            { "slug": "_platform", "id": null, "name": "Platform", "errors": 0,
+              "dataSources": [{ "name": "default", "cubes": ["u"] }] },
+            { "slug": "on", "id": on, "name": "ON", "errors": 0,
+              "dataSources": [{ "name": "ondb", "cubes": ["a"] }] },
+        ] })
+    );
+});
+
+tree_test!(model_members_read_the_organizations_scope, |store| {
+    let (env, admin, digital, on) = two_orgs(&store).await;
+    same_name_in_two_orgs(&env, digital, on).await;
+
+    let dimensions = |body: &Value| -> Vec<String> {
+        let cubes = body["cubes"].as_array().unwrap_or_else(|| panic!("{body}"));
+        assert_eq!(cubes.len(), 1, "{body}");
+        assert_eq!(cubes[0]["name"], "a", "{body}");
+        cubes[0]["dimensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (status, body, _) =
+        get(&env, &admin, &format!("/cube/v1/organizations/{digital}/model-members")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(dimensions(&body).contains(&"a.only_digital".to_string()), "{body}");
+    let (status, body, _) =
+        get(&env, &admin, &format!("/cube/v1/organizations/{on}/model-members")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!dimensions(&body).contains(&"a.only_digital".to_string()), "{body}");
+});
+
+tree_test!(generate_reuses_a_name_taken_in_another_org, |store| {
+    let (env, admin, digital, _on) = two_orgs(&store).await;
+    env.writer
+        .clone()
+        .unwrap()
+        .write("admin", "seed", |_| {
+            Ok(vec![put_in(
+                Some(digital),
+                "dfos_schema_meta.yml",
+                &titled("dfos_schema_meta", "Digital's", "sofiadb"),
+            )])
+        })
+        .await
+        .unwrap();
+    let cols = json!([{ "name": "id", "type": "String", "attributes": ["primaryKey"] }]);
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        "/playground/generate-schema",
+        Some(&admin),
+        Some(json!({
+            "format": "yaml",
+            "tables": [["ondb.dfos", "schema_meta"]],
+            "tablesSchema": { "ondb.dfos": { "schema_meta": cols } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"][0]["fileName"], "on/dfos_schema_meta.yml", "{body}");
+    let rows = store.model_rows().await.unwrap();
+    assert_eq!(rows.files.iter().filter(|f| f.path == "dfos_schema_meta.yml").count(), 2);
+});
+
+tree_test!(generate_into_platform_refuses_a_name_any_org_has, |store| {
+    let env = env(store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    install_policy(&[("digital", &["sofiadb"])], &["default"]);
+    // A `_platform/` cube is compiled in every organization's scope.
+    env.write("digital/users.yml", &titled("users", "Digital's", "sofiadb"));
+
+    let (status, body, _) = send(
+        &env.router,
+        Method::POST,
+        "/playground/generate-schema",
+        Some(&admin),
+        Some(generate_body(json!([["public", "users"]]))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!env.model.path().join("_platform/users.yml").exists());
 });

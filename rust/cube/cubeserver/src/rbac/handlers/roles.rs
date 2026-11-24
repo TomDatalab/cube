@@ -426,13 +426,20 @@ pub async fn model_members(
         .into_iter()
         .map(|c| c.name)
         .collect();
-    let sources = state.query.data_sources().ok_or_else(|| {
+    // The organization's own model: another organization may have cubes of
+    // the same names. Without scopes, the one model.
+    let scope = crate::rbac::scope::ModelScope::Organization(org.slug.clone());
+    let (meta, query) = match state.runtime_of_scope(&ctx, &scope).await? {
+        Some(runtime) => (runtime.meta.clone(), runtime.query.clone()),
+        None => (state.meta.clone(), state.query.clone()),
+    };
+    let sources = query.data_sources().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "The data model is not available",
         )
     })?;
-    let meta = state.meta.meta(&ctx, false).await?;
+    let meta = meta.meta(&ctx, false).await?;
     let cubes = listable_cubes(
         &meta,
         &connections,

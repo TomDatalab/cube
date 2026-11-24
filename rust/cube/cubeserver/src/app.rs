@@ -57,18 +57,32 @@ impl AppState {
             return Ok(None);
         };
         // With RBAC every request reads the model of its scope only.
-        if let (Some(_), Some(model)) = (&self.rbac, &self.model_runtime) {
+        if let (Some(_), Some(_)) = (&self.rbac, &self.model_runtime) {
             let scope = self.scope_for(ctx).await?;
-            let path = model.scope_path(&scope).await.map_err(|e| {
-                tracing::error!(scope = scope.key(), error = %e, "cannot write the model scope");
-                crate::rbac::unavailable()
-            })?;
-            return registry
-                .resolve_scoped(&ctx.security_context, &scope, path)
-                .await
-                .map(Some);
+            return self.runtime_of_scope(ctx, &scope).await;
         }
         registry.resolve(&ctx.security_context).await.map(Some)
+    }
+
+    /// The runtime of `scope` (RBAC, model served from the database), or
+    /// `None` when the deployment does not serve scopes.
+    pub async fn runtime_of_scope(
+        &self,
+        ctx: &RequestContext,
+        scope: &crate::rbac::scope::ModelScope,
+    ) -> Result<Option<Arc<crate::tenants::TenantRuntime>>, ApiError> {
+        let (Some(registry), Some(_), Some(model)) = (&self.tenants, &self.rbac, &self.model_runtime)
+        else {
+            return Ok(None);
+        };
+        let path = model.scope_path(scope).await.map_err(|e| {
+            tracing::error!(scope = scope.key(), error = %e, "cannot write the model scope");
+            crate::rbac::unavailable()
+        })?;
+        registry
+            .resolve_scoped(&ctx.security_context, scope, path)
+            .await
+            .map(Some)
     }
 
     /// The model scope of a request with RBAC on: the organization of its
