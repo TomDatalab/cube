@@ -27,6 +27,16 @@ use cubesqlbridge::{
 use serde_json::Value;
 
 use crate::planner_adapter::PlannerQueryService;
+use crate::rbac::scope::ModelScope;
+
+/// The scope the SQL API serves with RBAC on, from `CUBE_SQL_API_SCOPE`:
+/// the Platform unless it names an organization's slug.
+pub fn sql_api_scope(env: &cubeconfig::Env) -> ModelScope {
+    match env.get("CUBE_SQL_API_SCOPE").map(str::trim) {
+        None | Some(cubemodel::ownership::PLATFORM_FOLDER) => ModelScope::Platform,
+        Some(slug) => ModelScope::Organization(slug.to_string()),
+    }
+}
 
 /// Runs the SQL API's queries through the orchestrator.
 pub struct OrchestratedExecutor {
@@ -285,6 +295,36 @@ fn sql_api_config(model_path: &str) -> SqlApiConfig {
     config
 }
 
+/// Whether a port is configured for the SQL API, as [`start`] checks.
+pub fn enabled() -> bool {
+    sql_api_config("").postgres_bind_address.is_some()
+}
+
+/// The planner the SQL API's executor plans with, which must compile the
+/// folder the SQL API does: the boot planner when that is `boot_path`, else
+/// one of its own (an organization's scope).
+pub fn sql_api_planner(
+    boot: &Arc<PlannerQueryService>,
+    boot_path: &str,
+    sql_path: &str,
+    dialect: Dialect,
+    by_data_source: std::collections::HashMap<String, Dialect>,
+    workers: usize,
+) -> Result<Arc<PlannerQueryService>, String> {
+    if sql_path == boot_path {
+        return Ok(boot.clone());
+    }
+    PlannerQueryService::load_with_dialects(
+        sql_path,
+        dialect,
+        by_data_source,
+        workers,
+        cubemodel::TemplateContext::default(),
+    )
+    .map(Arc::new)
+    .map_err(|err| err.message())
+}
+
 /// Starts the SQL API when a port is configured, mirroring Node's
 /// `CUBEJS_PG_SQL_PORT`.
 pub async fn start(
@@ -375,5 +415,79 @@ mod tests {
         // With RBAC on a login JWT must never open the Postgres-wire API:
         // the SQL API is built without an authenticator.
         assert!(sql_api_config("model").authenticator.is_none());
+    }
+
+    #[test]
+    fn sql_api_scope_defaults_to_platform() {
+        assert_eq!(sql_api_scope(&cubeconfig::Env::new()), ModelScope::Platform);
+        let empty = cubeconfig::Env::new().with("CUBE_SQL_API_SCOPE", " ");
+        assert_eq!(sql_api_scope(&empty), ModelScope::Platform);
+        let platform = cubeconfig::Env::new().with("CUBE_SQL_API_SCOPE", "_platform");
+        assert_eq!(sql_api_scope(&platform), ModelScope::Platform);
+    }
+
+    fn planner_on(dir: &std::path::Path, cube: &str) -> Arc<PlannerQueryService> {
+        std::fs::write(
+            dir.join("m.yml"),
+            format!("cubes:\n  - name: {cube}\n    sql_table: t\n    measures:\n      - name: n\n        type: count\n"),
+        )
+        .unwrap();
+        Arc::new(
+            PlannerQueryService::load_with_dialects(
+                dir,
+                Dialect::Postgres,
+                Default::default(),
+                1,
+                cubemodel::TemplateContext::default(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_sql_api_plans_on_the_folder_it_compiles() {
+        let (boot_dir, org_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let boot = planner_on(boot_dir.path(), "p");
+        let boot_path = boot_dir.path().to_string_lossy().into_owned();
+        // The same folder (no RBAC, or the Platform scope) shares the planner.
+        let same = sql_api_planner(
+            &boot,
+            &boot_path,
+            &boot_path,
+            Dialect::Postgres,
+            Default::default(),
+            1,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&same, &boot));
+        // An organization's folder gets a planner of its own.
+        planner_on(org_dir.path(), "o");
+        let org_path = org_dir.path().to_string_lossy().into_owned();
+        let org = sql_api_planner(
+            &boot,
+            &boot_path,
+            &org_path,
+            Dialect::Postgres,
+            Default::default(),
+            1,
+        )
+        .unwrap();
+        let query = serde_json::json!({ "measures": ["o.n"] });
+        org.plan_value(&query, &serde_json::json!({}))
+            .await
+            .expect("plans the org's cube");
+        assert!(boot
+            .plan_value(&query, &serde_json::json!({}))
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn sql_api_scope_reads_a_slug() {
+        let env = cubeconfig::Env::new().with("CUBE_SQL_API_SCOPE", "digital");
+        assert_eq!(
+            sql_api_scope(&env),
+            ModelScope::Organization("digital".into())
+        );
     }
 }

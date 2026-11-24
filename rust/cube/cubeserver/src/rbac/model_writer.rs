@@ -10,7 +10,9 @@ use uuid::Uuid;
 use super::model_snapshot::sources;
 use super::model_store::{ModelChange, ModelFile, ModelRows};
 use super::model_runtime::ModelRuntime;
-use super::model_validate::{check, fixed_count, new_problems, Problem};
+use super::model_validate::{check_each, definitions_in, fixed_count, new_problems, Problem};
+use super::scope::{scopes_touched, ModelScope};
+use std::collections::{BTreeMap, BTreeSet};
 use super::store::{Store, StoreError};
 use crate::error::ApiError;
 use crate::tenants::TenantRegistry;
@@ -125,6 +127,31 @@ pub fn apply_in_memory(rows: &ModelRows, changes: &[ModelChange]) -> ModelRows {
     out
 }
 
+/// Scopes whose model differs between two source lists: those of the paths
+/// added, removed or changed. Falls back to every scope if none differ.
+fn touched_scopes(
+    before: &[(String, String)],
+    after: &[(String, String)],
+    org_slugs: &BTreeSet<String>,
+) -> BTreeSet<ModelScope> {
+    let old: BTreeMap<&str, &str> = before.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let new: BTreeMap<&str, &str> = after.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let mut changed: Vec<&str> = Vec::new();
+    for (p, c) in &new {
+        if old.get(p) != Some(c) {
+            changed.push(p);
+        }
+    }
+    changed.extend(old.keys().filter(|p| !new.contains_key(*p)));
+    let scopes = scopes_touched(&changed, org_slugs);
+    if !scopes.is_empty() {
+        return scopes;
+    }
+    let mut all = BTreeSet::from([ModelScope::Platform]);
+    all.extend(org_slugs.iter().cloned().map(ModelScope::Organization));
+    all
+}
+
 impl ModelWriter {
     pub fn new(
         store: Store,
@@ -168,20 +195,49 @@ impl ModelWriter {
                         return Err(WriteError::bad_request("Organização desconhecida"));
                     }
                 }
-                let before = check(&sources(rows, &slugs), &self.ctx, policy.as_deref());
+                let org_slugs: BTreeSet<String> = slugs.values().cloned().collect();
+                let before_sources = sources(rows, &slugs);
                 let after_rows = apply_in_memory(rows, &changes);
                 let after_sources = sources(&after_rows, &slugs);
-                let after = check(&after_sources, &self.ctx, policy.as_deref());
-                let problems = new_problems(&before, &after);
+                let scopes = touched_scopes(&before_sources, &after_sources, &org_slugs);
+                let before = check_each(&before_sources, &scopes, &org_slugs, &self.ctx, policy.as_deref());
+                let after = check_each(&after_sources, &scopes, &org_slugs, &self.ctx, policy.as_deref());
+                // New problems scope by scope, so one that already existed in
+                // another scope does not hide a new one.
+                let mut problems: BTreeSet<Problem> = BTreeSet::new();
+                let mut defs: BTreeMap<String, String> = BTreeMap::new();
+                let mut fixed_now = 0usize;
+                for (scope, after_check) in &after {
+                    let none = Default::default();
+                    let before_check = before.get(scope).unwrap_or(&none);
+                    fixed_now += fixed_count(before_check, after_check);
+                    let new = new_problems(before_check, after_check);
+                    if new.is_empty() {
+                        continue;
+                    }
+                    problems.extend(new);
+                    for (name, file) in definitions_in(&after_sources, scope, &org_slugs) {
+                        match defs.get(&name) {
+                            Some(old) if *old != file => {
+                                // Two scopes disagree: owners must not be
+                                // pointed at either file.
+                                defs.insert(name, "_conflict".into());
+                            }
+                            _ => {
+                                defs.insert(name, file);
+                            }
+                        }
+                    }
+                }
                 if !problems.is_empty() {
                     return Err(WriteError {
                         status: StatusCode::BAD_REQUEST,
                         message: "A mudança não compila".into(),
-                        problems,
-                        defs: crate::rbac::model_validate::definitions(&after_sources),
+                        problems: problems.into_iter().collect(),
+                        defs,
                     });
                 }
-                fixed = fixed_count(&before, &after);
+                fixed = fixed_now;
                 Ok(changes)
             })
             .await;

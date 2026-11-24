@@ -86,7 +86,8 @@ pub async fn refresh_policy(state: &AppState) -> Result<Vec<Rejection>, ApiError
     }
 
     let index = state.model_index.get(Path::new(&state.config.schema_path));
-    for e in &index.errors {
+    // A Platform file that breaks every scope is logged once.
+    for e in index.unique_errors() {
         tracing::warn!("The data model does not compile after the policy changed: {}: {}", e.file, e.message);
     }
     Ok(index.rejected.iter().map(|(_, r)| r.clone()).collect())

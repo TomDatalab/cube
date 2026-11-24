@@ -2,12 +2,12 @@ import { Select, Tooltip, Typography } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 
 import { useIsMounted, useWorkspace } from '../../hooks';
-import { chooseWorkspace } from '../../shared/auth';
+import { useOrganizationScope } from '../../hooks/workspace';
+import { adminApi } from '../../pages/Admin/api';
+import { chooseOrganizationScope, chooseWorkspace, PLATFORM_SCOPE } from '../../shared/auth';
 import { sessionFetchJson } from '../../shared/helpers';
-import { nextChoice } from './workspaceChoice';
+import { adminOptions, nextChoice } from './workspaceChoice';
 
-// The value of "Todos (admin)": no `X-Cube-Workspace` at all.
-const ALL = '';
 const PAGE_SIZE = 50;
 const DEBOUNCE_MS = 300;
 
@@ -57,15 +57,22 @@ export function WorkspaceSelector({ basePath, isAdmin }: Props) {
   const isMounted = useIsMounted();
   const base = basePath.replace(/\/$/, '');
   const [options, setOptions] = useState<Option[] | null>(null);
+  const [scopes, setScopes] = useState<Option[]>([]);
   const [loading, setLoading] = useState(false);
   const [currentLabel, setCurrentLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const current = useWorkspace();
+  const organization = useOrganizationScope();
   const latest = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
   function choose(id: string | null) {
-    chooseWorkspace(id);
+    // An admin's Platform or organization scope, or a workspace.
+    if (id == null || id === PLATFORM_SCOPE || scopes.some((o) => o.value === id)) {
+      chooseOrganizationScope(id);
+    } else {
+      chooseWorkspace(id);
+    }
   }
 
   function search(q: string) {
@@ -86,6 +93,10 @@ export function WorkspaceSelector({ basePath, isAdmin }: Props) {
   useEffect(() => {
     (async () => {
       const firstPage = await searchWorkspaces(base, '');
+      // Without the list an admin still has the Platform.
+      const organizations = isAdmin
+        ? await adminApi(base).organizations().catch(() => null)
+        : [];
       const known = current ? firstPage.find((o) => o.value === current) : undefined;
       let resolved = known?.label ?? null;
       if (current && !known) {
@@ -94,13 +105,23 @@ export function WorkspaceSelector({ basePath, isAdmin }: Props) {
       if (!isMounted()) {
         return;
       }
+      setScopes(isAdmin ? adminOptions(organizations ?? []) : []);
       setOptions(firstPage);
       setCurrentLabel(resolved);
+      // An organization that is gone: back to the Platform.
+      if (organizations && organization && !organizations.some((o) => o.slug === organization)) {
+        chooseOrganizationScope(null);
+        return;
+      }
       const next = nextChoice({
         current, currentVisible: resolved != null, firstPage, isAdmin,
       });
       if (next) {
-        choose(next.choose);
+        if (next.choose == null) {
+          chooseOrganizationScope(null);
+        } else {
+          chooseWorkspace(next.choose);
+        }
       }
     })().catch((e) => {
       if (isMounted()) {
@@ -124,7 +145,9 @@ export function WorkspaceSelector({ basePath, isAdmin }: Props) {
     );
   }
 
-  const all: Option[] = isAdmin ? [{ value: ALL, label: 'Todos (admin)' }] : [];
+  const all: Option[] = isAdmin && scopes.length === 0
+    ? adminOptions([])
+    : scopes;
   const found = options || [];
   // The chosen workspace stays selectable even when a search hides it.
   const pinned: Option[] = current && currentLabel && !found.some((o) => o.value === current)
@@ -132,7 +155,7 @@ export function WorkspaceSelector({ basePath, isAdmin }: Props) {
     : [];
   let value: string | undefined;
   if (options != null) {
-    value = current ?? (isAdmin ? ALL : undefined);
+    value = current ?? (isAdmin ? organization ?? PLATFORM_SCOPE : undefined);
   }
 
   return (
@@ -159,7 +182,7 @@ export function WorkspaceSelector({ basePath, isAdmin }: Props) {
           search('');
         }
       }}
-      onChange={(next) => choose(next === ALL ? null : next)}
+      onChange={(next) => choose(next)}
     />
   );
 }

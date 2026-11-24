@@ -6,8 +6,13 @@
 
 const STORAGE_KEY = 'cubePlaygroundSession';
 const WORKSPACE_KEY = 'cubePlaygroundWorkspace';
+const ORGANIZATION_KEY = 'cubePlaygroundOrganization';
 
 export const WORKSPACE_HEADER = 'X-Cube-Workspace';
+export const ORGANIZATION_HEADER = 'X-Cube-Organization';
+// The scope of an admin without an organization: what sending no header
+// gives too.
+export const PLATFORM_SCOPE = '_platform';
 
 export type Session = {
   token: string;
@@ -57,6 +62,8 @@ let lastToken: string | null = null;
 // The workspace when sessionStorage cannot keep it (blocked storage): it
 // lasts as long as the page.
 let memoryWorkspace: string | null = null;
+// The same for the organization scope.
+let memoryOrganization: string | null = null;
 // One reload is enough, however many requests answer 401 at once.
 let reloading = false;
 
@@ -82,7 +89,9 @@ export function getSession(): Session | null {
 export function logout() {
   write(STORAGE_KEY, null);
   write(WORKSPACE_KEY, null);
+  write(ORGANIZATION_KEY, null);
   memoryWorkspace = null;
+  memoryOrganization = null;
 }
 
 // Whether a 401 for this token means the session is gone; a token typed into
@@ -98,7 +107,7 @@ export function authHeaders(): Record<string, string> {
 }
 
 // The workspace data requests are scoped to; `null` sends no header, which
-// only platform admins may do ("Todos (admin)").
+// only platform admins may do (the Platform scope).
 export function getWorkspace(): string | null {
   if (storage() == null) {
     return memoryWorkspace;
@@ -119,18 +128,43 @@ export function onWorkspaceChange(listener: () => void): () => void {
   };
 }
 
-// Returns whether the choice outlives a reload (sessionStorage took it).
-export function setWorkspace(id: string | null): boolean {
-  memoryWorkspace = id || null;
-  write(WORKSPACE_KEY, memoryWorkspace);
-  workspaceListeners.forEach((listener) => listener());
-  let stored: string | null;
+// The organization a platform admin without a workspace reads the model of;
+// `null` is the Platform scope.
+export function getOrganizationScope(): string | null {
+  if (storage() == null) {
+    return memoryOrganization;
+  }
   try {
-    stored = storage()?.getItem(WORKSPACE_KEY) ?? null;
+    return storage()?.getItem(ORGANIZATION_KEY) || null;
+  } catch {
+    return memoryOrganization;
+  }
+}
+
+// Whether `key` holds `value` (so a reload keeps it).
+function kept(key: string, value: string | null): boolean {
+  try {
+    return storage() != null && (storage()?.getItem(key) ?? null) === value;
   } catch {
     return false;
   }
-  return storage() != null && stored === memoryWorkspace;
+}
+
+// Workspace and organization scope exclude each other. Returns whether the
+// choice outlives a reload (sessionStorage took it).
+function setScope(workspace: string | null, organization: string | null): boolean {
+  memoryWorkspace = workspace || null;
+  memoryOrganization = organization || null;
+  write(WORKSPACE_KEY, memoryWorkspace);
+  write(ORGANIZATION_KEY, memoryOrganization);
+  workspaceListeners.forEach((listener) => listener());
+  return kept(WORKSPACE_KEY, memoryWorkspace) && kept(ORGANIZATION_KEY, memoryOrganization);
+}
+
+// Returns whether the choice outlives a reload (sessionStorage took it).
+// A workspace replaces the organization scope.
+export function setWorkspace(id: string | null): boolean {
+  return setScope(id, null);
 }
 
 // Switch workspace. With the choice in sessionStorage the page reloads, so
@@ -144,9 +178,24 @@ export function chooseWorkspace(id: string | null, reload = () => window.locatio
   }
 }
 
+// Switch to an organization's model (`null` or `_platform`: the Platform),
+// clearing the workspace; reloads like `chooseWorkspace`.
+export function chooseOrganizationScope(
+  slug: string | null,
+  reload = () => window.location.reload()
+) {
+  if (setScope(null, slug === PLATFORM_SCOPE ? null : slug)) {
+    reload();
+  }
+}
+
 export function workspaceHeaders(): Record<string, string> {
   const workspace = getWorkspace();
-  return workspace ? { [WORKSPACE_HEADER]: workspace } : {};
+  if (workspace) {
+    return { [WORKSPACE_HEADER]: workspace };
+  }
+  const organization = getOrganizationScope();
+  return organization ? { [ORGANIZATION_HEADER]: organization } : {};
 }
 
 // A request answered 401 while logged in: the token expired or was revoked.
@@ -196,6 +245,8 @@ export async function login(
   lastToken = session.token;
   // A workspace picked by whoever used this tab before.
   write(WORKSPACE_KEY, null);
+  write(ORGANIZATION_KEY, null);
   memoryWorkspace = null;
+  memoryOrganization = null;
   return session;
 }

@@ -15,6 +15,8 @@ export type MetaGroup = {
   // (everyone without RBAC); `null` otherwise.
   errors: number | null;
   dataSources: { name: string; cubes: string[] }[];
+  // Which of the names in `dataSources` are views (older servers: absent).
+  views?: string[];
 };
 
 export type CubeSection<T> = {
@@ -129,4 +131,86 @@ export function cubeCountByDataSource(groups: MetaGroup[]): Record<string, numbe
 // The organizations a filter offers, in the groups' order.
 export function filterOptions(groups: MetaGroup[]): { value: string; label: string }[] {
   return groups.map((g) => ({ value: g.slug, label: g.name }));
+}
+
+// The answers of several scopes as one list: Platform first, then the
+// organizations. Every organization's answer repeats the Platform group
+// (`_platform/**` is in its scope), so a slug seen before is skipped.
+export function mergeMetaGroups(groupsPerScope: MetaGroup[][]): MetaGroup[] {
+  const seen = new Set<string>();
+  const merged: MetaGroup[] = [];
+  groupsPerScope.flat().forEach((group) => {
+    if (!seen.has(group.slug)) {
+      seen.add(group.slug);
+      merged.push(group);
+    }
+  });
+  return merged;
+}
+
+// An organization whose model the query builder is not on: its cubes (or
+// views) by name only. Choosing one switches to that organization's model.
+export type ScopeSection = {
+  slug: string;
+  name: string;
+  errors: number | null;
+  count: number;
+  dataSources: { name: string; names: string[] }[];
+};
+
+// The groups of `all` (every scope's, merged) that the current model does not
+// serve: neither the Platform (in every model) nor a group of `current`.
+// Their names of `type`, matching `filter` (lowercase) when given. A group
+// with none is left out, unless it has errors and nothing is filtered.
+export function otherScopeSections(
+  all: MetaGroup[],
+  current: MetaGroup[],
+  type: 'cubes' | 'views',
+  filter = ''
+): ScopeSection[] {
+  const served = new Set(current.map((g) => g.slug));
+  return all
+    .filter((group) => group.slug !== PLATFORM_GROUP && !served.has(group.slug))
+    .map((group) => {
+      const views = new Set(group.views ?? []);
+      const dataSources = group.dataSources
+        .map((ds) => ({
+          name: ds.name,
+          names: ds.cubes.filter((name) => (
+            (type === 'views') === views.has(name)
+            && (!filter || name.toLowerCase().includes(filter))
+          )),
+        }))
+        .filter((ds) => ds.names.length);
+      return {
+        slug: group.slug,
+        name: group.name,
+        errors: group.errors,
+        count: dataSources.reduce((n, ds) => n + ds.names.length, 0),
+        dataSources,
+      };
+    })
+    .filter((section) => section.count || (!filter && (section.errors ?? 0) > 0));
+}
+
+// The cube to open once the page is back on another organization's model:
+// kept in sessionStorage across the reload that switches models.
+const CUBE_TO_OPEN_KEY = 'cube.playground.cubeToOpen';
+
+export function rememberCubeToOpen(name: string) {
+  try {
+    window.sessionStorage.setItem(CUBE_TO_OPEN_KEY, name);
+  } catch {
+    // Without storage the cube is just not opened.
+  }
+}
+
+export function takeCubeToOpen(): string | null {
+  try {
+    const name = window.sessionStorage.getItem(CUBE_TO_OPEN_KEY);
+    window.sessionStorage.removeItem(CUBE_TO_OPEN_KEY);
+    return name;
+  } catch {
+    return null;
+  }
 }

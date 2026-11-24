@@ -5,12 +5,15 @@
 //! owner its folder gives it. It is cached until a file changes or the policy
 //! is replaced.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use cubemodel::ownership::{current_policy, Owner, OwnershipPolicy, Rejection};
 use cubemodel::{ModelError, ModelLoader};
+
+use crate::rbac::scope::{scope_sources, ModelScope};
 
 /// One member of a cube, as the Data Model page lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,9 +115,10 @@ pub struct ModelIndex {
     pub cubes: Vec<IndexedCube>,
     pub files: Vec<IndexedFile>,
     pub rejected: Vec<(Owner, Rejection)>,
-    /// Why the model did not compile (then `cubes` and `rejected` are
-    /// empty). They concern the whole model, so every node shows them.
-    pub errors: Vec<Rejection>,
+    /// Why a scope's model did not compile, with the scope's key
+    /// ([`ModelScope::key`]); that scope then lists no cube. They concern the
+    /// whole scope, so every node of it shows them.
+    pub errors: Vec<(String, Rejection)>,
 }
 
 /// The model files under `model_path` (the loader's own list:
@@ -167,46 +171,127 @@ impl ModelIndex {
     /// A model that does not compile still lists its files by folder; the
     /// compile errors go to [`ModelIndex::errors`] and no cube is listed.
     pub fn load_with(model_path: &Path, policy: Option<&OwnershipPolicy>) -> ModelIndex {
-        let owner_of = |file: &str| match policy {
-            Some(p) => p.owner_of_file(file),
-            None => Owner::Unowned(String::new()),
+        let sources = read_sources(model_path);
+        index_sources(&sources, policy, ModelScope::All.key())
+    }
+
+    /// The index with one model per scope ([`ModelScope`]): Platform and
+    /// each of `org_slugs`, each compiled on its own, as they are served. A
+    /// cube is kept once per `(owner, name)`, so Platform's appear once and
+    /// two organizations may each have a cube of the same name. Rejections
+    /// are kept once; compile errors once per scope, with its key.
+    pub fn load_scoped(
+        model_path: &Path,
+        policy: Option<&OwnershipPolicy>,
+        org_slugs: &BTreeSet<String>,
+    ) -> ModelIndex {
+        let sources = read_sources(model_path);
+        let mut index = ModelIndex {
+            files: index_files(&sources, policy),
+            ..ModelIndex::default()
         };
-
-        let sources: Vec<(String, String)> = model_file_names(model_path)
-            .into_iter()
-            .map(|(name, path)| (name, std::fs::read_to_string(&path).unwrap_or_default()))
-            .collect();
-        let files = sources
-            .iter()
-            .map(|(name, _)| IndexedFile {
-                file_name: name.clone(),
-                owner: owner_of(name),
-            })
-            .collect();
-
-        // Not validated: a file that does not validate must not hide the
-        // index. The policy is applied all the same. Templates render with
-        // the default context (no tenant's `COMPILE_CONTEXT`).
-        let model = match ModelLoader::new()
-            .without_validation()
-            .load_sources_with_policy(&sources, policy)
-        {
-            Ok(model) => model,
-            Err(e) => {
-                return ModelIndex {
-                    files,
-                    errors: compile_errors(&e),
-                    ..ModelIndex::default()
+        let scopes = std::iter::once(ModelScope::Platform)
+            .chain(org_slugs.iter().cloned().map(ModelScope::Organization));
+        for scope in scopes {
+            let scoped = index_sources(&scope_sources(&sources, &scope, org_slugs), policy, scope.key());
+            for cube in scoped.cubes {
+                if !index.cubes.iter().any(|c| c.owner == cube.owner && c.name == cube.name) {
+                    index.cubes.push(cube);
                 }
             }
-        };
+            for rejected in scoped.rejected {
+                if !index.rejected.contains(&rejected) {
+                    index.rejected.push(rejected);
+                }
+            }
+            index.errors.extend(scoped.errors);
+        }
+        index
+    }
 
-        let cubes = model
-            .cube_list()
-            .into_iter()
-            .map(|c| {
-                let (measure_list, dimension_list, segment_list) = member_lists(c);
-                IndexedCube {
+    /// The compile errors of the scope keyed `key`. Without scopes (no
+    /// policy) every error is the one model's, so every node shows it.
+    pub fn errors_in<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a Rejection> + 'a {
+        self.errors
+            .iter()
+            .filter(move |(k, _)| k == key || k == ModelScope::All.key())
+            .map(|(_, r)| r)
+    }
+
+    /// Every compile error once: a Platform file breaks every scope with
+    /// the same `(file, cube, message)`.
+    pub fn unique_errors(&self) -> Vec<&Rejection> {
+        let mut out: Vec<&Rejection> = Vec::new();
+        for (_, r) in &self.errors {
+            if !out.iter().any(|o| o.file == r.file && o.cube == r.cube && o.message == r.message) {
+                out.push(r);
+            }
+        }
+        out
+    }
+}
+
+fn owner_under(policy: Option<&OwnershipPolicy>, file: &str) -> Owner {
+    match policy {
+        Some(p) => p.owner_of_file(file),
+        None => Owner::Unowned(String::new()),
+    }
+}
+
+/// Every model file under `model_path`, `(relative path, content)`.
+fn read_sources(model_path: &Path) -> Vec<(String, String)> {
+    model_file_names(model_path)
+        .into_iter()
+        .map(|(name, path)| (name, std::fs::read_to_string(&path).unwrap_or_default()))
+        .collect()
+}
+
+fn index_files(sources: &[(String, String)], policy: Option<&OwnershipPolicy>) -> Vec<IndexedFile> {
+    sources
+        .iter()
+        .map(|(name, _)| IndexedFile {
+            file_name: name.clone(),
+            owner: owner_under(policy, name),
+        })
+        .collect()
+}
+
+/// The index of one compiled model: `sources`, under `policy`. Its compile
+/// errors carry `key`.
+fn index_sources(
+    sources: &[(String, String)],
+    policy: Option<&OwnershipPolicy>,
+    key: &str,
+) -> ModelIndex {
+    let owner_of = |file: &str| owner_under(policy, file);
+    let files = index_files(sources, policy);
+
+    // Not validated: a file that does not validate must not hide the
+    // index. The policy is applied all the same. Templates render with
+    // the default context (no tenant's `COMPILE_CONTEXT`).
+    let model = match ModelLoader::new()
+        .without_validation()
+        .load_sources_with_policy(sources, policy)
+    {
+        Ok(model) => model,
+        Err(e) => {
+            return ModelIndex {
+                files,
+                errors: compile_errors(&e)
+                    .into_iter()
+                    .map(|r| (key.to_string(), r))
+                    .collect(),
+                ..ModelIndex::default()
+            }
+        }
+    };
+
+    let cubes = model
+        .cube_list()
+        .into_iter()
+        .map(|c| {
+            let (measure_list, dimension_list, segment_list) = member_lists(c);
+            IndexedCube {
                 name: c.name.clone(),
                 title: c.title.clone(),
                 kind: if c.is_view { "view" } else { "cube" },
@@ -237,20 +322,20 @@ impl ModelIndex {
                     }
                     names
                 },
-            }})
-            .collect();
-        let rejected = model
-            .rejected
-            .iter()
-            .map(|r| (owner_of(&r.file), r.clone()))
-            .collect();
+            }
+        })
+        .collect();
+    let rejected = model
+        .rejected
+        .iter()
+        .map(|r| (owner_of(&r.file), r.clone()))
+        .collect();
 
-        ModelIndex {
-            cubes,
-            files,
-            rejected,
-            errors: Vec::new(),
-        }
+    ModelIndex {
+        cubes,
+        files,
+        rejected,
+        errors: Vec::new(),
     }
 }
 
@@ -300,7 +385,14 @@ impl ModelIndexCache {
                 return index.clone();
             }
         }
-        let index = Arc::new(ModelIndex::load_with(model_path, policy.as_deref()));
+        // With a policy, each scope is compiled on its own, as it is served.
+        let index = Arc::new(match policy.as_deref() {
+            Some(p) => {
+                let slugs: BTreeSet<String> = p.organizations.keys().cloned().collect();
+                ModelIndex::load_scoped(model_path, Some(p), &slugs)
+            }
+            None => ModelIndex::load_with(model_path, None),
+        });
         *cached = Some((key, index.clone()));
         index
     }
