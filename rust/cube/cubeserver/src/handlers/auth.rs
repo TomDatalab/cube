@@ -64,11 +64,10 @@ pub async fn auth_middleware(
 
     // With RBAC on, every request speaks for a user: a missing or invalid
     // token is 401, and the user is checked against the users table.
-    let (authenticated, user, platform_admin, workspace, organization) = match &state.rbac {
+    let (authenticated, identity, workspace, organization) = match &state.rbac {
         None => (
             authenticated.map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?,
             None,
-            false,
             None,
             None,
         ),
@@ -77,15 +76,17 @@ pub async fn auth_middleware(
                 crate::rbac::unauthenticated()
                     .with_request_id_if(state.config.dev_mode, &request_id)
             })?;
-            let (user, platform_admin) =
+            let identity =
                 crate::rbac::identity::resolve_identity(rbac, &authenticated.security_context)
                     .await
                     .map_err(|e| e.with_request_id_if(state.config.dev_mode, &request_id))?;
             let workspace = header_value(&req, WORKSPACE_HEADER);
             let organization = header_value(&req, ORGANIZATION_HEADER);
-            (authenticated, Some(user), platform_admin, workspace, organization)
+            (authenticated, Some(identity), workspace, organization)
         }
     };
+    let platform_admin = identity.as_ref().is_some_and(|i| i.platform_admin);
+    let (user, username) = identity.map(|i| (i.id, i.username)).unzip();
 
     req.extensions_mut().insert(RequestContext {
         request_id,
@@ -94,6 +95,7 @@ pub async fn auth_middleware(
         workspace,
         organization,
         user,
+        username,
         platform_admin,
         token_verified: authenticated.token_verified,
     });

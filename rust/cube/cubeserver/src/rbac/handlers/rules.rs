@@ -298,7 +298,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     let rule = tx
-        .create_rule(ws.id, &text, &r#type, role, user)
+        .create_rule(ws.id, &text, &r#type, role, super::actor(&ctx)?)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     rbac.authz

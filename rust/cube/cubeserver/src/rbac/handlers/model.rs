@@ -100,12 +100,12 @@ async fn org_scope(
             slug: org.slug,
             owner_only,
         },
-        user.to_string(),
+        super::actor(ctx)?.to_string(),
     ))
 }
 
 fn platform_scope(state: &AppState, ctx: &RequestContext) -> Result<(Scope, String), ApiError> {
-    let (_, user) = caller(state, ctx)?;
+    caller(state, ctx)?;
     require_platform_admin(ctx, "reach the platform model")?;
     Ok((
         Scope {
@@ -113,7 +113,7 @@ fn platform_scope(state: &AppState, ctx: &RequestContext) -> Result<(Scope, Stri
             slug: PLATFORM_FOLDER.to_string(),
             owner_only: false,
         },
-        user.to_string(),
+        super::actor(ctx)?.to_string(),
     ))
 }
 
@@ -324,7 +324,8 @@ pub async fn move_file(
     Path(file): Path<String>,
     request: Result<Json<MoveFile>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_, user) = caller(&state, &ctx)?;
+    caller(&state, &ctx)?;
+    let user = super::actor(&ctx)?;
     require_platform_admin(&ctx, "move model files")?;
     let request = body(request)?;
     let writer = writer(&state)?;
@@ -561,8 +562,9 @@ fn require_sync_user<'a>(
     state: &'a AppState,
     ctx: &'a RequestContext,
 ) -> Result<&'a crate::rbac::Rbac, ApiError> {
-    let (rbac, user) = caller(state, ctx)?;
-    if user != rbac.config.sync_user {
+    // `CUBE_SYNC_USER` is a username.
+    let (rbac, _) = caller(state, ctx)?;
+    if super::actor(ctx)? != rbac.config.sync_user {
         return Err(ApiError::forbidden(
             "Só o usuário de sincronização usa esta rota",
         ));
@@ -644,7 +646,7 @@ pub async fn sync_put(
     request: Result<Json<SyncBody>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_sync_user(&state, &ctx)?;
-    let user = ctx.user.clone().unwrap_or_default();
+    let user = super::actor(&ctx)?.to_string();
     let request = body(request)?;
     let prefix = format!("{connection}/");
     let mut seen = std::collections::HashSet::new();

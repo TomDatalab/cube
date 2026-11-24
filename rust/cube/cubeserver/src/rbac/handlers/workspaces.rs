@@ -164,7 +164,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, conflict))?;
     let ws = tx
-        .create_workspace(org.id, &name, user)
+        .create_workspace(org.id, &name, super::actor(&ctx)?)
         .await
         .map_err(|e| store_error(e, conflict))?;
     rbac.authz

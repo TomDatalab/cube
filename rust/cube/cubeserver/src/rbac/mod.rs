@@ -138,45 +138,52 @@ impl Rbac {
         Ok(rbac)
     }
 
-    /// `CUBE_RBAC_ADMINS`: creates the missing ones with
-    /// `CUBE_RBAC_ADMIN_PASSWORD` and grants `platform:main#admin` to all.
-    /// Removing an id from the list revokes nothing.
+    /// `CUBE_RBAC_ADMINS` (usernames): creates the missing ones, with a fresh
+    /// UUID and `CUBE_RBAC_ADMIN_PASSWORD`, and grants `platform:main#admin`
+    /// to each by UUID. Removing a name from the list revokes nothing.
     async fn bootstrap_admins(&self) -> Result<(), String> {
         let mut grants = Vec::new();
-        for id in &self.config.admins {
-            let existing = self
-                .store
-                .user_by_username(id)
-                .await
-                .map_err(|e| format!("Cannot read user {id}: {e}"))?;
-            if existing.is_none() {
-                let password = self.config.admin_password.as_deref().ok_or_else(|| {
-                    format!(
-                        "Admin {id} (CUBE_RBAC_ADMINS) does not exist and \
-                         CUBE_RBAC_ADMIN_PASSWORD is not set"
-                    )
-                })?;
-                let password_hash = identity::hash_password(password)
-                    .map_err(|e| format!("CUBE_RBAC_ADMIN_PASSWORD: {}", e.body.error))?;
-                let created = self
-                    .store
-                    .create_user(&NewUser {
-                        username: id.clone(),
-                        name: None,
-                        email: None,
-                        password_hash,
-                    })
-                    .await;
-                match created {
-                    // Another instance starting at the same time made it.
-                    Ok(_) | Err(StoreError::Conflict(_)) => {}
-                    Err(e) => return Err(format!("Cannot create admin {id}: {e}")),
+        for username in &self.config.admins {
+            let read = || async {
+                self.store
+                    .user_by_username(username)
+                    .await
+                    .map_err(|e| format!("Cannot read user {username}: {e}"))
+            };
+            let user = match read().await? {
+                Some(user) => user,
+                None => {
+                    let password = self.config.admin_password.as_deref().ok_or_else(|| {
+                        format!(
+                            "Admin {username} (CUBE_RBAC_ADMINS) does not exist and \
+                             CUBE_RBAC_ADMIN_PASSWORD is not set"
+                        )
+                    })?;
+                    let password_hash = identity::hash_password(password)
+                        .map_err(|e| format!("CUBE_RBAC_ADMIN_PASSWORD: {}", e.body.error))?;
+                    let created = self
+                        .store
+                        .create_user(&NewUser {
+                            username: username.clone(),
+                            name: None,
+                            email: None,
+                            password_hash,
+                        })
+                        .await;
+                    match created {
+                        Ok(user) => user,
+                        // Another instance starting at the same time made it.
+                        Err(StoreError::Conflict(_)) => read().await?.ok_or_else(|| {
+                            format!("Admin {username} conflicts but cannot be read")
+                        })?,
+                        Err(e) => return Err(format!("Cannot create admin {username}: {e}")),
+                    }
                 }
-            }
+            };
             grants.push(Relationship {
                 resource: platform(),
                 relation: "admin",
-                subject: ObjectRef::new("user", id.clone()),
+                subject: ObjectRef::new("user", user.id),
             });
         }
         if !grants.is_empty() {

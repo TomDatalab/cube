@@ -419,7 +419,8 @@ async fn generate_into_database(
         ));
     }
     let rbac = crate::rbac::handlers::rbac_of(state)?;
-    let user = ctx.and_then(|c| c.user.as_deref())
+    // What the model rows' `updated_by` records.
+    let user = ctx.and_then(|c| c.username.as_deref())
         .ok_or_else(crate::rbac::unauthenticated)?;
     let mut owners = std::collections::BTreeSet::new();
     for (schema, _) in &request.tables {

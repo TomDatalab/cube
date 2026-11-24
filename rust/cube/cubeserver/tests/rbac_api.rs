@@ -177,6 +177,26 @@ async fn login_token(router: &axum::Router, username: &str, password: &str) -> S
     body["token"].as_str().expect("a token").to_string()
 }
 
+/// The UUID of the user named `username`.
+async fn uuid_of(env: &Env, username: &str) -> String {
+    env.rbac
+        .store
+        .user_by_username(username)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("no user {username}"))
+        .id
+}
+
+/// [`uuid_of`] for each of `usernames`.
+async fn user_ids(env: &Env, usernames: &[&str]) -> std::collections::HashMap<String, String> {
+    let mut ids = std::collections::HashMap::new();
+    for username in usernames {
+        ids.insert(username.to_string(), uuid_of(env, username).await);
+    }
+    ids
+}
+
 async fn meta(router: &axum::Router, token: Option<&str>) -> StatusCode {
     send(router, Method::GET, "/cube/v1/meta", token, None)
         .await
@@ -204,7 +224,7 @@ db_test!(login_returns_a_token_that_authenticates, |store| {
     let (status, body) = login(&env.router, ADMIN, ADMIN_PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["expiresAt"].is_string(), "{body}");
-    assert_eq!(body["user"]["id"], ADMIN);
+    assert_eq!(body["user"]["username"], ADMIN);
     assert_eq!(body["user"]["platformAdmin"], json!(true));
     // Never the hash.
     assert!(!body.to_string().contains("argon2"), "{body}");
@@ -374,8 +394,8 @@ db_test!(spicedb_outages_fail_closed, |store| {
 
 db_test!(the_admins_are_bootstrapped_once, |store| {
     let env = env(store.clone(), Duration::ZERO).await;
-    assert!(env.rbac.is_platform_admin(ADMIN).await.unwrap());
-    let first = store.user(ADMIN).await.unwrap().expect("admin created");
+    let first = store.user_by_username(ADMIN).await.unwrap().expect("admin created");
+    assert!(env.rbac.is_platform_admin(&first.id).await.unwrap());
     assert!(verify_password(&first.password_hash, ADMIN_PASSWORD));
 
     // A restart with another bootstrap password keeps the existing one.
@@ -384,8 +404,129 @@ db_test!(the_admins_are_bootstrapped_once, |store| {
     Rbac::with_parts(env.authz.clone(), store.clone(), config)
         .await
         .unwrap();
-    let again = store.user(ADMIN).await.unwrap().unwrap();
+    let again = store.user_by_username(ADMIN).await.unwrap().unwrap();
     assert_eq!(again.password_hash, first.password_hash);
+});
+
+/// The claims of a token, unverified.
+fn token_claims(token: &str) -> Value {
+    use base64::Engine;
+    let payload = token.split('.').nth(1).expect("a JWT");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("base64url");
+    serde_json::from_slice(&bytes).expect("JSON claims")
+}
+
+/// A token signed like a login's, with this `sub` and `iat` (seconds).
+fn token_for(sub: &str, iat: f64) -> String {
+    let mut claims = Map::new();
+    claims.insert("sub".into(), json!(sub));
+    claims.insert("iat".into(), json!(iat));
+    cubeauth::issue_token(&auth_config(), claims, 3600).unwrap()
+}
+
+fn now_secs() -> f64 {
+    chrono::Utc::now().timestamp_millis() as f64 / 1000.0
+}
+
+db_test!(login_issues_a_token_whose_sub_is_the_uuid, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let admin = store.user_by_username(ADMIN).await.unwrap().expect("admin");
+    assert!(cubeserver::rbac::store::is_uuid(&admin.id), "{}", admin.id);
+
+    let (status, body) = login(&env.router, ADMIN, ADMIN_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["id"], json!(admin.id));
+    assert_eq!(body["user"]["username"], json!(ADMIN));
+    assert_eq!(body["user"]["platformAdmin"], json!(true));
+    let token = body["token"].as_str().unwrap();
+    assert_eq!(token_claims(token)["sub"], json!(admin.id));
+    assert_eq!(meta(&env.router, Some(token)).await, StatusCode::OK);
+});
+
+db_test!(a_legacy_token_naming_the_username_still_authenticates, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let legacy = token_for(ADMIN, now_secs());
+    assert_eq!(meta(&env.router, Some(&legacy)).await, StatusCode::OK);
+    // It speaks for the same user, a platform admin: users are admin-only.
+    let (status, body) = send(&env.router, Method::GET, "/cube/v1/users", Some(&legacy), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A `sub` that is neither a UUID nor a valid username is refused.
+    for bad in ["Admin", "a.b", "user:*"] {
+        assert_eq!(
+            meta(&env.router, Some(&token_for(bad, now_secs()))).await,
+            StatusCode::UNAUTHORIZED,
+            "{bad}"
+        );
+    }
+});
+
+db_test!(a_legacy_token_issued_before_a_password_change_is_refused, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let before = now_secs() - 5.0;
+    let token = login_token(&env.router, ADMIN, ADMIN_PASSWORD).await;
+    let (status, body) = send(
+        &env.router,
+        Method::PUT,
+        "/cube/v1/auth/password",
+        Some(&token),
+        Some(json!({ "currentPassword": ADMIN_PASSWORD, "newPassword": "a-new-password-2" })),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+
+    let old = token_for(ADMIN, before);
+    assert_eq!(meta(&env.router, Some(&old)).await, StatusCode::UNAUTHORIZED);
+    let fresh = token_for(ADMIN, now_secs() + 1.0);
+    assert_eq!(meta(&env.router, Some(&fresh)).await, StatusCode::OK);
+});
+
+db_test!(an_admin_listed_by_username_is_platform_admin, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let admin = store.user_by_username(ADMIN).await.unwrap().expect("admin created");
+    assert!(env.rbac.is_platform_admin(&admin.id).await.unwrap());
+    // SpiceDB names the admin by UUID, never by username.
+    let admins = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "platform",
+            id: Some("main".into()),
+            relation: Some("admin"),
+            subject: None,
+        })
+        .await
+        .unwrap();
+    let subjects: Vec<&str> = admins.iter().map(|r| r.subject.id.as_str()).collect();
+    assert_eq!(subjects, vec![admin.id.as_str()]);
+
+    // A restart grants the same UUID again and creates no second user.
+    Rbac::with_parts(env.authz.clone(), store.clone(), rbac_config(Duration::ZERO))
+        .await
+        .unwrap();
+    let again = store.user_by_username(ADMIN).await.unwrap().unwrap();
+    assert_eq!(again.id, admin.id);
+});
+
+db_test!(created_by_records_the_username, |store| {
+    let env = env(store.clone(), Duration::ZERO).await;
+    let admin = store.user_by_username(ADMIN).await.unwrap().unwrap();
+    let token = admin_token(&env).await;
+    let (status, org) = send(
+        &env.router,
+        Method::POST,
+        "/cube/v1/organizations",
+        Some(&token),
+        Some(json!({ "name": "Acme", "owner": admin.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{org}");
+    assert_eq!(org["createdBy"], json!(ADMIN));
+    let org = org["id"].as_str().unwrap();
+    let (status, ws) = create_workspace(&env, &token, org, "Sales").await;
+    assert_eq!(status, StatusCode::CREATED, "{ws}");
+    assert_eq!(ws["createdBy"], json!(ADMIN));
 });
 
 #[tokio::test]
@@ -1207,7 +1348,7 @@ db_test!(role_change_replaces_the_old_role, |store| {
         set_role(env, &s.ana, &w1, "bia", "editor").await,
         StatusCode::OK
     );
-    assert!(env.authz.check(&ws, "edit", "bia").await.unwrap());
+    assert!(env.authz.check(&ws, "edit", &uuid_of(env, "bia").await).await.unwrap());
     assert_eq!(
         set_role(env, &s.ana, &w1, "bia", "viewer").await,
         StatusCode::OK
@@ -1226,8 +1367,8 @@ db_test!(role_change_replaces_the_old_role, |store| {
         members,
         json!({ "members": [{ "user": "bia", "role": "viewer" }] })
     );
-    assert!(!env.authz.check(&ws, "edit", "bia").await.unwrap());
-    assert!(env.authz.check(&ws, "view", "bia").await.unwrap());
+    assert!(!env.authz.check(&ws, "edit", &uuid_of(env, "bia").await).await.unwrap());
+    assert!(env.authz.check(&ws, "view", &uuid_of(env, "bia").await).await.unwrap());
 
     // Bad role, bad user id, unknown user.
     assert_eq!(
@@ -1245,7 +1386,7 @@ db_test!(role_change_replaces_the_old_role, |store| {
 
     // Removing the last role also removes the organization membership.
     let org = ObjectRef::new("organization", s.org_a.clone());
-    assert!(env.authz.check(&org, "view", "bia").await.unwrap());
+    assert!(env.authz.check(&org, "view", &uuid_of(env, "bia").await).await.unwrap());
     let (status, _) = send(
         &env.router,
         Method::DELETE,
@@ -1255,8 +1396,8 @@ db_test!(role_change_replaces_the_old_role, |store| {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(!env.authz.check(&ws, "view", "bia").await.unwrap());
-    assert!(!env.authz.check(&org, "view", "bia").await.unwrap());
+    assert!(!env.authz.check(&ws, "view", &uuid_of(env, "bia").await).await.unwrap());
+    assert!(!env.authz.check(&org, "view", &uuid_of(env, "bia").await).await.unwrap());
 });
 
 db_test!(
@@ -1278,7 +1419,7 @@ db_test!(
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let org = ObjectRef::new("organization", s.org_a.clone());
-        assert!(env.authz.check(&org, "view", "bia").await.unwrap());
+        assert!(env.authz.check(&org, "view", &uuid_of(env, "bia").await).await.unwrap());
         // Deleting W2 takes the last role, and the membership, with it.
         let (status, _) = send(
             &env.router,
@@ -1289,7 +1430,7 @@ db_test!(
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(!env.authz.check(&org, "view", "bia").await.unwrap());
+        assert!(!env.authz.check(&org, "view", &uuid_of(env, "bia").await).await.unwrap());
     }
 );
 
@@ -1530,7 +1671,7 @@ db_test!(a_workspace_owner_cannot_act_as_org_owner, |store| {
     let (status, _) = create_workspace(env, &s.bia, &s.org_a, "W9").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let org_ref = ObjectRef::new("organization", s.org_a.clone());
-    assert!(!env.authz.check(&org_ref, "admin", "bia").await.unwrap());
+    assert!(!env.authz.check(&org_ref, "admin", &uuid_of(env, "bia").await).await.unwrap());
 
     // Workspace-level management is hers.
     let (status, _) = send(
@@ -1585,8 +1726,8 @@ db_test!(a_viewer_cannot_remove_members, |store| {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let ws = ObjectRef::new("workspace", w1.clone());
-    assert!(env.authz.check(&ws, "edit", "caio").await.unwrap());
-    assert!(env.authz.check(&ws, "view", "bia").await.unwrap());
+    assert!(env.authz.check(&ws, "edit", &uuid_of(env, "caio").await).await.unwrap());
+    assert!(env.authz.check(&ws, "view", &uuid_of(env, "bia").await).await.unwrap());
 });
 
 db_test!(workspace_listings_stay_within_their_organization, |store| {
@@ -1667,7 +1808,7 @@ db_test!(disabled_users_get_no_roles, |store| {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"], "User is disabled");
     let org = ObjectRef::new("organization", s.org_a.clone());
-    assert!(!env.authz.check(&org, "view", "caio").await.unwrap());
+    assert!(!env.authz.check(&org, "view", &uuid_of(env, "caio").await).await.unwrap());
 });
 
 db_test!(a_failed_delete_leaves_the_org_or_workspace_whole, |store| {
@@ -1701,8 +1842,8 @@ db_test!(a_failed_delete_leaves_the_org_or_workspace_whole, |store| {
         .await
         .unwrap()
         .is_some());
-    assert!(env.authz.check(&ws_ref, "view", "bia").await.unwrap());
-    assert!(env.authz.check(&ws_ref, "manage", "ana").await.unwrap());
+    assert!(env.authz.check(&ws_ref, "view", &uuid_of(env, "bia").await).await.unwrap());
+    assert!(env.authz.check(&ws_ref, "manage", &uuid_of(env, "ana").await).await.unwrap());
 
     assert_eq!(
         delete(format!("/cube/v1/workspaces/{w1}")).await,
@@ -1715,7 +1856,7 @@ db_test!(a_failed_delete_leaves_the_org_or_workspace_whole, |store| {
         .await
         .unwrap()
         .is_none());
-    assert!(!env.authz.check(&ws_ref, "view", "bia").await.unwrap());
+    assert!(!env.authz.check(&ws_ref, "view", &uuid_of(env, "bia").await).await.unwrap());
 
     env.authz.set_failing_writes(true);
     assert_eq!(
@@ -1730,7 +1871,7 @@ db_test!(a_failed_delete_leaves_the_org_or_workspace_whole, |store| {
         .await
         .unwrap()
         .is_some());
-    assert!(env.authz.check(&org_ref, "admin", "ana").await.unwrap());
+    assert!(env.authz.check(&org_ref, "admin", &uuid_of(env, "ana").await).await.unwrap());
 
     assert_eq!(
         delete(format!("/cube/v1/organizations/{}", s.org_a)).await,
@@ -1743,7 +1884,7 @@ db_test!(a_failed_delete_leaves_the_org_or_workspace_whole, |store| {
         .await
         .unwrap()
         .is_none());
-    assert!(!env.authz.check(&org_ref, "admin", "ana").await.unwrap());
+    assert!(!env.authz.check(&org_ref, "admin", &uuid_of(env, "ana").await).await.unwrap());
 });
 
 // ---- connections ----
@@ -1914,7 +2055,7 @@ db_test!(org_owner_adds_a_connection_and_releases_it, |store| {
     assert!(env.rbac.store.connection("x").await.unwrap().is_none());
     assert!(released(env, &w1).await.is_empty());
     let connection = ObjectRef::new("connection", "x");
-    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+    assert!(!env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
 });
 
 db_test!(
@@ -2078,8 +2219,8 @@ db_test!(assigning_an_existing_data_source_to_an_org, |store| {
     );
     assert!(released(env, &w1).await.is_empty());
     let connection = ObjectRef::new("connection", "shared");
-    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
-    assert!(env.authz.check(&connection, "manage", "bia").await.unwrap());
+    assert!(!env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
+    assert!(env.authz.check(&connection, "manage", &uuid_of(env, "bia").await).await.unwrap());
     let row = env.rbac.store.connection("shared").await.unwrap().unwrap();
     assert_eq!(row.organization_id.to_string(), org_b);
 });
@@ -2099,7 +2240,7 @@ db_test!(
         // `ana` administers A and could manage the connection in SpiceDB, but
         // its settings are the platform's.
         let connection = ObjectRef::new("connection", "shared");
-        assert!(env.authz.check(&connection, "manage", "ana").await.unwrap());
+        assert!(env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
         let (status, body) = send(
             &env.router,
             Method::PUT,
@@ -2290,7 +2431,7 @@ db_test!(moving_a_created_connection_makes_it_assigned, |store| {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let connection = ObjectRef::new("connection", "x");
-    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+    assert!(!env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
 });
 
 db_test!(data_sources_routes_are_admin_only_with_rbac, |store| {
@@ -2442,7 +2583,7 @@ db_test!(a_failed_spicedb_write_adds_no_connection, |store| {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(env.rbac.store.connection("broken").await.unwrap().is_none());
     let connection = ObjectRef::new("connection", "broken");
-    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
+    assert!(!env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
 });
 
 db_test!(a_recreated_data_source_inherits_no_grant, |store| {
@@ -2506,7 +2647,7 @@ db_test!(a_recreated_data_source_inherits_no_grant, |store| {
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list, json!({ "connections": [] }));
     let connection = ObjectRef::new("connection", "x");
-    assert!(!env.authz.check(&connection, "query", "bia").await.unwrap());
+    assert!(!env.authz.check(&connection, "query", &uuid_of(env, "bia").await).await.unwrap());
 });
 
 db_test!(a_data_source_never_adopts_a_stale_row, |store| {
@@ -3709,7 +3850,8 @@ db_test!(rbac_services_fail_closed_when_spicedb_is_down, |store| {
         d.queries.data_sources(),
     );
     let ctx = RequestContext {
-        user: Some("bia".into()),
+        user: Some(uuid_of(env, "bia").await),
+        username: Some("bia".into()),
         workspace: Some(d.w1.clone()),
         ..RequestContext::default()
     };
@@ -3803,9 +3945,11 @@ db_test!(
             inner.clone(),
             env.rbac.clone(),
         ));
+        let ids = user_ids(env, &["bia", "caio"]).await;
         let ctx = |user: &str, platform_admin: bool| RequestContext {
             request_id: "req-1-span-1".into(),
-            user: Some(user.into()),
+            user: Some(ids[user].clone()),
+            username: Some(user.into()),
             workspace: Some(d.w1.clone()),
             platform_admin,
             ..RequestContext::default()
@@ -4079,7 +4223,8 @@ db_test!(meta_extended_is_filtered_too, |store| {
         d.queries.data_sources(),
     );
     let ctx = RequestContext {
-        user: Some("bia".into()),
+        user: Some(uuid_of(env, "bia").await),
+        username: Some("bia".into()),
         workspace: Some(d.w1.clone()),
         ..RequestContext::default()
     };
@@ -4100,7 +4245,8 @@ db_test!(a_query_service_without_a_snapshot_is_503, |store| {
     let env = &d.s.env;
     let query = RbacQueryService::new(Arc::new(UnimplementedQueryService), env.rbac.clone());
     let ctx = RequestContext {
-        user: Some("bia".into()),
+        user: Some(uuid_of(env, "bia").await),
+        username: Some("bia".into()),
         workspace: Some(d.w1.clone()),
         ..RequestContext::default()
     };
@@ -4742,12 +4888,13 @@ db_test!(access_graph_agrees_with_check, |store| {
     );
     for user in ["ana", "bia", "caio"] {
         let (status, graph) = access_graph(env, &s.admin, user).await;
+        let id = uuid_of(env, user).await;
         assert_eq!(status, StatusCode::OK, "{graph}");
         let org = ObjectRef::new("organization", s.org_a.clone());
         for permission in ["admin", "view", "manage_connections"] {
             assert_eq!(
                 has_grant(&graph, &format!("organization:{}", s.org_a), permission),
-                env.authz.check(&org, permission, user).await.unwrap(),
+                env.authz.check(&org, permission, &id).await.unwrap(),
                 "{user} {permission} on the organization: {graph}"
             );
         }
@@ -4756,7 +4903,7 @@ db_test!(access_graph_agrees_with_check, |store| {
             for permission in ["manage", "edit", "view", "query", "execute"] {
                 assert_eq!(
                     has_grant(&graph, &format!("workspace:{ws}"), permission),
-                    env.authz.check(&resource, permission, user).await.unwrap(),
+                    env.authz.check(&resource, permission, &id).await.unwrap(),
                     "{user} {permission} on {ws}: {graph}"
                 );
             }
@@ -4866,7 +5013,7 @@ db_test!(access_graph_queries_only_configured_connections, |store| {
     // x: released, configured and queryable, as the graph says.
     assert_eq!(listed.get("x"), Some(&&json!("sqlite")), "{list}");
     let x = ObjectRef::new("connection", "x");
-    assert!(env.authz.check(&x, "query", "bia").await.unwrap());
+    assert!(env.authz.check(&x, "query", &uuid_of(env, "bia").await).await.unwrap());
     assert!(has_grant(&graph, "connection:x", "query"), "{graph}");
 
     // gone: released, but there is no data source to run it on, so the
@@ -6054,7 +6201,7 @@ db_test!(a_rule_member_that_is_not_a_uuid_is_503, |store| {
         .touch(&[Relationship {
             resource: ObjectRef::new("rule", "not-a-uuid"),
             relation: "member",
-            subject: ObjectRef::new("user", "bia"),
+            subject: ObjectRef::new("user", uuid_of(env, "bia").await),
         }])
         .await
         .unwrap();
@@ -6936,9 +7083,11 @@ db_test!(
             }),
             d.s.env.rbac.clone(),
         );
+        let ids = user_ids(&d.s.env, &["bia", "caio"]).await;
         let ctx = |user: &str| RequestContext {
             request_id: "req-executed-plan".into(),
-            user: Some(user.into()),
+            user: Some(ids[user].clone()),
+            username: Some(user.into()),
             workspace: Some(d.w1.clone()),
             ..RequestContext::default()
         };
@@ -7020,9 +7169,11 @@ db_test!(
             }),
             d.s.env.rbac.clone(),
         );
+        let ids = user_ids(&d.s.env, &["bia", "caio"]).await;
         let ctx = |user: &str| RequestContext {
             request_id: "req-unreporting".into(),
-            user: Some(user.into()),
+            user: Some(ids[user].clone()),
+            username: Some(user.into()),
             workspace: Some(d.w1.clone()),
             ..RequestContext::default()
         };
@@ -7415,8 +7566,8 @@ db_test!(unassign_returns_a_connection_to_platform, |store| {
     assert!(env.rbac.store.connection("shared").await.unwrap().is_none());
     assert!(released(env, &w1).await.is_empty());
     let connection = ObjectRef::new("connection", "shared");
-    assert!(!env.authz.check(&connection, "manage", "ana").await.unwrap());
-    assert!(!env.authz.check(&connection, "query", "ana").await.unwrap());
+    assert!(!env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
+    assert!(!env.authz.check(&connection, "query", &uuid_of(env, "ana").await).await.unwrap());
 
     // Platform again: it can be assigned anew.
     assert_eq!(assign(env, &s.admin, "shared", &s.org_a).await, StatusCode::NO_CONTENT);
@@ -7457,7 +7608,7 @@ db_test!(a_failed_spicedb_write_unassigns_nothing, |store| {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(env.rbac.store.connection("shared").await.unwrap().is_some());
     let connection = ObjectRef::new("connection", "shared");
-    assert!(env.authz.check(&connection, "manage", "ana").await.unwrap());
+    assert!(env.authz.check(&connection, "manage", &uuid_of(env, "ana").await).await.unwrap());
 });
 
 db_test!(unassign_withdraws_a_release_written_while_it_ran, |store| {

@@ -87,23 +87,31 @@ pub(crate) fn prepare_dummy_hash() {
     LazyLock::force(&DUMMY_HASH);
 }
 
-/// The user `username` when `password` is theirs and they are enabled.
-///
-/// Unknown users, and names that are not valid ids, are checked against a
-/// dummy hash so their answer takes as long as a wrong password.
-pub(crate) async fn check_credentials(
+/// The user who logs in as `username`, looked up before the password is
+/// checked. `None` for an unknown name and for one that is not a valid
+/// username (never asked about).
+pub(crate) async fn login_user(
     rbac: &Rbac,
     username: &str,
+) -> Result<Option<crate::rbac::store::User>, ApiError> {
+    if validate_user_id(username).is_err() {
+        return Ok(None);
+    }
+    rbac.store.user_by_username(username).await.map_err(|e| {
+        tracing::error!("RBAC store unavailable: {e}");
+        unavailable()
+    })
+}
+
+/// `user` when `password` is theirs and they are enabled.
+///
+/// A missing user is checked against a dummy hash so its answer takes as
+/// long as a wrong password.
+pub(crate) async fn check_password(
+    rbac: &Rbac,
+    user: Option<crate::rbac::store::User>,
     password: &str,
 ) -> Result<Option<crate::rbac::store::User>, ApiError> {
-    let user = if validate_user_id(username).is_ok() {
-        rbac.store.user(username).await.map_err(|e| {
-            tracing::error!("RBAC store unavailable: {e}");
-            unavailable()
-        })?
-    } else {
-        None
-    };
     let hash = match &user {
         Some(user) => user.password_hash.clone(),
         None => DUMMY_HASH.clone(),
@@ -116,16 +124,28 @@ pub(crate) async fn check_credentials(
     Ok(user.filter(|user| matches && !user.disabled))
 }
 
+/// Who a token speaks for.
+#[derive(Debug, Clone)]
+pub struct Identity {
+    /// The user's UUID.
+    pub id: String,
+    pub username: String,
+    pub platform_admin: bool,
+}
+
 /// Resolve o usuário do token: 401 sem `sub`, usuário inexistente/desativado,
 /// ou `iat` < password_changed_at.
+///
+/// `sub` is the user's UUID; a token issued before users had one names the
+/// username instead, and still works until it expires.
 pub async fn resolve_identity(
     rbac: &Rbac,
     security_context: &Value,
-) -> Result<(String, bool /*platform admin*/), ApiError> {
+) -> Result<Identity, ApiError> {
     let sub = security_context
         .get("sub")
         .and_then(Value::as_str)
-        .filter(|sub| validate_user_id(sub).is_ok())
+        .filter(|sub| super::store::is_uuid(sub) || validate_user_id(sub).is_ok())
         .ok_or_else(unauthenticated)?;
     // Tokens without `iat` cannot be compared with the last password change.
     let issued_at = security_context
@@ -135,7 +155,7 @@ pub async fn resolve_identity(
 
     let user = rbac
         .store
-        .user(sub)
+        .resolve_user(sub)
         .await
         .map_err(|e| {
             tracing::error!("RBAC store unavailable: {e}");
@@ -151,7 +171,11 @@ pub async fn resolve_identity(
     }
 
     let platform_admin = rbac.is_platform_admin(&user.id).await?;
-    Ok((user.id, platform_admin))
+    Ok(Identity {
+        id: user.id,
+        username: user.username,
+        platform_admin,
+    })
 }
 
 /// `true` once the token's `exp` (a NumericDate, seconds) has passed. A
@@ -174,7 +198,8 @@ fn iat_millis(iat: f64) -> i64 {
     (iat * 1000.0).round() as i64
 }
 
-/// Claims of a token for `user`, valid for `ttl`: `{sub, iat, exp}`.
+/// Claims of a token for the user whose UUID is `user`, valid for `ttl`:
+/// `{sub, iat, exp}`.
 ///
 /// `iat` is a NumericDate with millisecond precision (RFC 7519 allows
 /// fractions), compared with `password_changed_at` on every request.

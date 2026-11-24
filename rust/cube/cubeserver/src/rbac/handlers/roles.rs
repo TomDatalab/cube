@@ -232,7 +232,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let role = tx
-        .create_role(org.id, &name, &permissions, &restrictions, user)
+        .create_role(org.id, &name, &permissions, &restrictions, super::actor(&ctx)?)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     rbac.authz

@@ -263,6 +263,12 @@ pub(crate) fn caller<'a>(
     Ok((rbac, user))
 }
 
+/// The caller's username, what `created_by`/`updated_by` record; 401
+/// without an identity.
+pub(crate) fn actor(ctx: &RequestContext) -> Result<&str, ApiError> {
+    ctx.username.as_deref().ok_or_else(unauthenticated)
+}
+
 /// A resource id from the path. Anything that is not a UUID cannot exist: 404.
 pub(crate) fn resource_id(id: &str, kind: &str) -> Result<Uuid, ApiError> {
     id.parse()

@@ -83,7 +83,7 @@ pub async fn create(
     Extension(ctx): Extension<RequestContext>,
     request: Result<Json<CreateOrganization>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let (rbac, user) = caller(&state, &ctx)?;
+    let (rbac, _) = caller(&state, &ctx)?;
     if !ctx.platform_admin {
         return Err(ApiError::forbidden(
             "Only platform admins create organizations",
@@ -128,7 +128,7 @@ pub async fn create(
             .transaction()
             .await
             .map_err(|e| store_error(e, "Conflict"))?;
-        match tx.create_organization(&name, &slug, user).await {
+        match tx.create_organization(&name, &slug, super::actor(&ctx)?).await {
             Ok(org) => break (tx, org),
             Err(StoreError::Conflict(c))
                 if request.slug.is_none() && attempt < 5 && c.contains("organizations_slug") => {}
