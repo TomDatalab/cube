@@ -7,7 +7,8 @@ import {
 
 import { AdminApi, User } from '../api';
 import {
-  applyPositions, bounds, edgeGeometry, EdgeGeometry, expandFor, fitView, highlight, layout, LaidOutNode,
+  applyPositions, bounds, drawOrder, edgeGeometry, EdgeGeometry, expandFor, fitView, graphHeight, highlight, layout,
+  LaidOutNode,
   movedBeyond, NODE_W, nodeRows, Point, Positions, View, zoomAt,
 } from './layout';
 import { AccessEdge, AccessGraph, AccessNodeKind, Reason } from './types';
@@ -29,12 +30,17 @@ const FG = 'var(--pg-graph-fg, #1f1d3a)';
 const DERIVED = 'var(--pg-graph-derived, #9c9ab8)';
 const PANEL = 'var(--pg-graph-panel, #f6f6fb)';
 const NODE_BG = 'var(--pg-graph-node, #fff)';
+// How much a node the user cannot access fades.
+const DIM_OPACITY = 0.55;
 
 const KIND_COLOR: Record<AccessNodeKind, string> = {
   user: 'var(--pg-graph-user, #1f1d3a)',
   organization: 'var(--pg-graph-organization, #2f7d6d)',
+  rule: 'var(--pg-graph-rule, #8a5cc2)',
+  role: 'var(--pg-graph-role, #c2477a)',
   workspace: 'var(--pg-graph-workspace, #6a66f0)',
   connection: 'var(--pg-graph-connection, #b8641e)',
+  cube: 'var(--pg-graph-cube, #3a7bb8)',
 };
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -121,7 +127,7 @@ function Node({
   const rows = nodeRows(node);
   const clip = `access-clip-${index}`;
   const tx = node.x + 16;
-  const pill = node.hiddenCount ? `+${node.hiddenCount} workspaces` : 'collapse';
+  const pill = node.hiddenCount ? `+${node.hiddenCount} ${node.kind === 'connection' ? 'cubes' : 'workspaces'}` : 'collapse';
   return (
     <g onPointerDown={onPointerDown} style={{ cursor: grabbing ? 'grabbing' : 'grab' }}>
       <clipPath id={clip}>
@@ -136,29 +142,33 @@ function Node({
         style={{ fill: NODE_BG, stroke: hl ? ACCENT : LINE }}
         strokeWidth={hl ? 2 : 1}
       />
-      <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} style={{ fill: color }} />
-      <g clipPath={`url(#${clip})`}>
-        <text x={tx} y={node.y + rows.kindY} fontSize={10.5} style={{ fill: color }} fontFamily={MONO}>
-          {node.kind}
-        </text>
-        <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} style={{ fill: FG }}>
-          {node.label}
-          <title>{node.name}</title>
-        </text>
-        {node.permLines.length ? (
-          <text fontSize={11.5} style={{ fill: MUTED }} fontFamily={MONO}>
-            {node.permLines.map((line, i) => ({ line, y: node.y + rows.permY[i] })).map(({ line, y }) => (
-              <tspan key={y} x={tx} y={y}>{line}</tspan>
-            ))}
+      {/* Dimmed (no access): its contents fade, its background stays opaque,
+          so what lies behind it never shows through. */}
+      <g opacity={node.dim ? DIM_OPACITY : 1}>
+        <rect x={node.x} y={node.y + 10} width={4} height={node.h - 20} rx={2} style={{ fill: color }} />
+        <g clipPath={`url(#${clip})`}>
+          <text x={tx} y={node.y + rows.kindY} fontSize={10.5} style={{ fill: color }} fontFamily={MONO}>
+            {node.kind}
           </text>
-        ) : null}
-        {node.noteLines.length ? (
-          <text fontSize={10.5} style={{ fill: MUTED }} fontStyle="italic">
-            {node.noteLines.map((line, i) => ({ line, y: node.y + rows.noteY[i] })).map(({ line, y }) => (
-              <tspan key={y} x={tx} y={y}>{line}</tspan>
-            ))}
+          <text x={tx} y={node.y + rows.nameY} fontSize={14} fontWeight={600} style={{ fill: FG }}>
+            {node.label}
+            <title>{node.name}</title>
           </text>
-        ) : null}
+          {node.permLines.length ? (
+            <text fontSize={11.5} style={{ fill: MUTED }} fontFamily={MONO}>
+              {node.permLines.map((line, i) => ({ line, y: node.y + rows.permY[i] })).map(({ line, y }) => (
+                <tspan key={y} x={tx} y={y}>{line}</tspan>
+              ))}
+            </text>
+          ) : null}
+          {node.noteLines.length ? (
+            <text fontSize={10.5} style={{ fill: MUTED }} fontStyle="italic">
+              {node.noteLines.map((line, i) => ({ line, y: node.y + rows.noteY[i] })).map(({ line, y }) => (
+                <tspan key={y} x={tx} y={y}>{line}</tspan>
+              ))}
+            </text>
+          ) : null}
+        </g>
       </g>
       {rows.pillY != null ? (
         <g
@@ -196,7 +206,8 @@ export function AccessModal({ api, user, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [active, setActive] = useState<Reason | null>(null);
-  // Where nodes were dragged to, by node id; kept across expand/collapse.
+  // How far nodes were dragged from their place, by node id; kept across
+  // expand/collapse, so a dragged node moves with its column.
   const [positions, setPositions] = useState<Positions>({});
   // Null until the graph is first fitted into the viewport.
   const [view, setView] = useState<View | null>(null);
@@ -204,7 +215,13 @@ export function AccessModal({ api, user, onClose }: Props) {
   const [drag, setDrag] = useState<Drag | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const narrow = useNarrow();
-  const viewHeight = narrow ? 420 : 600;
+  // Full screen: the dialog's content fills the screen (Fullscreen API).
+  const content = useRef<HTMLDivElement>(null);
+  const [full, setFull] = useState(false);
+  const canFullScreen = typeof document !== 'undefined' && Boolean(document.fullscreenEnabled);
+  const viewHeight = graphHeight({
+    full, narrow, screen: typeof window !== 'undefined' ? window.innerHeight : 0,
+  });
   const userId = user?.id;
 
   useEffect(() => {
@@ -243,6 +260,38 @@ export function AccessModal({ api, user, onClose }: Props) {
     if (placed && width > 0) {
       setView(fitView(placed.box, width, viewHeight));
     }
+  }
+
+  // What goes full screen: the dialog's whole content (title bar and its
+  // buttons included), or just the graph and its panel outside a dialog.
+  function fullScreenTarget(): Element | null {
+    return content.current?.closest('.ant-modal-content') ?? content.current;
+  }
+
+  function toggleFullScreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      fullScreenTarget()?.requestFullscreen().catch(() => undefined);
+    }
+  }
+
+  // Entering or leaving full screen (the button, Esc or F11) resizes the
+  // graph and fits it again.
+  useEffect(() => {
+    const onChange = () => {
+      setFull(document.fullscreenElement != null && document.fullscreenElement === fullScreenTarget());
+      setView(null);
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  function close() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    }
+    onClose();
   }
 
   // The graph opens fitted (once the viewport has a width).
@@ -304,7 +353,8 @@ export function AccessModal({ api, user, onClose }: Props) {
       node: node?.id,
       toggle: !!(e.target as Element).closest?.('[data-toggle]'),
       start: svgPoint(e),
-      origin: node ? { x: node.x, y: node.y } : { x: v.x, y: v.y },
+      // A node: its offset so far; the view: its translation.
+      origin: node ? positions[node.id] || { x: 0, y: 0 } : { x: v.x, y: v.y },
       moved: false,
     });
   }
@@ -346,11 +396,11 @@ export function AccessModal({ api, user, onClose }: Props) {
     setDrag(null);
   }
 
-  function flip(orgId: string) {
+  function flip(parentId: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (!next.delete(orgId)) {
-        next.add(orgId);
+      if (!next.delete(parentId)) {
+        next.add(parentId);
       }
       return next;
     });
@@ -372,7 +422,7 @@ export function AccessModal({ api, user, onClose }: Props) {
       setActive(null);
       return;
     }
-    // A reason through a collapsed organization opens it, so its path shows.
+    // A reason through a collapsed organization or connection opens it, so its path shows.
     if (graph && drawn) {
       const { nodes } = drawn;
       setExpanded((prev) => expandFor(graph, nodes, r.path, prev));
@@ -423,12 +473,7 @@ export function AccessModal({ api, user, onClose }: Props) {
             ))}
           </defs>
           <g transform={`translate(${v.x},${v.y}) scale(${v.k})`}>
-            <g>
-              {edges.map((g) => (
-                <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
-              ))}
-            </g>
-            {nodes.map((n, i) => (
+            {drawOrder(nodes, drag?.moved ? drag.node : undefined).map((n, i) => (
               <Node
                 key={n.id}
                 node={n}
@@ -439,6 +484,13 @@ export function AccessModal({ api, user, onClose }: Props) {
                 onPointerDown={(e) => startDrag(e, n)}
               />
             ))}
+            {/* Edges over the boxes, so none hides behind one; they let the
+                pointer through to the box or canvas below. */}
+            <g style={{ pointerEvents: 'none' }}>
+              {edges.map((g) => (
+                <Edge key={`${g.edge.from}>${g.edge.to}>${g.edge.label}`} geometry={g} hl={isHl(g.edge)} />
+              ))}
+            </g>
           </g>
         </svg>
       </div>
@@ -572,18 +624,23 @@ export function AccessModal({ api, user, onClose }: Props) {
                 <Button size="small" disabled={!Object.keys(positions).length} onClick={() => setPositions({})}>
                   Reset layout
                 </Button>
+                {canFullScreen ? (
+                  <Button size="small" aria-pressed={full} onClick={toggleFullScreen}>
+                    {full ? 'Exit full screen' : 'Full screen'}
+                  </Button>
+                ) : null}
               </Space>
             ) : null}
           </Space>
         </div>
       )}
       visible={user != null}
-      onCancel={onClose}
+      onCancel={close}
       footer={null}
       width="90vw"
       destroyOnClose
     >
-      {body}
+      <div ref={content}>{body}</div>
     </Modal>
   );
 }

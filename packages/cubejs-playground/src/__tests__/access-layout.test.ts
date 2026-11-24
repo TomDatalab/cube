@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyPositions,
+  drawOrder,
+  graphHeight,
   bounds,
   clampScale,
   COLLAPSE_AT,
@@ -156,6 +158,19 @@ describe('access layout', () => {
     });
   });
 
+  it('draws every edge as one curve straight between its nodes', () => {
+    // Edges are drawn over the boxes, so they need not go around them.
+    const g = graphWith(3);
+    g.edges.push({ from: 'user:ana', to: 'workspace:w1', label: 'editor', kind: 'direct' });
+    const out = layout(g, new Set());
+    const user = out.nodes.find((n) => n.id === 'user:ana')!;
+    const w1 = out.nodes.find((n) => n.id === 'workspace:w1')!;
+    const geo = edgeGeometry(out.nodes, out.edges).find((e) => e.edge.from === 'user:ana' && e.edge.to === 'workspace:w1')!;
+    expect(geo.d.startsWith(`M${user.x + NODE_W},${user.y + user.h / 2} C`)).toBe(true);
+    expect(geo.d.endsWith(`${w1.x},${w1.y + w1.h / 2}`)).toBe(true);
+    expect(geo.d).not.toContain(' L');
+  });
+
   it('opens the organizations a reason passes through', () => {
     const g = graphWith(COLLAPSE_AT + 1);
     const drawn = layout(g, new Set());
@@ -172,6 +187,105 @@ describe('access layout', () => {
   });
 });
 
+function kindGraph(cubes: number): AccessGraph {
+  const cs = Array.from({ length: cubes }, (_, i) => node(`cube:org:c${i}`, 'cube', O));
+  const nodes = [
+    node('user:ana', 'user'),
+    node(OID, 'organization'),
+    node('rule:r', 'rule', O),
+    { ...node('role:r1', 'role', O), details: ['manage', 'query'] },
+    node('workspace:w', 'workspace', O),
+    node('connection:db', 'connection', O),
+    node('connection:db2', 'connection', O),
+    ...cs,
+  ];
+  return {
+    user: { id: 'ana', name: null, disabled: false },
+    platformAdmin: false,
+    nodes,
+    edges: [
+      { from: 'user:ana', to: 'rule:r', label: 'member', kind: 'direct' },
+      { from: 'rule:r', to: 'role:r1', label: 'role', kind: 'direct' },
+      { from: 'rule:r', to: 'workspace:w', label: 'Role', kind: 'direct' },
+      { from: 'workspace:w', to: 'connection:db', label: 'released', kind: 'derived' },
+      ...cs.map((c) => ({ from: 'connection:db', to: c.id, label: 'serves', kind: 'derived' as const })),
+    ],
+    grants: [{ resource: 'connection:db', permission: 'query', reasons: [] }],
+  };
+}
+
+describe('rules, roles and cubes', () => {
+  it('columns follow user, organization, rule, role, workspace, connection, cube', () => {
+    const g = kindGraph(2);
+    const x = (out: ReturnType<typeof layout>, id: string) => out.nodes.find((n) => n.id === id)!.x;
+    const out = layout(g, new Set());
+    const xs = [
+      'user:ana', OID, 'rule:r', 'role:r1', 'workspace:w', 'connection:db', 'cube:org:c0',
+    ].map((id) => x(out, id));
+    expect(xs).toEqual([20, 400, 780, 1160, 1540, 1920, 2300]);
+    g.nodes = g.nodes.filter((n) => n.kind !== 'rule');
+    const without = layout(g, new Set());
+    expect(x(without, 'role:r1')).toBe(780);
+  });
+
+  it('a connection with more than COLLAPSE_AT cubes collapses them', () => {
+    const g = kindGraph(COLLAPSE_AT + 16);
+    const out = layout(g, new Set());
+    const db = out.nodes.find((n) => n.id === 'connection:db')!;
+    expect(db.foldable).toBe(true);
+    expect(db.hiddenCount).toBe(COLLAPSE_AT + 16);
+    expect(out.nodes.some((n) => n.kind === 'cube')).toBe(false);
+    expect(out.edges.some((e) => e.to.startsWith('cube:'))).toBe(false);
+    expect(layout(g, new Set(['connection:db'])).nodes.filter((n) => n.kind === 'cube')).toHaveLength(COLLAPSE_AT + 16);
+    const next = expandFor(g, out.nodes, ['user:ana', 'connection:db', 'cube:org:c3'], new Set());
+    expect([...next]).toEqual(['connection:db']);
+  });
+
+  it('a cube served by a small connection stays visible with its edge', () => {
+    const g = kindGraph(COLLAPSE_AT + 1);
+    g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
+    const out = layout(g, new Set());
+    expect(out.nodes.find((n) => n.id === 'connection:db2')!.foldable).toBe(false);
+    expect(out.nodes.some((n) => n.id === 'cube:org:c0')).toBe(true);
+    expect(out.nodes.some((n) => n.id === 'cube:org:c1')).toBe(false);
+    expect(out.edges.some((e) => e.from === 'connection:db2' && e.to === 'cube:org:c0')).toBe(true);
+    expect(out.edges.some((e) => e.from === 'connection:db' && e.to === 'cube:org:c0')).toBe(true);
+  });
+
+  it('a collapsed connection counts only the cubes it hides', () => {
+    const g = kindGraph(COLLAPSE_AT + 1);
+    g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
+    const out = layout(g, new Set());
+    // c0 stays visible through db2: db hides the others only.
+    expect(out.nodes.find((n) => n.id === 'connection:db')!.hiddenCount).toBe(COLLAPSE_AT);
+  });
+
+  it('a cube of two big connections is hidden until one opens', () => {
+    const g = kindGraph(COLLAPSE_AT + 1);
+    const extra = Array.from({ length: COLLAPSE_AT }, (_, i) => node(`cube:org:x${i}`, 'cube', O));
+    g.nodes.push(...extra);
+    extra.forEach((c) => g.edges.push({ from: 'connection:db2', to: c.id, label: 'serves', kind: 'derived' }));
+    g.edges.push({ from: 'connection:db2', to: 'cube:org:c0', label: 'serves', kind: 'derived' });
+    const out = layout(g, new Set());
+    expect(out.nodes.some((n) => n.id === 'cube:org:c0')).toBe(false);
+    const path = ['user:ana', 'connection:db2', 'cube:org:c0'];
+    const next = expandFor(g, out.nodes, path, new Set());
+    expect([...next]).toEqual(['connection:db2']);
+    expect(layout(g, next).nodes.some((n) => n.id === 'cube:org:c0')).toBe(true);
+  });
+
+  it('a role node lists its details as permission lines', () => {
+    const out = layout(kindGraph(1), new Set());
+    expect(out.nodes.find((n) => n.id === 'role:r1')!.permLines).toEqual(['manage · query']);
+  });
+
+  it('marks only access-less connections and cubes dim', () => {
+    const out = layout(kindGraph(1), new Set());
+    const dim = out.nodes.filter((n) => n.dim).map((n) => n.id).sort();
+    expect(dim).toEqual(['connection:db2', 'cube:org:c0']);
+  });
+});
+
 describe('dragging nodes', () => {
   it('tells a click from a drag', () => {
     expect(movedBeyond(2, 3)).toBe(false);
@@ -179,21 +293,42 @@ describe('dragging nodes', () => {
     expect(movedBeyond(-5, 0)).toBe(true);
   });
 
-  it('moves only the dragged nodes, whatever the layout', () => {
+  it('moves only the dragged nodes, by how far they were dragged', () => {
     const out = layout(graphWith(2), new Set());
+    const org = out.nodes.find((n) => n.id === OID)!;
     const moved = applyPositions(out.nodes, { [OID]: { x: 5, y: 900 }, 'workspace:gone': { x: 1, y: 1 } });
-    expect(moved.find((n) => n.id === OID)).toMatchObject({ x: 5, y: 900 });
+    expect(moved.find((n) => n.id === OID)).toMatchObject({ x: org.x + 5, y: org.y + 900 });
     expect(moved.find((n) => n.id === 'user:ana')).toEqual(out.nodes.find((n) => n.id === 'user:ana'));
     expect(moved).toHaveLength(out.nodes.length);
   });
 
+  it('a dragged node follows the layout when it moves the node', () => {
+    // Expanding or collapsing moves nodes down or up their column: a node
+    // dragged before keeps where it was dragged to relative to its place,
+    // so it does not land on the nodes that moved around it.
+    const out = layout(graphWith(2), new Set());
+    const reflowed = out.nodes.map((n) => ({ ...n, y: n.y + 100 }));
+    const before = applyPositions(out.nodes, { [OID]: { x: 0, y: 30 } }).find((n) => n.id === OID)!;
+    const after = applyPositions(reflowed, { [OID]: { x: 0, y: 30 } }).find((n) => n.id === OID)!;
+    expect(after.y - before.y).toBe(100);
+  });
+
+  it('draws the dragged node last, on top of the others', () => {
+    const out = layout(graphWith(2), new Set());
+    const order = drawOrder(out.nodes, OID).map((n) => n.id);
+    expect(order[order.length - 1]).toBe(OID);
+    expect(order).toHaveLength(out.nodes.length);
+    expect(drawOrder(out.nodes, undefined)).toEqual(out.nodes);
+  });
+
   it('bounds enclose dragged nodes', () => {
     const out = layout(graphWith(2), new Set());
-    const moved = applyPositions(out.nodes, { [OID]: { x: -300, y: 2000 } });
+    const moved = applyPositions(out.nodes, { [OID]: { x: -700, y: 2000 } });
     const org = moved.find((n) => n.id === OID)!;
     const b = bounds(moved, edgeGeometry(moved, out.edges));
-    expect(b.minX).toBeLessThanOrEqual(-300);
-    expect(b.maxY).toBeGreaterThanOrEqual(2000 + org.h);
+    expect(b.minX).toBeLessThanOrEqual(org.x);
+    expect(org.x).toBeLessThan(0);
+    expect(b.maxY).toBeGreaterThanOrEqual(org.y + org.h);
     expect(b.maxX).toBeGreaterThanOrEqual(1160 + NODE_W);
   });
 });
@@ -233,5 +368,19 @@ describe('zoom and pan', () => {
     expect(fitView({
       minX: 10, minY: 10, maxX: 110, maxY: 60,
     }, 1000, 600).k).toBe(1);
+  });
+});
+
+describe('graph height', () => {
+  it('fills the screen in full screen, below the title bar', () => {
+    expect(graphHeight({ full: true, narrow: false, screen: 1000 })).toBe(1000 - 140);
+    expect(graphHeight({ full: true, narrow: true, screen: 1000 })).toBe(1000 - 140);
+    // Never smaller than the narrow view.
+    expect(graphHeight({ full: true, narrow: false, screen: 300 })).toBe(420);
+  });
+
+  it('keeps its fixed height in the dialog', () => {
+    expect(graphHeight({ full: false, narrow: false, screen: 1000 })).toBe(600);
+    expect(graphHeight({ full: false, narrow: true, screen: 1000 })).toBe(420);
   });
 });

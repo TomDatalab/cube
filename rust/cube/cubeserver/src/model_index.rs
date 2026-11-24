@@ -102,6 +102,10 @@ pub struct IndexedCube {
     pub joins: Vec<(String, Option<String>)>,
     /// A view's source cubes: every segment of every `join_path`, deduped.
     pub includes: Vec<String>,
+    /// A view's member-owning cubes: the last segment of each `join_path`
+    /// (the cube whose members the include brings), deduped. The cubes a
+    /// join path only passes through are left out.
+    pub member_cubes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +326,20 @@ fn index_sources(
                     }
                     names
                 },
+                member_cubes: {
+                    let mut names: Vec<String> = Vec::new();
+                    for last in c
+                        .cubes
+                        .iter()
+                        .filter_map(|i| i.join_path.as_deref())
+                        .filter_map(|p| p.rsplit('.').next())
+                    {
+                        if !last.is_empty() && !names.iter().any(|n| n == last) {
+                            names.push(last.to_string());
+                        }
+                    }
+                    names
+                },
             }
         })
         .collect();
@@ -401,6 +419,23 @@ impl ModelIndexCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_names_the_cubes_that_own_its_members() {
+        let dir = std::env::temp_dir().join(format!("model-index-owners-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("m.yml"),
+            "cubes:\n  - name: a\n    sql_table: t\n    joins:\n      - name: b\n        sql: \"1=1\"\n        relationship: many_to_one\n    measures:\n      - name: n\n        type: count\n  - name: b\n    sql_table: t\n    measures:\n      - name: n\n        type: count\nviews:\n  - name: w\n    cubes:\n      - join_path: a.b\n        includes: \"*\"\n",
+        )
+        .unwrap();
+        let index = ModelIndex::load_with(&dir, None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let w = index.cubes.iter().find(|c| c.name == "w").unwrap();
+        // `a` is only on the join path: its members are not the view's.
+        assert_eq!(w.includes, ["a", "b"]);
+        assert_eq!(w.member_cubes, ["b"]);
+    }
 
     #[test]
     fn a_cube_lists_all_its_members_flagged() {

@@ -5310,15 +5310,19 @@ db_test!(
         assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
         assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::OK);
 
-        // The access graph names the role.
+        // The access graph names the role: the rule reaches it, and carries
+        // its name to the workspace.
         let (status, graph) = access_graph(env, &s.admin, "bia").await;
         assert_eq!(status, StatusCode::OK, "{graph}");
+        let edges = graph["edges"].as_array().unwrap();
         assert!(
-            graph["edges"]
-                .as_array()
-                .unwrap()
+            edges
                 .iter()
-                .any(|e| e["label"] == "Analyst via rule Analysts"),
+                .any(|e| e["label"] == "Analyst" && e["from"].as_str().unwrap().starts_with("rule:")),
+            "{graph}"
+        );
+        assert!(
+            edges.iter().any(|e| e["label"] == "role" && e["to"] == format!("role:{role}")),
             "{graph}"
         );
 

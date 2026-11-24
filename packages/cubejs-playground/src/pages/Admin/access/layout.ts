@@ -12,7 +12,7 @@ export const NOTE_CHARS = 30;
 
 const GAP = 22;
 const PAD = 20;
-const COLUMNS: AccessNodeKind[] = ['user', 'organization', 'workspace', 'connection'];
+const COLUMNS: AccessNodeKind[] = ['user', 'organization', 'rule', 'role', 'workspace', 'connection', 'cube'];
 // NODE_W plus a 160 px gutter for the edge labels.
 const COLUMN_STEP = 380;
 
@@ -27,10 +27,12 @@ export type LaidOutNode = AccessNode & {
   label: string;
   permLines: string[];
   noteLines: string[];
-  /** An organization with more than COLLAPSE_AT workspaces: it has a toggle. */
+  /** A parent with more than COLLAPSE_AT children (an organization's workspaces, a connection's cubes): it has a toggle. */
   foldable: boolean;
-  /** Workspaces hidden while it is collapsed. */
+  /** Children hidden while it is collapsed. */
   hiddenCount?: number;
+  /** A connection or cube without access: drawn faded. */
+  dim: boolean;
 };
 
 export type LaidOutEdge = AccessEdge & {
@@ -82,9 +84,44 @@ export function nodeRows(n: Pick<LaidOutNode, 'permLines' | 'noteLines' | 'folda
 }
 
 /**
- * `expanded` holds organization node ids (`organization:<uuid>`); an
- * organization with more than COLLAPSE_AT workspaces is collapsed unless its
- * id is in the set.
+ * Parent → children where the parent folds: an organization's workspaces
+ * (a workspace's organizationId is the bare UUID of the organization node)
+ * and a connection's cubes (its `connection → cube` edges). `foldables` keeps
+ * the parents with more than COLLAPSE_AT children.
+ */
+function childrenOf(graph: AccessGraph): Map<string, string[]> {
+  const children = new Map<string, string[]>();
+  const add = (parent: string, child: string) => children.set(parent, [...(children.get(parent) || []), child]);
+  const kindOf = new Map(graph.nodes.map((n) => [n.id, n.kind]));
+  graph.nodes.forEach((n) => {
+    if (n.kind === 'workspace' && n.organizationId) {
+      add(`organization:${n.organizationId}`, n.id);
+    }
+  });
+  graph.edges.forEach((e) => {
+    if (kindOf.get(e.from) === 'connection' && kindOf.get(e.to) === 'cube') {
+      add(e.from, e.to);
+    }
+  });
+  return new Map([...children].map(([k, c]) => [k, [...new Set(c)]]));
+}
+
+function foldables(children: Map<string, string[]>): Map<string, string[]> {
+  return new Map([...children].filter(([, c]) => c.length > COLLAPSE_AT));
+}
+
+/** Child → every parent it hangs from, foldable or not. */
+function parentsOf(folds: Map<string, string[]>): Map<string, string[]> {
+  const parents = new Map<string, string[]>();
+  folds.forEach((cs, p) => cs.forEach((c) => parents.set(c, [...(parents.get(c) || []), p])));
+  return parents;
+}
+
+/**
+ * `expanded` holds the ids of the parents to open (`organization:<uuid>`,
+ * `connection:<id>`); a parent with more than COLLAPSE_AT children is
+ * collapsed unless its id is in the set. A child with several parents is
+ * hidden only if all of them are collapsed.
  */
 export function layout(
   graph: AccessGraph,
@@ -95,32 +132,27 @@ export function layout(
     perms.set(g.resource, [...(perms.get(g.resource) || []), g.permission]);
   });
 
-  // A workspace's organizationId is the bare UUID of the organization node.
-  const orgOf = (n: AccessNode) => (n.kind === 'workspace' && n.organizationId ? `organization:${n.organizationId}` : null);
-  const workspaceCount = new Map<string, number>();
-  graph.nodes.forEach((n) => {
-    const org = orgOf(n);
-    if (org) {
-      workspaceCount.set(org, (workspaceCount.get(org) || 0) + 1);
-    }
-  });
-  const foldable = new Set([...workspaceCount].filter(([, c]) => c > COLLAPSE_AT).map(([k]) => k));
-  const collapsed = new Set([...foldable].filter((k) => !expanded.has(k)));
+  const children = childrenOf(graph);
+  const folds = foldables(children);
+  const parents = parentsOf(children);
+  const collapsed = new Set([...folds.keys()].filter((k) => !expanded.has(k)));
 
-  // Hidden workspace → its organization node.
+  // Hidden child → the collapsed parent it is folded into.
   const hidden = new Map<string, string>();
-  graph.nodes.forEach((n) => {
-    const org = orgOf(n);
-    if (org && collapsed.has(org)) {
-      hidden.set(n.id, org);
+  parents.forEach((ps, child) => {
+    if (ps.every((p) => collapsed.has(p))) {
+      hidden.set(child, ps[0]);
     }
   });
 
   const nextY: Record<AccessNodeKind, number> = {
     user: PAD,
     organization: PAD,
+    rule: PAD,
+    role: PAD,
     workspace: PAD,
     connection: PAD,
+    cube: PAD,
   };
   // Columns left to right; one with no node (all workspaces hidden, say)
   // takes no room.
@@ -135,10 +167,13 @@ export function layout(
     if (graph.platformAdmin && n.kind === 'user') {
       permList = [PLATFORM_ADMIN];
     }
+    if (n.kind === 'role') {
+      permList = n.details || [];
+    }
     const rows = {
       permLines: wrap(permList, ' · ', PERM_CHARS),
       noteLines: n.notes.flatMap((note) => wrap(note.split(' '), ' ', NOTE_CHARS)),
-      foldable: foldable.has(n.id),
+      foldable: folds.has(n.id),
     };
     const { h } = nodeRows(rows);
     const laid: LaidOutNode = {
@@ -148,16 +183,17 @@ export function layout(
       y: nextY[n.kind],
       h,
       label: shorten(n.name, NAME_CHARS),
+      dim: (n.kind === 'connection' || n.kind === 'cube') && !perms.has(n.id),
     };
     nextY[n.kind] += h + GAP;
     if (collapsed.has(n.id)) {
-      laid.hiddenCount = workspaceCount.get(n.id);
+      // A child still drawn under another, open parent is not hidden here.
+      laid.hiddenCount = folds.get(n.id)!.filter((c) => hidden.has(c)).length;
     }
     nodes.push(laid);
   });
 
-  // Edges into a hidden workspace go; edges out of one start at its
-  // organization, merged as the server merges parallel edges.
+  // Edges into a hidden child go; edges out of one start at its parent, merged as the server merges parallel edges.
   const edges: LaidOutEdge[] = [];
   const byEnds = new Map<string, LaidOutEdge>();
   graph.edges.forEach((e) => {
@@ -190,7 +226,7 @@ export function layout(
   return { nodes, edges };
 }
 
-/** The organizations to open so that every node of `path` is drawn. */
+/** The parents (organizations, connections) to open so that every node of `path` is drawn. */
 export function expandFor(
   graph: AccessGraph,
   drawn: LaidOutNode[],
@@ -198,12 +234,14 @@ export function expandFor(
   expanded: Set<string>
 ): Set<string> {
   const shown = new Set(drawn.map((n) => n.id));
-  const open = path
-    .filter((id) => !shown.has(id))
-    .map((id) => graph.nodes.find((n) => n.id === id))
-    .filter((n): n is AccessNode => n?.kind === 'workspace' && n.organizationId != null)
-    .map((n) => `organization:${n.organizationId}`)
-    .filter((id) => !expanded.has(id));
+  const folds = foldables(childrenOf(graph));
+  const parents = parentsOf(childrenOf(graph));
+  const open = path.flatMap((id, i) => {
+    const ps = (shown.has(id) ? [] : parents.get(id) || []).filter((p) => folds.has(p));
+    // Prefer the parent the path itself goes through.
+    const via = ps.find((p) => p === path[i - 1]) ?? ps[0];
+    return via && !expanded.has(via) ? [via] : [];
+  });
   return open.length ? new Set([...expanded, ...open]) : expanded;
 }
 
@@ -286,9 +324,26 @@ export function edgeGeometry(nodes: LaidOutNode[], edges: LaidOutEdge[]): EdgeGe
   return out;
 }
 
+// ---- size ----
+
+/** Room the full-screen view keeps for its title bar and padding. */
+const FULL_SCREEN_CHROME = 140;
+
+/**
+ * The graph's height: fixed in the dialog (shorter on a narrow screen), the
+ * screen less the title bar in full screen, never below the narrow height.
+ */
+export function graphHeight({ full, narrow, screen }: { full: boolean; narrow: boolean; screen: number }): number {
+  if (full) {
+    return Math.max(420, screen - FULL_SCREEN_CHROME);
+  }
+  return narrow ? 420 : 600;
+}
+
 // ---- dragging, zoom and pan ----
 
 export type Point = { x: number; y: number };
+/** How far each dragged node was moved from where the layout puts it. */
 export type Positions = Record<string, Point>;
 /** Screen = world * k + (x, y). */
 export type View = { x: number; y: number; k: number };
@@ -303,9 +358,23 @@ export function movedBeyond(dx: number, dy: number): boolean {
   return Math.hypot(dx, dy) >= DRAG_THRESHOLD;
 }
 
-/** Nodes at their dragged position, if any; the others where layout put them. */
+/**
+ * Dragged nodes moved by their offset from where the layout puts them, the
+ * others where it puts them. An offset, not a place: when expanding or
+ * collapsing moves a node along its column, a node dragged before moves with
+ * it rather than staying behind on top of the nodes that moved.
+ */
 export function applyPositions(nodes: LaidOutNode[], positions: Positions): LaidOutNode[] {
-  return nodes.map((n) => (positions[n.id] ? { ...n, ...positions[n.id] } : n));
+  return nodes.map((n) => {
+    const offset = positions[n.id];
+    return offset ? { ...n, x: n.x + offset.x, y: n.y + offset.y } : n;
+  });
+}
+
+/** The nodes in drawing order: the one being dragged last, on top. */
+export function drawOrder(nodes: LaidOutNode[], dragged: string | undefined): LaidOutNode[] {
+  const top = dragged ? nodes.find((n) => n.id === dragged) : undefined;
+  return top ? [...nodes.filter((n) => n !== top), top] : nodes;
 }
 
 export function bounds(nodes: LaidOutNode[], geometry: EdgeGeometry[]): Bounds {
