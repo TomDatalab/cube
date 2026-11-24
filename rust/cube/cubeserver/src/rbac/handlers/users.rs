@@ -22,7 +22,9 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::data_source_types;
 use crate::rbac::access::{self, AccessInput};
-use crate::rbac::identity::{hash_password, user_token_claims, validate_user_id};
+use crate::rbac::identity::{
+    hash_password, user_token_claims, validate_new_username, validate_user_id,
+};
 use crate::rbac::restrictions::{validated_attributes, Attributes};
 use crate::rbac::store::{NewUser, StoreError, User};
 use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
@@ -81,14 +83,14 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_user_id(&request.id)?;
+    validate_new_username(&request.id)?;
 
     let password = request.password;
     let password_hash = rbac.run_hashing(move || hash_password(&password)).await??;
     let user = rbac
         .store
         .create_user(&NewUser {
-            id: request.id,
+            username: request.id,
             name: request.name,
             email: request.email,
             password_hash,
@@ -138,7 +140,7 @@ pub async fn update(
     }
     let user = rbac
         .store
-        .update_user(&id, request.name, request.email, request.disabled)
+        .update_user(&id, None, request.name, request.email, request.disabled)
         .await
         .map_err(|e| store_error(e, "This email is already in use"))?
         .ok_or_else(user_not_found)?;

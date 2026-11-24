@@ -822,6 +822,7 @@ mod tests {
     fn user(disabled: bool) -> User {
         User {
             id: "ana".into(),
+            username: "ana".into(),
             name: Some("Ana".into()),
             email: None,
             password_hash: String::new(),

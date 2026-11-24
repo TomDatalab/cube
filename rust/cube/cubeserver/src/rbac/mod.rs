@@ -143,7 +143,7 @@ impl Rbac {
         for id in &self.config.admins {
             let existing = self
                 .store
-                .user(id)
+                .user_by_username(id)
                 .await
                 .map_err(|e| format!("Cannot read user {id}: {e}"))?;
             if existing.is_none() {
@@ -158,7 +158,7 @@ impl Rbac {
                 let created = self
                     .store
                     .create_user(&NewUser {
-                        id: id.clone(),
+                        username: id.clone(),
                         name: None,
                         email: None,
                         password_hash,

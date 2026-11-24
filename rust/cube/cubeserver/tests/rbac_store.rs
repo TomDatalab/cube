@@ -9,9 +9,9 @@ use cubeserver::rbac::store::{ConnectionOrigin, NewObject, NewUser, Search, Stor
 use support::{connect, with_db, TestDb};
 use uuid::Uuid;
 
-fn user(id: &str) -> NewUser {
+fn user(username: &str) -> NewUser {
     NewUser {
-        id: id.into(),
+        username: username.into(),
         name: Some("Ann".into()),
         email: None,
         password_hash: "hash1".into(),
@@ -38,36 +38,41 @@ macro_rules! db_test {
 
 db_test!(users_roundtrip_and_conflict, |store, _url| {
     let u = store.create_user(&user("ann")).await.unwrap();
-    assert_eq!(u.id, "ann");
+    assert_eq!(u.username, "ann");
     assert!(!u.disabled);
     assert!(matches!(
         store.create_user(&user("ann")).await,
         Err(StoreError::Conflict(_))
     ));
     assert_eq!(
-        store.user("ann").await.unwrap().unwrap().name.as_deref(),
+        store.user(&u.id).await.unwrap().unwrap().name.as_deref(),
         Some("Ann")
     );
-    assert!(store.user("nobody").await.unwrap().is_none());
+    assert!(store
+        .user(&Uuid::new_v4().to_string())
+        .await
+        .unwrap()
+        .is_none());
     store.create_user(&user("bob")).await.unwrap();
     assert_eq!(store.users().await.unwrap().len(), 2);
 
     let updated = store
-        .update_user("ann", None, Some("a@x.org".into()), Some(true))
+        .update_user(&u.id, None, None, Some("a@x.org".into()), Some(true))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(updated.email.as_deref(), Some("a@x.org"));
     assert_eq!(updated.name.as_deref(), Some("Ann"));
+    assert_eq!(updated.username, "ann");
     assert!(updated.disabled);
     assert!(store
-        .update_user("nobody", None, None, None)
+        .update_user("nobody", None, None, None, None)
         .await
         .unwrap()
         .is_none());
 
-    store.set_password_hash("ann", "hash2").await.unwrap();
-    let after = store.user("ann").await.unwrap().unwrap();
+    store.set_password_hash(&u.id, "hash2").await.unwrap();
+    let after = store.user(&u.id).await.unwrap().unwrap();
     assert_eq!(after.password_hash, "hash2");
     assert!(after.password_changed_at > u.password_changed_at);
     assert!(matches!(
@@ -75,6 +80,179 @@ db_test!(users_roundtrip_and_conflict, |store, _url| {
         Err(StoreError::NotFound)
     ));
 });
+
+db_test!(
+    a_new_user_gets_a_uuid_and_keeps_its_username,
+    |store, _url| {
+        let ann = store.create_user(&user("ann")).await.unwrap();
+        let bob = store.create_user(&user("bob")).await.unwrap();
+        let id: Uuid = ann.id.parse().expect("the id is a UUID");
+        assert_eq!(ann.id, id.hyphenated().to_string(), "lower-case hyphenated");
+        assert_ne!(ann.id, bob.id);
+        assert_eq!(ann.username, "ann");
+        let found = store.user(&ann.id).await.unwrap().unwrap();
+        assert_eq!(
+            (found.id.as_str(), found.username.as_str()),
+            (ann.id.as_str(), "ann")
+        );
+        let by_name = store.user_by_username("ann").await.unwrap().unwrap();
+        assert_eq!(by_name.id, ann.id);
+        assert!(store.user_by_username("nobody").await.unwrap().is_none());
+        // The username is not an id.
+        assert!(store.user("ann").await.unwrap().is_none());
+    }
+);
+
+db_test!(resolve_user_takes_a_uuid_or_a_username, |store, _url| {
+    let ann = store.create_user(&user("ann")).await.unwrap();
+    let by_id = store.resolve_user(&ann.id).await.unwrap().unwrap();
+    assert_eq!(by_id.username, "ann");
+    let upper = ann.id.to_uppercase();
+    assert_eq!(
+        store.resolve_user(&upper).await.unwrap().unwrap().id,
+        ann.id
+    );
+    let by_name = store.resolve_user("ann").await.unwrap().unwrap();
+    assert_eq!(by_name.id, ann.id);
+    assert!(store.resolve_user("nobody").await.unwrap().is_none());
+    assert!(store
+        .resolve_user(&Uuid::new_v4().to_string())
+        .await
+        .unwrap()
+        .is_none());
+});
+
+db_test!(
+    renaming_a_username_keeps_the_id_and_frees_the_old_name,
+    |store, _url| {
+        let ann = store.create_user(&user("ann")).await.unwrap();
+        let attributes = Attributes::from([("region".to_string(), vec!["Sul".to_string()])]);
+        store
+            .set_user_attributes(&ann.id, &attributes)
+            .await
+            .unwrap();
+        let renamed = store
+            .update_user(&ann.id, Some("anna".into()), None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (renamed.id.as_str(), renamed.username.as_str()),
+            (ann.id.as_str(), "anna")
+        );
+        assert!(store.user_by_username("ann").await.unwrap().is_none());
+        assert_eq!(
+            store.resolve_user("anna").await.unwrap().unwrap().id,
+            ann.id
+        );
+        assert_eq!(store.user_attributes(&ann.id).await.unwrap(), attributes);
+
+        // The old name is free again; a taken one conflicts.
+        let other = store.create_user(&user("ann")).await.unwrap();
+        assert_ne!(other.id, ann.id);
+        assert!(matches!(
+            store
+                .update_user(&other.id, Some("anna".into()), None, None, None)
+                .await,
+            Err(StoreError::Conflict(_))
+        ));
+        // Searching matches the username.
+        let page = store
+            .search_users(&search(Some("anna"), None, 0))
+            .await
+            .unwrap();
+        let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, [ann.id.as_str()]);
+    }
+);
+
+db_test!(a_username_shaped_like_a_uuid_is_refused, |store, _url| {
+    let shaped = Uuid::new_v4().to_string();
+    match store.create_user(&user(&shaped)).await {
+        Err(StoreError::Invalid(m)) => assert!(m.contains("UUID"), "{m}"),
+        other => panic!("expected the username to be refused, got {other:?}"),
+    }
+    assert!(store.users().await.unwrap().is_empty());
+    let ann = store.create_user(&user("ann")).await.unwrap();
+    assert!(matches!(
+        store
+            .update_user(&ann.id, Some(shaped.to_uppercase()), None, None, None)
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(store.user(&ann.id).await.unwrap().unwrap().username, "ann");
+    // The API-side check says the same.
+    assert!(cubeserver::rbac::identity::validate_new_username(&shaped).is_err());
+    assert!(cubeserver::rbac::identity::validate_new_username("ann").is_ok());
+});
+
+db_test!(
+    the_migration_keys_existing_users_by_uuid_once,
+    |store, url| {
+        drop(store);
+        let raw = connect(&url).await;
+        let version: i32 = raw
+            .query_one("SELECT current_setting('server_version_num')::int", &[])
+            .await
+            .unwrap()
+            .get(0);
+        eprintln!("postgres server_version_num = {version}");
+        // The schema as it was: the username is the id.
+        raw.batch_execute(
+            "DROP TABLE user_attributes; DROP TABLE users; DROP TABLE rbac_migrations;
+         CREATE TABLE users (
+             id text PRIMARY KEY, name text, email text,
+             password_hash text NOT NULL,
+             disabled boolean NOT NULL DEFAULT false,
+             created_at timestamptz NOT NULL DEFAULT now(),
+             password_changed_at timestamptz NOT NULL DEFAULT now());
+         CREATE TABLE user_attributes (
+             user_id text NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+             name text NOT NULL, values text[] NOT NULL,
+             PRIMARY KEY (user_id, name));
+         INSERT INTO users (id, name, password_hash) VALUES ('ann', 'Ann', 'h');
+         INSERT INTO user_attributes VALUES ('ann', 'region', '{Sul}');",
+        )
+        .await
+        .unwrap();
+
+        let migrated = cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1)
+            .await
+            .unwrap();
+        let ann = migrated.user_by_username("ann").await.unwrap().unwrap();
+        let id: Uuid = ann.id.parse().expect("the id is now a UUID");
+        assert_eq!(ann.id, id.hyphenated().to_string());
+        assert_eq!(ann.name.as_deref(), Some("Ann"));
+        let regions = Attributes::from([("region".to_string(), vec!["Sul".to_string()])]);
+        assert_eq!(migrated.user_attributes(&ann.id).await.unwrap(), regions);
+        drop(migrated);
+
+        let again = cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1)
+            .await
+            .unwrap();
+        let still = again.user_by_username("ann").await.unwrap().unwrap();
+        assert_eq!(still.id, ann.id, "a second run keeps the id");
+        assert_eq!(again.user_attributes(&ann.id).await.unwrap(), regions);
+        let markers: i64 = raw
+            .query_one(
+                "SELECT count(*) FROM rbac_migrations WHERE name = 'users_uuid'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(markers, 1);
+        // The new shape: username NOT NULL UNIQUE.
+        assert!(raw
+            .execute(
+                "INSERT INTO users (id, password_hash) VALUES ('x', 'h')",
+                &[]
+            )
+            .await
+            .is_err());
+        assert!(again.create_user(&user("ann")).await.is_err());
+    }
+);
 
 db_test!(
     workspace_names_are_unique_per_organization,
@@ -345,9 +523,9 @@ fn search(q: Option<&str>, limit: Option<i64>, offset: i64) -> Search {
     }
 }
 
-fn user_with(id: &str, name: Option<&str>, email: Option<&str>) -> NewUser {
+fn user_with(username: &str, name: Option<&str>, email: Option<&str>) -> NewUser {
     NewUser {
-        id: id.into(),
+        username: username.into(),
         name: name.map(str::to_string),
         email: email.map(str::to_string),
         password_hash: "h".into(),
@@ -355,7 +533,7 @@ fn user_with(id: &str, name: Option<&str>, email: Option<&str>) -> NewUser {
 }
 
 db_test!(
-    search_users_matches_id_name_and_email_case_insensitively,
+    search_users_matches_username_name_and_email_case_insensitively,
     |store, _url| {
         store
             .create_user(&user_with("ana", Some("Ana Souza"), None))
@@ -373,7 +551,7 @@ db_test!(
             .search_users(&search(Some("ana"), None, 0))
             .await
             .unwrap();
-        let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+        let ids: Vec<_> = page.items.iter().map(|u| u.username.as_str()).collect();
         assert_eq!(ids, ["ana", "bia"]);
         assert_eq!(page.total, 2);
     }
@@ -386,7 +564,7 @@ db_test!(search_treats_like_wildcards_literally, |store, _url| {
         .search_users(&search(Some("a_b"), None, 0))
         .await
         .unwrap();
-    let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+    let ids: Vec<_> = page.items.iter().map(|u| u.username.as_str()).collect();
     assert_eq!(ids, ["a_b"]);
     let page = store
         .search_users(&search(Some("%"), None, 0))
@@ -401,7 +579,7 @@ db_test!(search_pages_report_the_full_total, |store, _url| {
         store.create_user(&user(&format!("u{i}"))).await.unwrap();
     }
     let page = store.search_users(&search(None, Some(2), 2)).await.unwrap();
-    let ids: Vec<_> = page.items.iter().map(|u| u.id.as_str()).collect();
+    let ids: Vec<_> = page.items.iter().map(|u| u.username.as_str()).collect();
     assert_eq!(ids, ["u3", "u4"]);
     assert_eq!(page.total, 5);
     let page = store
@@ -589,8 +767,9 @@ db_test!(role_restrictions_round_trip, |store, _url| {
 });
 
 db_test!(user_attributes_are_replaced_as_a_set, |store, _url| {
-    store.create_user(&user("ann")).await.unwrap();
-    assert!(store.user_attributes("ann").await.unwrap().is_empty());
+    let ann = store.create_user(&user("ann")).await.unwrap();
+    let ann = ann.id.as_str();
+    assert!(store.user_attributes(ann).await.unwrap().is_empty());
     let first = Attributes::from([
         (
             "region".to_string(),
@@ -598,23 +777,24 @@ db_test!(user_attributes_are_replaced_as_a_set, |store, _url| {
         ),
         ("cost_center".to_string(), vec!["1020".to_string()]),
     ]);
-    store.set_user_attributes("ann", &first).await.unwrap();
-    assert_eq!(store.user_attributes("ann").await.unwrap(), first);
+    store.set_user_attributes(ann, &first).await.unwrap();
+    assert_eq!(store.user_attributes(ann).await.unwrap(), first);
 
     let second = Attributes::from([("region".to_string(), vec!["Norte".to_string()])]);
-    store.set_user_attributes("ann", &second).await.unwrap();
-    assert_eq!(store.user_attributes("ann").await.unwrap(), second);
+    store.set_user_attributes(ann, &second).await.unwrap();
+    assert_eq!(store.user_attributes(ann).await.unwrap(), second);
 });
 
 db_test!(deleting_a_user_deletes_their_attributes, |store, url| {
-    store.create_user(&user("ann")).await.unwrap();
+    let ann = store.create_user(&user("ann")).await.unwrap();
+    let ann = ann.id.as_str();
     let attributes = Attributes::from([("region".to_string(), vec!["Sul".to_string()])]);
-    store.set_user_attributes("ann", &attributes).await.unwrap();
+    store.set_user_attributes(ann, &attributes).await.unwrap();
     let raw = connect(&url).await;
-    raw.execute("DELETE FROM users WHERE id = 'ann'", &[])
+    raw.execute("DELETE FROM users WHERE username = 'ann'", &[])
         .await
         .unwrap();
-    assert!(store.user_attributes("ann").await.unwrap().is_empty());
+    assert!(store.user_attributes(ann).await.unwrap().is_empty());
     let left: i64 = raw
         .query_one("SELECT count(*) FROM user_attributes", &[])
         .await

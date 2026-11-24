@@ -31,6 +31,18 @@ pub fn validate_user_id(id: &str) -> Result<(), ApiError> {
     }
 }
 
+/// A username to create or rename to: a valid user id that does not parse
+/// as a UUID, so it is never mistaken for another user's id.
+pub fn validate_new_username(username: &str) -> Result<(), ApiError> {
+    validate_user_id(username)?;
+    if uuid::Uuid::parse_str(username).is_ok() {
+        return Err(ApiError::bad_request(
+            "Invalid username: it cannot be a UUID",
+        ));
+    }
+    Ok(())
+}
+
 /// argon2id with the crate's default (OWASP) parameters.
 pub fn hash_password(password: &str) -> Result<String, ApiError> {
     if password.chars().count() < MIN_PASSWORD_LENGTH {

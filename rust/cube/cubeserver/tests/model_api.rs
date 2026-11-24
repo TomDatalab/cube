@@ -597,7 +597,7 @@ async fn owner_org(
 ) -> (String, uuid::Uuid, String) {
     store
         .create_user(&cubeserver::rbac::store::NewUser {
-            id: user.into(),
+            username: user.into(),
             name: None,
             email: None,
             password_hash: cubeserver::rbac::identity::hash_password("owner-password-1").unwrap(),
@@ -835,7 +835,7 @@ api_test!(owner_reaches_only_own_model, |store| {
     // A workspace member of A who is not its owner: 403 on A's model routes.
     store
         .create_user(&cubeserver::rbac::store::NewUser {
-            id: "bia".into(),
+            username: "bia".into(),
             name: None,
             email: None,
             password_hash: cubeserver::rbac::identity::hash_password("member-password-1").unwrap(),
@@ -869,7 +869,7 @@ const SYNC_PASSWORD: &str = "sync-password-1";
 async fn sync_tokens(env: &Env, store: &cubeserver::rbac::store::Store) -> (String, String) {
     store
         .create_user(&cubeserver::rbac::store::NewUser {
-            id: SYNC_USER.into(),
+            username: SYNC_USER.into(),
             name: None,
             email: None,
             password_hash: cubeserver::rbac::identity::hash_password(SYNC_PASSWORD).unwrap(),

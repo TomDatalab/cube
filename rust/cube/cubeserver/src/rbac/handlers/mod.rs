@@ -245,6 +245,7 @@ pub(crate) fn body<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, ApiE
 pub(crate) fn store_error(error: StoreError, conflict: &str) -> ApiError {
     match error {
         StoreError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, conflict),
+        StoreError::Invalid(m) => ApiError::bad_request(m),
         e => {
             tracing::error!("RBAC store failed: {e}");
             crate::rbac::unavailable()

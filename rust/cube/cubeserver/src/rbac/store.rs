@@ -16,6 +16,8 @@ const MIGRATIONS: &str = include_str!("migrations.sql");
 #[derive(Debug)]
 pub enum StoreError {
     Conflict(String),
+    /// A value the store refuses, with a message for the caller.
+    Invalid(String),
     NotFound,
     Db(String),
 }
@@ -24,6 +26,7 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Conflict(m) => write!(f, "conflict: {m}"),
+            Self::Invalid(m) => write!(f, "{m}"),
             Self::NotFound => write!(f, "not found"),
             Self::Db(m) => write!(f, "database error: {m}"),
         }
@@ -54,7 +57,8 @@ impl From<deadpool_postgres::PoolError> for StoreError {
 
 #[derive(Debug, Clone)]
 pub struct NewUser {
-    pub id: String,
+    /// The id is generated (a UUID); the username is the login name.
+    pub username: String,
     pub name: Option<String>,
     pub email: Option<String>,
     pub password_hash: String,
@@ -62,7 +66,10 @@ pub struct NewUser {
 
 #[derive(Debug, Clone)]
 pub struct User {
+    /// The UUID, lower-case hyphenated.
     pub id: String,
+    /// Unique, renamable; never shaped like a UUID.
+    pub username: String,
     pub name: Option<String>,
     pub email: Option<String>,
     pub password_hash: String,
@@ -311,7 +318,8 @@ pub struct StoredObject {
     pub updated_by: String,
 }
 
-const USER_COLS: &str = "id, name, email, password_hash, disabled, created_at, password_changed_at";
+const USER_COLS: &str =
+    "id, name, email, password_hash, disabled, created_at, password_changed_at, username";
 const OBJECT_COLS: &str = "id, workspace_id, type, name, content_type, content, version, \
                            created_at, created_by, updated_at, updated_by";
 
@@ -324,7 +332,23 @@ fn user_from(r: &Row) -> User {
         disabled: r.get(4),
         created_at: r.get(5),
         password_changed_at: r.get(6),
+        username: r.get(7),
     }
+}
+
+/// A username that parses as a UUID could be taken for another user's id.
+fn check_username(username: &str) -> Result<(), StoreError> {
+    if Uuid::parse_str(username).is_ok() {
+        return Err(StoreError::Invalid("A username cannot be a UUID".into()));
+    }
+    Ok(())
+}
+
+/// The canonical (lower-case hyphenated) form of `key` when it is a UUID.
+fn uuid_key(key: &str) -> Option<String> {
+    Uuid::parse_str(key)
+        .ok()
+        .map(|u| u.hyphenated().to_string())
 }
 
 fn org_from(r: &Row) -> Organization {
@@ -415,12 +439,17 @@ mod q {
     use super::*;
 
     pub async fn create_user(c: &tokio_postgres::Client, u: &NewUser) -> Result<User, StoreError> {
+        check_username(&u.username)?;
         let sql = format!(
-            "INSERT INTO users (id, name, email, password_hash) VALUES ($1, $2, $3, $4) \
-             RETURNING {USER_COLS}"
+            "INSERT INTO users (id, username, name, email, password_hash) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING {USER_COLS}"
         );
+        let id = Uuid::new_v4().hyphenated().to_string();
         let row = c
-            .query_one(&sql, &[&u.id, &u.name, &u.email, &u.password_hash])
+            .query_one(
+                &sql,
+                &[&id, &u.username, &u.name, &u.email, &u.password_hash],
+            )
             .await?;
         Ok(user_from(&row))
     }
@@ -936,26 +965,49 @@ impl Store {
 
     shared_creates!(Self::conn);
 
+    /// The user with this id (a UUID, in any case). A username finds nothing.
     pub async fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
+        let Some(id) = uuid_key(id) else {
+            return Ok(None);
+        };
         let c = self.conn().await?;
         let sql = format!("SELECT {USER_COLS} FROM users WHERE id = $1");
         Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(user_from))
     }
 
+    pub async fn user_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {USER_COLS} FROM users WHERE username = $1");
+        Ok(c.query_opt(&sql, &[&username])
+            .await?
+            .as_ref()
+            .map(user_from))
+    }
+
+    /// `key` names a user by id when it parses as a UUID, else by username.
+    pub async fn resolve_user(&self, key: &str) -> Result<Option<User>, StoreError> {
+        if uuid_key(key).is_some() {
+            self.user(key).await
+        } else {
+            self.user_by_username(key).await
+        }
+    }
+
     pub async fn users(&self) -> Result<Vec<User>, StoreError> {
         let c = self.conn().await?;
-        let sql = format!("SELECT {USER_COLS} FROM users ORDER BY id");
+        let sql = format!("SELECT {USER_COLS} FROM users ORDER BY username");
         Ok(c.query(&sql, &[]).await?.iter().map(user_from).collect())
     }
 
     pub async fn search_users(&self, s: &Search) -> Result<Page<User>, StoreError> {
         let c = self.conn().await?;
         let q = s.escaped();
-        const WHERE: &str = "($1::text IS NULL OR id ILIKE '%' || $1 || '%' ESCAPE '\\' \
+        const WHERE: &str = "($1::text IS NULL OR username ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR email ILIKE '%' || $1 || '%' ESCAPE '\\')";
-        let sql =
-            format!("SELECT {USER_COLS} FROM users WHERE {WHERE} ORDER BY id LIMIT $2 OFFSET $3");
+        let sql = format!(
+            "SELECT {USER_COLS} FROM users WHERE {WHERE} ORDER BY username LIMIT $2 OFFSET $3"
+        );
         let items = c
             .query(&sql, &[&q, &s.limit(), &s.offset()])
             .await?
@@ -1053,23 +1105,34 @@ impl Store {
             .collect())
     }
 
-    /// `None` fields are left unchanged. `Ok(None)` when the user is unknown.
+    /// `None` fields are left unchanged. `Ok(None)` when the user is unknown;
+    /// a username already taken is `Conflict`.
     pub async fn update_user(
         &self,
         id: &str,
+        username: Option<String>,
         name: Option<String>,
         email: Option<String>,
         disabled: Option<bool>,
     ) -> Result<Option<User>, StoreError> {
+        if let Some(username) = &username {
+            check_username(username)?;
+        }
+        let Some(id) = uuid_key(id) else {
+            return Ok(None);
+        };
         let c = self.conn().await?;
         let sql = format!(
-            "UPDATE users SET name = COALESCE($2, name), email = COALESCE($3, email), \
-             disabled = COALESCE($4, disabled) WHERE id = $1 RETURNING {USER_COLS}"
+            "UPDATE users SET username = COALESCE($2, username), name = COALESCE($3, name), \
+             email = COALESCE($4, email), disabled = COALESCE($5, disabled) \
+             WHERE id = $1 RETURNING {USER_COLS}"
         );
-        Ok(c.query_opt(&sql, &[&id, &name, &email, &disabled])
-            .await?
-            .as_ref()
-            .map(user_from))
+        Ok(
+            c.query_opt(&sql, &[&id, &username, &name, &email, &disabled])
+                .await?
+                .as_ref()
+                .map(user_from),
+        )
     }
 
     /// Also bumps `password_changed_at`, invalidating older tokens.

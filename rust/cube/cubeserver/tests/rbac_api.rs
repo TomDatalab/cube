@@ -300,19 +300,19 @@ db_test!(
 db_test!(a_disabled_user_is_locked_out_at_once, |store| {
     let env = env(store, Duration::ZERO).await;
     let user = cubeserver::rbac::store::NewUser {
-        id: "ann".into(),
+        username: "ann".into(),
         name: Some("Ann".into()),
         email: None,
         password_hash: hash_password("ann-password-1").unwrap(),
     };
-    env.rbac.store.create_user(&user).await.unwrap();
+    let ann = env.rbac.store.create_user(&user).await.unwrap();
     let token = login_token(&env.router, "ann", "ann-password-1").await;
     assert_eq!(meta(&env.router, Some(&token)).await, StatusCode::OK);
 
     // What `PATCH /v1/users/ann {disabled: true}` does.
     env.rbac
         .store
-        .update_user("ann", None, None, Some(true))
+        .update_user(&ann.id, None, None, None, Some(true))
         .await
         .unwrap();
 
@@ -527,12 +527,12 @@ impl Recorder {
 db_test!(a_websocket_loses_its_user_at_the_next_message, |store| {
     let env = env(store, Duration::ZERO).await;
     let user = cubeserver::rbac::store::NewUser {
-        id: "ann".into(),
+        username: "ann".into(),
         name: None,
         email: None,
         password_hash: hash_password("ann-password-1").unwrap(),
     };
-    env.rbac.store.create_user(&user).await.unwrap();
+    let ann = env.rbac.store.create_user(&user).await.unwrap();
     let token = login_token(&env.router, "ann", "ann-password-1").await;
 
     let recorder = Arc::new(Recorder::default());
@@ -550,14 +550,14 @@ db_test!(a_websocket_loses_its_user_at_the_next_message, |store| {
     // and the connection loses its authorization and subscriptions.
     env.rbac
         .store
-        .update_user("ann", None, None, Some(true))
+        .update_user(&ann.id, None, None, None, Some(true))
         .await
         .unwrap();
     server.process_message("c1", &meta_message(2)).await;
     assert_eq!(recorder.last().await["status"], json!(401));
     env.rbac
         .store
-        .update_user("ann", None, None, Some(false))
+        .update_user(&ann.id, None, None, None, Some(false))
         .await
         .unwrap();
     server.process_message("c1", &meta_message(3)).await;
@@ -569,7 +569,7 @@ db_test!(a_websocket_loses_its_user_when_the_token_expires, |store| {
     config.token_ttl = Duration::from_secs(2);
     let env = env_with(store, config).await;
     let user = cubeserver::rbac::store::NewUser {
-        id: "ann".into(),
+        username: "ann".into(),
         name: None,
         email: None,
         password_hash: hash_password("ann-password-1").unwrap(),

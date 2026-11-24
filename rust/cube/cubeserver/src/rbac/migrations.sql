@@ -161,3 +161,44 @@ CREATE TABLE IF NOT EXISTS model_state (
     version bigint NOT NULL DEFAULT 0
 );
 INSERT INTO model_state (id, version) VALUES (true, 0) ON CONFLICT DO NOTHING;
+
+-- One-off data migrations: a row per step once it has completed.
+CREATE TABLE IF NOT EXISTS rbac_migrations (
+    name text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- `users_uuid`: a user's id was their username. It becomes a UUID (as
+-- lower-case hyphenated text, so `user_attributes.user_id` keeps its type)
+-- and the username moves to its own column, NOT NULL UNIQUE. The FK from
+-- `user_attributes` cascades the new id. One DO block: all or nothing.
+DO $$
+DECLARE
+    fk text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM rbac_migrations WHERE name = 'users_uuid') THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
+    UPDATE users SET username = id WHERE username IS NULL;
+    ALTER TABLE users ALTER COLUMN username SET NOT NULL;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_username_key') THEN
+        ALTER TABLE users ADD CONSTRAINT users_username_key UNIQUE (username);
+    END IF;
+
+    FOR fk IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'user_attributes'::regclass AND contype = 'f'
+    LOOP
+        EXECUTE format('ALTER TABLE user_attributes DROP CONSTRAINT %I', fk);
+    END LOOP;
+    ALTER TABLE user_attributes ADD CONSTRAINT user_attributes_user_id_fkey
+        FOREIGN KEY (user_id) REFERENCES users (id)
+        ON DELETE CASCADE ON UPDATE CASCADE;
+
+    UPDATE users SET id = gen_random_uuid()::text
+    WHERE id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+    INSERT INTO rbac_migrations (name) VALUES ('users_uuid');
+END $$;
