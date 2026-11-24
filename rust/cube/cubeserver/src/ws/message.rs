@@ -24,10 +24,12 @@ pub fn parse_message_id(value: &Value) -> Result<String, String> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WsMessage {
     /// `{ "authorization": "<token>" }`; with RBAC on, also
-    /// `"workspace": "<id>"`, the WebSocket's `X-Cube-Workspace`.
+    /// `"workspace": "<id>"`, the WebSocket's `X-Cube-Workspace`, and
+    /// `"organization": "<slug>"`, its `X-Cube-Organization` (platform admins).
     Auth {
         authorization: String,
         workspace: Option<String>,
+        organization: Option<String>,
     },
     /// `{ "unsubscribe": "<messageId>" }`
     Unsubscribe { message_id: String },
@@ -133,7 +135,7 @@ pub fn parse_message(value: &Value) -> Result<WsMessage, MessageError> {
     let object = object_of(value, "message").map_err(MessageError::format)?;
 
     if object.contains_key("authorization") {
-        reject_unknown(object, &["authorization", "workspace"], "").map_err(MessageError::auth)?;
+        reject_unknown(object, &["authorization", "workspace", "organization"], "").map_err(MessageError::auth)?;
         let authorization = object["authorization"]
             .as_str()
             .ok_or_else(|| MessageError::auth("authorization: Invalid input: expected string"))?;
@@ -149,9 +151,22 @@ pub fn parse_message(value: &Value) -> Result<WsMessage, MessageError> {
             }
         };
 
+        let organization = match object.get("organization") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(organization)) => {
+                Some(organization.trim().to_string()).filter(|o| !o.is_empty())
+            }
+            Some(_) => {
+                return Err(MessageError::auth(
+                    "organization: Invalid input: expected string",
+                ))
+            }
+        };
+
         return Ok(WsMessage::Auth {
             authorization: authorization.to_string(),
             workspace,
+            organization,
         });
     }
 
@@ -288,8 +303,23 @@ mod tests {
             WsMessage::Auth {
                 authorization: "token".to_string(),
                 workspace: None,
+                organization: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_an_organization_scope_in_an_auth_message() {
+        assert_eq!(
+            parse_message(&json!({ "authorization": "t", "organization": " acme " })).unwrap(),
+            WsMessage::Auth {
+                authorization: "t".to_string(),
+                workspace: None,
+                organization: Some("acme".to_string()),
+            }
+        );
+        let err = parse_message(&json!({ "authorization": "t", "organization": 3 })).unwrap_err();
+        assert!(err.detail.contains("organization"), "{}", err.detail);
     }
 
     #[test]

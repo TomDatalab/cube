@@ -89,8 +89,9 @@ impl SubscriptionServer {
             WsMessage::Auth {
                 authorization,
                 workspace,
+                organization,
             } => {
-                self.handle_auth(connection_id, &authorization, workspace)
+                self.handle_auth(connection_id, &authorization, workspace, organization)
                     .await;
             }
             WsMessage::Unsubscribe { message_id } => {
@@ -108,6 +109,7 @@ impl SubscriptionServer {
         connection_id: &str,
         authorization: &str,
         workspace: Option<String>,
+        organization: Option<String>,
     ) {
         let authenticated = match self.state.auth.authenticate(Some(authorization)).await {
             Ok(authenticated) => self.resolve_rbac_identity(authenticated).await,
@@ -125,7 +127,7 @@ impl SubscriptionServer {
                                 .signed_with_playground_auth_secret,
                             // Only RBAC reads it, as it does the header.
                             workspace: workspace.filter(|_| self.state.rbac.is_some()),
-                            organization: None,
+                            organization: organization.filter(|_| self.state.rbac.is_some()),
                             user,
                             platform_admin,
                             token_verified: authenticated.token_verified,
