@@ -1211,6 +1211,40 @@ async fn org_names(env: &Env, token: &str) -> Vec<String> {
     names(&body, "organizations")
 }
 
+db_test!(a_new_organization_has_its_default_roles_and_grants, |store| {
+    let s = scenario(store.clone()).await;
+    let env = &s.env;
+    let org: uuid::Uuid = s.org_a.parse().unwrap();
+    let roles = store.roles_of_organization(org).await.unwrap();
+    assert_eq!(roles.len(), 3);
+    for (key, permissions) in cubeserver::rbac::store::DEFAULT_ROLES {
+        let role = roles
+            .iter()
+            .find(|r| r.role.builtin.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no {key} role"));
+        assert_eq!(role.role.name, key);
+        assert_eq!(role.role.permissions, permissions.to_vec());
+        let mut granted: Vec<String> = env
+            .authz
+            .read(&RelationshipFilter {
+                kind: "role",
+                id: Some(role.role.id.to_string()),
+                relation: None,
+                subject: None,
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.relation.to_string())
+            .collect();
+        granted.sort();
+        let mut expected: Vec<String> =
+            permissions.iter().map(|p| format!("can_{p}")).collect();
+        expected.sort();
+        assert_eq!(granted, expected, "{key}");
+    }
+});
+
 db_test!(login_lists_owned_organizations, |store| {
     let s = scenario(store).await;
     create_org(&s.env, &s.admin, "Teste", "ana").await;
@@ -5649,7 +5683,7 @@ db_test!(roles_validate_and_cannot_be_deleted_while_in_use, |store| {
         .authz
         .read(&RelationshipFilter {
             kind: "role",
-            id: None,
+            id: Some(role.clone()),
             relation: None,
             subject: None,
         })

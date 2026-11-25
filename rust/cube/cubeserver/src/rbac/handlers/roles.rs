@@ -83,7 +83,7 @@ fn can_relation(permission: &str) -> &'static str {
 }
 
 /// `role#can_<permission>@user:*` for each permission.
-fn wildcard_grants(role: Uuid, permissions: &[String]) -> Vec<Relationship> {
+pub(crate) fn wildcard_grants(role: Uuid, permissions: &[String]) -> Vec<Relationship> {
     permissions
         .iter()
         .map(|p| Relationship {

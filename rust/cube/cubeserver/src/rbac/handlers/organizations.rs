@@ -134,20 +134,28 @@ pub async fn create(
             Err(e) => return Err(store_error(e, "Conflict")),
         }
     };
+    let roles = tx
+        .seed_default_roles(org.id, super::actor(&ctx)?)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
     let resource = organization_ref(org.id);
+    let mut relationships = vec![
+        Relationship {
+            resource: resource.clone(),
+            relation: "platform",
+            subject: platform(),
+        },
+        Relationship {
+            resource,
+            relation: "owner",
+            subject: user_ref(&owner.id),
+        },
+    ];
+    for role in &roles {
+        relationships.extend(super::roles::wildcard_grants(role.id, &role.permissions));
+    }
     rbac.authz
-        .touch(&[
-            Relationship {
-                resource: resource.clone(),
-                relation: "platform",
-                subject: platform(),
-            },
-            Relationship {
-                resource,
-                relation: "owner",
-                subject: user_ref(&owner.id),
-            },
-        ])
+        .touch(&relationships)
         .await
         // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;

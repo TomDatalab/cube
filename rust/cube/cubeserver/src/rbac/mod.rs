@@ -25,6 +25,7 @@ pub mod secrets;
 pub mod slug;
 pub mod store;
 pub mod user_ids;
+pub mod default_roles;
 
 use std::sync::Arc;
 
@@ -121,6 +122,7 @@ impl Rbac {
             })?;
         // Before the admins are granted: SpiceDB names users by UUID.
         user_ids::migrate_user_subjects(&store, authz.as_ref()).await?;
+        default_roles::migrate_default_roles(&store, authz.as_ref()).await?;
         identity::prepare_dummy_hash();
         let hashing = Arc::new(Semaphore::new(config.max_concurrent_hashes.max(1)));
         let rbac = Self {
