@@ -77,6 +77,11 @@
   --ring: var(--pg-accent, #2f5597);
 }
 
+/* The dark accent is light: text on it is the dark page color. */
+:root[data-theme="dark"] {
+  --primary-foreground: var(--pg-bg, #171b2c);
+}
+
 /* What preflight would give shadcn's elements, and only them. */
 @layer base {
   :where([data-slot]),
@@ -84,6 +89,10 @@
   :where([data-slot])::after {
     box-sizing: border-box;
     border: 0 solid var(--border);
+  }
+  /* Any element with a border utility (no preflight: else currentColor). */
+  :where([class*="tw:border"]) {
+    border-color: var(--border);
   }
   :where(button[data-slot], input[data-slot], textarea[data-slot], select[data-slot]) {
     font: inherit;

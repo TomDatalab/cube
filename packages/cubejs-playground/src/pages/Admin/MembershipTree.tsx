@@ -1,8 +1,14 @@
-import { CaretDownOutlined, CaretRightOutlined, CloseOutlined } from '@ant-design/icons';
-import {
-  Alert, Button, Empty, Input, message, Popconfirm, Select, Space, Spin, Typography,
-} from 'antd';
 import { DragEvent, useEffect, useRef, useState } from 'react';
+import {
+  ChevronDown, ChevronRight, CircleAlert, X,
+} from 'lucide-react';
+
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  Confirm, EmptyState, notify, SearchInput, SimpleSelect, Spinner,
+} from '@/components/kit';
+import { cn } from '@/lib/utils';
 
 import { useIsMounted } from '../../hooks';
 import {
@@ -46,7 +52,7 @@ export function MembershipTree({ api }: Props) {
       }
       return list;
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
       return null;
     }
   }
@@ -65,9 +71,9 @@ export function MembershipTree({ api }: Props) {
   async function act(ws: string, action: () => Promise<unknown>, done: string) {
     try {
       await action();
-      message.success(done);
+      notify.success(done);
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
     await loadMembers(ws);
   }
@@ -104,7 +110,7 @@ export function MembershipTree({ api }: Props) {
     setOpen(new Set(open).add(ws.id));
     const current = members[ws.id] || await loadMembers(ws.id);
     if (current?.some((m) => m.user === user)) {
-      message.info(`${username} is already in ${ws.name}`);
+      notify.info(`${username} is already in ${ws.name}`);
       return;
     }
     if (current) {
@@ -116,27 +122,30 @@ export function MembershipTree({ api }: Props) {
   const pages = Math.max(1, Math.ceil((result?.total || 0) / PAGE_SIZE));
 
   return (
-    <div>
-      <Input.Search
-        allowClear
+    <div className="tw:text-sm">
+      <SearchInput
+        className="tw:mb-4"
         placeholder="Search workspaces, or their organization"
         value={q}
-        onChange={(e) => setQ(e.target.value)}
-        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+        onChange={setQ}
       />
-      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
-      {result == null && !error ? <Spin /> : null}
+      {error ? (
+        <Alert variant="destructive" className="tw:mb-4">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+      {result == null && !error ? <Spinner /> : null}
       {result && !groups.length && !loading ? (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={q ? 'No workspaces match' : 'No workspaces yet: create them in the Workspaces tab'}
-        />
+        <EmptyState>
+          {q ? 'No workspaces match' : 'No workspaces yet: create them in the Workspaces tab'}
+        </EmptyState>
       ) : null}
       {groups.map((group) => {
         const { workspaces } = group;
         return (
-          <div key={group.organizationId} style={{ marginBottom: 16 }}>
-            <Typography.Text strong>{group.organizationName}</Typography.Text>
+          <div key={group.organizationId} className="tw:mb-4">
+            <span className="tw:font-semibold">{group.organizationName}</span>
             {workspaces.map((ws) => {
               const list = members[ws.id];
               const expanded = open.has(ws.id);
@@ -148,53 +157,43 @@ export function MembershipTree({ api }: Props) {
                   onDragOver={(e) => dragOver(e, ws.id)}
                   onDragLeave={() => setTarget((t) => (t === ws.id ? null : t))}
                   onDrop={(e) => drop(e, ws)}
-                  style={{
-                    margin: '4px 0 4px 16px',
-                    padding: '4px 8px',
-                    borderRadius: 4,
-                    border: `1px dashed ${highlighted ? 'var(--pg-accent, #7a77ff)' : 'transparent'}`,
-                    background: highlighted ? 'rgba(var(--purple-color-rgb), 0.08)' : undefined,
-                  }}
+                  className={cn(
+                    'tw:my-1 tw:ml-4 tw:rounded tw:border tw:border-dashed tw:px-2 tw:py-1',
+                    highlighted ? 'tw:border-primary tw:bg-primary/10' : 'tw:border-transparent'
+                  )}
                 >
                   <div
                     role="button"
                     tabIndex={0}
                     onClick={() => toggle(ws.id)}
                     onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggle(ws.id)}
-                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                    className="tw:flex tw:cursor-pointer tw:items-center tw:gap-1 tw:select-none"
                   >
-                    {expanded ? <CaretDownOutlined /> : <CaretRightOutlined />}
-                    {' '}
-                    <Typography.Text>{ws.name}</Typography.Text>
-                    {' '}
+                    {expanded ? <ChevronDown className="tw:size-3.5" /> : <ChevronRight className="tw:size-3.5" />}
+                    <span>{ws.name}</span>
                     {list ? (
-                      <Typography.Text type="secondary">
+                      <span className="tw:text-muted-foreground">
                         {list.length === 1 ? '(1 member)' : `(${list.length} members)`}
-                      </Typography.Text>
+                      </span>
                     ) : null}
                   </div>
                   {expanded ? (
-                    <div style={{ paddingLeft: 20 }}>
+                    <div className="tw:pl-5">
                       {list?.length ? list.map((m) => (
-                        <div
-                          key={m.user}
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: 8, marginTop: 4,
-                          }}
-                        >
-                          <Typography.Text style={{ minWidth: 120 }}>{memberName(m)}</Typography.Text>
-                          <Select
-                            size="small"
+                        <div key={m.user} className="tw:mt-1 tw:flex tw:items-center tw:gap-2">
+                          <span className="tw:min-w-[120px]">{memberName(m)}</span>
+                          <SimpleSelect
+                            size="sm"
+                            className="tw:w-[100px]"
                             value={m.role}
                             options={roleOptions}
-                            style={{ width: 100 }}
-                            onChange={(role: Role) => act(
+                            onChange={(role) => role && act(
                               ws.id,
-                              () => api.setMember(ws.id, m.user, role),
+                              () => api.setMember(ws.id, m.user, role as Role),
                               `${memberName(m)} is now ${role} in ${ws.name}`
                             )}
                           />
-                          <Popconfirm
+                          <Confirm
                             title={`Remove ${memberName(m)} from ${ws.name}?`}
                             onConfirm={() => act(
                               ws.id,
@@ -203,21 +202,22 @@ export function MembershipTree({ api }: Props) {
                             )}
                           >
                             <Button
-                              size="small"
-                              type="text"
-                              danger
-                              icon={<CloseOutlined />}
+                              size="icon-xs"
+                              variant="ghost"
+                              className="tw:text-destructive tw:hover:text-destructive"
                               aria-label={`Remove ${memberName(m)}`}
-                            />
-                          </Popconfirm>
+                            >
+                              <X />
+                            </Button>
+                          </Confirm>
                         </div>
                       )) : null}
                       {list && !list.length ? (
-                        <Typography.Text type="secondary">
+                        <span className="tw:text-muted-foreground">
                           Drag users here
-                        </Typography.Text>
+                        </span>
                       ) : null}
-                      {list ? null : <Spin size="small" />}
+                      {list ? null : <Spinner />}
                     </div>
                   ) : null}
                 </div>
@@ -227,15 +227,15 @@ export function MembershipTree({ api }: Props) {
         );
       })}
       {result && result.total > PAGE_SIZE ? (
-        <Space>
-          <Button size="small" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>
+        <div className="tw:flex tw:items-center tw:gap-2">
+          <Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>
             Previous
           </Button>
-          <Typography.Text type="secondary">{`page ${page} of ${pages}`}</Typography.Text>
-          <Button size="small" disabled={page >= pages || loading} onClick={() => setPage(page + 1)}>
+          <span className="tw:text-muted-foreground">{`page ${page} of ${pages}`}</span>
+          <Button size="sm" variant="outline" disabled={page >= pages || loading} onClick={() => setPage(page + 1)}>
             Next
           </Button>
-        </Space>
+        </div>
       ) : null}
     </div>
   );

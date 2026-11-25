@@ -1,7 +1,9 @@
-import {
-  Alert, Form, Input, Modal,
-} from 'antd';
-import { useEffect, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
+import { CircleAlert } from 'lucide-react';
+
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Input } from '@/components/ui/input';
+import { Field, FormDialog } from '@/components/kit';
 
 import { RemoteSelect } from './RemoteSelect';
 
@@ -27,31 +29,40 @@ type Props = {
   onClose: () => void;
 };
 
-// A modal asking for a name; open while `title` is set. A failure keeps it
+// A dialog asking for a name; open while `title` is set. A failure keeps it
 // open with the server's message.
 export function NameDialog({
   title, initialName = '', choice, onSubmit, onClose,
 }: Props) {
-  const [form] = Form.useForm();
+  const [name, setName] = useState('');
+  const [picked, setPicked] = useState<string | undefined>();
+  const [missing, setMissing] = useState<{ name?: string; choice?: string }>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (title != null) {
-      form.resetFields();
-      form.setFieldsValue({ name: initialName });
-      if (choice) {
-        form.setFieldsValue({ [choice.field]: choice.initial });
-      }
+      setName(initialName);
+      setPicked(choice?.initial);
+      setMissing({});
       setError(null);
     }
   }, [title, initialName, choice?.initial]);
 
-  async function submit(values: NameValues) {
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    const lacking = {
+      name: name.trim() ? undefined : 'Enter a name',
+      choice: choice && !picked ? choice.message : undefined,
+    };
+    setMissing(lacking);
+    if (lacking.name || lacking.choice) {
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await onSubmit(values);
+      await onSubmit(choice ? { name, [choice.field]: picked } : { name });
       onClose();
     } catch (e: any) {
       setError(e.message);
@@ -61,30 +72,51 @@ export function NameDialog({
   }
 
   return (
-    <Modal
+    <FormDialog
+      open={title != null}
       title={title}
-      visible={title != null}
-      onCancel={onClose}
-      onOk={() => form.submit()}
-      okText="Save"
-      confirmLoading={saving}
-      forceRender
+      onClose={onClose}
+      onOk={() => submit()}
+      saving={saving}
     >
-      <Form form={form} layout="vertical" requiredMark={false} onFinish={submit}>
-        <Form.Item label="Name" name="name" rules={[{ required: true, message: 'Enter a name' }]}>
-          <Input autoComplete="off" />
-        </Form.Item>
+      <form className="tw:flex tw:flex-col tw:gap-4" onSubmit={submit} noValidate>
+        <Field label="Name" htmlFor="name-dialog-name" error={missing.name}>
+          <Input
+            id="name-dialog-name"
+            autoComplete="off"
+            autoFocus
+            value={name}
+            aria-invalid={Boolean(missing.name)}
+            onChange={(e) => {
+              setName(e.target.value);
+              setMissing((m) => ({ ...m, name: undefined }));
+            }}
+          />
+        </Field>
         {choice ? (
-          <Form.Item
-            label={choice.label}
-            name={choice.field}
-            rules={[{ required: true, message: choice.message }]}
-          >
-            <RemoteSelect fetchOptions={choice.fetchOptions} valueLabel={choice.initialLabel} />
-          </Form.Item>
+          <Field label={choice.label} htmlFor="name-dialog-choice" error={missing.choice}>
+            <RemoteSelect
+              id="name-dialog-choice"
+              fetchOptions={choice.fetchOptions}
+              valueLabel={choice.initialLabel}
+              value={picked}
+              invalid={Boolean(missing.choice)}
+              onChange={(v) => {
+                setPicked(v);
+                setMissing((m) => ({ ...m, choice: undefined }));
+              }}
+            />
+          </Field>
         ) : null}
-        {error ? <Alert type="error" message={error} showIcon /> : null}
-      </Form>
-    </Modal>
+        {error ? (
+          <Alert variant="destructive">
+            <CircleAlert />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+        {/* Enter in the name submits. */}
+        <button type="submit" hidden aria-hidden tabIndex={-1} />
+      </form>
+    </FormDialog>
   );
 }

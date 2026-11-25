@@ -1,7 +1,12 @@
-import {
-  Button, Checkbox, Divider, message, Popconfirm, Select, Space, Table, Typography,
-} from 'antd';
 import { useEffect, useState } from 'react';
+
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
+import { Separator } from '@/components/ui/separator';
+import {
+  Confirm, DataTable, notify, SimpleSelect,
+} from '@/components/kit';
 
 import { useIsMounted } from '../../hooks';
 import {
@@ -33,7 +38,7 @@ export function WorkspacePanel({
         setMembers(loaded);
       }
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
   }
 
@@ -44,10 +49,10 @@ export function WorkspacePanel({
   async function act(action: () => Promise<unknown>, done: string, reload: () => Promise<void>) {
     try {
       await action();
-      message.success(done);
+      notify.success(done);
       await reload();
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
   }
 
@@ -60,27 +65,26 @@ export function WorkspacePanel({
   );
 
   return (
-    <div style={{ padding: '8px 0' }}>
-      <Typography.Text strong>Members</Typography.Text>
-      <Table<Member>
+    <div className="tw:py-2">
+      <span className="tw:font-semibold">Members</span>
+      <DataTable<Member>
+        className="tw:mt-2"
         rowKey="user"
-        size="small"
         loading={members == null}
-        dataSource={members || []}
-        pagination={false}
-        style={{ marginTop: 8 }}
+        rows={members || []}
         columns={[
-          { title: 'User', render: (_, m) => memberName(m) },
+          { key: 'user', title: 'User', render: (_, m) => memberName(m) },
           {
+            key: 'role',
             title: 'Role',
             render: (_, m) => (
-              <Select
-                size="small"
+              <SimpleSelect
+                size="sm"
+                className="tw:w-[120px]"
                 value={m.role}
                 options={roleOptions}
-                style={{ width: 120 }}
-                onChange={(role: Role) => act(
-                  () => api.setMember(workspace.id, m.user, role),
+                onChange={(role) => role && act(
+                  () => api.setMember(workspace.id, m.user, role as Role),
                   `${memberName(m)} is now ${role}`,
                   loadMembers
                 )}
@@ -88,10 +92,11 @@ export function WorkspacePanel({
             ),
           },
           {
+            key: 'actions',
             title: '',
             align: 'right',
             render: (_, m) => (
-              <Popconfirm
+              <Confirm
                 title={`Remove ${memberName(m)} from ${workspace.name}?`}
                 onConfirm={() => act(
                   () => api.removeMember(workspace.id, m.user),
@@ -99,13 +104,13 @@ export function WorkspacePanel({
                   loadMembers
                 )}
               >
-                <Button size="small" danger>Remove</Button>
-              </Popconfirm>
+                <Button size="sm" variant="outline" className="tw:text-destructive">Remove</Button>
+              </Confirm>
             ),
           },
         ]}
       />
-      <Space style={{ marginTop: 8 }}>
+      <div className="tw:mt-2 tw:flex tw:flex-wrap tw:items-center tw:gap-2">
         <RemoteSelect
           // Loads its options again whenever the members change.
           key={[...memberIds].join(',')}
@@ -119,16 +124,15 @@ export function WorkspacePanel({
           }}
           fetchOptions={newMemberOptions}
         />
-        <Select
-          size="small"
+        <SimpleSelect
+          size="sm"
+          className="tw:w-[120px]"
           value={newRole}
           options={roleOptions}
-          style={{ width: 120 }}
-          onChange={setNewRole}
+          onChange={(role) => role && setNewRole(role as Role)}
         />
         <Button
-          size="small"
-          type="primary"
+          size="sm"
           disabled={!newMember}
           onClick={() => act(
             () => api.setMember(workspace.id, newMember!, newRole),
@@ -142,32 +146,40 @@ export function WorkspacePanel({
         >
           Add member
         </Button>
-      </Space>
+      </div>
 
-      <Divider style={{ margin: '16px 0 8px' }} />
+      <Separator className="tw:mt-4 tw:mb-2" />
 
-      <Typography.Text strong>Connections released to this workspace</Typography.Text>
-      <div style={{ marginTop: 8 }}>
-        {connections.length ? connections.map((c) => (
-          <div key={c.name}>
-            <Checkbox
-              checked={c.workspaces.includes(workspace.id)}
-              onChange={(e) => act(
-                () => (e.target.checked
-                  ? api.release(workspace.id, c.name)
-                  : api.withdraw(workspace.id, c.name)),
-                `${c.name} ${e.target.checked ? 'released to' : 'withdrawn from'} ${workspace.name}`,
-                reloadConnections
-              )}
-            >
-              {c.name}
-              {c.type ? <Typography.Text type="secondary">{` (${c.type})`}</Typography.Text> : null}
-            </Checkbox>
-          </div>
-        )) : (
-          <Typography.Text type="secondary">
+      <span className="tw:font-semibold">Connections released to this workspace</span>
+      <div className="tw:mt-2 tw:flex tw:flex-col tw:gap-2">
+        {connections.length ? connections.map((c) => {
+          const id = `release-${workspace.id}-${c.name}`;
+          return (
+            <div key={c.name} className="tw:flex tw:items-center tw:gap-2">
+              <Checkbox
+                id={id}
+                checked={c.workspaces.includes(workspace.id)}
+                onCheckedChange={(next) => {
+                  const checked = next === true;
+                  act(
+                    () => (checked
+                      ? api.release(workspace.id, c.name)
+                      : api.withdraw(workspace.id, c.name)),
+                    `${c.name} ${checked ? 'released to' : 'withdrawn from'} ${workspace.name}`,
+                    reloadConnections
+                  );
+                }}
+              />
+              <Label htmlFor={id} className="tw:font-normal">
+                {c.name}
+                {c.type ? <span className="tw:text-muted-foreground">{` (${c.type})`}</span> : null}
+              </Label>
+            </div>
+          );
+        }) : (
+          <span className="tw:text-muted-foreground">
             The organization has no connections yet.
-          </Typography.Text>
+          </span>
         )}
       </div>
     </div>

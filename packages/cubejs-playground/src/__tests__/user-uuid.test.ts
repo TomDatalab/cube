@@ -156,7 +156,7 @@ describe('the Users tab', () => {
 
   const self = () => ({
     you: document.body.querySelector('tbody tr:not([aria-hidden])')!.textContent!.includes('you'),
-    locked: (document.body.querySelector('tbody .ant-switch') as HTMLButtonElement).disabled,
+    locked: (document.body.querySelector('tbody [role="switch"]') as HTMLButtonElement).disabled,
   });
 
   it('knows the user of a session stored before ids were UUIDs', async () => {
@@ -194,7 +194,8 @@ describe('the Users tab', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
     act(() => {
-      (document.body.querySelector('.ant-modal-footer .ant-btn-primary') as HTMLElement).click();
+      ([...document.body.querySelectorAll('[role="dialog"] [data-slot="dialog-footer"] button')]
+        .find((button) => button.textContent === 'Save') as HTMLElement).click();
     });
     await flush();
 

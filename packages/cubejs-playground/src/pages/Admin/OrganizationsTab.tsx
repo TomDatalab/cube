@@ -1,7 +1,14 @@
-import {
-  Alert, Button, Card, Input, message, Popconfirm, Select, Space, Table, Tag, Typography,
-} from 'antd';
 import { useEffect, useState } from 'react';
+import { CircleAlert } from 'lucide-react';
+
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  Card, CardAction, CardContent, CardHeader, CardTitle,
+} from '@/components/ui/card';
+import {
+  Column, Confirm, DataTable, notify, SearchInput, SimpleSelect, Tag,
+} from '@/components/kit';
 
 import { useIsMounted } from '../../hooks';
 import { IdText } from './IdText';
@@ -36,51 +43,67 @@ export function OrganizationsTab({ api, onShowWorkspaces }: Props) {
     } else {
       await api.renameOrganization(org!.id, name);
     }
-    message.success(`${name} saved`);
+    notify.success(`${name} saved`);
     reload();
   }
 
+  const columns: Column<Organization>[] = [
+    {
+      key: 'select',
+      title: '',
+      width: 32,
+      render: (_, o) => (
+        <input
+          type="radio"
+          name="organization"
+          aria-label={`Select ${o.name}`}
+          className="tw:cursor-pointer tw:accent-primary"
+          checked={selected?.id === o.id}
+          onChange={() => setSelected(o)}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ),
+    },
+    { key: 'name', title: 'Organization', dataIndex: 'name' },
+    { key: 'id', title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
+    { key: 'createdBy', title: 'Created by', dataIndex: 'createdBy', render: (v) => v || '—' },
+    { key: 'createdAt', title: 'Created', dataIndex: 'createdAt', render: (v) => new Date(v).toLocaleString() },
+  ];
+
   return (
     <>
-      <Space style={{ marginBottom: 16 }}>
-        <Button type="primary" onClick={() => setDialog('new')}>
+      <div className="tw:mb-4 tw:flex tw:items-center tw:gap-2">
+        <Button onClick={() => setDialog('new')}>
           New organization
         </Button>
-      </Space>
+      </div>
 
-      <Input.Search
-        allowClear
+      <SearchInput
+        className="tw:mb-4"
         placeholder="Search organizations by name or id"
         value={q}
-        onChange={(e) => setQ(e.target.value)}
-        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+        onChange={setQ}
       />
-      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
+      {error ? (
+        <Alert variant="destructive" className="tw:mb-4">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
 
-      <Table<Organization>
+      <DataTable<Organization>
         rowKey="id"
-        size="small"
         loading={loading}
-        dataSource={result?.items || []}
+        rows={result?.items || []}
         pagination={{
           current: page,
           pageSize: PAGE_SIZE,
           total: result?.total ?? 0,
           onChange: setPage,
-          showSizeChanger: false,
         }}
-        rowSelection={{
-          type: 'radio',
-          selectedRowKeys: selected ? [selected.id] : [],
-          onChange: (_, rows) => setSelected(rows[0] ?? null),
-        }}
-        onRow={(o) => ({ onClick: () => setSelected(o), style: { cursor: 'pointer' } })}
-        columns={[
-          { title: 'Organization', dataIndex: 'name' },
-          { title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
-          { title: 'Created by', dataIndex: 'createdBy', render: (v) => v || '—' },
-          { title: 'Created', dataIndex: 'createdAt', render: (v) => new Date(v).toLocaleString() },
-        ]}
+        selectedKey={selected?.id ?? null}
+        onRowClick={setSelected}
+        columns={columns}
       />
 
       {org ? (
@@ -142,7 +165,7 @@ function OrganizationCard({
         setWorkspaces(loaded);
       }
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
   }
 
@@ -160,7 +183,7 @@ function OrganizationCard({
         setMoveTo({});
       }
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
   }
 
@@ -172,146 +195,147 @@ function OrganizationCard({
   async function act(action: () => Promise<unknown>, done: string, reload?: () => Promise<void>) {
     try {
       await action();
-      message.success(done);
+      notify.success(done);
       await reload?.();
       return true;
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
       return false;
     }
   }
 
   return (
-    <Card
-      size="small"
-      style={{ marginTop: 16 }}
-      title={org.name}
-      extra={(
-        <Space>
-          <Button size="small" onClick={onRename}>Rename</Button>
-          <Popconfirm
+    <Card className="tw:mt-4 tw:gap-4 tw:py-4">
+      <CardHeader className="tw:px-4">
+        <CardTitle>{org.name}</CardTitle>
+        <CardAction className="tw:flex tw:items-center tw:gap-2">
+          <Button size="sm" variant="outline" onClick={onRename}>Rename</Button>
+          <Confirm
             title={`Delete ${org.name}? It must have no workspaces or connections left.`}
             onConfirm={() => act(() => api.deleteOrganization(org.id), `${org.name} deleted`, onDeleted)}
           >
-            <Button size="small" danger>Delete</Button>
-          </Popconfirm>
-        </Space>
-      )}
-    >
-      <Typography.Text strong>Owners</Typography.Text>
-      <div>
-        <Typography.Text type="secondary">
+            <Button size="sm" variant="outline" className="tw:text-destructive">Delete</Button>
+          </Confirm>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="tw:px-4 tw:text-sm">
+        <strong className="tw:font-semibold">Owners</strong>
+        <div className="tw:text-muted-foreground">
           Owners administer the organization: its workspaces, members and connections.
-        </Typography.Text>
-      </div>
-      <Space style={{ marginTop: 8, marginBottom: 16 }}>
-        <RemoteSelect
-          size="small"
-          placeholder="User"
-          style={{ width: 200 }}
-          value={owner}
-          onChange={(v, label) => {
-            setOwner(v);
-            setOwnerName(label);
-          }}
-          fetchOptions={userOptions(api)}
-        />
-        <Button
-          size="small"
-          disabled={!owner}
-          onClick={() => act(() => api.addOwner(org.id, owner!), `${ownerName ?? owner} is an owner of ${org.name}`)}
-        >
-          Make owner
-        </Button>
-        <Popconfirm
-          title={`Remove ${ownerName ?? owner} as an owner of ${org.name}?`}
-          disabled={!owner}
-          onConfirm={() => act(() => api.removeOwner(org.id, owner!), `${ownerName ?? owner} is no longer an owner`)}
-        >
-          <Button size="small" danger disabled={!owner}>Remove owner</Button>
-        </Popconfirm>
-      </Space>
+        </div>
+        <div className="tw:mt-2 tw:mb-4 tw:flex tw:flex-wrap tw:items-center tw:gap-2">
+          <RemoteSelect
+            size="small"
+            placeholder="User"
+            style={{ width: 200 }}
+            value={owner}
+            onChange={(v, label) => {
+              setOwner(v);
+              setOwnerName(label);
+            }}
+            fetchOptions={userOptions(api)}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!owner}
+            onClick={() => act(() => api.addOwner(org.id, owner!), `${ownerName ?? owner} is an owner of ${org.name}`)}
+          >
+            Make owner
+          </Button>
+          <Confirm
+            title={`Remove ${ownerName ?? owner} as an owner of ${org.name}?`}
+            disabled={!owner}
+            onConfirm={() => act(() => api.removeOwner(org.id, owner!), `${ownerName ?? owner} is no longer an owner`)}
+          >
+            <Button size="sm" variant="outline" className="tw:text-destructive" disabled={!owner}>Remove owner</Button>
+          </Confirm>
+        </div>
 
-      <Typography.Text strong>Connections</Typography.Text>
-      <div>
-        {connections.length ? connections.map((c) => {
-          const target = organizations.find((o) => o.id === moveTo[c.name]);
-          return (
-            <Space key={c.name} style={{ marginRight: 16, marginBottom: 8 }}>
-              <Typography.Text code>{c.name}</Typography.Text>
-              {c.origin === 'assigned' ? (
-                <Tag title="Assigned by a platform admin: the organization uses and releases it, only platform admins edit or delete it">
-                  assigned
-                </Tag>
-              ) : (
-                <Tag title="Created by the organization: its owners edit and delete it">created</Tag>
-              )}
-              <Select
-                size="small"
-                placeholder="Move to…"
-                aria-label={`Move ${c.name} to`}
-                style={{ width: 160 }}
-                value={moveTo[c.name]}
-                onChange={(v: string) => setMoveTo({ ...moveTo, [c.name]: v })}
-                options={moveTargets(organizations, org.id).map((o) => ({ value: o.id, label: o.name }))}
-              />
-              <Popconfirm
-                title={`Move ${c.name} to ${target?.name}? Its releases to ${org.name}'s workspaces are withdrawn.`}
-                disabled={!target}
-                onConfirm={() => act(
-                  () => api.moveConnection(c.name, target!.id),
-                  `${c.name} belongs to ${target!.name}`,
-                  loadConnections
+        <strong className="tw:font-semibold">Connections</strong>
+        <div className="tw:flex tw:flex-wrap">
+          {connections.length ? connections.map((c) => {
+            const target = organizations.find((o) => o.id === moveTo[c.name]);
+            return (
+              <div key={c.name} className="tw:mr-4 tw:mb-2 tw:flex tw:items-center tw:gap-2">
+                <code className="tw:rounded tw:border tw:bg-muted tw:px-1 tw:font-mono tw:text-xs">{c.name}</code>
+                {c.origin === 'assigned' ? (
+                  <Tag title="Assigned by a platform admin: the organization uses and releases it, only platform admins edit or delete it">
+                    assigned
+                  </Tag>
+                ) : (
+                  <Tag title="Created by the organization: its owners edit and delete it">created</Tag>
                 )}
-              >
-                <Button size="small" disabled={!target}>Move</Button>
-              </Popconfirm>
-            </Space>
-          );
-        }) : <Typography.Text type="secondary">None yet.</Typography.Text>}
-      </div>
-      <Space style={{ marginTop: 8, marginBottom: 16 }}>
-        <Select
-          size="small"
-          placeholder="Data source"
-          style={{ width: 200 }}
-          value={dataSource}
-          onChange={setDataSource}
-          options={dataSources
-            .map((ds) => ({ value: ds.name, label: ds.type ? `${ds.name} (${ds.type})` : ds.name }))}
-        />
-        <Popconfirm
-          title={`Assign ${dataSource} to ${org.name}? Its owners can release it to their workspaces, but only platform admins edit or delete it.`}
-          disabled={!dataSource}
-          onConfirm={async () => {
-            if (await act(
-              () => api.assignConnection(dataSource!, org.id),
-              `${dataSource} belongs to ${org.name}`,
-              loadConnections
-            )) {
-              setDataSource(undefined);
-            }
-          }}
-        >
-          <Button size="small" disabled={!dataSource}>Add to organization</Button>
-        </Popconfirm>
-      </Space>
+                <div className="tw:w-40">
+                  {/* Names the select, as its aria-label did. */}
+                  <label htmlFor={`move-to-${c.name}`} className="tw:sr-only">{`Move ${c.name} to`}</label>
+                  <SimpleSelect
+                    id={`move-to-${c.name}`}
+                    size="sm"
+                    placeholder="Move to…"
+                    value={moveTo[c.name]}
+                    onChange={(v) => setMoveTo({ ...moveTo, [c.name]: v })}
+                    options={moveTargets(organizations, org.id).map((o) => ({ value: o.id, label: o.name }))}
+                  />
+                </div>
+                <Confirm
+                  title={`Move ${c.name} to ${target?.name}? Its releases to ${org.name}'s workspaces are withdrawn.`}
+                  disabled={!target}
+                  onConfirm={() => act(
+                    () => api.moveConnection(c.name, target!.id),
+                    `${c.name} belongs to ${target!.name}`,
+                    loadConnections
+                  )}
+                >
+                  <Button size="sm" variant="outline" disabled={!target}>Move</Button>
+                </Confirm>
+              </div>
+            );
+          }) : <span className="tw:text-muted-foreground">None yet.</span>}
+        </div>
+        <div className="tw:mt-2 tw:mb-4 tw:flex tw:flex-wrap tw:items-center tw:gap-2">
+          <SimpleSelect
+            size="sm"
+            className="tw:w-[200px]"
+            placeholder="Data source"
+            value={dataSource}
+            onChange={setDataSource}
+            options={dataSources
+              .map((ds) => ({ value: ds.name, label: ds.type ? `${ds.name} (${ds.type})` : ds.name }))}
+          />
+          <Confirm
+            title={`Assign ${dataSource} to ${org.name}? Its owners can release it to their workspaces, but only platform admins edit or delete it.`}
+            disabled={!dataSource}
+            onConfirm={async () => {
+              if (await act(
+                () => api.assignConnection(dataSource!, org.id),
+                `${dataSource} belongs to ${org.name}`,
+                loadConnections
+              )) {
+                setDataSource(undefined);
+              }
+            }}
+          >
+            <Button size="sm" variant="outline" disabled={!dataSource}>Add to organization</Button>
+          </Confirm>
+        </div>
 
-      <Typography.Text strong>Workspaces</Typography.Text>
-      <div style={{ marginTop: 8 }}>
-        {workspaces == null ? (
-          <Typography.Text type="secondary">Loading...</Typography.Text>
-        ) : (
-          <Space>
-            <Typography.Text>
-              {workspaces.length === 1 ? '1 workspace' : `${workspaces.length} workspaces`}
-            </Typography.Text>
-            <Button size="small" type="link" onClick={onShowWorkspaces}>
-              Open in Workspaces
-            </Button>
-          </Space>
-        )}
-      </div>
+        <strong className="tw:font-semibold">Workspaces</strong>
+        <div className="tw:mt-2">
+          {workspaces == null ? (
+            <span className="tw:text-muted-foreground">Loading...</span>
+          ) : (
+            <div className="tw:flex tw:items-center tw:gap-2">
+              <span>
+                {workspaces.length === 1 ? '1 workspace' : `${workspaces.length} workspaces`}
+              </span>
+              <Button size="sm" variant="link" className="tw:px-0" onClick={onShowWorkspaces}>
+                Open in Workspaces
+              </Button>
+            </div>
+          )}
+        </div>
+      </CardContent>
     </Card>
   );
 }

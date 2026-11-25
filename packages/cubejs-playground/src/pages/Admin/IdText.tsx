@@ -1,4 +1,9 @@
-import { Tooltip, Typography } from 'antd';
+import { useState } from 'react';
+import { Check, Copy } from 'lucide-react';
+
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -13,10 +18,33 @@ export function shortId(id: string): string {
  */
 export function IdText({ id }: { id: string }) {
   const short = shortId(id);
-  const text = (
-    <Typography.Text type="secondary" copyable={{ text: id }} style={{ whiteSpace: 'nowrap' }}>
-      {short}
-    </Typography.Text>
+  const [copied, setCopied] = useState(false);
+  const text = <span>{short}</span>;
+  return (
+    <span className="tw:inline-flex tw:items-center tw:gap-1 tw:whitespace-nowrap tw:text-muted-foreground">
+      {short === id ? text : (
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>{text}</TooltipTrigger>
+            <TooltipContent>{id}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+      <button
+        type="button"
+        data-slot="copy-id"
+        aria-label="Copy id"
+        className="tw:cursor-pointer tw:text-muted-foreground tw:hover:text-foreground"
+        onClick={(e) => {
+          e.stopPropagation();
+          navigator.clipboard?.writeText(id).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }, () => {});
+        }}
+      >
+        {copied ? <Check className="tw:size-3.5" /> : <Copy className="tw:size-3.5" />}
+      </button>
+    </span>
   );
-  return short === id ? text : <Tooltip title={id}>{text}</Tooltip>;
 }

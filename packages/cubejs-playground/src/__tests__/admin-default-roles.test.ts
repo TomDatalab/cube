@@ -72,6 +72,10 @@ describe('default roles in the Playground', () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     })) as any;
+    // Radix Select calls these, which jsdom lacks.
+    Element.prototype.scrollIntoView = vi.fn();
+    Element.prototype.hasPointerCapture = vi.fn(() => false) as any;
+    Element.prototype.releasePointerCapture = vi.fn();
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -86,6 +90,7 @@ describe('default roles in the Playground', () => {
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
   const pick = (placeholder: string) => click(document.querySelector(`[data-pick="${placeholder}"]`)!);
+  const dialog = () => document.querySelector('[role="dialog"]');
 
   describe('RolesTab', () => {
     const api = { roles: vi.fn(async () => roles) } as unknown as AdminApi;
@@ -100,7 +105,7 @@ describe('default roles in the Playground', () => {
       await render();
       const rows = [...document.querySelectorAll('tbody tr')];
       expect(rows).toHaveLength(4);
-      const tagged = rows.filter((r) => [...r.querySelectorAll('.ant-tag')].some((t) => t.textContent === 'default'));
+      const tagged = rows.filter((r) => [...r.querySelectorAll('[data-slot="badge"]')].some((t) => t.textContent === 'default'));
       expect(tagged.map((r) => r.querySelector('td')!.textContent)).toEqual(['ownerdefault', 'Editorsdefault', 'viewerdefault']);
       expect(rows[1].textContent).toContain('22222222…');
     });
@@ -133,7 +138,19 @@ describe('default roles in the Playground', () => {
       await flush();
     }
 
-    const selected = () => document.querySelector('.ant-modal .ant-select-selection-item')?.textContent;
+    const roleSelect = () => dialog()?.querySelector('[data-slot="select-trigger"]');
+    // The text of the selected role; undefined while none is.
+    const selected = () => {
+      const trigger = roleSelect();
+      return trigger && !trigger.hasAttribute('data-placeholder')
+        ? trigger.querySelector('[data-slot="select-value"]')?.textContent ?? undefined
+        : undefined;
+    };
+    // Opens the role dropdown.
+    const openRoles = () => act(async () => {
+      roleSelect()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    const saveButton = () => [...dialog()!.querySelectorAll('button')].find((b) => b.textContent === 'Save')!;
 
     it('offers only the organization roles and sends roleId', async () => {
       const api = makeApi();
@@ -141,18 +158,13 @@ describe('default roles in the Playground', () => {
       await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
       await flush();
       expect(selected()).toContain('viewer');
-      // Open the role dropdown.
-      await act(async () => {
-        document.querySelector('.ant-modal .ant-select-selector')!
-          .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      });
+      await openRoles();
+      expect(document.querySelector('[role="listbox"]')).toBeTruthy();
       const text = document.body.textContent!;
       expect(text).not.toContain('Built-in');
       expect(text).not.toContain('views and queries');
       expect(text).toContain('finance');
-      await act(async () => {
-        document.querySelector('.ant-modal .ant-btn-primary')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
+      await click(saveButton());
       await flush();
       expect(api.updateRule).toHaveBeenCalledTimes(1);
       const patch = (api.updateRule.mock.calls[0] as any[])[1];
@@ -179,9 +191,7 @@ describe('default roles in the Playground', () => {
       await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
       await flush();
       expect(selected()).toBeUndefined();
-      await act(async () => {
-        document.querySelector('.ant-modal .ant-btn-primary')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
+      await click(saveButton());
       await flush();
       await flush();
       await act(async () => {
@@ -197,13 +207,10 @@ describe('default roles in the Playground', () => {
       await render(api);
       await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
       await flush();
-      expect(document.querySelector('.ant-modal .ant-select-arrow-loading')).toBeNull();
-      expect(document.querySelector('.ant-modal .ant-select-loading')).toBeNull();
+      expect(roleSelect()!.querySelector('[aria-label="Loading"]')).toBeNull();
       // The list is empty: no organization role is offered.
-      await act(async () => {
-        document.querySelector('.ant-modal .ant-select-selector')!
-          .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      });
+      await openRoles();
+      expect(document.querySelector('[role="listbox"]')).toBeTruthy();
       expect(document.body.textContent).not.toContain('Editors');
     });
 
@@ -214,6 +221,8 @@ describe('default roles in the Playground', () => {
       await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
       expect(selected()).toBe('viewer');
       expect(document.body.textContent).not.toContain(VIEWER_ID);
+      // The select shows it is loading.
+      expect(roleSelect()!.querySelector('[aria-label="Loading"]')).toBeTruthy();
     });
 
     it('preselects nothing for a new rule in an organization without a default viewer', async () => {
@@ -224,9 +233,7 @@ describe('default roles in the Playground', () => {
       await pick('Organization / workspace');
       await flush();
       expect(selected()).toBeUndefined();
-      await act(async () => {
-        document.querySelector('.ant-modal .ant-btn-primary')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
+      await click(saveButton());
       await flush();
       await flush();
       await act(async () => {

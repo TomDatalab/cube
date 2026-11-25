@@ -8,7 +8,10 @@ import {
 const detail = {
   cubes: [
     {
-      name: 'dfos_fibercable', type: 'cube' as const, dataSource: 'default', file: 'digital/a.yml',
+      name: 'dfos_fibercable',
+      type: 'cube' as const,
+      dataSource: 'default',
+      file: 'digital/a.yml',
       members: { measures: 1, dimensions: 2 },
     },
   ],
@@ -38,9 +41,12 @@ describe('organization tree helpers', () => {
   });
 
   it('filterTree keeps matches and their ancestors', () => {
-    const org = { ...orgNodes([{
-      slug: 'digital', name: 'Digital', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
-    }])[0], children: detailNodes('digital', detail) };
+    const org = {
+      ...orgNodes([{
+        slug: 'digital', name: 'Digital', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
+      }])[0],
+      children: detailNodes('digital', detail),
+    };
     const out = filterTree([org], 'FIB');
     expect(out).toHaveLength(1);
     expect(out[0].key).toBe('org:digital');
@@ -51,9 +57,12 @@ describe('organization tree helpers', () => {
   });
 
   it('filterTree matches titles and names, never the kind or the slug of a key', () => {
-    const org = { ...orgNodes([{
-      slug: 'digital', name: 'Digital', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
-    }])[0], children: detailNodes('digital', detail) };
+    const org = {
+      ...orgNodes([{
+        slug: 'digital', name: 'Digital', counts: { cubes: 1, files: 2, connections: 1 }, errors: 0,
+      }])[0],
+      children: detailNodes('digital', detail),
+    };
     // Kinds of keys: no title holds them.
     expect(filterTree([org], 'datasource')).toEqual([]);
     expect(filterTree([org], 'schema:')).toEqual([]);

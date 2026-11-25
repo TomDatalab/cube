@@ -45,7 +45,7 @@ describe('AttributesModal', () => {
   });
 
   // The values shown as tags in the form.
-  const tags = () => [...document.body.querySelectorAll('.ant-select-selection-item-content')]
+  const tags = () => [...document.body.querySelectorAll('[role="dialog"] [data-slot="badge"]')]
     .map((tag) => tag.textContent);
 
   it('ignores the attributes of a user it no longer shows', async () => {
@@ -66,7 +66,7 @@ describe('AttributesModal', () => {
     await act(async () => loads.ana.resolve({ region: ['Sul'] }));
     expect(tags()).toEqual(['Norte']);
 
-    const save = [...document.body.querySelectorAll('.ant-modal-footer button')]
+    const save = [...document.body.querySelectorAll('[role="dialog"] [data-slot="dialog-footer"] button')]
       .find((button) => button.textContent === 'Save') as HTMLButtonElement;
     expect(save.disabled).toBe(false);
     await act(async () => save.click());
@@ -94,7 +94,7 @@ describe('AttributesModal', () => {
     expect(calls).toBe(2);
     // The first load answers late, for a user no longer shown.
     await act(async () => loads[0].resolve({ region: ['Sul'] }));
-    const save = [...document.body.querySelectorAll('.ant-modal-footer button')]
+    const save = [...document.body.querySelectorAll('[role="dialog"] [data-slot="dialog-footer"] button')]
       .find((button) => button.textContent === 'Save') as HTMLButtonElement;
     expect(save.disabled).toBe(true);
     expect(tags()).toEqual([]);

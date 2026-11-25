@@ -1,6 +1,8 @@
-import { Alert, Layout, Typography } from 'antd';
 import { useMemo, useState } from 'react';
+import { Info } from 'lucide-react';
 import { Redirect, useHistory, useLocation } from 'react-router-dom';
+
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
 import { usePlaygroundContext, useRbac } from '../../hooks';
 import { Content, Header } from '../components/Ui';
@@ -36,11 +38,11 @@ export function AdminPage() {
   const title = ADMIN_SECTIONS.find((s) => s.key === section)!.label;
 
   return (
-    <Layout>
+    <div className="tw:text-foreground">
       <Header>
-        <Typography.Title>{title}</Typography.Title>
+        <h1 className="tw:text-3xl tw:font-semibold">{title}</h1>
       </Header>
-      <Content>
+      <Content className="tw:pb-8">
         {enabled ? (
           <>
             {section === 'organizations' ? (
@@ -69,14 +71,15 @@ export function AdminPage() {
             ) : null}
           </>
         ) : (
-          <Alert
-            type="info"
-            showIcon
-            message="RBAC is off"
-            description="Set CUBE_RBAC=spicedb to manage users, organizations, workspaces and rules here."
-          />
+          <Alert>
+            <Info />
+            <AlertTitle>RBAC is off</AlertTitle>
+            <AlertDescription>
+              Set CUBE_RBAC=spicedb to manage users, organizations, workspaces and rules here.
+            </AlertDescription>
+          </Alert>
         )}
       </Content>
-    </Layout>
+    </div>
   );
 }
