@@ -101,3 +101,49 @@
     margin: 0;
   }
 }
+
+/* Column resizing (src/shared/column-resize.ts): a handle on the right edge
+   of every header cell. Unlayered, like the utilities. */
+.pg-col-resize {
+  position: absolute;
+  top: 0;
+  /* Inside the cell: a resized table's cells clip what overflows them. */
+  right: 0;
+  z-index: 3;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.pg-col-resize::after {
+  content: "";
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  right: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+th:hover > .pg-col-resize::after,
+[data-qa="ResultsColumnHeader"]:hover > .pg-col-resize::after {
+  background: var(--pg-line, #e3e4ee);
+}
+.pg-col-resize:hover::after,
+.pg-col-resize.active::after {
+  top: 0;
+  bottom: 0;
+  background: var(--pg-accent, #2f5597);
+}
+body.pg-col-resizing,
+body.pg-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+/* Once resized, a column cuts what does not fit. */
+table[data-col-resized] > thead > tr > th,
+table[data-col-resized] > tbody > tr > td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -11,6 +11,7 @@ import { CubeLoader } from './atoms';
 import { AppContextConsumer, PlaygroundContext } from './components/AppContext';
 import GlobalStyles from './components/GlobalStyles';
 import { Toaster } from './components/ui/sonner';
+import { installColumnResize } from './shared/column-resize';
 import Header from './components/Header/Header';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { LivePreviewContextProvider } from './components/LivePreviewContext/LivePreviewContextProvider';
@@ -206,9 +207,16 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
           Toaster's <section> would take a column.
         */}
         <Toaster richColors closeButton position="top-center" />
+        <ColumnResize />
       </LivePreviewContextProvider>
     );
   }
+}
+
+// Every table's columns resize by hand (src/shared/column-resize.ts).
+function ColumnResize() {
+  useEffect(() => installColumnResize(document.body), []);
+  return null;
 }
 
 type ContextSetterProps = {
