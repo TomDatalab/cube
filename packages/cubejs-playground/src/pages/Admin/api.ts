@@ -167,6 +167,19 @@ export type Rule = {
   createdBy: string | null;
 };
 
+// A group of users of an organization. Placed in rules of that organization,
+// its members are members of them. `members` and `rules` are counts.
+export type Group = {
+  id: string;
+  organizationId: string;
+  organizationName: string;
+  name: string;
+  members: number;
+  rules: number;
+  createdAt: string;
+  createdBy: string | null;
+};
+
 // What a rule grants: a built-in role or an organization role's id.
 export type RuleGrant = { role: Role } | { roleId: string };
 
@@ -274,6 +287,37 @@ export function adminApi(basePath: string) {
       workspaceId?: string | null;
       page: number;
     }): Promise<Page<Rule>> => search('rules', 'rules', opts),
+
+    searchGroups: (opts: {
+      q: string;
+      organizationId?: string | null;
+      page: number;
+    }): Promise<Page<Group>> => search('groups', 'groups', opts),
+    createGroup: (org: string, name: string): Promise<Group> => call(
+      'POST', `/v1/organizations/${id(org)}/groups`, { name }
+    ),
+    renameGroup: (group: string, name: string): Promise<Group> => call(
+      'PATCH', `/v1/groups/${id(group)}`, { name }
+    ),
+    deleteGroup: (group: string) => call('DELETE', `/v1/groups/${id(group)}`),
+    groupMembers: async (group: string): Promise<RuleMember[]> => (
+      await call('GET', `/v1/groups/${id(group)}/members`)
+    ).members.map((m: RuleMember) => ({ user: m.user, username: m.username ?? null })),
+    addGroupMember: (group: string, user: string) => call(
+      'PUT', `/v1/groups/${id(group)}/members/${id(user)}`
+    ),
+    removeGroupMember: (group: string, user: string) => call(
+      'DELETE', `/v1/groups/${id(group)}/members/${id(user)}`
+    ),
+    groupRules: async (group: string): Promise<Rule[]> => (
+      await call('GET', `/v1/groups/${id(group)}/rules`)
+    ).rules,
+    addGroupRule: (group: string, rule: string) => call(
+      'PUT', `/v1/groups/${id(group)}/rules/${id(rule)}`
+    ),
+    removeGroupRule: (group: string, rule: string) => call(
+      'DELETE', `/v1/groups/${id(group)}/rules/${id(rule)}`
+    ),
 
     users: async (): Promise<User[]> => (await call('GET', '/v1/users')).users,
     createUser: (user: { username: string; name?: string; email?: string; password: string }) => call(

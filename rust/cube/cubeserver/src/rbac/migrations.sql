@@ -233,3 +233,15 @@ BEGIN
 END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS roles_builtin_idx
     ON roles (organization_id, builtin) WHERE builtin IS NOT NULL;
+
+-- A group of users of an organization. Its members are in SpiceDB
+-- (`group#member@user`), as are the rules it is placed in
+-- (`rule#group@group`): there its members are members of the rule.
+CREATE TABLE IF NOT EXISTS groups (
+    id uuid PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations (id) ON DELETE CASCADE,
+    name text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    UNIQUE (organization_id, name)
+);

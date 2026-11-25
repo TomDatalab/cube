@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::authz::Relationship;
 use super::restrictions::{Restrictions, RowOperator};
 use super::store::{
-    ConnectionOrigin, ConnectionRow, Organization, Role, Rule, RuleRole, User, Workspace,
+    ConnectionOrigin, ConnectionRow, Group, Organization, Role, Rule, RuleRole, User, Workspace,
 };
 
 const ORG_OWNER: &[&str] = &["admin", "view", "manage_connections"];
@@ -106,8 +106,14 @@ pub struct AccessInput {
     pub direct: Vec<Relationship>,
     pub organizations: Vec<Organization>,
     pub workspaces: Vec<Workspace>,
-    /// The rules the user is a member of.
+    /// The rules the user is a member of, directly or through groups.
     pub rules: Vec<Rule>,
+    /// Those of `rules` the user is in only through groups.
+    pub indirect_rules: BTreeSet<Uuid>,
+    /// The groups the user is in.
+    pub groups: Vec<Group>,
+    /// (rule, group): the user's groups placed in rules.
+    pub rule_groups: Vec<(Uuid, Uuid)>,
     /// The organization roles those rules grant.
     pub roles: Vec<Role>,
     pub connections: Vec<ConnectionRow>,
@@ -393,6 +399,27 @@ pub fn build(input: &AccessInput) -> AccessGraph {
         };
         let node = format!("workspace:{}", ws.id);
         let rule_node = format!("rule:{}", rule.id);
+        // How the user is in the rule: directly, and through each group.
+        let mut routes: Vec<(Vec<String>, String)> = Vec::new();
+        if !input.indirect_rules.contains(&rule.id) {
+            edges.add(&user_id, &rule_node, "member", "direct");
+            routes.push((vec![user_id.clone()], String::new()));
+        }
+        for (_, group) in input.rule_groups.iter().filter(|(r, _)| *r == rule.id) {
+            let Some(group) = input.groups.iter().find(|g| g.id == *group) else {
+                continue;
+            };
+            let group_node = format!("group:{}", group.id);
+            edges.add(&user_id, &group_node, "member", "direct");
+            edges.add(&group_node, &rule_node, "in rule", "direct");
+            routes.push((
+                vec![user_id.clone(), group_node],
+                format!(" (group {})", group.name),
+            ));
+        }
+        if routes.is_empty() {
+            continue;
+        }
         rule_nodes.push((rule, ws));
         role_nodes.entry(role_id.clone()).or_insert_with(|| Node {
             id: role_id.clone(),
@@ -402,32 +429,37 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             notes: note.clone().into_iter().collect(),
             details: perms.iter().map(|p| p.to_string()).collect(),
         });
-        edges.add(&user_id, &rule_node, "member", "direct");
         edges.add(&rule_node, &role_id, "role", "derived");
         edges.add(&rule_node, &node, &role, "derived");
-        ws_sources
-            .entry(ws.id.to_string())
-            .or_default()
-            .push(Source {
-                text: format!(
-                    "{role} through the rule {}{}",
-                    rule.description,
-                    note.map(|n| format!(" {n}")).unwrap_or_default()
-                ),
-                path: vec![user_id.clone(), rule_node.clone(), node.clone()],
-                perms: perms.to_vec(),
-            });
-        // `organization#rule`: the rule's members see its organization.
-        if let Some(org) = orgs.get(&ws.organization_id.to_string()) {
-            let org_node = format!("organization:{}", org.id);
-            org_sources
-                .entry(org.id.to_string())
+        let note = note.map(|n| format!(" {n}")).unwrap_or_default();
+        for (prefix, via) in routes {
+            let path = |tail: &[&String]| -> Vec<String> {
+                prefix
+                    .iter()
+                    .cloned()
+                    .chain(tail.iter().map(|s| (*s).clone()))
+                    .collect()
+            };
+            ws_sources
+                .entry(ws.id.to_string())
                 .or_default()
                 .push(Source {
-                    text: format!("member of the rule {}", rule.description),
-                    path: vec![user_id.clone(), rule_node, node, org_node],
-                    perms: ORG_MEMBER.to_vec(),
+                    text: format!("{role} through the rule {}{via}{note}", rule.description),
+                    path: path(&[&rule_node, &node]),
+                    perms: perms.to_vec(),
                 });
+            // `organization#rule`: the rule's members see its organization.
+            if let Some(org) = orgs.get(&ws.organization_id.to_string()) {
+                let org_node = format!("organization:{}", org.id);
+                org_sources
+                    .entry(org.id.to_string())
+                    .or_default()
+                    .push(Source {
+                        text: format!("member of the rule {}{via}", rule.description),
+                        path: path(&[&rule_node, &node, &org_node]),
+                        perms: ORG_MEMBER.to_vec(),
+                    });
+            }
         }
     }
     for org in &owned_orgs {
@@ -602,6 +634,29 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             ))
     });
     rule_nodes.dedup_by_key(|(r, _)| r.id);
+    // The user's groups that place them in a rule, by organization and name.
+    let mut groups: Vec<&Group> = input
+        .groups
+        .iter()
+        .filter(|g| input.rule_groups.iter().any(|(_, id)| *id == g.id))
+        .collect();
+    groups.sort_by(|a, b| {
+        (org_name(a.organization_id), &a.name, a.id).cmp(&(
+            org_name(b.organization_id),
+            &b.name,
+            b.id,
+        ))
+    });
+    for group in groups {
+        graph.nodes.push(Node {
+            id: format!("group:{}", group.id),
+            kind: "group".into(),
+            name: group.name.clone(),
+            organization_id: Some(group.organization_id.to_string()),
+            notes: vec![],
+            details: vec![],
+        });
+    }
     for (rule, ws) in &rule_nodes {
         graph.nodes.push(Node {
             id: format!("rule:{}", rule.id),
@@ -892,6 +947,9 @@ mod tests {
             organizations: vec![org()],
             workspaces: vec![ws()],
             rules: vec![],
+            indirect_rules: BTreeSet::new(),
+            groups: vec![],
+            rule_groups: vec![],
             roles: vec![],
             connections: vec![],
             releases: vec![],

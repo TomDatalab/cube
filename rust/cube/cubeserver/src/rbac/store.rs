@@ -178,6 +178,24 @@ pub struct RoleListing {
     pub rules: i64,
 }
 
+/// A group of users of an organization. Who is in it, and the rules it is
+/// placed in, are SpiceDB relationships.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+/// A group with the name of its organization.
+#[derive(Debug, Clone)]
+pub struct GroupListing {
+    pub group: Group,
+    pub organization_name: String,
+}
+
 /// A named role in a workspace: its members hold a built-in `role`
 /// (`owner`, `editor`, `viewer`) or the organization's `role_id` there,
 /// exactly one of them. `type` is a free label.
@@ -427,6 +445,17 @@ const RULE_COLS: &str =
     "id, workspace_id, description, type, role, role_id, created_at, created_by";
 const ROLE_COLS: &str =
     "id, organization_id, name, permissions, restrictions, created_at, created_by, builtin";
+const GROUP_COLS: &str = "id, organization_id, name, created_at, created_by";
+
+fn group_from(r: &Row) -> Group {
+    Group {
+        id: r.get(0),
+        organization_id: r.get(1),
+        name: r.get(2),
+        created_at: r.get(3),
+        created_by: r.get(4),
+    }
+}
 
 fn rule_from(r: &Row) -> Rule {
     Rule {
@@ -840,6 +869,35 @@ mod q {
         }
     }
 
+    pub async fn create_group(
+        c: &tokio_postgres::Client,
+        organization_id: Uuid,
+        name: &str,
+        created_by: &str,
+    ) -> Result<Group, StoreError> {
+        let sql = format!(
+            "INSERT INTO groups (id, organization_id, name, created_by) \
+             VALUES ($1, $2, $3, $4) RETURNING {GROUP_COLS}"
+        );
+        let row = c
+            .query_one(&sql, &[&Uuid::new_v4(), &organization_id, &name, &created_by])
+            .await?;
+        Ok(group_from(&row))
+    }
+
+    pub async fn rename_group(
+        c: &tokio_postgres::Client,
+        id: Uuid,
+        name: &str,
+    ) -> Result<Option<Group>, StoreError> {
+        let sql = format!("UPDATE groups SET name = $2 WHERE id = $1 RETURNING {GROUP_COLS}");
+        Ok(c.query_opt(&sql, &[&id, &name]).await?.as_ref().map(group_from))
+    }
+
+    pub async fn delete_group(c: &tokio_postgres::Client, id: Uuid) -> Result<bool, StoreError> {
+        Ok(c.execute("DELETE FROM groups WHERE id = $1", &[&id]).await? > 0)
+    }
+
     pub async fn create_object(
         c: &tokio_postgres::Client,
         o: &NewObject,
@@ -1035,6 +1093,27 @@ macro_rules! shared_creates {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
             q::delete_role(c, id).await
+        }
+        pub async fn create_group(
+            &self,
+            organization_id: Uuid,
+            name: &str,
+            created_by: &str,
+        ) -> Result<Group, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::create_group(c, organization_id, name, created_by).await
+        }
+        pub async fn rename_group(&self, id: Uuid, name: &str) -> Result<Option<Group>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::rename_group(c, id, name).await
+        }
+        /// `true` when a row was deleted.
+        pub async fn delete_group(&self, id: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_group(c, id).await
         }
         pub async fn create_object(&self, o: &NewObject) -> Result<StoredObject, StoreError> {
             let guard = $conn(self).await?;
@@ -1574,6 +1653,58 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    pub async fn group(&self, id: Uuid) -> Result<Option<Group>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {GROUP_COLS} FROM groups WHERE id = $1");
+        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(group_from))
+    }
+
+    pub async fn groups_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Group>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {GROUP_COLS} FROM groups WHERE id = ANY($1) ORDER BY name, id");
+        Ok(c.query(&sql, &[&ids]).await?.iter().map(group_from).collect())
+    }
+
+    /// Groups by organization and name. `visible: None` lists those of every
+    /// organization; `organization` narrows to one. `q` matches the group's
+    /// name, its organization's name or the start of its id.
+    pub async fn search_groups(
+        &self,
+        visible: Option<&[Uuid]>,
+        organization: Option<Uuid>,
+        s: &Search,
+    ) -> Result<Page<GroupListing>, StoreError> {
+        let c = self.conn().await?;
+        let q = s.escaped();
+        let visible = visible.map(<[Uuid]>::to_vec);
+        const FROM: &str = "FROM groups g JOIN organizations o ON o.id = g.organization_id \
+             WHERE ($1::text IS NULL OR g.name ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR o.name ILIKE '%' || $1 || '%' ESCAPE '\\' OR g.id::text LIKE lower($1) || '%' ESCAPE '\\') \
+             AND ($2::uuid[] IS NULL OR g.organization_id = ANY($2)) \
+             AND ($3::uuid IS NULL OR g.organization_id = $3)";
+        let sql = format!(
+            "SELECT g.id, g.organization_id, g.name, g.created_at, g.created_by, o.name {FROM} \
+             ORDER BY o.name, g.name, g.id LIMIT $4 OFFSET $5"
+        );
+        let items = c
+            .query(&sql, &[&q, &visible, &organization, &s.limit(), &s.offset()])
+            .await?
+            .iter()
+            .map(|r| GroupListing {
+                group: group_from(r),
+                organization_name: r.get(5),
+            })
+            .collect();
+        let total = c
+            .query_one(
+                &format!("SELECT count(*) {FROM}"),
+                &[&q, &visible, &organization],
+            )
+            .await?
+            .get(0);
+        Ok(Page { items, total })
     }
 
     /// The user's attributes: name to values.

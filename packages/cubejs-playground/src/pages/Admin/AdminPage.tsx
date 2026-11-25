@@ -7,6 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { usePlaygroundContext, useRbac } from '../../hooks';
 import { Content, Header } from '../components/Ui';
 import { adminApi } from './api';
+import { GroupsTab } from './GroupsTab';
 import { OrganizationsTab } from './OrganizationsTab';
 import { RolesTab } from './RolesTab';
 import { RulesTab } from './RulesTab';
@@ -16,7 +17,7 @@ import { WorkspacesTab } from './WorkspacesTab';
 
 // With RBAC on: organizations, workspaces (with their members and connection
 // releases), roles (what an organization's rules may grant), rules (named
-// roles in a workspace) and users, each at its own /admin/<section> path, listed under
+// roles in a workspace), groups (users placed in rules together) and users, each at its own /admin/<section> path, listed under
 // Admin in the sidebar, through the management API. A section loads when
 // shown, so it sees what the others changed. Platform admins only
 // (`AdminOnly`).
@@ -63,6 +64,7 @@ export function AdminPage() {
             ) : null}
             {section === 'roles' ? <RolesTab api={api} /> : null}
             {section === 'rules' ? <RulesTab api={api} /> : null}
+            {section === 'groups' ? <GroupsTab api={api} /> : null}
             {section === 'users' ? (
               <UsersTab
                 api={api}

@@ -71,16 +71,16 @@ describe('Sidebar', () => {
     expect(group()?.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('opens the Admin group onto its five pages', () => {
+  it('opens the Admin group onto its six pages', () => {
     rbac = ADMIN;
     render();
 
     act(() => group()!.click());
 
     expect(group()?.getAttribute('aria-expanded')).toBe('true');
-    expect(labels().slice(4)).toEqual(['Organizations', 'Workspaces', 'Roles', 'Rules', 'Users']);
+    expect(labels().slice(4)).toEqual(['Organizations', 'Workspaces', 'Roles', 'Rules', 'Groups', 'Users']);
     expect([...host.querySelectorAll('[role="group"] a')].map((a) => a.getAttribute('href')))
-      .toEqual(['/admin/organizations', '/admin/workspaces', '/admin/roles', '/admin/rules', '/admin/users']);
+      .toEqual(['/admin/organizations', '/admin/workspaces', '/admin/roles', '/admin/rules', '/admin/groups', '/admin/users']);
 
     act(() => group()!.click());
     expect(labels()).toHaveLength(4);

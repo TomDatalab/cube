@@ -8938,3 +8938,266 @@ db_test!(a_legacy_token_cannot_act_as_a_newcomer_under_the_freed_name, |store| {
     let (status, _) = send(&env.router, Method::GET, &path, Some(&legacy), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 });
+
+// ---- groups ----
+
+async fn create_group(env: &Env, token: &str, org: &str, name: &str) -> (StatusCode, Value) {
+    send(
+        &env.router,
+        Method::POST,
+        &format!("/cube/v1/organizations/{org}/groups"),
+        Some(token),
+        Some(json!({ "name": name })),
+    )
+    .await
+}
+
+async fn group_id(env: &Env, token: &str, org: &str, name: &str) -> String {
+    let (status, body) = create_group(env, token, org, name).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["id"].as_str().expect("a group id").to_string()
+}
+
+async fn group_link(
+    env: &Env,
+    token: &str,
+    method: Method,
+    group: &str,
+    kind: &str,
+    target: &str,
+) -> StatusCode {
+    send(
+        &env.router,
+        method,
+        &format!("/cube/v1/groups/{group}/{kind}/{target}"),
+        Some(token),
+        None,
+    )
+    .await
+    .0
+}
+
+/// A viewer rule in a new workspace `W1` of A: its id and the workspace's.
+async fn viewer_rule(s: &Scenario) -> (String, String) {
+    let ws = workspace_id(&s.env, &s.ana, &s.org_a, "W1").await;
+    let (status, rule) = create_rule(
+        &s.env,
+        &s.ana,
+        &ws,
+        json!({ "description": "Analysts", "type": "analytics", "role": "viewer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rule}");
+    (rule["id"].as_str().unwrap().to_string(), ws)
+}
+
+db_test!(a_group_gives_its_members_the_rules_it_is_in, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let (rule, w1) = viewer_rule(&s).await;
+    let group = group_id(env, &s.ana, &s.org_a, "  Finance team ").await;
+
+    assert_eq!(
+        group_link(env, &s.ana, Method::PUT, &group, "members", "bia").await,
+        StatusCode::OK
+    );
+    // In the group, not yet in a rule: nothing.
+    assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::NOT_FOUND);
+    assert!(org_names(env, &s.bia).await.is_empty());
+
+    assert_eq!(
+        group_link(env, &s.ana, Method::PUT, &group, "rules", &rule).await,
+        StatusCode::NO_CONTENT
+    );
+    // Through the group: the rule's viewer role and its organization.
+    assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::OK);
+    assert_eq!(org_names(env, &s.bia).await, ["A"]);
+    assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+
+    let (status, body) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/groups/{group}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "Finance team");
+    assert_eq!(body["organizationName"], "A");
+    assert_eq!(body["members"], 1);
+    assert_eq!(body["rules"], 1);
+    let (_, members) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/groups/{group}/members"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(members["members"][0]["username"], "bia", "{members}");
+    let (_, rules) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/groups/{group}/rules"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(rules["rules"][0]["id"], json!(rule), "{rules}");
+    let (_, listed) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/groups?organizationId={}&q=finance", s.org_a),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(listed["total"], 1, "{listed}");
+
+    // A group in a rule is not deleted.
+    let path = format!("/cube/v1/groups/{group}");
+    let (status, _) = send(&env.router, Method::DELETE, &path, Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Leaving the group takes the access away.
+    assert_eq!(
+        group_link(env, &s.ana, Method::DELETE, &group, "members", "bia").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::NOT_FOUND);
+
+    // Out of the rule, it goes; with it, its members.
+    assert_eq!(
+        group_link(env, &s.ana, Method::PUT, &group, "members", "caio").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        group_link(env, &s.ana, Method::DELETE, &group, "rules", &rule).await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, _) = send(&env.router, Method::DELETE, &path, Some(&s.ana), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let left = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "group",
+            id: Some(group.clone()),
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+});
+
+db_test!(a_group_stays_in_its_organization, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let (rule, _) = viewer_rule(&s).await;
+    let org_b = create_org(env, &s.admin, "B", "caio").await;
+    let group_b = group_id(env, &s.caio, &org_b, "Team").await;
+
+    // Only the organization's admins create its groups.
+    let (status, _) = create_group(env, &s.bia, &s.org_a, "Mine").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Names are unique in the organization, not across them.
+    let (status, _) = create_group(env, &s.caio, &org_b, "team").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = create_group(env, &s.caio, &org_b, "Team").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = create_group(env, &s.ana, &s.org_a, "Team").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Another organization's group, in A's rule: caio cannot manage it, and
+    // the admin may not mix organizations.
+    assert_eq!(
+        group_link(env, &s.caio, Method::PUT, &group_b, "rules", &rule).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        group_link(env, &s.admin, Method::PUT, &group_b, "rules", &rule).await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A rule with a group does not move to another organization.
+    let group_a = group_id(env, &s.ana, &s.org_a, "Movers").await;
+    assert_eq!(
+        group_link(env, &s.ana, Method::PUT, &group_a, "rules", &rule).await,
+        StatusCode::NO_CONTENT
+    );
+    let ws_b = workspace_id(env, &s.caio, &org_b, "WB").await;
+    let (status, body) = patch_rule(env, &s.admin, &rule, json!({ "workspaceId": ws_b })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // caio lists B's groups, not A's.
+    let (_, listed) = send(&env.router, Method::GET, "/cube/v1/groups", Some(&s.caio), None).await;
+    let mut names: Vec<&str> = listed["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Team", "team"], "{listed}");
+});
+
+db_test!(the_access_graph_shows_the_group_between_user_and_rule, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let (rule, w1) = viewer_rule(&s).await;
+    let group = group_id(env, &s.ana, &s.org_a, "Finance team").await;
+    group_link(env, &s.ana, Method::PUT, &group, "members", "bia").await;
+    group_link(env, &s.ana, Method::PUT, &group, "rules", &rule).await;
+
+    let (status, graph) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/users/bia/access",
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    let bia = uuid_of(env, "bia").await;
+    let group_node = format!("group:{group}");
+    let rule_node = format!("rule:{rule}");
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == json!(group_node) && n["kind"] == "group" && n["name"] == "Finance team"),
+        "{graph}"
+    );
+    let edge = |from: &str, to: &str| {
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["from"] == json!(from) && e["to"] == json!(to))
+    };
+    assert!(edge(&format!("user:{bia}"), &group_node), "{graph}");
+    assert!(edge(&group_node, &rule_node), "{graph}");
+    // Not a direct member of the rule.
+    assert!(!edge(&format!("user:{bia}"), &rule_node), "{graph}");
+    let query = graph["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["resource"] == json!(format!("workspace:{w1}")) && g["permission"] == "query")
+        .unwrap_or_else(|| panic!("no query grant: {graph}"));
+    let path = &query["reasons"][0]["path"];
+    assert_eq!(
+        path,
+        &json!([format!("user:{bia}"), group_node, rule_node, format!("workspace:{w1}")]),
+        "{query}"
+    );
+    assert!(
+        query["reasons"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("(group Finance team)"),
+        "{query}"
+    );
+});

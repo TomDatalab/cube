@@ -12,6 +12,7 @@ import {
   RightOutlined,
   SafetyOutlined,
   TeamOutlined,
+  UsergroupAddOutlined,
 } from '@ant-design/icons';
 import { ReactNode, useEffect, useState } from 'react';
 import { useMediaQuery } from 'react-responsive';
@@ -46,6 +47,7 @@ const ADMIN_ICONS: Record<AdminSection, ReactNode> = {
   workspaces: <AppstoreOutlined />,
   roles: <IdcardOutlined />,
   rules: <NodeIndexOutlined />,
+  groups: <UsergroupAddOutlined />,
   users: <TeamOutlined />,
 };
 

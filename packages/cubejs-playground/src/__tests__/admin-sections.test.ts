@@ -8,6 +8,7 @@ describe('admin sections', () => {
     expect(adminSectionOf('/admin/workspaces')).toBe('workspaces');
     expect(adminSectionOf('/admin/rules')).toBe('rules');
     expect(adminSectionOf('/admin/roles')).toBe('roles');
+    expect(adminSectionOf('/admin/groups')).toBe('groups');
     expect(adminSectionOf('/admin')).toBe('organizations');
     expect(adminSectionOf('/admin/nope')).toBe('organizations');
     expect(adminPath('users')).toBe('/admin/users');

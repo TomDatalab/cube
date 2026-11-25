@@ -1,4 +1,4 @@
-export type AccessNodeKind = 'user' | 'organization' | 'rule' | 'role' | 'workspace' | 'connection' | 'cube';
+export type AccessNodeKind = 'user' | 'organization' | 'group' | 'rule' | 'role' | 'workspace' | 'connection' | 'cube';
 
 export type AccessNode = {
   id: string;

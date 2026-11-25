@@ -41,6 +41,7 @@ const DIM_OPACITY = 0.55;
 const KIND_COLOR: Record<AccessNodeKind, string> = {
   user: 'var(--pg-graph-user, #1f1d3a)',
   organization: 'var(--pg-graph-organization, #2f7d6d)',
+  group: 'var(--pg-graph-group, #5a8f29)',
   rule: 'var(--pg-graph-rule, #8a5cc2)',
   role: 'var(--pg-graph-role, #c2477a)',
   workspace: 'var(--pg-graph-workspace, #6a66f0)',

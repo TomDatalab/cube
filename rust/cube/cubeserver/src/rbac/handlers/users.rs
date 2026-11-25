@@ -304,6 +304,9 @@ pub(crate) async fn access(
         organizations: vec![],
         workspaces: vec![],
         rules: vec![],
+        indirect_rules: BTreeSet::new(),
+        groups: vec![],
+        rule_groups: vec![],
         roles: vec![],
         connections: vec![],
         releases: vec![],
@@ -350,6 +353,43 @@ pub(crate) async fn access(
         .iter()
         .filter_map(|r| r.resource.id.parse().ok())
         .collect();
+    // The groups the user is in, and the rules those are placed in.
+    let group_ids: Vec<Uuid> = rbac
+        .authz
+        .read(&RelationshipFilter {
+            kind: "group",
+            id: None,
+            relation: Some("member"),
+            subject: Some(user_ref(&id)),
+        })
+        .await
+        .map_err(authz_error)?
+        .iter()
+        .filter_map(|r| r.resource.id.parse().ok())
+        .collect();
+    let groups = rbac
+        .store
+        .groups_by_ids(&group_ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let placed = try_join_all(
+        groups
+            .iter()
+            .map(|g| super::groups::rule_ids(rbac, g.id)),
+    )
+    .await?;
+    let rule_groups: Vec<(Uuid, Uuid)> = groups
+        .iter()
+        .zip(placed)
+        .flat_map(|(g, rules)| rules.into_iter().map(move |r| (r, g.id)))
+        .collect();
+    let indirect_rules: BTreeSet<Uuid> = rule_groups
+        .iter()
+        .map(|(r, _)| *r)
+        .filter(|r| !rule_ids.contains(r))
+        .collect();
+    let mut rule_ids = rule_ids;
+    rule_ids.extend(indirect_rules.iter().copied());
     let rules = rbac
         .store
         .rules_by_ids(&rule_ids)
@@ -428,6 +468,9 @@ pub(crate) async fn access(
     input.organizations = organizations;
     input.workspaces = workspaces;
     input.rules = rules;
+    input.indirect_rules = indirect_rules;
+    input.groups = groups;
+    input.rule_groups = rule_groups;
     input.roles = roles;
     input.connections = connections;
     input.releases = releases;

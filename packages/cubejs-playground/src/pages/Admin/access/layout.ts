@@ -12,7 +12,7 @@ export const NOTE_CHARS = 30;
 
 const GAP = 22;
 const PAD = 20;
-const COLUMNS: AccessNodeKind[] = ['user', 'organization', 'rule', 'role', 'workspace', 'connection', 'cube'];
+const COLUMNS: AccessNodeKind[] = ['user', 'organization', 'group', 'rule', 'role', 'workspace', 'connection', 'cube'];
 // NODE_W plus a 160 px gutter for the edge labels.
 const COLUMN_STEP = 380;
 
@@ -148,6 +148,7 @@ export function layout(
   const nextY: Record<AccessNodeKind, number> = {
     user: PAD,
     organization: PAD,
+    group: PAD,
     rule: PAD,
     role: PAD,
     workspace: PAD,

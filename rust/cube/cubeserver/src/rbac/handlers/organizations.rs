@@ -271,6 +271,14 @@ pub async fn delete(
         .roles_of_organization(org.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
+    // Its groups too; their members go after the commit (with no workspace
+    // left, no rule holds them).
+    let groups = rbac
+        .store
+        .search_groups(None, Some(org.id), &Default::default())
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .items;
 
     // The row goes in a transaction committed only once SpiceDB forgot the
     // organization: a failure leaves both or neither.
@@ -298,6 +306,9 @@ pub async fn delete(
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
     for role in &roles {
         super::roles::forget(rbac, role.role.id).await?;
+    }
+    for group in &groups {
+        super::groups::forget(rbac, group.group.id).await?;
     }
     crate::rbac::ownership::refresh_after_commit(&state).await;
     Ok(StatusCode::NO_CONTENT)

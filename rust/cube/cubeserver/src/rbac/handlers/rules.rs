@@ -8,7 +8,8 @@
 //! not yet moved off a built-in role (`workspace#<role>_rule@rule`) is still
 //! read and removed, never written. Its members (`rule#member@user`) hold those
 //! permissions in the workspace and see its organization through
-//! `organization#rule@rule`. Managing a rule, or its members, takes `manage`
+//! `organization#rule@rule`, as do the members of its groups
+//! (`rule#group@group`, see [`super::groups`]). Managing a rule, or its members, takes `manage`
 //! on its workspace; moving it to another workspace takes `manage` on both.
 
 use axum::extract::rejection::JsonRejection;
@@ -205,7 +206,7 @@ fn optional_uuid(id: Option<&str>, name: &str) -> Result<Option<Uuid>, ApiError>
     .transpose()
 }
 
-fn view(listing: &RuleListing) -> Value {
+pub(crate) fn rule_view(listing: &RuleListing) -> Value {
     let rule = &listing.rule;
     let (key, role_name, permissions): (Option<String>, String, Vec<String>) =
         match (&listing.role, &rule.role) {
@@ -243,7 +244,7 @@ fn view(listing: &RuleListing) -> Value {
 }
 
 /// `rule` with the names of its workspace, organization and role.
-async fn listing(rbac: &Rbac, rule: Rule, ws: &Workspace) -> Result<RuleListing, ApiError> {
+pub(crate) async fn rule_listing(rbac: &Rbac, rule: Rule, ws: &Workspace) -> Result<RuleListing, ApiError> {
     let org = rbac
         .store
         .organization(ws.organization_id)
@@ -270,7 +271,7 @@ async fn listing(rbac: &Rbac, rule: Rule, ws: &Workspace) -> Result<RuleListing,
 /// The rule in the path and its workspace, after `permission` is checked on
 /// the workspace (404 when the caller cannot view it, 403 when they lack
 /// `permission`).
-async fn visible_rule(
+pub(crate) async fn visible_rule(
     rbac: &Rbac,
     id: &str,
     permission: &str,
@@ -331,8 +332,8 @@ pub async fn create(
         // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
-    let listing = listing(rbac, rule, &ws).await?;
-    Ok((StatusCode::CREATED, Json(view(&listing))))
+    let listing = rule_listing(rbac, rule, &ws).await?;
+    Ok((StatusCode::CREATED, Json(rule_view(&listing))))
 }
 
 /// `?q&organizationId&workspaceId&limit&offset` → `{rules: [...], total}`:
@@ -366,7 +367,7 @@ pub(crate) async fn list_all(
         .search_rules(visible.as_deref(), organization, workspace, &search)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let rules: Vec<Value> = page.items.iter().map(view).collect();
+    let rules: Vec<Value> = page.items.iter().map(rule_view).collect();
     Ok(Json(json!({ "rules": rules, "total": page.total })))
 }
 
@@ -385,7 +386,7 @@ pub async fn of_workspace(
         .map_err(|e| store_error(e, "Conflict"))?;
     let mut out = Vec::with_capacity(rules.len());
     for rule in rules {
-        out.push(view(&listing(rbac, rule, &ws).await?));
+        out.push(rule_view(&rule_listing(rbac, rule, &ws).await?));
     }
     Ok(Json(json!({ "rules": out })))
 }
@@ -398,7 +399,7 @@ pub async fn get(
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let (rule, ws) = visible_rule(rbac, &id, "view", user).await?;
-    Ok(Json(view(&listing(rbac, rule, &ws).await?)))
+    Ok(Json(rule_view(&rule_listing(rbac, rule, &ws).await?)))
 }
 
 /// `{description?, type?, role? | roleId?, workspaceId?}`: `manage` on the
@@ -429,6 +430,14 @@ pub async fn update(
         }
         _ => from.clone(),
     };
+    // A group belongs to the rule's organization: it does not move along.
+    if to.organization_id != from.organization_id
+        && !super::groups::groups_of_rule(rbac, rule.id).await?.is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "Take the rule's groups out of it before moving it to another organization",
+        ));
+    }
     let current = rule.role_ref();
     let role = match requested_role(
         rbac,
@@ -476,7 +485,7 @@ pub async fn update(
         // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
-    Ok(Json(view(&listing(rbac, updated, &to).await?)))
+    Ok(Json(rule_view(&rule_listing(rbac, updated, &to).await?)))
 }
 
 /// The role a rule keeps when an update names none, in `to`'s organization:
