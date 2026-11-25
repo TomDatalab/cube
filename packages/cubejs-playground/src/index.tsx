@@ -1,5 +1,5 @@
 import ReactDOM from 'react-dom';
-import { Router, Route } from 'react-router-dom';
+import { Redirect, Router, Route } from 'react-router-dom';
 import { createHashHistory } from 'history';
 
 import App from './App';
@@ -9,7 +9,7 @@ import {
   ConnectionWizardPage,
   SchemaPage,
   IndexPage,
-  FrontendIntegrationsPage,
+  ApiPage,
   DataSourcesPage,
   AdminPage,
 } from './pages';
@@ -90,9 +90,15 @@ ReactDOM.render(
           render={() => <AdminOnly><AdminPage /></AdminOnly>}
         />
         <Route
+          key="api"
+          path="/api"
+          component={ApiPage}
+        />
+        {/* The page's old address, in saved links. */}
+        <Route
           key="frontend-integrations"
           path="/frontend-integrations"
-          component={FrontendIntegrationsPage}
+          render={() => <Redirect to="/api" />}
         />
       </App>
     </AppContextProvider>

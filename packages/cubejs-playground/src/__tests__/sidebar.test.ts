@@ -149,5 +149,6 @@ describe('pageFor', () => {
     expect(pageTrail('/admin/users').map((p) => p.label)).toEqual(['Admin', 'Users']);
     expect(pageTrail('/admin').map((p) => p.label)).toEqual(['Admin']);
     expect(pageTrail('/build').map((p) => p.label)).toEqual(['Playground']);
+    expect(pageTrail('/api').map((p) => p.label)).toEqual(['API']);
   });
 });

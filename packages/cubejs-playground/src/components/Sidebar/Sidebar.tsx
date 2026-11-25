@@ -55,7 +55,7 @@ export const NAV_PAGES: NavPage[] = [
   { path: '/build', label: 'Playground', icon: <CaretRightOutlined /> },
   { path: '/schema', label: 'Data Model', icon: <ApiOutlined />, model: true },
   { path: '/data-sources', label: 'Data Source', icon: <DatabaseOutlined />, admin: true },
-  { path: '/frontend-integrations', label: 'API', icon: <CodeOutlined /> },
+  { path: '/api', label: 'API', icon: <CodeOutlined /> },
   {
     path: '/admin',
     label: 'Admin',
