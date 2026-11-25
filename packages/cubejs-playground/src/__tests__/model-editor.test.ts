@@ -105,6 +105,7 @@ describe('ModelEditor', () => {
   let root: ReturnType<typeof createRoot>;
   let api: Record<string, ReturnType<typeof vi.fn>>;
   let onBuilt: Mock<(cubeName: string) => void>;
+  let onDeleted: Mock<() => void>;
 
   beforeEach(() => {
     Element.prototype.hasPointerCapture = vi.fn(() => false) as any;
@@ -113,8 +114,10 @@ describe('ModelEditor', () => {
       model: vi.fn(async () => view(saved())),
       saveModel: vi.fn(async (_id: string, change: any) => view(change.definition, change.version + 1)),
       buildModel: vi.fn(async () => built),
+      deleteModel: vi.fn(async () => undefined),
     };
     onBuilt = vi.fn<(cubeName: string) => void>();
+    onDeleted = vi.fn<() => void>();
     const host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -123,6 +126,7 @@ describe('ModelEditor', () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.innerHTML = '';
+    document.documentElement.removeAttribute('data-theme');
     flow.props = null;
   });
 
@@ -133,10 +137,19 @@ describe('ModelEditor', () => {
       modelId: 'm1',
       tables,
       onBuilt,
+      onDeleted,
     })));
   };
   const button = (text: string | RegExp) => [...document.querySelectorAll('button')]
     .find((b) => (typeof text === 'string' ? b.textContent!.trim() === text : text.test(b.textContent!))) as HTMLButtonElement;
+  const rename = async (value: string) => {
+    const input = document.querySelector('input[aria-label="Model name"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
   const panelItem = (name: string) => [...document.querySelectorAll('[data-slot="model-table-item"]')]
     .find((li) => li.textContent!.trim() === name) as HTMLElement;
 
@@ -294,5 +307,72 @@ describe('ModelEditor', () => {
     await act(async () => button('Save').click());
     expect(api.saveModel).toHaveBeenCalledWith('m1', expect.objectContaining({ name: 'Sales 2', version: 3 }));
     expect(document.body.textContent).not.toContain('Unsaved changes');
+  });
+
+  it('keeps an edit made while a save is on its way unsaved', async () => {
+    let finish: (v: CubeModelView) => void = () => {};
+    api.saveModel.mockImplementationOnce(() => new Promise<CubeModelView>((resolve) => { finish = resolve; }));
+    await render();
+    await rename('Sales 2');
+    await act(async () => button('Save').click());
+    await rename('Sales 3');
+    await act(async () => finish(view(saved(), 4)));
+    expect(document.body.textContent).toContain('Unsaved changes');
+    await act(async () => button('Save').click());
+    expect(api.saveModel.mock.calls[1][1]).toEqual(expect.objectContaining({ name: 'Sales 3', version: 4 }));
+    expect(document.body.textContent).not.toContain('Unsaved changes');
+  });
+
+  it('sends the version each save returned', async () => {
+    await render();
+    await rename('Sales 2');
+    await act(async () => button('Save').click());
+    await rename('Sales 3');
+    await act(async () => button('Save').click());
+    expect(api.saveModel.mock.calls.map(([, c]) => c.version)).toEqual([3, 4]);
+  });
+
+  it('writes the dragged position into the definition', async () => {
+    await render();
+    await act(async () => flow.props.onNodeDragStop(
+      {},
+      { id: 'customers' },
+      [{ id: 'customers', position: { x: 410.4, y: 19.6 } }]
+    ));
+    expect(document.body.textContent).toContain('Unsaved changes');
+    await act(async () => button('Save').click());
+    const { tables: placed } = api.saveModel.mock.calls[0][1].definition;
+    expect(placed.find((t: any) => t.alias === 'customers')).toEqual(expect.objectContaining({ x: 410, y: 20 }));
+    expect(placed.find((t: any) => t.alias === 'orders')).toEqual(expect.objectContaining({ x: 0, y: 0 }));
+  });
+
+  it('deletes the model after asking, with the version it read', async () => {
+    await render();
+    await act(async () => button('Delete model').click());
+    expect(document.body.textContent).toContain('Delete model Sales? The cube it built stays in Cubes.');
+    expect(api.deleteModel).not.toHaveBeenCalled();
+    await act(async () => button('Delete').click());
+    expect(api.deleteModel).toHaveBeenCalledWith('m1', 3);
+    expect(onDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a model whose delete found a newer version', async () => {
+    api.deleteModel.mockRejectedValueOnce(new ApiError('O model mudou desde que você abriu; abra de novo', 409));
+    await render();
+    await act(async () => button('Delete model').click());
+    await act(async () => button('Delete').click());
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(document.querySelectorAll('[data-node]').length).toBe(2);
+  });
+
+  it('follows the page theme on the canvas', async () => {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    await render();
+    expect(flow.props.colorMode).toBe('dark');
+    await act(async () => {
+      document.documentElement.setAttribute('data-theme', 'light');
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(flow.props.colorMode).toBe('light');
   });
 });

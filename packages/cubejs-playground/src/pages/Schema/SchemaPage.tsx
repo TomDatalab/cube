@@ -615,6 +615,16 @@ export function SchemaPage({ history }: RouterProps) {
     openUnder(slug, 'models', `model:${slug}:${created.id}`);
   };
 
+  // The deleted model's changes are gone with it: leaving does not ask.
+  const afterModelDelete = async (slug: string) => {
+    dirtyRef.current = false;
+    setModelDirty(false);
+    openUnder(slug, 'models', `org:${slug}:models`);
+    toast.success('Model deleted');
+    await loadDetail(slug, true);
+    refreshOrgs();
+  };
+
   const afterBuild = async (slug: string, cubeName: string) => {
     await loadDetail(slug, true);
     refreshOrgs();
@@ -731,8 +741,8 @@ export function SchemaPage({ history }: RouterProps) {
     }
 
     if (selected.kind === 'model') {
-      const org = known.current[selected.slug];
-      if (!detail || !org || !selected.rest) {
+      const org = known.current[selected.slug] ?? { slug: selected.slug, name: selected.slug };
+      if (!detail || !selected.rest) {
         return <CubeLoader />;
       }
       return (
@@ -744,6 +754,7 @@ export function SchemaPage({ history }: RouterProps) {
           tables={detail.tables || {}}
           onBuilt={(cubeName) => afterBuild(selected.slug, cubeName)}
           onSaved={() => loadDetail(selected.slug, true)}
+          onDeleted={() => afterModelDelete(selected.slug)}
           onDirtyChange={setModelDirty}
         />
       );

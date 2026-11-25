@@ -1,7 +1,7 @@
 import '@xyflow/react/dist/style.css';
 
 import {
-  CSSProperties, DragEvent, useCallback, useEffect, useMemo, useState,
+  CSSProperties, DragEvent, useCallback, useEffect, useMemo, useRef, useState,
 } from 'react';
 import {
   Background, Controls, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
@@ -22,7 +22,6 @@ import { Input } from '@/components/ui/input';
 import {
   EmptyState, Field, SearchInput, SimpleSelect, Spinner, notify,
 } from '@/components/kit';
-import { useTheme } from '@/shared/useTheme';
 
 import { ApiError, OrgNode, modelApi } from '../api';
 import type { OrgDetail } from '../tree';
@@ -65,12 +64,30 @@ export type ModelEditorProps = {
   onBuilt(cubeName: string): void;
   // After a save: the tree shows the model's name.
   onSaved?(): void;
+  // After the model is deleted.
+  onDeleted?(): void;
   // Tells the page when there are changes not saved, so leaving can warn.
   onDirtyChange?(dirty: boolean): void;
 };
 
 type JoinEdit = { kind: 'new'; from: End; to: End } | { kind: 'edit'; index: number };
-type Ask = 'unlinked' | 'overwrite';
+type Ask = 'unlinked' | 'overwrite' | 'delete';
+
+const STALE = 'Changed elsewhere: reopen';
+
+// The theme the app shows (`data-theme` on <html>), followed as it changes.
+// It only reads the attribute: the app's own theme hook writes it.
+function useDocumentTheme(): 'light' | 'dark' {
+  const read = () => (document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
+  const [theme, setTheme] = useState<'light' | 'dark'>(read);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(read()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    setTheme(read());
+    return () => observer.disconnect();
+  }, []);
+  return theme;
+}
 
 function definitionOf(value: unknown): ModelDefinition {
   const def = (value && typeof value === 'object' ? value : {}) as Partial<ModelDefinition>;
@@ -159,9 +176,12 @@ function TablePanel({
 }
 
 function Editor({
-  api, modelId, tables, onBuilt, onSaved, onDirtyChange,
+  api, modelId, tables, onBuilt, onSaved, onDeleted, onDirtyChange,
 }: ModelEditorProps) {
-  const { theme } = useTheme();
+  const theme = useDocumentTheme();
+  // Bumped on every edit: a save clears `dirty` only when nothing changed
+  // while it was on its way.
+  const revision = useRef(0);
   const { screenToFlowPosition } = useReactFlow();
 
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -170,9 +190,13 @@ function Editor({
   const [version, setVersion] = useState(0);
   const [def, setDef] = useState<ModelDefinition>(emptyDefinition);
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<'save' | 'build' | null>(null);
+  const [busy, setBusy] = useState<'save' | 'build' | 'delete' | null>(null);
   const [joinEdit, setJoinEdit] = useState<JoinEdit | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
+  const lastAsk = useRef<Ask>('unlinked');
+  if (ask) {
+    lastAsk.current = ask;
+  }
   const [nodes, setNodes] = useState<TableFlowNode[]>([]);
 
   useEffect(() => {
@@ -214,9 +238,14 @@ function Editor({
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [dirty]);
 
+  const edited = () => {
+    revision.current += 1;
+    setDirty(true);
+  };
+
   const change = (next: ModelDefinition) => {
     setDef(next);
-    setDirty(true);
+    edited();
   };
 
   const columnsOf = useCallback(
@@ -227,6 +256,7 @@ function Editor({
 
   const onRemove = useCallback((alias: string) => {
     setDef((d) => removeTable(d, alias));
+    revision.current += 1;
     setDirty(true);
   }, []);
 
@@ -332,14 +362,17 @@ function Editor({
 
   const save = async (): Promise<boolean> => {
     setBusy('save');
+    const sent = revision.current;
     try {
       const saved = await api.saveModel(modelId, { name, definition: def, version });
       setVersion(saved.version);
-      setDirty(false);
+      if (revision.current === sent) {
+        setDirty(false);
+      }
       onSaved?.();
       return true;
     } catch (e: any) {
-      notify.error(e instanceof ApiError && e.status === 409 ? 'Changed elsewhere: reopen' : e.message);
+      notify.error(e instanceof ApiError && e.status === 409 ? STALE : e.message);
       return false;
     } finally {
       setBusy(null);
@@ -367,6 +400,20 @@ function Editor({
     }
   };
 
+  const remove = async () => {
+    setBusy('delete');
+    try {
+      await api.deleteModel(modelId, version);
+    } catch (e: any) {
+      notify.error(e instanceof ApiError && e.status === 409 ? STALE : e.message);
+      setBusy(null);
+      return;
+    }
+    setDirty(false);
+    setBusy(null);
+    onDeleted?.();
+  };
+
   const loose = unlinked(def);
   const build = () => {
     if (loose.length) {
@@ -389,6 +436,26 @@ function Editor({
     return <Spinner />;
   }
 
+  // What the confirm asks; the last question stays while it closes.
+  const asked = ask ?? lastAsk.current;
+  const question = {
+    unlinked: {
+      title: 'Build with tables not linked?',
+      text: `Not linked to the principal: ${loose.join(', ')}. The build fails until every table is linked.`,
+      ok: 'Build anyway',
+    },
+    overwrite: {
+      title: 'Overwrite the cube?',
+      text: 'The cube was edited by hand since the last build. Overwrite?',
+      ok: 'Overwrite',
+    },
+    delete: {
+      title: 'Delete model?',
+      text: `Delete model ${name}? The cube it built stays in Cubes.`,
+      ok: 'Delete',
+    },
+  }[asked];
+
   const principal = def.tables.find((t) => t.alias === def.primary);
   const principalColumns = principal ? columnsOf(principal.schema, principal.table) ?? [] : [];
   const editing = joinEdit?.kind === 'edit' ? def.joins[joinEdit.index] : undefined;
@@ -403,7 +470,7 @@ function Editor({
             value={name}
             onChange={(e) => {
               setName(e.target.value);
-              setDirty(true);
+              edited();
             }}
           />
         </Field>
@@ -442,6 +509,10 @@ function Editor({
           <Button disabled={busy !== null || def.tables.length === 0} onClick={build}>
             {busy === 'build' ? <Spinner className="tw:text-current" /> : null}
             Build cube
+          </Button>
+          <Button variant="destructive" disabled={busy !== null} onClick={() => setAsk('delete')}>
+            {busy === 'delete' ? <Spinner className="tw:text-current" /> : null}
+            Delete model
           </Button>
         </div>
       </div>
@@ -511,24 +582,23 @@ function Editor({
       <AlertDialog open={ask !== null} onOpenChange={(open) => !open && setAsk(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{ask === 'overwrite' ? 'Overwrite the cube?' : 'Build with tables not linked?'}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {ask === 'overwrite'
-                ? 'The cube was edited by hand since the last build. Overwrite?'
-                : `Not linked to the principal: ${loose.join(', ')}. The build fails until every table is linked.`}
-            </AlertDialogDescription>
+            <AlertDialogTitle>{question.title}</AlertDialogTitle>
+            <AlertDialogDescription>{question.text}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              variant={ask === 'overwrite' ? 'destructive' : 'default'}
+              variant={asked === 'unlinked' ? 'default' : 'destructive'}
               onClick={() => {
-                const forced = ask === 'overwrite';
                 setAsk(null);
-                runBuild(forced);
+                if (asked === 'delete') {
+                  remove();
+                } else {
+                  runBuild(asked === 'overwrite');
+                }
               }}
             >
-              {ask === 'overwrite' ? 'Overwrite' : 'Build anyway'}
+              {question.ok}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
