@@ -4,22 +4,32 @@
  * Tailwind's global reset (preflight) is left out: it would restyle every
  * antd screen. Only the theme and the utilities are imported, and the reset
  * shadcn components need is applied to them alone (their `data-slot`
- * elements), in the base layer, so utilities still win.
+ * elements), in the base layer, under the utilities.
  *
  * Dark mode follows the Playground's own switch: html[data-theme="dark"].
  */
-@layer theme, base, components, utilities;
-@import "tailwindcss/theme.css" layer(theme);
-@import "tailwindcss/utilities.css" layer(utilities);
+@layer theme, base, components;
+@import "tailwindcss/theme.css" layer(theme) prefix(tw);
+/*
+ * Utilities outside any layer: antd's sheet resets elements unlayered
+ * (`button { color: inherit }`), and an unlayered rule beats every layered
+ * one. Unlayered, a utility class wins over an element selector by
+ * specificity, as it should.
+ *
+ * Every utility carries the `tw:` prefix (`tw:flex`), so the words of the
+ * rest of the Playground ("hidden", "table", ...) never become utilities
+ * that could restyle antd or other libraries.
+ */
+@import "tailwindcss/utilities.css" prefix(tw);
 @import "tw-animate-css";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-sm: calc(var(--shadcn-radius) - 4px);
+  --radius-md: calc(var(--shadcn-radius) - 2px);
+  --radius-lg: var(--shadcn-radius);
+  --radius-xl: calc(var(--shadcn-radius) + 4px);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -41,46 +51,30 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-}
-
-[data-theme="dark"] {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  /* Not `--radius`: @cube-dev/ui-kit sets that one (6px) for its own components. */
+  --shadcn-radius: 0.5rem;
+  /*
+   * The Playground's palette (src/theme/dark-tokens.ts, light and dark under
+   * html[data-theme="dark"]), so shadcn screens match the antd ones.
+   */
+  --background: var(--pg-surface, #ffffff);
+  --foreground: var(--pg-text, #21263f);
+  --card: var(--pg-surface, #ffffff);
+  --card-foreground: var(--pg-text, #21263f);
+  --popover: var(--pg-raised, #ffffff);
+  --popover-foreground: var(--pg-text, #21263f);
+  --primary: var(--pg-accent, #2f5597);
+  --primary-foreground: var(--pg-bar-text, #ffffff);
+  --secondary: var(--pg-subtle, #f6f7fb);
+  --secondary-foreground: var(--pg-text, #21263f);
+  --muted: var(--pg-subtle, #f6f7fb);
+  --muted-foreground: var(--pg-muted, #6c7393);
+  --accent: var(--pg-hover, #edf3fb);
+  --accent-foreground: var(--pg-text, #21263f);
+  --destructive: var(--pg-negative, #c2371b);
+  --border: var(--pg-line, #e3e4ee);
+  --input: var(--pg-line, #e3e4ee);
+  --ring: var(--pg-accent, #2f5597);
 }
 
 /* What preflight would give shadcn's elements, and only them. */
@@ -89,7 +83,7 @@
   :where([data-slot])::before,
   :where([data-slot])::after {
     box-sizing: border-box;
-    border: 0 solid var(--color-border);
+    border: 0 solid var(--border);
   }
   :where(button[data-slot], input[data-slot], textarea[data-slot], select[data-slot]) {
     font: inherit;

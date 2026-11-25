@@ -6,13 +6,13 @@ import { cn } from '@/lib/utils';
 
 describe('shadcn/ui', () => {
   it('cn lets the later Tailwind utility win', () => {
-    expect(cn('px-2 py-1', false && 'hidden', 'px-4')).toBe('py-1 px-4');
+    expect(cn('tw:px-2 tw:py-1', false && 'tw:hidden', 'tw:px-4')).toBe('tw:py-1 tw:px-4');
   });
 
   it('renders a Button with its slot and variant classes', () => {
     const html = renderToStaticMarkup(<Button variant="outline">Save</Button>);
     expect(html).toContain('data-slot="button"');
-    expect(html).toContain('border');
+    expect(html).toContain('tw:border');
     expect(html).toContain('>Save</button>');
   });
 });

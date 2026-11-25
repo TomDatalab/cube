@@ -8,7 +8,7 @@
     "css": "src/shadcn.css",
     "baseColor": "neutral",
     "cssVariables": true,
-    "prefix": ""
+    "prefix": "tw"
   },
   "aliases": {
     "components": "@/components",

@@ -10,6 +10,7 @@ import { Root } from '@cube-dev/ui-kit';
 import { CubeLoader } from './atoms';
 import { AppContextConsumer, PlaygroundContext } from './components/AppContext';
 import GlobalStyles from './components/GlobalStyles';
+import { Toaster } from './components/ui/sonner';
 import Header from './components/Header/Header';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { LivePreviewContextProvider } from './components/LivePreviewContext/LivePreviewContextProvider';
@@ -199,6 +200,12 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
             </StyledLayoutContent>
           </Main>
         </Root>
+        {/*
+          shadcn/ui notifications (`toast`), in place of antd's `message`.
+          Outside Root: Root is a two-column grid (sidebar, main), and the
+          Toaster's <section> would take a column.
+        */}
+        <Toaster richColors closeButton position="top-center" />
       </LivePreviewContextProvider>
     );
   }
