@@ -38,12 +38,13 @@ export type OrgDetail = {
   tables: Record<string, Record<string, Record<string, { name: string; type: string }[]>>>;
   files: { id?: string; fileName: string; path?: string; version?: number; editable?: boolean }[];
   errors: { file: string; cube: string; message: string }[];
+  models?: { id: string; name: string; cubeName?: string | null }[];
 };
 
 export type NodeKey = string;
 
 export type ParsedKey = {
-  kind: 'org' | 'cubes' | 'views' | 'cube' | 'tables' | 'table' | 'files' | 'file' | 'datasource' | 'schema';
+  kind: 'org' | 'cubes' | 'views' | 'models' | 'model' | 'cube' | 'tables' | 'table' | 'files' | 'file' | 'datasource' | 'schema';
   slug: string;
   rest?: string;
 };
@@ -103,6 +104,17 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
   return [
     group('cubes', 'Cubes', 'cube'),
     group('views', 'Views', 'view'),
+    {
+      key: `org:${slug}:models`,
+      title: `Models (${(d.models || []).length})`,
+      checkable: false,
+      children: (d.models || []).map((model) => ({
+        key: `model:${slug}:${model.id}`,
+        title: model.name,
+        isLeaf: true,
+        checkable: false,
+      })),
+    },
     {
       key: `tables:${slug}`,
       title: `Tables (${tableCount})`,
@@ -187,7 +199,7 @@ export function filterTree(nodes: DataNode[], term: string): DataNode[] {
 }
 
 const KINDS: ParsedKey['kind'][] = [
-  'org', 'cubes', 'views', 'cube', 'tables', 'table', 'files', 'file', 'datasource', 'schema',
+  'org', 'cubes', 'views', 'models', 'model', 'cube', 'tables', 'table', 'files', 'file', 'datasource', 'schema',
 ];
 
 export function parseKey(key: NodeKey): ParsedKey {
@@ -201,7 +213,7 @@ export function parseKey(key: NodeKey): ParsedKey {
   const slug = first === -1 ? '' : key.slice(first + 1, second === -1 ? undefined : second);
   const rest = second === -1 ? undefined : key.slice(second + 1);
 
-  if (kind === 'org' && (rest === 'cubes' || rest === 'views')) {
+  if (kind === 'org' && (rest === 'cubes' || rest === 'views' || rest === 'models')) {
     return { kind: rest, slug, rest: undefined };
   }
   return { kind, slug, rest };
@@ -231,7 +243,7 @@ export function tablesFromSameOrg(checked: NodeKey[]): string | null {
   return slugs.size === 1 ? [...slugs][0] : null;
 }
 
-export type TreeIconKind = 'cube' | 'table' | 'file';
+export type TreeIconKind = 'cube' | 'table' | 'file' | 'model';
 
 /**
  * Which icon a node shows: the three groups and their leaves get one each;
@@ -250,6 +262,9 @@ export function iconKind(key: NodeKey): TreeIconKind | null {
     case 'views':
     case 'cube':
       return 'cube';
+    case 'models':
+    case 'model':
+      return 'model';
     case 'tables':
     case 'table':
       return 'table';

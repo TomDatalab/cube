@@ -23,7 +23,7 @@ const detail = {
 describe('organization tree helpers', () => {
   it('detailNodes returns Cubes, Views, Tables and Files with counts', () => {
     const nodes = detailNodes('digital', detail);
-    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Views (0)', 'Tables (2)', 'Files (2)']);
+    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Views (0)', 'Models (0)', 'Tables (2)', 'Files (2)']);
   });
 
   it('detailNodes puts views under Views and cubes under Cubes', () => {
@@ -131,6 +131,11 @@ describe('iconKind', () => {
     expect(iconKind('file:digital:sofiadb/dfos_a.yml')).toBe('file');
   });
 
+  it('gives the Models group and every model the model icon', () => {
+    expect(iconKind('org:acme:models')).toBe('model');
+    expect(iconKind('model:acme:m1')).toBe('model');
+  });
+
   it('leaves organizations, connections, schemas and unknown keys bare', () => {
     expect(iconKind('org:digital')).toBeNull();
     expect(iconKind('datasource:digital:sofiadb')).toBeNull();
@@ -141,13 +146,13 @@ describe('iconKind', () => {
 
 describe('file titles', () => {
   it('drop the organization folder they all share, keeping the full path in the key', () => {
-    const files = detailNodes('digital', detail)[3].children!;
+    const files = detailNodes('digital', detail)[4].children!;
     expect(files.map((n) => n.title)).toEqual(['sofiadb/a.yml', 'b.yml']);
     expect(files.map((n) => n.key)).toEqual(['file:digital:digital/sofiadb/a.yml', 'file:digital:b.yml']);
   });
 
   it('drop the Platform folder too', () => {
-    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[3].children!;
+    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[4].children!;
     expect(files.map((n) => n.title)).toEqual(['orders.yml']);
   });
 });
@@ -175,5 +180,23 @@ describe('loadedTreeKeys', () => {
     const keys = loadedTreeKeys([{ ...on, children: detailNodes('on', detail) }], ['on']);
     expect(keys.some((k) => k.startsWith('schema:'))).toBe(true);
     expect(keys.some((k) => k.startsWith('file:'))).toBe(true);
+  });
+});
+
+describe('models in the tree', () => {
+  it('detailNodes adds a Models group after Views with a leaf per model', () => {
+    const nodes = detailNodes('acme', { ...detail, models: [{ id: 'm1', name: 'Sales' }] });
+    expect(nodes[2].key).toBe('org:acme:models');
+    expect(nodes[2].title).toBe('Models (1)');
+    expect(nodes[2].children!.map((c) => [c.key, c.title])).toEqual([['model:acme:m1', 'Sales']]);
+  });
+
+  it('detailNodes shows Models (0) without models', () => {
+    expect(detailNodes('acme', detail)[2].title).toBe('Models (0)');
+  });
+
+  it('parseKey reads model and models keys', () => {
+    expect(parseKey('model:acme:m1')).toEqual({ kind: 'model', slug: 'acme', rest: 'm1' });
+    expect(parseKey('org:acme:models')).toEqual({ kind: 'models', slug: 'acme', rest: undefined });
   });
 });

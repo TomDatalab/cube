@@ -2,6 +2,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
 import { Layout, Modal, Empty, Typography, Input, Tooltip, Button, Spin, message } from 'antd';
 import type { DataNode } from 'antd/lib/tree';
 import { RouterProps } from 'react-router-dom';
+import { Workflow } from 'lucide-react';
 
 import { playgroundAction } from '../../events';
 import { Menu, Tree } from '../../components';
@@ -43,7 +44,7 @@ const { Content, Sider } = Layout;
 const PAGE_SIZE = 50;
 const MORE_KEY = 'more:';
 
-const TREE_ICONS = { cube: CubeIcon, table: TableIcon, file: FileIcon };
+const TREE_ICONS = { cube: CubeIcon, table: TableIcon, file: FileIcon, model: Workflow };
 
 // The full name a tooltip shows: a file's whole path, else the title.
 function fullName(node: DataNode): string | undefined {

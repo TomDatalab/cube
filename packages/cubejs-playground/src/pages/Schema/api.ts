@@ -55,6 +55,17 @@ async function answer(response: Response): Promise<any> {
   return body;
 }
 
+export type CubeModelView = {
+  id: string;
+  organizationId: string;
+  name: string;
+  definition: unknown;
+  cubeName: string | null;
+  version: number;
+  updatedAt: string;
+  updatedBy: string | null;
+};
+
 export function modelApi(rbac: Rbac, basePath = '/cube') {
   const base = basePath.replace(/\/$/, '');
   const enc = encodeURIComponent;
@@ -139,6 +150,37 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
     // Platform admins only; `null` moves the file to Platform.
     async move(id: string, organizationId: string | null): Promise<void> {
       await call('PUT', `/model/files/${enc(id)}/organization`, { organizationId });
+    },
+
+    // Models (RBAC only): a canvas of joined tables built into one cube.
+    async models(org: OrgNode): Promise<CubeModelView[]> {
+      return (await call('GET', `/organizations/${enc(org.id!)}/cube-models`)).models || [];
+    },
+
+    model(id: string): Promise<CubeModelView> {
+      return call('GET', `/cube-models/${enc(id)}`);
+    },
+
+    createModel(org: OrgNode, name: string, definition: unknown): Promise<CubeModelView> {
+      return call('POST', `/organizations/${enc(org.id!)}/cube-models`, { name, definition });
+    },
+
+    saveModel(
+      id: string,
+      change: { name?: string; definition?: unknown; version: number }
+    ): Promise<CubeModelView> {
+      return call('PUT', `/cube-models/${enc(id)}`, change);
+    },
+
+    async deleteModel(id: string, version: number): Promise<void> {
+      await call('DELETE', `/cube-models/${enc(id)}?version=${version}`);
+    },
+
+    buildModel(
+      id: string,
+      force?: boolean
+    ): Promise<{ fileName: string; content: string; cubeName: string; detail: OrgDetail }> {
+      return call('POST', `/cube-models/${enc(id)}/build`, { force });
     },
 
     async workspaces(org: OrgNode): Promise<{ id: string; name: string }[]> {
