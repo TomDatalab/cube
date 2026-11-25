@@ -295,6 +295,65 @@ pub(crate) async fn access(
 ) -> Result<Json<access::AccessGraph>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let user = named_user(rbac, &id).await?;
+    Ok(Json(access::build(
+        &access_input(&state, rbac, user).await?,
+    )))
+}
+
+/// → what the user reaches, by kind (`rbac::access::summarize`), with the
+/// objects of the workspaces where they read objects. Platform admins only.
+pub(crate) async fn permissions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = require_admin(&state, &ctx)?;
+    let user = named_user(rbac, &id).await?;
+    let summary = access::summarize(&access::build(&access_input(&state, rbac, user).await?));
+    let readable: Vec<(Uuid, bool)> = summary
+        .workspaces
+        .iter()
+        .filter(|w| w.permissions.iter().any(|p| p == "read objects"))
+        .filter_map(|w| {
+            let write = w.permissions.iter().any(|p| p == "write objects");
+            w.id.parse().ok().map(|id| (id, write))
+        })
+        .collect();
+    let listed = try_join_all(
+        readable
+            .iter()
+            .map(|(ws, _)| rbac.store.objects_of_workspace(*ws, None)),
+    )
+    .await
+    .map_err(|e| store_error(e, "Conflict"))?;
+    let objects: Vec<Value> = readable
+        .iter()
+        .zip(listed)
+        .flat_map(|((ws, write), objects)| {
+            objects.into_iter().map(move |o| {
+                let permissions: &[&str] = if *write {
+                    &["read", "write"]
+                } else {
+                    &["read"]
+                };
+                json!({
+                    "id": o.id,
+                    "type": o.r#type,
+                    "name": o.name,
+                    "workspaceId": ws,
+                    "permissions": permissions,
+                })
+            })
+        })
+        .collect();
+    let mut body = serde_json::to_value(&summary).map_err(|_| ApiError::internal())?;
+    body["objects"] = Value::Array(objects);
+    Ok(Json(body))
+}
+
+/// What `access::build` reads about a user: their relationships, rules,
+/// groups, roles, workspaces, organizations, connections and the model's cubes.
+async fn access_input(state: &AppState, rbac: &Rbac, user: User) -> Result<AccessInput, ApiError> {
     let id = user.id.clone();
     let platform_admin = rbac.is_platform_admin(&id).await?;
     let mut input = AccessInput {
@@ -315,7 +374,7 @@ pub(crate) async fn access(
         cubes: vec![],
     };
     if platform_admin {
-        return Ok(Json(access::build(&input)));
+        return Ok(input);
     }
 
     let mut direct = Vec::new();
@@ -474,7 +533,7 @@ pub(crate) async fn access(
     input.roles = roles;
     input.connections = connections;
     input.releases = releases;
-    input.configured = data_source_types(&state).await?.into_keys().collect();
+    input.configured = data_source_types(state).await?.into_keys().collect();
 
     // Configured data sources that are no organization's connection.
     let rows: BTreeSet<String> = rbac
@@ -491,8 +550,8 @@ pub(crate) async fn access(
         .filter(|name| !rows.contains(*name))
         .cloned()
         .collect();
-    input.cubes = access_cubes(&*crate::handlers::tree::index(&state).await?);
-    Ok(Json(access::build(&input)))
+    input.cubes = access_cubes(&*crate::handlers::tree::index(state).await?);
+    Ok(input)
 }
 
 /// The cubes and views of the model index, each with its folder and the data

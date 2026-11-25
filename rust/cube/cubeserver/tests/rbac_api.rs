@@ -9201,3 +9201,63 @@ db_test!(the_access_graph_shows_the_group_between_user_and_rule, |store| {
         "{query}"
     );
 });
+
+// ---- a user's permissions, by kind ----
+
+db_test!(the_permissions_list_what_a_user_reaches_by_kind, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let (rule, w1) = viewer_rule(&s).await;
+    let group = group_id(env, &s.ana, &s.org_a, "Finance team").await;
+    group_link(env, &s.ana, Method::PUT, &group, "members", "bia").await;
+    group_link(env, &s.ana, Method::PUT, &group, "rules", &rule).await;
+    let (status, object) = create_object(env, &s.ana, &w1, pipeline("daily", "{}")).await;
+    assert_eq!(status, StatusCode::CREATED, "{object}");
+
+    let get = |token: &str, user: &str| {
+        let path = format!("/cube/v1/users/{user}/permissions");
+        let token = token.to_string();
+        async move { send(&env.router, Method::GET, &path, Some(&token), None).await }
+    };
+    assert_eq!(get(&s.ana, "bia").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(get(&s.admin, "nobody").await.0, StatusCode::NOT_FOUND);
+
+    let (status, body) = get(&s.admin, "bia").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["username"], "bia");
+    assert_eq!(body["platformAdmin"], false);
+    let ids = |kind: &str| -> Vec<Value> {
+        body[kind]
+            .as_array()
+            .unwrap_or_else(|| panic!("no {kind}: {body}"))
+            .iter()
+            .map(|x| x["id"].clone())
+            .collect()
+    };
+    assert_eq!(ids("organizations"), [json!(s.org_a)], "{body}");
+    assert_eq!(ids("groups"), [json!(group)], "{body}");
+    assert_eq!(ids("rules"), [json!(rule)], "{body}");
+    assert_eq!(body["rules"][0]["direct"], false, "{body}");
+    assert_eq!(body["rules"][0]["groups"], json!([group]), "{body}");
+    assert_eq!(body["rules"][0]["workspaceId"], json!(w1), "{body}");
+    let role = body["rules"][0]["roleId"].clone();
+    assert_eq!(ids("roles"), [role], "{body}");
+    assert_eq!(body["roles"][0]["name"], "viewer", "{body}");
+    assert_eq!(ids("workspaces"), [json!(w1)], "{body}");
+    assert_eq!(
+        body["workspaces"][0]["permissions"],
+        json!(["view", "query", "read objects"]),
+        "{body}"
+    );
+    assert_eq!(ids("objects"), [object["id"].clone()], "{body}");
+    assert_eq!(body["objects"][0]["permissions"], json!(["read"]), "{body}");
+    assert_eq!(body["objects"][0]["type"], "pipeline");
+    assert!(body["cubes"].is_array() && body["connections"].is_array(), "{body}");
+
+    // Out of the group, nothing is left.
+    group_link(env, &s.ana, Method::DELETE, &group, "members", "bia").await;
+    let (_, body) = get(&s.admin, "bia").await;
+    for kind in ["organizations", "groups", "rules", "roles", "workspaces", "objects"] {
+        assert_eq!(body[kind], json!([]), "{kind}: {body}");
+    }
+});

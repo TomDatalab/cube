@@ -880,6 +880,201 @@ pub fn build(input: &AccessInput) -> AccessGraph {
     graph
 }
 
+/// One thing the user reaches, in `AccessSummary`: its bare id (the graph
+/// node's without the kind), what they may do on it and why.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryItem {
+    pub id: String,
+    pub name: String,
+    /// The organization's UUID, or `_platform`; `None` for an organization.
+    pub organization_id: Option<String>,
+    pub permissions: Vec<String>,
+    /// How the user holds them, one text per way (`viewer`, `editor through
+    /// the rule Analysts (group Finance)`...).
+    pub via: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryGroup {
+    pub id: String,
+    pub name: String,
+    pub organization_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryRule {
+    pub id: String,
+    pub description: String,
+    pub organization_id: Option<String>,
+    pub workspace_id: Option<String>,
+    /// The role's id in `roles`.
+    pub role_id: Option<String>,
+    /// Whether the user is a member of the rule themselves.
+    pub direct: bool,
+    /// The user's groups placed in the rule.
+    pub groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryRole {
+    /// `builtin:<key>` for a built-in role, else the role's UUID.
+    pub id: String,
+    pub name: String,
+    /// `None` for a built-in role.
+    pub organization_id: Option<String>,
+    pub permissions: Vec<String>,
+    /// The restrictions it applies, as the graph writes them.
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryCube {
+    /// `<folder>:<name>`: names are unique per folder only.
+    pub id: String,
+    pub name: String,
+    pub view: bool,
+    pub organization_id: Option<String>,
+    /// The connections it reads.
+    pub data_sources: Vec<String>,
+    pub permissions: Vec<String>,
+    pub via: Vec<String>,
+}
+
+/// A user's access as lists, one per kind of thing: the graph of `build`
+/// without its layout. Only what the user may do something on is listed
+/// (organizations, workspaces, connections and cubes with a permission);
+/// groups, rules and roles are those that grant it. A platform admin reaches
+/// everything, so their lists are empty.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessSummary {
+    pub user: GraphUser,
+    pub platform_admin: bool,
+    pub organizations: Vec<SummaryItem>,
+    pub groups: Vec<SummaryGroup>,
+    pub rules: Vec<SummaryRule>,
+    pub roles: Vec<SummaryRole>,
+    pub workspaces: Vec<SummaryItem>,
+    pub connections: Vec<SummaryItem>,
+    pub cubes: Vec<SummaryCube>,
+}
+
+fn bare<'a>(node: &'a str, kind: &str) -> &'a str {
+    node.strip_prefix(kind)
+        .and_then(|s| s.strip_prefix(':'))
+        .unwrap_or(node)
+}
+
+pub fn summarize(graph: &AccessGraph) -> AccessSummary {
+    let grants_of = |node: &str| -> (Vec<String>, Vec<String>) {
+        let mut permissions = Vec::new();
+        let mut via: Vec<String> = Vec::new();
+        for g in graph.grants.iter().filter(|g| g.resource == node) {
+            permissions.push(g.permission.clone());
+            for r in &g.reasons {
+                if !via.contains(&r.text) {
+                    via.push(r.text.clone());
+                }
+            }
+        }
+        (permissions, via)
+    };
+    let of_kind = |kind: &'static str| graph.nodes.iter().filter(move |n| n.kind == kind);
+    let items = |kind: &'static str| -> Vec<SummaryItem> {
+        of_kind(kind)
+            .filter_map(|n| {
+                let (permissions, via) = grants_of(&n.id);
+                (!permissions.is_empty()).then(|| SummaryItem {
+                    id: bare(&n.id, kind).to_string(),
+                    name: n.name.clone(),
+                    organization_id: n.organization_id.clone(),
+                    permissions,
+                    via,
+                    notes: n.notes.clone(),
+                })
+            })
+            .collect()
+    };
+    let target = |from: &str, kind: &str| {
+        graph
+            .edges
+            .iter()
+            .find(|e| e.from == from && e.to.starts_with(&format!("{kind}:")))
+            .map(|e| bare(&e.to, kind).to_string())
+    };
+    let user_node = format!("user:{}", graph.user.id);
+    AccessSummary {
+        user: graph.user.clone(),
+        platform_admin: graph.platform_admin,
+        organizations: items("organization"),
+        groups: of_kind("group")
+            .map(|n| SummaryGroup {
+                id: bare(&n.id, "group").to_string(),
+                name: n.name.clone(),
+                organization_id: n.organization_id.clone(),
+            })
+            .collect(),
+        rules: of_kind("rule")
+            .map(|n| SummaryRule {
+                id: bare(&n.id, "rule").to_string(),
+                description: n.name.clone(),
+                organization_id: n.organization_id.clone(),
+                workspace_id: target(&n.id, "workspace"),
+                role_id: target(&n.id, "role"),
+                direct: graph
+                    .edges
+                    .iter()
+                    .any(|e| e.from == user_node && e.to == n.id),
+                groups: graph
+                    .edges
+                    .iter()
+                    .filter(|e| e.to == n.id && e.from.starts_with("group:"))
+                    .map(|e| bare(&e.from, "group").to_string())
+                    .collect(),
+            })
+            .collect(),
+        roles: of_kind("role")
+            .map(|n| SummaryRole {
+                id: bare(&n.id, "role").to_string(),
+                name: n.name.clone(),
+                organization_id: n.organization_id.clone(),
+                permissions: n.details.clone(),
+                notes: n.notes.clone(),
+            })
+            .collect(),
+        workspaces: items("workspace"),
+        connections: items("connection"),
+        cubes: of_kind("cube")
+            .filter_map(|n| {
+                let (permissions, via) = grants_of(&n.id);
+                if permissions.is_empty() {
+                    return None;
+                }
+                Some(SummaryCube {
+                    id: bare(&n.id, "cube").to_string(),
+                    name: n.name.clone(),
+                    view: n.notes.iter().any(|x| x == NOTE_VIEW),
+                    organization_id: n.organization_id.clone(),
+                    data_sources: graph
+                        .edges
+                        .iter()
+                        .filter(|e| e.to == n.id && e.from.starts_with("connection:"))
+                        .map(|e| bare(&e.from, "connection").to_string())
+                        .collect(),
+                    permissions,
+                    via,
+                })
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1756,5 +1951,87 @@ mod tests {
         let g = build(&i);
         assert!(perms(&g, "cube:acme:a").is_empty());
         assert_eq!(node(&g, "cube:acme:a").unwrap().notes, [NOTE_MISSING]);
+    }
+
+    #[test]
+    fn the_summary_lists_what_the_user_reaches_by_kind() {
+        let g1 = Uuid::from_u128(20);
+        let mut i = input(vec![]);
+        i.rules = vec![
+            rule(3, W, Some("viewer"), None),
+            rule(4, W, Some("editor"), None),
+        ];
+        i.indirect_rules = BTreeSet::from([Uuid::from_u128(4)]);
+        i.groups = vec![Group {
+            id: g1,
+            organization_id: O,
+            name: "Finance".into(),
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        }];
+        i.rule_groups = vec![(Uuid::from_u128(4), g1)];
+        i.connections = vec![
+            conn("c", ConnectionOrigin::Assigned),
+            conn("d", ConnectionOrigin::Assigned),
+        ];
+        i.releases = vec![("c".into(), W)];
+        i.configured.extend(["c".to_string(), "d".to_string()]);
+        i.cubes = vec![
+            cube("orders", "acme", false, &["c"]),
+            cube("hidden", "acme", false, &["d"]),
+            cube("sales", "acme", true, &["c"]),
+        ];
+        let s = summarize(&build(&i));
+        assert!(!s.platform_admin);
+        assert_eq!(s.organizations.len(), 1);
+        assert_eq!(s.organizations[0].id, O.to_string());
+        assert_eq!(s.organizations[0].permissions, ["view"]);
+        assert_eq!(s.groups.len(), 1);
+        assert_eq!(s.groups[0].id, g1.to_string());
+
+        let r3 = s
+            .rules
+            .iter()
+            .find(|r| r.id == Uuid::from_u128(3).to_string())
+            .unwrap();
+        assert!(r3.direct);
+        assert!(r3.groups.is_empty());
+        assert_eq!(r3.workspace_id.as_deref(), Some(W.to_string().as_str()));
+        assert_eq!(r3.role_id.as_deref(), Some("builtin:viewer"));
+        let r4 = s
+            .rules
+            .iter()
+            .find(|r| r.id == Uuid::from_u128(4).to_string())
+            .unwrap();
+        assert!(!r4.direct);
+        assert_eq!(r4.groups, [g1.to_string()]);
+
+        let roles: Vec<&str> = s.roles.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(roles, ["builtin:editor", "builtin:viewer"]);
+        assert_eq!(s.workspaces.len(), 1);
+        assert!(s.workspaces[0]
+            .permissions
+            .contains(&"write objects".to_string()));
+        assert!(s.workspaces[0]
+            .via
+            .iter()
+            .any(|v| v.contains("(group Finance)")));
+
+        // Only the released connection, and the cubes over it.
+        let conns: Vec<&str> = s.connections.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(conns, ["c"]);
+        let cubes: Vec<(&str, bool)> = s.cubes.iter().map(|c| (c.id.as_str(), c.view)).collect();
+        assert_eq!(cubes, [("acme:orders", false), ("acme:sales", true)]);
+        assert_eq!(s.cubes[0].data_sources, ["c"]);
+        assert_eq!(s.cubes[0].permissions, ["query"]);
+    }
+
+    #[test]
+    fn a_platform_admins_summary_is_empty() {
+        let mut i = input(vec![rel("workspace", W, "viewer")]);
+        i.platform_admin = true;
+        let s = summarize(&build(&i));
+        assert!(s.platform_admin);
+        assert!(s.workspaces.is_empty() && s.organizations.is_empty() && s.cubes.is_empty());
     }
 }

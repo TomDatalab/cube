@@ -189,6 +189,12 @@ export const SECTIONS: Section[] = [
         method: 'PUT', path: '/v1/users/:id/attributes', summary: 'Replace a user\'s attributes', who: 'platform admin', body: { attributes: { region: ['south'] } },
       },
       { method: 'GET', path: '/v1/users/:id/access', summary: 'What the user can reach, and why (the access graph)', who: 'platform admin' },
+      {
+        method: 'GET',
+        path: '/v1/users/:id/permissions',
+        summary: 'What the user reaches, as lists: organizations, groups, rules, roles, workspaces, connections, cubes and objects, each with its permissions',
+        who: 'platform admin',
+      },
     ],
   },
   {
