@@ -15,6 +15,7 @@ import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeChange, CubeDetail } from './CubeDetail';
+import { CubeList } from './CubeList';
 import { cubeEditBlock, cubeFileOf, cubeUsers } from './cubeEdit';
 import { removeCube } from './cubeYaml';
 import { loadRows, openScope, orgWorkspace, previewHeaders, PreviewQuery } from './preview';
@@ -555,6 +556,25 @@ export function SchemaPage({ history }: RouterProps) {
               </Button>
             </>
           )}
+        />
+      );
+    }
+
+    if (selected.kind === 'cubes') {
+      if (!detail) {
+        return <CubeLoader />;
+      }
+      const orgKey = `org:${selected.slug}`;
+      return (
+        <CubeList
+          orgName={known.current[selected.slug]?.name ?? selected.slug}
+          cubes={detail.cubes}
+          errors={detail.errors || []}
+          onOpen={(name) => {
+            // The cube's node shows selected under its open "Cubes" node.
+            setExpandedKeys((keys) => Array.from(new Set([...keys, orgKey, `${orgKey}:cubes`])));
+            setSelectedKey(`cube:${selected.slug}:${name}`);
+          }}
         />
       );
     }
