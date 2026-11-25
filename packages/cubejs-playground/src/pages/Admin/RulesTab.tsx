@@ -8,7 +8,7 @@ import { useMemo, useRef, useState } from 'react';
 import { useIsMounted } from '../../hooks';
 import { IdText } from './IdText';
 import {
-  AdminApi, OrgRole, PAGE_SIZE, Role, ROLES, Rule, RuleGrant,
+  AdminApi, OrgRole, PAGE_SIZE, Rule,
 } from './api';
 import { organizationOptions, RemoteSelect, workspaceOptions } from './RemoteSelect';
 import { RULE_DRAG_TYPE, ruleDragData, RuleTree } from './RuleTree';
@@ -22,20 +22,8 @@ type Props = {
 const MAX_DESCRIPTION = 500;
 const MAX_TYPE = 100;
 
-const ROLE_HELP: Record<Role, string> = {
-  owner: 'manages the workspace',
-  editor: 'edits and queries',
-  viewer: 'views and queries',
-};
-
-const builtinOptions = ROLES.map((r) => ({ value: r, label: `${r} — ${ROLE_HELP[r]}` }));
-
-// The form's role: a built-in role's name or an organization role's id.
+// The form's role: the id of one of the organization's roles.
 type FormValues = { description: string; type: string; role: string; workspaceId: string };
-
-function grantOf(role: string): RuleGrant {
-  return (ROLES as readonly string[]).includes(role) ? { role: role as Role } : { roleId: role };
-}
 
 // Every rule (a named role in one workspace) of every organization. Rows
 // drag onto a workspace of the tree to move there; users dragged from the
@@ -72,8 +60,9 @@ export function RulesTab({ api }: Props) {
         setOrgRoles(loaded);
         // A role of another organization does not carry over.
         const role = form.getFieldValue('role');
-        if (role && !(ROLES as readonly string[]).includes(role) && !loaded.some((r) => r.id === role)) {
-          form.setFieldsValue({ role: undefined });
+        if (!role || !loaded.some((r) => r.id === role)) {
+          // A new rule starts as the organization's default viewer, if it has one.
+          form.setFieldsValue({ role: loaded.find((r) => r.builtin === 'viewer')?.id });
         }
       }
     } catch (e: any) {
@@ -93,13 +82,10 @@ export function RulesTab({ api }: Props) {
     }
   }
 
-  const roleOptions = [
-    { label: 'Built-in', options: builtinOptions },
-    ...(orgRoles.length ? [{
-      label: "The organization's roles",
-      options: orgRoles.map((r) => ({ value: r.id, label: `${r.name} — ${r.permissions.join(', ')}` })),
-    }] : []),
-  ];
+  const roleOptions = orgRoles.map((r) => ({
+    value: r.id,
+    label: `${r.name} — ${r.permissions.join(', ')}`,
+  }));
   // The types already in use on this page, offered while typing a new one.
   const typeOptions = useMemo(
     () => [...new Set((result?.items || []).map((r) => r.type))].sort().map((t) => ({ value: t })),
@@ -114,11 +100,11 @@ export function RulesTab({ api }: Props) {
   function open(rule: Rule | true) {
     form.resetFields();
     form.setFieldsValue(rule === true
-      ? { role: 'viewer' }
+      ? {}
       : {
         description: rule.description,
         type: rule.type,
-        role: rule.roleId ?? rule.role ?? undefined,
+        role: rule.roleId ?? undefined,
         workspaceId: rule.workspaceId,
       });
     loadRoles(rule === true ? null : rule.organizationId);
@@ -133,12 +119,12 @@ export function RulesTab({ api }: Props) {
       const description = values.description.trim();
       const type = values.type.trim();
       if (editing === true) {
-        await api.createRule(values.workspaceId, { description, type, ...grantOf(values.role) });
+        await api.createRule(values.workspaceId, { description, type, roleId: values.role });
       } else if (editing) {
         await api.updateRule(editing.id, {
           description,
           type,
-          ...grantOf(values.role),
+          roleId: values.role,
           workspaceId: values.workspaceId,
         });
       }
@@ -340,7 +326,7 @@ export function RulesTab({ api }: Props) {
             <Form.Item
               label="Role"
               name="role"
-              extra="What the rule's members can do in the workspace: a built-in role or one of the organization's (Admin → Roles)."
+              extra="What the rule's members can do in the workspace: one of the organization's roles (Admin → Roles)."
               rules={[{ required: true, message: 'Pick a role' }]}
             >
               <Select options={roleOptions} />

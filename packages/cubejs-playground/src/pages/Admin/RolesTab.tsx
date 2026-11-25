@@ -23,14 +23,6 @@ type Props = {
 // `MAX_NAME` in `cubeserver/src/rbac/handlers/roles.rs`.
 const MAX_NAME = 100;
 
-// The built-in roles, as an organization's role would grant them; shown for
-// reference, not editable.
-const BUILTIN: { name: string; permissions: Permission[] }[] = [
-  { name: 'owner', permissions: [...PERMISSIONS] },
-  { name: 'editor', permissions: ['view', 'query', 'read_objects', 'write_objects'] },
-  { name: 'viewer', permissions: ['view', 'query', 'read_objects'] },
-];
-
 type FormValues = { name: string; permissions: Permission[]; restrictions?: RestrictionsFormValues };
 
 function PermissionTags({ permissions }: { permissions: readonly string[] }) {
@@ -181,9 +173,18 @@ export function RolesTab({ api }: Props) {
           loading={loading}
           dataSource={roles || []}
           pagination={false}
-          locale={{ emptyText: 'No roles yet: rules use the built-in ones below' }}
+          locale={{ emptyText: 'No roles' }}
           columns={[
-            { title: 'Role', dataIndex: 'name' },
+            {
+              title: 'Role',
+              dataIndex: 'name',
+              render: (v: string, role) => (
+                <Space size={4}>
+                  {v}
+                  {role.builtin ? <Tag color="blue">default</Tag> : null}
+                </Space>
+              ),
+            },
             { title: 'Id', dataIndex: 'id', render: (v) => <IdText id={v} /> },
             {
               title: 'Permissions',
@@ -233,27 +234,6 @@ export function RolesTab({ api }: Props) {
       ) : (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Pick an organization to see its roles" />
       )}
-
-      <Typography.Title level={5} style={{ marginTop: 24 }}>Built-in roles</Typography.Title>
-      <Typography.Paragraph type="secondary">
-        Every organization&apos;s rules can also use these; they cannot be edited.
-      </Typography.Paragraph>
-      <Table
-        rowKey="name"
-        size="small"
-        pagination={false}
-        dataSource={BUILTIN}
-        columns={[
-          { title: 'Role', dataIndex: 'name' },
-          // A built-in role has no UUID: rules name it by this key.
-          { title: 'Id', dataIndex: 'name', render: (v) => <IdText id={v} /> },
-          {
-            title: 'Permissions',
-            dataIndex: 'permissions',
-            render: (permissions: Permission[]) => <PermissionTags permissions={permissions} />,
-          },
-        ]}
-      />
 
       <Modal
         title={editing === true ? 'New role' : 'Edit role'}

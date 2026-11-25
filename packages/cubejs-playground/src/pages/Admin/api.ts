@@ -134,9 +134,12 @@ export function restrictionSummary(r: Restrictions): string {
   return parts.join(' · ');
 }
 
-// A role an organization defines, with how many rules use it.
+// A role an organization defines, with how many rules use it. Every
+// organization has three default roles, `builtin` "owner", "editor" and
+// "viewer" (whatever their names now are); the others have `builtin` null.
 export type OrgRole = {
   id: string;
+  builtin: Role | null;
   organizationId: string;
   name: string;
   permissions: Permission[];
