@@ -244,3 +244,18 @@ cubes:
     assert!(!sql.contains("tenant_id = 7"), "{sql}");
     assert_eq!(body["sql"]["sql"][1], json!(["7"]));
 }
+
+// A query of a cube the model does not have is the request's fault: 400, not
+// 500 (the Playground restores saved queries in whatever scope it is in).
+#[tokio::test]
+async fn a_cube_the_model_does_not_have_is_400() {
+    let (_dir, router) = app(MODEL);
+    let (status, body) = post(
+        router,
+        "/cube/v1/sql",
+        json!({ "query": { "measures": ["dfos_fibercable.count"] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("dfos_fibercable"), "{body}");
+}

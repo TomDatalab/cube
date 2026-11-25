@@ -63,7 +63,7 @@ pub struct PlanFailure {
 impl PlanFailure {
     fn from_planner(err: PlannerError) -> Self {
         Self {
-            user_error: matches!(err, PlannerError::Query(_) | PlannerError::Unsupported(_)),
+            user_error: err.is_user_error(),
             message: err.message(),
         }
     }

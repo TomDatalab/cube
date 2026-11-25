@@ -25,6 +25,7 @@ import {
   extractMembersFromFilters,
   getUsedCubesAndMembers,
   getQueryHash,
+  missingCubesError,
   movePivotItem,
   prepareQuery,
   useIsFirstRender,
@@ -258,6 +259,13 @@ export function useQueryBuilder(props: UseQueryBuilderProps) {
     return c1joined > c2joined ? -1 : 1;
   });
 
+  // The query's cubes the scope's model has not at all (hidden ones count as
+  // there: `missingCubes` leaves them out, but they run).
+  function cubesOutsideMeta(): string[] {
+    const known = new Set((meta?.meta.cubes ?? []).map((c) => c.name));
+    return usedCubes.filter((name) => !known.has(name));
+  }
+
   async function runQuery() {
     const currentRequest = ++loadingRef.current;
 
@@ -266,6 +274,14 @@ export function useQueryBuilder(props: UseQueryBuilderProps) {
     }
 
     const queryCopy = JSON.parse(JSON.stringify(query)) as Query;
+
+    // A cube the scope's model lacks: say so instead of sending it.
+    const missing = meta ? missingCubesError(cubesOutsideMeta()) : null;
+    if (missing) {
+      setIsLoading(false);
+      setError(missing);
+      return Promise.resolve();
+    }
 
     setIsLoading(true);
     setProgress(null);
@@ -398,6 +414,14 @@ export function useQueryBuilder(props: UseQueryBuilderProps) {
     const currentRequest = ++verificationRef.current;
 
     if (!meta || !cubeApi || !usedCubes.length) {
+      return;
+    }
+
+    const missing = missingCubesError(cubesOutsideMeta());
+    if (missing) {
+      setIsVerifying(false);
+      setDryRunResponse(null);
+      setVerificationError(missing);
       return;
     }
 
