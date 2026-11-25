@@ -54,8 +54,9 @@ const JOINS: [&str; 2] = ["left", "inner"];
 
 /// The shape alone, valid while drafting: unique non-empty aliases, a
 /// `primary` among them, links between known aliases with known values, and
-/// a tree (no second path between two tables) that reaches every table from
-/// `primary` once it is chosen. A model with no tables is a valid draft.
+/// no second path between two tables. A table not linked yet is fine here
+/// (the editor saves while one is being placed); [`build`] refuses it. A
+/// model with no tables is a valid draft.
 pub fn validate(def: &Definition) -> Result<(), String> {
     let mut aliases = HashSet::new();
     for table in &def.tables {
@@ -108,19 +109,6 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         parent.insert(a, b);
     }
 
-    if let Some(primary) = &def.primary {
-        let reached = root(&parent, primary);
-        if let Some(table) = def
-            .tables
-            .iter()
-            .find(|t| root(&parent, &t.alias) != reached)
-        {
-            return Err(format!(
-                "A tabela {} não está ligada à principal",
-                table.alias
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -183,7 +171,8 @@ pub fn build(
         ));
     }
 
-    // Breadth-first from the primary; validate made the links a tree.
+    // Breadth-first from the primary; validate made the links a forest, and
+    // a table this walk does not reach is not linked to the primary.
     let mut order = vec![primary];
     let mut visited = HashSet::from([primary]);
     let mut steps = Vec::new();
@@ -216,6 +205,16 @@ pub fn build(
             order.push(step.to.alias.as_str());
             steps.push(step);
         }
+    }
+    if let Some(table) = def
+        .tables
+        .iter()
+        .find(|t| !visited.contains(t.alias.as_str()))
+    {
+        return Err(format!(
+            "A tabela {} não está ligada à principal",
+            table.alias
+        ));
     }
     let multiplies = steps.iter().any(|s| s.relationship == "one_to_many");
 
@@ -566,10 +565,8 @@ mod tests {
 
         let mut unlinked = base.clone();
         unlinked.tables.push(table("x", "customers"));
-        assert_eq!(
-            validate(&unlinked),
-            Err("A tabela x não está ligada à principal".into())
-        );
+        // A draft: the table just dropped is not linked yet.
+        assert_eq!(validate(&unlinked), Ok(()));
 
         let mut twice = base.clone();
         twice.joins.push(join(
@@ -661,6 +658,13 @@ mod tests {
         assert_eq!(
             run(&no_key_column),
             Err("A coluna orders.nope não existe".into())
+        );
+
+        let mut unlinked = orders_customers();
+        unlinked.tables.push(table("x", "customers"));
+        assert_eq!(
+            run(&unlinked),
+            Err("A tabela x não está ligada à principal".into())
         );
 
         let mut no_table = orders_customers();
