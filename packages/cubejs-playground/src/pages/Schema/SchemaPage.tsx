@@ -16,6 +16,7 @@ import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeChange, CubeDetail } from './CubeDetail';
 import { CubeList } from './CubeList';
+import { FileList, fileListRows, TableList, tableListRows } from './OrgLists';
 import { cubeEditBlock, cubeFileOf, cubeUsers } from './cubeEdit';
 import { removeCube } from './cubeYaml';
 import { loadRows, openScope, orgWorkspace, previewHeaders, PreviewQuery } from './preview';
@@ -556,6 +557,38 @@ export function SchemaPage({ history }: RouterProps) {
               </Button>
             </>
           )}
+        />
+      );
+    }
+
+    if (selected.kind === 'tables' || selected.kind === 'files') {
+      if (!detail) {
+        return <CubeLoader />;
+      }
+      const orgName = known.current[selected.slug]?.name ?? selected.slug;
+      if (selected.kind === 'tables') {
+        const rows = tableListRows(selected.slug, detail.tables);
+        return (
+          <TableList
+            orgName={orgName}
+            rows={rows}
+            checkedKeys={checkedKeys}
+            onCheck={(keys) => {
+              // This organization's tables as checked here; the others' stay.
+              const here = new Set(rows.map((r) => r.key));
+              setCheckedKeys([...checkedKeys.filter((k) => !here.has(k)), ...keys]);
+            }}
+          />
+        );
+      }
+      return (
+        <FileList
+          orgName={orgName}
+          rows={fileListRows(selected.slug, detail.files || [], detail.cubes, detail.errors || [])}
+          onOpen={(key) => {
+            setExpandedKeys((keys) => Array.from(new Set([...keys, `org:${selected.slug}`, `files:${selected.slug}`])));
+            setSelectedKey(key);
+          }}
         />
       );
     }
