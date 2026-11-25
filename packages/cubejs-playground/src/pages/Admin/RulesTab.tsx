@@ -46,11 +46,13 @@ export function RulesTab({ api }: Props) {
   const isMounted = useIsMounted();
   // The roles of the organization of the workspace picked in the form.
   const [orgRoles, setOrgRoles] = useState<OrgRole[]>([]);
+  const [rolesLoaded, setRolesLoaded] = useState(false);
   const rolesRequest = useRef(0);
 
-  async function loadRoles(org: string | null) {
+  async function loadRoles(org: string | null, isNew = false) {
     const request = ++rolesRequest.current;
     setOrgRoles([]);
+    setRolesLoaded(false);
     if (!org) {
       return;
     }
@@ -58,11 +60,13 @@ export function RulesTab({ api }: Props) {
       const loaded = await api.roles(org);
       if (isMounted() && request === rolesRequest.current) {
         setOrgRoles(loaded);
+        setRolesLoaded(true);
         // A role of another organization does not carry over.
         const role = form.getFieldValue('role');
         if (!role || !loaded.some((r) => r.id === role)) {
-          // A new rule starts as the organization's default viewer, if it has one.
-          form.setFieldsValue({ role: loaded.find((r) => r.builtin === 'viewer')?.id });
+          // A new rule starts as the organization's default viewer, if it has
+          // one. A role the organization lacks is cleared, to be picked again.
+          form.setFieldsValue({ role: isNew ? loaded.find((r) => r.builtin === 'viewer')?.id : undefined });
         }
       }
     } catch (e: any) {
@@ -70,22 +74,22 @@ export function RulesTab({ api }: Props) {
     }
   }
 
-  async function workspaceChanged(ws: string | undefined) {
+  async function workspaceChanged(ws: string | undefined, isNew: boolean) {
     if (!ws) {
       loadRoles(null);
       return;
     }
     try {
-      loadRoles((await api.workspace(ws)).organizationId);
+      loadRoles((await api.workspace(ws)).organizationId, isNew);
     } catch (e: any) {
       message.error(e.message);
     }
   }
 
-  const roleOptions = orgRoles.map((r) => ({
-    value: r.id,
-    label: `${r.name} — ${r.permissions.join(', ')}`,
-  }));
+  // Until the roles load, an edited rule shows its own role by name, not id.
+  const roleOptions = !rolesLoaded && editing && editing !== true && editing.roleId
+    ? [{ value: editing.roleId, label: editing.roleName }]
+    : orgRoles.map((r) => ({ value: r.id, label: `${r.name} — ${r.permissions.join(', ')}` }));
   // The types already in use on this page, offered while typing a new one.
   const typeOptions = useMemo(
     () => [...new Set((result?.items || []).map((r) => r.type))].sort().map((t) => ({ value: t })),
@@ -278,7 +282,7 @@ export function RulesTab({ api }: Props) {
             onFinish={save}
             onValuesChange={(values) => {
               if ('workspaceId' in values) {
-                workspaceChanged(values.workspaceId);
+                workspaceChanged(values.workspaceId, editing === true);
               }
             }}
           >
@@ -329,7 +333,7 @@ export function RulesTab({ api }: Props) {
               extra="What the rule's members can do in the workspace: one of the organization's roles (Admin → Roles)."
               rules={[{ required: true, message: 'Pick a role' }]}
             >
-              <Select options={roleOptions} />
+              <Select options={roleOptions} loading={!rolesLoaded && editing !== true} />
             </Form.Item>
             {error ? <Alert type="error" message={error} showIcon /> : null}
           </Form>

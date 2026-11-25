@@ -170,5 +170,54 @@ describe('default roles in the Playground', () => {
       expect(api.roles).toHaveBeenCalledWith('o1');
       expect(selected()).toContain('viewer');
     });
+
+    it('clears an edited rule\'s role the organization lacks, instead of picking viewer', async () => {
+      const api = makeApi();
+      // The rule's role is gone from the organization, which has a default viewer.
+      api.searchRules.mockResolvedValue({ items: [{ ...rule, roleId: 'gone' }], total: 1 });
+      await render(api);
+      await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
+      await flush();
+      expect(selected()).toBeUndefined();
+      await act(async () => {
+        document.querySelector('.ant-modal .ant-btn-primary')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      await flush();
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 100));
+      });
+      expect(document.body.textContent).toContain('Pick a role');
+      expect(api.updateRule).not.toHaveBeenCalled();
+    });
+
+    it('shows the rule\'s role name, not its id, while the roles load', async () => {
+      const api = makeApi();
+      api.roles.mockReturnValue(new Promise(() => {}));
+      await render(api);
+      await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
+      expect(selected()).toBe('viewer');
+      expect(document.body.textContent).not.toContain(VIEWER_ID);
+    });
+
+    it('preselects nothing for a new rule in an organization without a default viewer', async () => {
+      const api = makeApi();
+      api.roles.mockResolvedValue(roles.filter((r) => r.builtin !== 'viewer'));
+      await render(api);
+      await click([...document.querySelectorAll('button')].find((b) => b.textContent === 'New rule')!);
+      await pick('Organization / workspace');
+      await flush();
+      expect(selected()).toBeUndefined();
+      await act(async () => {
+        document.querySelector('.ant-modal .ant-btn-primary')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      await flush();
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 100));
+      });
+      expect(document.body.textContent).toContain('Pick a role');
+      expect(api.createRule).not.toHaveBeenCalled();
+    });
   });
 });
