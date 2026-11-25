@@ -54,3 +54,16 @@ export function editFailure(e: unknown): { message: string; problems: string[] }
   }
   return { message: e instanceof Error ? e.message : String(e), problems: [] };
 }
+
+/**
+ * Who uses the cube `name` in the organization's model: the cubes that join
+ * it and the views that include it. Deleting it would break them.
+ */
+export function cubeUsers(name: string, cubes: Pick<TreeCube, 'name' | 'type' | 'joins' | 'includes'>[]): string[] {
+  return cubes
+    .filter((c) => c.name !== name)
+    .filter((c) => (c.type === 'view'
+      ? (c.includes ?? []).includes(name)
+      : (c.joins ?? []).some((j) => j.name === name)))
+    .map((c) => c.name);
+}

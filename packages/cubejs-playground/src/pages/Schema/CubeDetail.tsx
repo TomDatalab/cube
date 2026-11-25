@@ -36,6 +36,11 @@ export type CubeDetailProps = {
   onEdit?: (change: CubeChange) => Promise<void>;
   // The data preview; none without it.
   preview?: Omit<CubePreviewProps, 'cube'>;
+  // Deletes the cube from its file (the file, when it is all it defines);
+  // rejects on failure. `users`: the cubes and views that use it, which
+  // block it.
+  onDelete?: () => Promise<void>;
+  users?: string[];
 };
 
 type Dialog = { kind: 'measure'; member: TreeMember }
@@ -279,7 +284,7 @@ function SectionHeader({ title, count, action }: { title: string; count: number;
 }
 
 export function CubeDetail({
-  cube, errors, open, onOpen, editBlock = null, onEdit, preview,
+  cube, errors, open, onOpen, editBlock = null, onEdit, preview, onDelete, users = [],
 }: CubeDetailProps) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const canEdit = Boolean(onEdit) && !editBlock;
@@ -294,6 +299,16 @@ export function CubeDetail({
       message.error([failure.message, ...failure.problems].join(' — '));
     }
   };
+  const deleteCube = async () => {
+    try {
+      await onDelete!();
+      message.success(`Cube ${cube.name} deleted`);
+    } catch (e) {
+      const failure = editFailure(e);
+      message.error([failure.message, ...failure.problems].join(' — '));
+    }
+  };
+  const deleteBlock = users.length ? `Used by ${users.join(', ')}: change those first` : '';
   const rejections = errors.filter((e) => e.cube === cube.name || e.file === cube.file);
   const measures = cube.measures ?? [];
   const dimensions = cube.dimensions ?? [];
@@ -328,6 +343,32 @@ export function CubeDetail({
           </Button>
         </span>
       </Tooltip>
+
+      {onDelete && !editBlock && cube.type === 'cube' && (
+        <Tooltip title={deleteBlock}>
+          <span style={{ marginLeft: 8 }}>
+            <Popconfirm
+              title={(
+                <div style={{ maxWidth: 320 }}>
+                  <div>{`Delete cube ${cube.name}?`}</div>
+                  <Typography.Text type="secondary">
+                    It leaves the data model; the table in the database is not touched.
+                  </Typography.Text>
+                </div>
+              )}
+              okText="Delete"
+              okButtonProps={{ danger: true }}
+              cancelText="Cancel"
+              disabled={Boolean(deleteBlock)}
+              onConfirm={deleteCube}
+            >
+              <Button danger icon={<DeleteOutlined />} disabled={Boolean(deleteBlock)}>
+                Delete cube
+              </Button>
+            </Popconfirm>
+          </span>
+        </Tooltip>
+      )}
 
       {onEdit && editBlock && cube.type === 'cube' && (
         <Typography.Paragraph type="secondary" style={{ marginTop: 16, marginBottom: 0 }}>

@@ -15,7 +15,8 @@ import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeChange, CubeDetail } from './CubeDetail';
-import { cubeEditBlock, cubeFileOf } from './cubeEdit';
+import { cubeEditBlock, cubeFileOf, cubeUsers } from './cubeEdit';
+import { removeCube } from './cubeYaml';
 import { loadRows, openScope, orgWorkspace, previewHeaders, PreviewQuery } from './preview';
 import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
@@ -75,17 +76,20 @@ const SEARCH_MIN_CHARS = 2;
 // Its members are edited in its file: read fresh, changed, saved with the
 // version read (a concurrent change makes the save a 409, not a loss).
 function CubePanel({
-  api, org, owner, basePath, cube, errors, files, onOpen, onSaved,
+  api, org, owner, basePath, cube, cubes, errors, files, onOpen, onSaved, onDeleted,
 }: {
   api: ReturnType<typeof modelApi>;
   org: OrgNode | undefined;
   owner: boolean;
   basePath: string;
   cube: TreeCube;
+  // The organization's cubes and views: who uses this cube.
+  cubes: TreeCube[];
   errors: OrgDetail['errors'];
   files: OrgDetail['files'];
   onOpen: () => void;
   onSaved: (detail: OrgDetail) => void;
+  onDeleted: () => void;
 }) {
   const open = useOpenBlock(api, org, owner, cube);
   // The preview queries with the user's own access: an admin in the cube's
@@ -137,6 +141,22 @@ function CubePanel({
     }
     onSaved(await api.save(org, file.id, next, current.version ?? file.version ?? 0));
   };
+  // The cube leaves its file, read fresh; the file goes when the cube is all
+  // it defines. The server refuses what breaks the model.
+  const onDelete = async () => {
+    if (!org || !file?.id) {
+      return;
+    }
+    const current = await api.file(org, file.id);
+    const version = current.version ?? file.version ?? 0;
+    const next = removeCube(current.content, cube.name);
+    if (next === null) {
+      await api.remove(org, file.id, version);
+    } else {
+      await api.save(org, file.id, next, version);
+    }
+    onDeleted();
+  };
   return (
     <CubeDetail
       cube={cube}
@@ -145,6 +165,8 @@ function CubePanel({
       onOpen={openHere}
       editBlock={editBlock}
       onEdit={onEdit}
+      onDelete={onDelete}
+      users={cubeUsers(cube.name, cubes)}
       preview={{
         runQuery, block: previewBlock, hidden: !owner,
       }}
@@ -549,9 +571,14 @@ export function SchemaPage({ history }: RouterProps) {
           owner={!rbac.isAdmin}
           basePath={playgroundContext.basePath ?? '/cube'}
           cube={cube}
+          cubes={detail.cubes}
           errors={detail.errors || []}
           files={detail.files || []}
           onOpen={() => history.push(buildQueryUrl(cube))}
+          onDeleted={() => {
+            setSelectedKey(null);
+            afterFileChange(selected.slug);
+          }}
           onSaved={(saved) => {
             setDetails((current) => ({ ...current, [selected.slug]: saved }));
             refreshOrgs();

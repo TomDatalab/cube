@@ -301,6 +301,22 @@ api_test!(sync_file_is_read_only, |store| {
     assert_eq!((status, body["error"].as_str()), (StatusCode::BAD_REQUEST, Some("Arquivos .jinja e .j2 não são editáveis aqui")));
 });
 
+api_test!(delete_of_a_cube_a_view_includes_is_400, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let view = "views:\n  - name: v\n    cubes:\n      - join_path: b\n        includes: \"*\"\n";
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(None, "b.yml", &cube("b"), None), put_in(None, "v.yml", view, None)]))
+        .await
+        .unwrap();
+    let (_, detail) = call(&env, Method::GET, &admin, "/cube/v1/platform/model", None).await;
+    let (id, version) = file_in(&detail, "_platform/b.yml");
+    let (status, body) = call(&env, Method::DELETE, &admin, &format!("/cube/v1/platform/model/files/{id}?version={version}"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["problems"].to_string().contains("Cube b doesn't exist"), "{body}");
+    assert_eq!(call(&env, Method::GET, &admin, &format!("/cube/v1/platform/model/files/{id}"), None).await.0, StatusCode::OK);
+});
+
 api_test!(delete_of_depended_file_is_400, |store| {
     let env = env_live(store.clone()).await;
     let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;

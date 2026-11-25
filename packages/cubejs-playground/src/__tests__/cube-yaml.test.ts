@@ -4,6 +4,7 @@ import {
   addMeasure,
   CubeEditError,
   measureNeedsSql,
+  removeCube,
   removeMeasure,
   renameDimension,
   setDimensionType,
@@ -171,5 +172,58 @@ describe('removeMeasure', () => {
 
   it('refuses an unknown measure', () => {
     expect(() => removeMeasure(FILE, 'cables', 'nope')).toThrow(/nope/);
+  });
+});
+
+describe('removeCube', () => {
+  const TWO = `# Two cubes
+cubes:
+- name: a
+  sql_table: t_a # first
+  measures:
+  - name: count
+    type: count
+- name: b
+  sql_table: t_b
+  measures:
+  - name: count
+    type: count
+`;
+
+  it('takes the cube out and keeps the rest of the file as it was', () => {
+    expect(removeCube(TWO, 'a')).toBe(`# Two cubes
+cubes:
+- name: b
+  sql_table: t_b
+  measures:
+  - name: count
+    type: count
+`);
+  });
+
+  it('answers null when the cube is all the file defines, so the file is deleted', () => {
+    expect(removeCube('# one\ncubes:\n- name: a\n  sql_table: t\n', 'a')).toBeNull();
+  });
+
+  it('keeps the views of the file when its only cube goes', () => {
+    const text = `cubes:
+- name: a
+  sql_table: t
+views:
+- name: v
+  cubes:
+  - join_path: other
+    includes: '*'
+`;
+    expect(removeCube(text, 'a')).toBe(`views:
+- name: v
+  cubes:
+  - join_path: other
+    includes: '*'
+`);
+  });
+
+  it('refuses a cube the file does not have', () => {
+    expect(() => removeCube(TWO, 'zz')).toThrow(CubeEditError);
   });
 });

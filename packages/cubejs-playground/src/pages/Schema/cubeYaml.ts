@@ -216,3 +216,22 @@ export function removeMeasure(text: string, cube: string, measure: string): stri
   }
   return save(doc, text);
 }
+
+/**
+ * The file without `cube`, or null when the cube is all the file defines (no
+ * other cube, no view): the file is deleted then.
+ */
+export function removeCube(text: string, cube: string): string | null {
+  const doc = load(text);
+  const found = cubeOf(doc, cube);
+  const cubes = doc.get('cubes') as YAMLSeq;
+  cubes.items = cubes.items.filter((c) => c !== found);
+  if (!cubes.items.length) {
+    const views = doc.get('views');
+    if (!(isSeq(views) && (views as YAMLSeq).items.length)) {
+      return null;
+    }
+    doc.delete('cubes');
+  }
+  return save(doc, text);
+}

@@ -316,3 +316,28 @@ fn served_path_still_errs_on_a_template_error() {
     let r = cubemodel::ModelLoader::new().load_sources_with_policy(&sources, None);
     assert!(matches!(r, Err(cubemodel::ModelError::Template { .. })));
 }
+
+#[test]
+fn a_view_of_a_cube_that_does_not_exist_is_an_error() {
+    let source = r#"
+cubes:
+  - name: orders
+    sql_table: public.orders
+    measures:
+      - name: count
+        type: count
+views:
+  - name: sales
+    cubes:
+      - join_path: orders.gone
+        includes: "*"
+"#;
+    let err = ModelLoader::load_str(source, "sales.yml").unwrap_err();
+    let messages = err.messages();
+    assert_eq!(
+        messages.iter().filter(|m| m.ends_with("Cube gone doesn't exist")).count(),
+        1,
+        "{messages:?}"
+    );
+    assert!(!messages.iter().any(|m| m.contains("Cube orders doesn't exist")), "{messages:?}");
+}
