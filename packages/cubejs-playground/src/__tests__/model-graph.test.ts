@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  addTable, canConnect, connect, emptyDefinition, joinLabel, removeJoin, removeTable, unlinked,
+  addTable, canConnect, connect, emptyDefinition, joinLabel, removeJoin, removeTable, setPrimary, unlinked,
   updateJoin,
 } from '../pages/Schema/models/modelGraph';
 
@@ -85,5 +85,33 @@ describe('modelGraph', () => {
     def = connect(def, { alias: 'b', column: 'x' }, { alias: 'a', column: 'y' }, 'many_to_one', 'left');
     expect(unlinked(def)).toEqual(['c']);
     expect(unlinked(emptyDefinition())).toEqual([]);
+  });
+
+  it('reuses a freed alias after removal', () => {
+    let def = build(['customers', 'customers']);
+    expect(def.tables.map((t) => t.alias)).toEqual(['customers', 'customers_2']);
+    def = removeTable(def, 'customers');
+    def = addTable(def, 'ds', 'public', 'customers', 0, 0).def;
+    expect(def.tables.map((t) => t.alias).sort()).toEqual(['customers', 'customers_2']);
+  });
+
+  it('clears primaryKey when the primary changes', () => {
+    const def = { ...build(['a', 'b']), primaryKey: 'id' };
+    expect(removeTable(def, 'b').primaryKey).toBe('id');
+    const r = removeTable(def, 'a');
+    expect(r.primary).toBe('b');
+    expect(r.primaryKey).toBeNull();
+    expect(removeTable(r, 'b').primaryKey).toBeNull();
+    expect(setPrimary(def, 'a')).toBe(def);
+    expect(setPrimary(def, 'zzz')).toBe(def);
+    const s = setPrimary(def, 'b');
+    expect(s.primary).toBe('b');
+    expect(s.primaryKey).toBeNull();
+  });
+
+  it('canConnect refuses unknown aliases', () => {
+    const def = build(['a']);
+    expect(canConnect(def, { alias: 'a', column: 'x' }, { alias: 'ghost', column: 'y' })).toBe('Unknown table: ghost');
+    expect(canConnect(def, { alias: 'ghost', column: 'y' }, { alias: 'a', column: 'x' })).toBe('Unknown table: ghost');
   });
 });

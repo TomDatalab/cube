@@ -63,20 +63,32 @@ export function addTable(
 export function removeTable(def: ModelDefinition, alias: string): ModelDefinition {
   const tables = def.tables.filter((t) => t.alias !== alias);
   const joins = def.joins.filter((j) => j.from.alias !== alias && j.to.alias !== alias);
-  let { primary } = def;
-  if (primary === alias) {
-    primary = tables[0]?.alias ?? null;
+  if (def.primary !== alias) {
+    return { ...def, tables, joins };
   }
   return {
     ...def,
     dataSource: tables.length === 0 ? '' : def.dataSource,
     tables,
     joins,
-    primary,
+    primary: tables[0]?.alias ?? null,
+    primaryKey: null,
   };
 }
 
+export function setPrimary(def: ModelDefinition, alias: string): ModelDefinition {
+  if (def.primary === alias || !def.tables.some((t) => t.alias === alias)) {
+    return def;
+  }
+  return { ...def, primary: alias, primaryKey: null };
+}
+
 export function canConnect(def: ModelDefinition, from: End, to: End): string | null {
+  for (const end of [from, to]) {
+    if (!def.tables.some((t) => t.alias === end.alias)) {
+      return `Unknown table: ${end.alias}`;
+    }
+  }
   if (from.alias === to.alias) {
     return 'A table cannot link to itself';
   }
@@ -123,11 +135,20 @@ export function connect(
 export function updateJoin(
   def: ModelDefinition,
   index: number,
-  patch: Partial<ModelJoin>
+  patch: Partial<Pick<ModelJoin, 'relationship' | 'join'>>
 ): ModelDefinition {
   return {
     ...def,
-    joins: def.joins.map((j, i) => (i === index ? { ...j, ...patch } : j)),
+    joins: def.joins.map((j, i) => {
+      if (i !== index) {
+        return j;
+      }
+      return {
+        ...j,
+        relationship: patch.relationship ?? j.relationship,
+        join: patch.join ?? j.join,
+      };
+    }),
   };
 }
 
