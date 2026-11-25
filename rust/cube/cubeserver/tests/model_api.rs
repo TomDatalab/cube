@@ -1222,20 +1222,25 @@ macro_rules! build_test {
 const SOFIADB_VARS: [&str; 3] =
     ["CUBEJS_DATASOURCES", "CUBEJS_DS_SOFIADB_DB_TYPE", "CUBEJS_DS_SOFIADB_DB_URL"];
 
-/// Points the `sofiadb` data source at a database for as long as it lives.
-struct SofiadbEnv;
+/// Points the `sofiadb` data source at a database for as long as it lives,
+/// then puts back what the variables held.
+struct SofiadbEnv(Vec<Option<String>>);
 impl SofiadbEnv {
     fn point_at(url: &str) -> Self {
+        let saved = SOFIADB_VARS.iter().map(|var| std::env::var(var).ok()).collect();
         std::env::set_var(SOFIADB_VARS[0], "default,sofiadb");
         std::env::set_var(SOFIADB_VARS[1], "postgres");
         std::env::set_var(SOFIADB_VARS[2], url);
-        SofiadbEnv
+        SofiadbEnv(saved)
     }
 }
 impl Drop for SofiadbEnv {
     fn drop(&mut self) {
-        for var in SOFIADB_VARS {
-            std::env::remove_var(var);
+        for (var, saved) in SOFIADB_VARS.iter().zip(&self.0) {
+            match saved {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
         }
     }
 }
@@ -1473,4 +1478,42 @@ build_test!(deleting_the_model_keeps_the_cube, |store, url| {
     assert!(detail["cubes"].as_array().unwrap().iter().any(|c| c["name"] == "vendas"), "{detail}");
     let row = store.model_rows().await.unwrap().files.into_iter().find(|f| f.path == "vendas.yml").unwrap();
     assert_eq!(row.content, built["content"].as_str().unwrap());
+});
+
+build_test!(a_build_whose_record_was_lost_adopts_its_file, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let db = support::connect(&url).await;
+    let forget = |sql: &'static str| {
+        let db = &db;
+        let id: uuid::Uuid = id.parse().unwrap();
+        async move { db.execute(sql, &[&id]).await.unwrap() }
+    };
+
+    // The file id lost, the hash kept: the header names this model.
+    forget("UPDATE cube_models SET cube_file_id = NULL WHERE id = $1").await;
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["fileName"], "on/vendas.yml");
+
+    // Nothing recorded, as after a first build whose record failed: the
+    // file is still this model's, and only `force` overwrites it.
+    forget("UPDATE cube_models SET cube_file_id = NULL, cube_built_hash = NULL WHERE id = $1").await;
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!("O cubo foi editado desde o último build")), "{body}");
+    let (status, body) = build(&env, &token, &id, json!({ "force": true })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["fileName"], "on/vendas.yml");
+    assert_eq!(store.model_rows().await.unwrap().files.iter().filter(|f| f.organization_id == Some(on)).count(), 1);
+    // Recorded again: a plain rebuild works.
+    assert_eq!(build(&env, &token, &id, json!({})).await.0, StatusCode::OK);
+
+    // A file at the path with another model's header keeps the 409.
+    let other = new_model(&env, &token, on, "Vendas!").await;
+    let (status, body) = build(&env, &token, &other, json!({ "force": true })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "O caminho vendas.yml já é de outro arquivo; renomeie ou mova esse arquivo");
 });

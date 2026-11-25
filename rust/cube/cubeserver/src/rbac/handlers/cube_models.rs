@@ -237,11 +237,22 @@ fn sha256_hex(content: &str) -> String {
         .collect()
 }
 
+/// Whether `content` starts with the header [`cube_model::build`] writes
+/// for model `id` (the name in it may have changed since).
+fn built_from(content: &str, id: uuid::Uuid) -> bool {
+    content.lines().next().is_some_and(|line| {
+        line.starts_with("# Built from model ")
+            && line.ends_with(&format!(" ({id}): Build cube rewrites this file"))
+    })
+}
+
 /// `{force?}` → `{fileName, content, cubeName, detail}`: `admin` on the
 /// organization. Reads the columns of the model's connection, builds the
 /// cube and writes it: over the file of the last build when that file still
 /// holds what was built (or with `force`), else 409; at `<cubeName>.yml`
-/// when there is no such file. `detail` is the organization's new detail.
+/// when there is no such file. A file at that path that carries this model's
+/// header is taken as the last build's, its record lost. `detail` is the
+/// organization's new detail.
 pub async fn build(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -290,11 +301,22 @@ pub async fn build(
     let mut path = format!("{cube_name}.yml");
     writer
         .write(&actor, "build model", |rows| {
-            let built = model.cube_file_id.and_then(|file| {
-                rows.files
-                    .iter()
-                    .find(|f| f.id == file && f.organization_id == Some(org))
-            });
+            let built = model
+                .cube_file_id
+                .and_then(|file| {
+                    rows.files
+                        .iter()
+                        .find(|f| f.id == file && f.organization_id == Some(org))
+                })
+                // A build whose record was lost: the file at the path still
+                // carries this model's header.
+                .or_else(|| {
+                    rows.files.iter().find(|f| {
+                        f.organization_id == Some(org)
+                            && f.path == path
+                            && built_from(&f.content, model.id)
+                    })
+                });
             if let Some(row) = built {
                 if !force && model.cube_built_hash.as_deref() != Some(&sha256_hex(&row.content)) {
                     return Err(WriteError::new(StatusCode::CONFLICT, EDITED));
@@ -355,14 +377,14 @@ pub async fn build(
             )
         })?;
     rbac.store
-        .set_cube_model_build(model.id, &cube_name, row.id, &sha256_hex(&row.content))
+        .set_cube_model_build(model.id, &cube_name, row.id, &sha256_hex(&content))
         .await
         .map_err(model_error)?;
     let file_name = source_path(row, &slugs).unwrap_or_else(|| format!("{}/{path}", scope.slug));
     let detail = detail_of(&state, &scope).await?;
     Ok(Json(json!({
         "fileName": file_name,
-        "content": row.content,
+        "content": content,
         "cubeName": cube_name,
         "detail": detail,
     })))
