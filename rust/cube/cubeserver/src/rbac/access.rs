@@ -612,12 +612,24 @@ pub fn build(input: &AccessInput) -> AccessGraph {
             details: vec![],
         });
     }
-    // Built-in roles first (owner, editor, viewer), then by name.
-    let builtin_rank = |id: &str| match id {
-        "role:builtin:owner" => 0,
-        "role:builtin:editor" => 1,
-        "role:builtin:viewer" => 2,
+    // Default roles first (owner, editor, viewer), then by name. A rule not
+    // yet moved to its default role shows the built-in one.
+    let key_rank = |key: &str| match key {
+        "owner" => 0,
+        "editor" => 1,
+        "viewer" => 2,
         _ => 3,
+    };
+    let builtin_rank = |id: &str| {
+        if let Some(key) = id.strip_prefix("role:builtin:") {
+            return key_rank(key);
+        }
+        input
+            .roles
+            .iter()
+            .find(|r| format!("role:{}", r.id) == id)
+            .and_then(|r| r.builtin.as_deref())
+            .map_or(3, key_rank)
     };
     let mut roles: Vec<Node> = role_nodes.into_values().collect();
     roles.sort_by(|a, b| {
@@ -1571,6 +1583,39 @@ mod tests {
         );
         assert!(r.iter().all(|x| x.text == "released to Sales (as viewer)"));
         assert_eq!(node(&g, "cube:acme:v").unwrap().notes, ["view"]);
+    }
+
+    #[test]
+    fn default_roles_come_first_by_key() {
+        let mut i = input(vec![]);
+        let role = |n: u128, name: &str, builtin: Option<&str>| Role {
+            id: Uuid::from_u128(n),
+            organization_id: O,
+            builtin: builtin.map(String::from),
+            name: name.into(),
+            permissions: vec!["view".into()],
+            restrictions: Default::default(),
+            created_at: Utc::now(),
+            created_by: "x".into(),
+        };
+        i.roles = vec![
+            role(10, "Analyst", None),
+            role(11, "viewer", Some("viewer")),
+            role(12, "Admins", Some("owner")),
+        ];
+        i.rules = vec![
+            rule(3, W, None, Some(Uuid::from_u128(10))),
+            rule(4, W, None, Some(Uuid::from_u128(11))),
+            rule(5, W, None, Some(Uuid::from_u128(12))),
+        ];
+        let g = build(&i);
+        let names: Vec<_> = g
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "role")
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(names, ["Admins", "viewer", "Analyst"]);
     }
 
     #[test]

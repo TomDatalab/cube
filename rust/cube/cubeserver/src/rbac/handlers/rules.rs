@@ -1,11 +1,12 @@
 //! Rules: `/v1/rules` and `/v1/workspaces/{id}/rules`.
 //!
 //! A rule is a named role in one workspace: a description, a type (any
-//! label, e.g. `finance`) and what it grants, either a built-in role
-//! (`role`: `owner`, `editor` or `viewer`) or one its organization defines
-//! (`roleId`, see [`super::roles`]). In SpiceDB a built-in role is
-//! `workspace#<role>_rule@rule`; an organization's is `workspace#rule@rule`
-//! plus `rule#role@role`. Its members (`rule#member@user`) hold those
+//! label, e.g. `finance`) and what it grants, one of its organization's roles
+//! (`roleId`, see [`super::roles`]). `role` (`owner`, `editor` or `viewer`)
+//! names the organization's default role with that key, whatever its name.
+//! In SpiceDB a rule is `workspace#rule@rule` plus `rule#role@role`; a row
+//! not yet moved off a built-in role (`workspace#<role>_rule@rule`) is still
+//! read and removed, never written. Its members (`rule#member@user`) hold those
 //! permissions in the workspace and see its organization through
 //! `organization#rule@rule`. Managing a rule, or its members, takes `manage`
 //! on its workspace; moving it to another workspace takes `manage` on both.
@@ -24,7 +25,7 @@ use super::workspaces::{visible_workspace, workspace_ref, ROLES};
 use super::{body, caller, existing_user, resource_id, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::rbac::store::{Rule, RuleListing, RuleRole, Workspace};
+use crate::rbac::store::{Rule, RuleListing, RuleRole, RuleRoleRow, Workspace};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
 
@@ -63,7 +64,8 @@ pub(crate) fn rule_ref(id: Uuid) -> ObjectRef {
     ObjectRef::new("rule", id.to_string())
 }
 
-/// The workspace relation that gives a rule a built-in role.
+/// The workspace relation that gave a rule not yet migrated its built-in
+/// role.
 fn builtin_relation(role: &str) -> &'static str {
     match role {
         "owner" => "owner_rule",
@@ -147,8 +149,19 @@ fn builtin_role(text: &str) -> Result<&'static str, ApiError> {
         .ok_or_else(|| ApiError::bad_request("The role must be owner, editor or viewer"))
 }
 
+/// The default role of `organization` with `key`: 400 when it was deleted.
+async fn default_role(rbac: &Rbac, organization: Uuid, key: &str) -> Result<Uuid, ApiError> {
+    rbac.store
+        .default_role(organization, key)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .map(|r| r.id)
+        .ok_or_else(|| ApiError::bad_request(format!("This organization has no {key} role")))
+}
+
 /// The role a request names (`role` or `roleId`, not both), `None` when it
-/// names none. A `roleId` must be a role of `organization`.
+/// names none. A `roleId` must be a role of `organization`; a `role` names
+/// its default role with that key.
 async fn requested_role(
     rbac: &Rbac,
     role: Option<&str>,
@@ -157,7 +170,12 @@ async fn requested_role(
 ) -> Result<Option<RuleRole<'static>>, ApiError> {
     match (role, role_id) {
         (Some(_), Some(_)) => Err(ApiError::bad_request("Give role or roleId, not both")),
-        (Some(r), None) => Ok(Some(RuleRole::Builtin(builtin_role(r)?))),
+        (Some(r), None) => {
+            let key = builtin_role(r)?;
+            Ok(Some(RuleRole::Custom(
+                default_role(rbac, organization, key).await?,
+            )))
+        }
         (None, Some(id)) => {
             let id: Uuid = id
                 .parse()
@@ -189,22 +207,29 @@ fn optional_uuid(id: Option<&str>, name: &str) -> Result<Option<Uuid>, ApiError>
 
 fn view(listing: &RuleListing) -> Value {
     let rule = &listing.rule;
-    let (role_name, permissions): (String, Vec<String>) = match (&rule.role, &listing.custom_role) {
-        (Some(r), _) => (
-            r.clone(),
-            builtin_permissions(r)
-                .iter()
-                .map(|p| p.to_string())
-                .collect(),
-        ),
-        (None, Some((name, perms))) => (name.clone(), perms.clone()),
-        (None, None) => (String::new(), vec![]),
-    };
+    let (key, role_name, permissions): (Option<String>, String, Vec<String>) =
+        match (&listing.role, &rule.role) {
+            (Some(role), _) => (
+                role.builtin.clone(),
+                role.name.clone(),
+                role.permissions.clone(),
+            ),
+            // Not yet migrated: the built-in role's fixed permissions.
+            (None, Some(r)) => (
+                Some(r.clone()),
+                r.clone(),
+                builtin_permissions(r)
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect(),
+            ),
+            (None, None) => (None, String::new(), vec![]),
+        };
     json!({
         "id": rule.id,
         "description": rule.description,
         "type": rule.r#type,
-        "role": rule.role,
+        "role": key,
         "roleId": rule.role_id,
         "roleName": role_name,
         "permissions": permissions,
@@ -217,20 +242,20 @@ fn view(listing: &RuleListing) -> Value {
     })
 }
 
-/// `rule` with the names of its workspace, organization and custom role.
+/// `rule` with the names of its workspace, organization and role.
 async fn listing(rbac: &Rbac, rule: Rule, ws: &Workspace) -> Result<RuleListing, ApiError> {
     let org = rbac
         .store
         .organization(ws.organization_id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let custom_role = match rule.role_id {
+    let role = match rule.role_id {
         Some(id) => rbac
             .store
             .role(id)
             .await
             .map_err(|e| store_error(e, "Conflict"))?
-            .map(|r| (r.name, r.permissions)),
+            .map(RuleRoleRow::from),
         None => None,
     };
     Ok(RuleListing {
@@ -238,7 +263,7 @@ async fn listing(rbac: &Rbac, rule: Rule, ws: &Workspace) -> Result<RuleListing,
         workspace_name: ws.name.clone(),
         organization_id: ws.organization_id,
         organization_name: org.map(|o| o.name).unwrap_or_default(),
-        custom_role,
+        role,
     })
 }
 
@@ -378,8 +403,9 @@ pub async fn get(
 
 /// `{description?, type?, role? | roleId?, workspaceId?}`: `manage` on the
 /// workspace, and on the new one when `workspaceId` moves the rule. Its
-/// members come along. A rule with an organization's role moves to another
-/// organization only with a role of that one.
+/// members come along. A rule with a default role moves to another
+/// organization's default role with the same key; one with another role
+/// moves only with a role of the new organization.
 pub async fn update(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -413,17 +439,7 @@ pub async fn update(
     .await?
     {
         Some(role) => role,
-        None if matches!(current, RuleRole::Custom(_))
-            && to.organization_id != from.organization_id =>
-        {
-            return Err(ApiError::bad_request(
-                "The rule's role belongs to its organization: give a role of the new one",
-            ));
-        }
-        None => match current {
-            RuleRole::Builtin(r) => RuleRole::Builtin(builtin_role(r)?),
-            RuleRole::Custom(id) => RuleRole::Custom(id),
-        },
+        None => kept_role(rbac, current, &from, &to).await?,
     };
 
     // Only what changes, as one atomic write: SpiceDB refuses the same
@@ -461,6 +477,43 @@ pub async fn update(
         .map_err(authz_error)?;
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
     Ok(Json(view(&listing(rbac, updated, &to).await?)))
+}
+
+/// The role a rule keeps when an update names none, in `to`'s organization:
+/// its own, or there the default role with its key. A rule not yet moved
+/// off a built-in role moves to its default role now.
+async fn kept_role(
+    rbac: &Rbac,
+    current: RuleRole<'_>,
+    from: &Workspace,
+    to: &Workspace,
+) -> Result<RuleRole<'static>, ApiError> {
+    let id = match current {
+        RuleRole::Builtin(r) => {
+            let key = builtin_role(r)?;
+            return Ok(RuleRole::Custom(
+                default_role(rbac, to.organization_id, key).await?,
+            ));
+        }
+        RuleRole::Custom(id) if to.organization_id == from.organization_id => {
+            return Ok(RuleRole::Custom(id))
+        }
+        RuleRole::Custom(id) => id,
+    };
+    let key = rbac
+        .store
+        .role(id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .and_then(|r| r.builtin);
+    match key {
+        Some(key) => Ok(RuleRole::Custom(
+            default_role(rbac, to.organization_id, &key).await?,
+        )),
+        None => Err(ApiError::bad_request(
+            "The rule's role belongs to its organization: give a role of the new one",
+        )),
+    }
 }
 
 /// `manage` on the workspace. The row goes only after SpiceDB forgot the

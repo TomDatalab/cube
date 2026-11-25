@@ -193,7 +193,10 @@ pub struct Rule {
     pub created_by: String,
 }
 
-/// What a rule grants: a built-in role or one of its organization's.
+/// What a rule grants: one of its organization's roles. `Builtin` is a row
+/// not yet moved to its organization's default role by
+/// [`crate::rbac::default_roles`]: it is still read and removed, but the API
+/// never writes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleRole<'a> {
     Builtin(&'a str),
@@ -227,8 +230,28 @@ pub struct RuleListing {
     pub workspace_name: String,
     pub organization_id: Uuid,
     pub organization_name: String,
-    /// The name and permissions of its custom role, if it has one.
-    pub custom_role: Option<(String, Vec<String>)>,
+    /// Its role of the organization, if it has one (a rule not yet moved
+    /// off a built-in role has none).
+    pub role: Option<RuleRoleRow>,
+}
+
+/// What a rule's answer shows of its role.
+#[derive(Debug, Clone)]
+pub struct RuleRoleRow {
+    pub name: String,
+    pub permissions: Vec<String>,
+    /// The key of a default role, `None` for any other.
+    pub builtin: Option<String>,
+}
+
+impl From<Role> for RuleRoleRow {
+    fn from(role: Role) -> Self {
+        Self {
+            name: role.name,
+            permissions: role.permissions,
+            builtin: role.builtin,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -418,11 +441,16 @@ fn rule_from(r: &Row) -> Rule {
     }
 }
 
-/// `(name, permissions)` at columns `at` and `at + 1`, `None` when NULL.
-fn custom_role(r: &Row, at: usize) -> Option<(String, Vec<String>)> {
+/// The role's name, permissions and key at columns `at` to `at + 2`, `None`
+/// when the rule has no role row.
+fn rule_role_row(r: &Row, at: usize) -> Option<RuleRoleRow> {
     let name: Option<String> = r.get(at);
     let permissions: Option<Vec<String>> = r.get(at + 1);
-    name.zip(permissions)
+    name.zip(permissions).map(|(name, permissions)| RuleRoleRow {
+        name,
+        permissions,
+        builtin: r.get(at + 2),
+    })
 }
 
 /// A stored `restrictions` that does not parse is an error, never "no
@@ -1648,7 +1676,7 @@ impl Store {
              AND ($4::uuid IS NULL OR w.id = $4)";
         let sql = format!(
             "SELECT r.id, r.workspace_id, r.description, r.type, r.role, r.role_id, \
-             r.created_at, r.created_by, w.name, o.id, o.name, ro.name, ro.permissions {FROM} \
+             r.created_at, r.created_by, w.name, o.id, o.name, ro.name, ro.permissions, ro.builtin {FROM} \
              ORDER BY o.name, o.id, w.name, w.id, r.description, r.id LIMIT $5 OFFSET $6"
         );
         let items = c
@@ -1670,7 +1698,7 @@ impl Store {
                 workspace_name: r.get(8),
                 organization_id: r.get(9),
                 organization_name: r.get(10),
-                custom_role: custom_role(r, 11),
+                role: rule_role_row(r, 11),
             })
             .collect();
         let total = c

@@ -5512,12 +5512,13 @@ db_test!(
             "{graph}"
         );
 
-        // A rule turns from the custom role to a built-in one and back.
+        // A rule turns from the custom role to the default editor and back.
+        let editor = default_role_id(env, &s.ana, &s.org_a, "editor").await;
         let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "role": "editor" })).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             (body["role"].as_str(), body["roleId"].as_str()),
-            (Some("editor"), None)
+            (Some("editor"), Some(editor.as_str()))
         );
         assert_eq!(objects_status(env, &s.bia, &w1).await, StatusCode::OK);
         let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "roleId": role })).await;
@@ -5617,7 +5618,13 @@ db_test!(organization_roles_stay_in_their_organization, |store| {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{list}");
-    assert_eq!(list["roles"][0]["rules"], 1, "{list}");
+    let r = list["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(role_b))
+        .unwrap_or_else(|| panic!("{list}"));
+    assert_eq!(r["rules"], 1, "{list}");
     let (status, _) = send(
         &env.router,
         Method::GET,
@@ -5699,6 +5706,295 @@ db_test!(roles_validate_and_cannot_be_deleted_while_in_use, |store| {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+});
+
+// ---- default roles ----
+
+async fn list_roles(env: &Env, token: &str, org: &str) -> Vec<Value> {
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/organizations/{org}/roles"),
+        Some(token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    list["roles"].as_array().unwrap().clone()
+}
+
+/// The id of the organization's default role with `key`.
+async fn default_role_id(env: &Env, token: &str, org: &str, key: &str) -> String {
+    let roles = list_roles(env, token, org).await;
+    roles
+        .iter()
+        .find(|r| r["builtin"] == key)
+        .unwrap_or_else(|| panic!("no default {key} role: {roles:?}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn rule_relationships(env: &Env, ws: &str) -> Vec<Relationship> {
+    env.authz
+        .read(&RelationshipFilter {
+            kind: "workspace",
+            id: Some(ws.to_string()),
+            relation: None,
+            subject: None,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.subject.kind == "rule")
+        .collect()
+}
+
+db_test!(a_rule_created_with_a_builtin_key_uses_the_default_role, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let editor = default_role_id(env, &s.ana, &s.org_a, "editor").await;
+
+    let (status, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "Editors", "type": "t", "role": "editor" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rule}");
+    assert_eq!(rule["role"], "editor");
+    assert_eq!(rule["roleId"], json!(editor));
+    assert_eq!(rule["roleName"], "editor");
+    assert_eq!(
+        rule["permissions"],
+        json!(["view", "query", "read_objects", "write_objects"])
+    );
+    let id = rule["id"].as_str().unwrap().to_string();
+
+    // Placed as a role of the organization, never as a built-in relation.
+    let rels = rule_relationships(env, &w1).await;
+    assert_eq!(rels.len(), 1, "{rels:?}");
+    assert_eq!(rels[0].relation, "rule");
+    assert_eq!(rels[0].subject.id, id);
+    let role_of_rule = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "rule",
+            id: Some(id.clone()),
+            relation: Some("role"),
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(role_of_rule.len(), 1, "{role_of_rule:?}");
+    assert_eq!(role_of_rule[0].subject.id, editor);
+
+    // Reading it again gives the same answer.
+    let (status, got) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/rules/{id}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(
+        (got["role"].as_str(), got["roleId"].as_str()),
+        (Some("editor"), Some(editor.as_str()))
+    );
+
+    // Its members hold what an editor held.
+    rule_member(env, &s.ana, Method::PUT, &id, "bia").await;
+    assert_eq!(objects_status(env, &s.bia, &w1).await, StatusCode::OK);
+    let (status, body) = create_object(env, &s.bia, &w1, pipeline("p", "{}")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::FORBIDDEN);
+
+    // Changing the key moves it to another default role.
+    let owner = default_role_id(env, &s.ana, &s.org_a, "owner").await;
+    let (status, body) = patch_rule(env, &s.ana, &id, json!({ "role": "owner" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (body["role"].as_str(), body["roleId"].as_str()),
+        (Some("owner"), Some(owner.as_str()))
+    );
+    assert_eq!(rename_status(env, &s.bia, &w1).await, StatusCode::OK);
+    let rels = rule_relationships(env, &w1).await;
+    assert_eq!(rels.len(), 1, "{rels:?}");
+    assert_eq!(rels[0].relation, "rule");
+});
+
+db_test!(the_key_still_resolves_after_the_default_role_is_renamed, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let viewer = default_role_id(env, &s.ana, &s.org_a, "viewer").await;
+    let (status, renamed) = patch_role(env, &s.ana, &viewer, json!({ "name": "Readers" })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["builtin"], "viewer");
+
+    let (status, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "x", "type": "t", "role": "viewer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rule}");
+    assert_eq!(rule["role"], "viewer");
+    assert_eq!(rule["roleId"], json!(viewer));
+    assert_eq!(rule["roleName"], "Readers");
+    assert_eq!(rule["permissions"], json!(["view", "query", "read_objects"]));
+});
+
+db_test!(
+    a_default_role_in_use_cannot_be_deleted_and_once_deleted_its_key_is_400,
+    |store| {
+        let s = scenario(store).await;
+        let env = &s.env;
+        let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+        let owner = default_role_id(env, &s.ana, &s.org_a, "owner").await;
+        let (_, rule) = create_rule(
+            env,
+            &s.ana,
+            &w1,
+            json!({ "description": "x", "type": "t", "role": "owner" }),
+        )
+        .await;
+        let rule = rule["id"].as_str().unwrap().to_string();
+        let role_path = format!("/cube/v1/roles/{owner}");
+        let delete_role = || send(&env.router, Method::DELETE, &role_path, Some(&s.ana), None);
+        assert_eq!(delete_role().await.0, StatusCode::CONFLICT);
+
+        // Moved off it, the default role goes.
+        let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "role": "viewer" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(delete_role().await.0, StatusCode::NO_CONTENT);
+
+        let (status, body) = create_rule(
+            env,
+            &s.ana,
+            &w1,
+            json!({ "description": "y", "type": "t", "role": "owner" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "This organization has no owner role");
+        let (status, body) = patch_rule(env, &s.ana, &rule, json!({ "role": "owner" })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "This organization has no owner role");
+        // An unknown key keeps its own answer.
+        let (status, body) = create_rule(
+            env,
+            &s.ana,
+            &w1,
+            json!({ "description": "y", "type": "t", "role": "admin" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "The role must be owner, editor or viewer");
+    }
+);
+
+db_test!(editing_the_default_viewer_changes_what_its_rules_grant, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let viewer = default_role_id(env, &s.ana, &s.org_a, "viewer").await;
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "x", "type": "t", "role": "viewer" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    rule_member(env, &s.ana, Method::PUT, &rule, "bia").await;
+    assert_eq!(objects_status(env, &s.bia, &w1).await, StatusCode::OK);
+    let (status, _) = create_object(env, &s.bia, &w1, pipeline("p", "{}")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, edited) = patch_role(
+        env,
+        &s.ana,
+        &viewer,
+        json!({ "permissions": ["write_objects"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["rules"], 1);
+    let (status, body) = create_object(env, &s.bia, &w1, pipeline("p", "{}")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // The rule shows the role's permissions, not fixed ones.
+    let (_, got) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(
+        got["permissions"],
+        json!(["view", "read_objects", "write_objects"])
+    );
+    assert_eq!(got["role"], "viewer");
+
+    let (status, _) = patch_role(env, &s.ana, &viewer, json!({ "permissions": ["view"] })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        objects_status(env, &s.bia, &w1).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(workspace_status(env, &s.bia, &w1).await, StatusCode::OK);
+});
+
+db_test!(roles_list_marks_default_roles, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let (status, analyst) = create_role(
+        env,
+        &s.ana,
+        &s.org_a,
+        json!({ "name": "Analyst", "permissions": ["query"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{analyst}");
+    assert_eq!(analyst["builtin"], Value::Null);
+
+    let roles = list_roles(env, &s.ana, &s.org_a).await;
+    let mut marks: Vec<(String, Value)> = roles
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap().to_string(), r["builtin"].clone()))
+        .collect();
+    marks.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        marks,
+        vec![
+            ("Analyst".to_string(), Value::Null),
+            ("editor".to_string(), json!("editor")),
+            ("owner".to_string(), json!("owner")),
+            ("viewer".to_string(), json!("viewer")),
+        ]
+    );
+    let owner = default_role_id(env, &s.ana, &s.org_a, "owner").await;
+    let (status, got) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/roles/{owner}"),
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got["builtin"], "owner");
+    assert_eq!(
+        got["permissions"],
+        json!(["view", "query", "read_objects", "write_objects", "execute", "manage"])
+    );
 });
 
 async fn set_attributes(env: &Env, token: &str, user: &str, body: Value) -> (StatusCode, Value) {

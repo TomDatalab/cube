@@ -6,7 +6,9 @@
 //! `role#can_<permission>@user:*`, and a rule with the role gives its members
 //! `member & role->can_<permission>` in its workspace: editing a role changes
 //! the access of every rule that uses it at once. The organization's admins
-//! manage its roles; anyone who views the organization lists them.
+//! manage its roles; anyone who views the organization lists them. Its
+//! default roles carry `builtin`, the key (`owner`, `editor`, `viewer`) a
+//! rule's `role` names them by; they are edited and deleted like any other.
 
 use std::collections::BTreeSet;
 
@@ -38,7 +40,7 @@ pub const PERMISSIONS: [&str; 6] = [
 ];
 
 /// The permissions of the built-in roles of a rule, as a role would grant
-/// them.
+/// them: what a rule not yet moved to its default role shows.
 pub(crate) fn builtin_permissions(role: &str) -> &'static [&'static str] {
     let viewer = DEFAULT_ROLES[2];
     DEFAULT_ROLES
@@ -152,6 +154,7 @@ fn view(role: &Role, rules: i64) -> Value {
         "name": role.name,
         "permissions": role.permissions,
         "restrictions": role.restrictions,
+        "builtin": role.builtin,
         "rules": rules,
         "createdAt": role.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "createdBy": role.created_by,
