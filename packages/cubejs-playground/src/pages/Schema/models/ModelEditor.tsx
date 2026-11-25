@@ -574,6 +574,8 @@ function Editor({
             onEdgeClick={onEdgeClick}
             deleteKeyCode={null}
             fitView
+            // A model of one or two tables would otherwise open at 2x.
+            fitViewOptions={{ maxZoom: 1 }}
           >
             <Background />
             <Controls showInteractive={false} />
