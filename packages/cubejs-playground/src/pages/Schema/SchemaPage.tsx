@@ -1,8 +1,12 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Layout, Modal, Empty, Typography, Input, Tooltip, Button, Spin, message } from 'antd';
 import type { DataNode } from 'antd/lib/tree';
-import { RouterProps } from 'react-router-dom';
-import { Workflow } from 'lucide-react';
+import { Prompt, RouterProps } from 'react-router-dom';
+import { Plus, Workflow } from 'lucide-react';
+import { toast } from 'sonner';
+
+import { Button as UiButton } from '@/components/ui/button';
+import { EmptyState } from '@/components/kit';
 
 import { playgroundAction } from '../../events';
 import { Menu, Tree } from '../../components';
@@ -25,6 +29,9 @@ import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
 import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
 import { useOpenBlock } from './useOpenBlock';
+import { ModelEditor } from './models/ModelEditor';
+import { emptyDefinition } from './models/modelGraph';
+import { NameDialog } from '../Admin/NameDialog';
 import {
   OrgDetail,
   OrgSummary,
@@ -71,6 +78,55 @@ function TreeTitle({ node }: { node: DataNode }) {
     </span>
   );
 }
+const LEAVE_MODEL = 'This model has changes not saved. Leave without saving?';
+
+// The right panel for an organization's "Models" node: its models, each
+// opening its editor, and "New model". Models need an organization (an id).
+function ModelList({
+  orgName, models, canCreate, onOpen, onNew,
+}: {
+  orgName: string;
+  models: NonNullable<OrgDetail['models']>;
+  canCreate: boolean;
+  onOpen: (id: string) => void;
+  onNew: () => void;
+}) {
+  return (
+    <div data-testid="model-list" className="tw:flex tw:flex-col tw:gap-3">
+      <div className="tw:flex tw:items-center tw:justify-between tw:gap-3">
+        <h4 className="tw:m-0 tw:text-lg tw:font-medium">{`Models of ${orgName} (${models.length})`}</h4>
+        <UiButton
+          disabled={!canCreate}
+          title={canCreate ? undefined : 'Models belong to an organization'}
+          onClick={onNew}
+        >
+          <Plus />
+          New model
+        </UiButton>
+      </div>
+      {models.length === 0 ? (
+        <EmptyState>No models yet: a model joins tables into one cube</EmptyState>
+      ) : (
+        <ul className="tw:m-0 tw:list-none tw:divide-y tw:rounded-md tw:border tw:p-0">
+          {models.map((m) => (
+            <li key={m.id}>
+              <button
+                type="button"
+                data-slot="model-list-item"
+                className="tw:flex tw:w-full tw:cursor-pointer tw:items-center tw:justify-between tw:gap-3 tw:border-0 tw:bg-transparent tw:px-3 tw:py-2 tw:text-left tw:text-sm tw:text-foreground tw:hover:bg-accent"
+                onClick={() => onOpen(m.id)}
+              >
+                <span className="tw:truncate">{m.name}</span>
+                <span className="tw:text-muted-foreground">{m.cubeName ? `cube ${m.cubeName}` : 'not built yet'}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS = 2;
 
@@ -206,6 +262,10 @@ export function SchemaPage({ history }: RouterProps) {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [shown, setShown] = useState(false);
+  // The open model's editor has changes not saved.
+  const [modelDirty, setModelDirty] = useState(false);
+  // The organization "New model" asks a name for.
+  const [newModelIn, setNewModelIn] = useState<string | null>(null);
 
   // The organizations the lists returned, by slug.
   const known = useRef<Record<string, OrgSummary>>({});
@@ -524,6 +584,45 @@ export function SchemaPage({ history }: RouterProps) {
     });
   };
 
+  // Selects a node; leaving a model with changes not saved asks first. It
+  // reads refs: the toast after a build calls it later.
+  const dirtyRef = useRef(false);
+  dirtyRef.current = modelDirty;
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selectedKey;
+  const select = (key: string | null): boolean => {
+    // eslint-disable-next-line no-alert
+    if (dirtyRef.current && key !== selectedRef.current && !window.confirm(LEAVE_MODEL)) {
+      return false;
+    }
+    if (key !== selectedRef.current) {
+      setModelDirty(false);
+    }
+    setSelectedKey(key);
+    return true;
+  };
+
+  const openUnder = (slug: string, group: 'cubes' | 'models', key: string) => {
+    if (select(key)) {
+      setExpandedKeys((keys) => Array.from(new Set([...keys, `org:${slug}`, `org:${slug}:${group}`])));
+    }
+  };
+
+  const createModel = async (slug: string, name: string) => {
+    const org = known.current[slug] ?? { slug, name: slug };
+    const created = await api.createModel(org, name, emptyDefinition());
+    await loadDetail(slug, true);
+    openUnder(slug, 'models', `model:${slug}:${created.id}`);
+  };
+
+  const afterBuild = async (slug: string, cubeName: string) => {
+    await loadDetail(slug, true);
+    refreshOrgs();
+    toast.success(`Cube ${cubeName} built`, {
+      action: { label: 'Open cube', onClick: () => openUnder(slug, 'cubes', `cube:${slug}:${cubeName}`) },
+    });
+  };
+
   const afterFileChange = (slug: string, others: string[] = []) => {
     [slug, ...others].forEach((s) => {
       if (details[s]) {
@@ -611,6 +710,41 @@ export function SchemaPage({ history }: RouterProps) {
             setExpandedKeys((keys) => Array.from(new Set([...keys, orgKey, `${orgKey}:${group}`])));
             setSelectedKey(`cube:${selected.slug}:${name}`);
           }}
+        />
+      );
+    }
+
+    if (selected.kind === 'models') {
+      if (!detail) {
+        return <CubeLoader />;
+      }
+      const org = known.current[selected.slug];
+      return (
+        <ModelList
+          orgName={org?.name ?? selected.slug}
+          models={detail.models || []}
+          canCreate={Boolean(org?.id)}
+          onOpen={(id) => openUnder(selected.slug, 'models', `model:${selected.slug}:${id}`)}
+          onNew={() => setNewModelIn(selected.slug)}
+        />
+      );
+    }
+
+    if (selected.kind === 'model') {
+      const org = known.current[selected.slug];
+      if (!detail || !org || !selected.rest) {
+        return <CubeLoader />;
+      }
+      return (
+        <ModelEditor
+          key={selected.rest}
+          api={api}
+          org={org}
+          modelId={selected.rest}
+          tables={detail.tables || {}}
+          onBuilt={(cubeName) => afterBuild(selected.slug, cubeName)}
+          onSaved={() => loadDetail(selected.slug, true)}
+          onDirtyChange={setModelDirty}
         />
       );
     }
@@ -795,7 +929,9 @@ export function SchemaPage({ history }: RouterProps) {
             loadMore();
             return;
           }
-          setSelectedKey(key);
+          if (!select(key)) {
+            return;
+          }
           if (key && parseKey(key).kind === 'org') {
             loadDetail(parseKey(key).slug);
           }
@@ -858,6 +994,12 @@ export function SchemaPage({ history }: RouterProps) {
       <Content style={{ minHeight: 280, padding: 24 }}>
         {renderContent()}
       </Content>
+      <Prompt when={modelDirty} message={LEAVE_MODEL} />
+      <NameDialog
+        title={newModelIn ? 'New model' : null}
+        onSubmit={({ name }) => createModel(newModelIn!, name)}
+        onClose={() => setNewModelIn(null)}
+      />
     </Layout>
   );
 }
