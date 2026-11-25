@@ -5825,6 +5825,22 @@ db_test!(a_rule_created_with_a_builtin_key_uses_the_default_role, |store| {
     let rels = rule_relationships(env, &w1).await;
     assert_eq!(rels.len(), 1, "{rels:?}");
     assert_eq!(rels[0].relation, "rule");
+    // Only the owner role: the editor one is gone.
+    let role_of_rule = env
+        .authz
+        .read(&RelationshipFilter {
+            kind: "rule",
+            id: Some(id.clone()),
+            relation: Some("role"),
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(role_of_rule.len(), 1, "{role_of_rule:?}");
+    assert_eq!(
+        (role_of_rule[0].subject.kind, role_of_rule[0].subject.id.as_str()),
+        ("role", owner.as_str())
+    );
 });
 
 db_test!(the_key_still_resolves_after_the_default_role_is_renamed, |store| {
@@ -5848,6 +5864,70 @@ db_test!(the_key_still_resolves_after_the_default_role_is_renamed, |store| {
     assert_eq!(rule["roleId"], json!(viewer));
     assert_eq!(rule["roleName"], "Readers");
     assert_eq!(rule["permissions"], json!(["view", "query", "read_objects"]));
+
+    // Searching by the key still finds it.
+    let (status, list) = send(
+        &env.router,
+        Method::GET,
+        "/cube/v1/rules?q=viewer",
+        Some(&s.ana),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["rules"][0]["id"], rule["id"]);
+});
+
+db_test!(a_rule_moved_to_another_organization_takes_its_default_role, |store| {
+    let s = scenario(store).await;
+    let env = &s.env;
+    let w1 = workspace_id(env, &s.ana, &s.org_a, "W1").await;
+    let org_b = create_org(env, &s.admin, "B", "caio").await;
+    let wb = workspace_id(env, &s.admin, &org_b, "WB").await;
+    let org_c = create_org(env, &s.admin, "C", "caio").await;
+    let wc = workspace_id(env, &s.admin, &org_c, "WC").await;
+    let editor_b = default_role_id(env, &s.admin, &org_b, "editor").await;
+    let editor_c = default_role_id(env, &s.admin, &org_c, "editor").await;
+
+    let (_, rule) = create_rule(
+        env,
+        &s.ana,
+        &w1,
+        json!({ "description": "Ops", "type": "Ops", "role": "editor" }),
+    )
+    .await;
+    let rule = rule["id"].as_str().unwrap().to_string();
+    let (status, moved) = patch_rule(env, &s.admin, &rule, json!({ "workspaceId": wb })).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(
+        (moved["role"].as_str(), moved["roleId"].as_str()),
+        (Some("editor"), Some(editor_b.as_str()))
+    );
+
+    // Without a default editor in C, the move is refused.
+    let (status, _) = send(
+        &env.router,
+        Method::DELETE,
+        &format!("/cube/v1/roles/{editor_c}"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = patch_rule(env, &s.admin, &rule, json!({ "workspaceId": wc })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "This organization has no editor role");
+    let (_, got) = send(
+        &env.router,
+        Method::GET,
+        &format!("/cube/v1/rules/{rule}"),
+        Some(&s.admin),
+        None,
+    )
+    .await;
+    assert_eq!(got["workspaceId"], json!(wb));
+    assert_eq!(got["roleId"], json!(editor_b));
 });
 
 db_test!(

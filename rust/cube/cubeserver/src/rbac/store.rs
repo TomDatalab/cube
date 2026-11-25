@@ -1669,6 +1669,7 @@ impl Store {
              WHERE ($1::text IS NULL OR r.description ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR r.type ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR coalesce(r.role, ro.name) ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR ro.builtin ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR w.name ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR o.name ILIKE '%' || $1 || '%' ESCAPE '\\') \
              AND ($2::uuid[] IS NULL OR w.id = ANY($2)) \
