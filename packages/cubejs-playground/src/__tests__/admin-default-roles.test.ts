@@ -191,6 +191,22 @@ describe('default roles in the Playground', () => {
       expect(api.updateRule).not.toHaveBeenCalled();
     });
 
+    it('stops loading and shows an empty list when the roles fail to load', async () => {
+      const api = makeApi();
+      api.roles.mockRejectedValue(new Error('boom'));
+      await render(api);
+      await click(document.querySelector('[aria-label="Edit Finance readers"]')!);
+      await flush();
+      expect(document.querySelector('.ant-modal .ant-select-arrow-loading')).toBeNull();
+      expect(document.querySelector('.ant-modal .ant-select-loading')).toBeNull();
+      // The list is empty: no organization role is offered.
+      await act(async () => {
+        document.querySelector('.ant-modal .ant-select-selector')!
+          .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      });
+      expect(document.body.textContent).not.toContain('Editors');
+    });
+
     it('shows the rule\'s role name, not its id, while the roles load', async () => {
       const api = makeApi();
       api.roles.mockReturnValue(new Promise(() => {}));

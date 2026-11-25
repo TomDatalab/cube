@@ -60,7 +60,6 @@ export function RulesTab({ api }: Props) {
       const loaded = await api.roles(org);
       if (isMounted() && request === rolesRequest.current) {
         setOrgRoles(loaded);
-        setRolesLoaded(true);
         // A role of another organization does not carry over.
         const role = form.getFieldValue('role');
         if (!role || !loaded.some((r) => r.id === role)) {
@@ -71,6 +70,11 @@ export function RulesTab({ api }: Props) {
       }
     } catch (e: any) {
       message.error(e.message);
+    } finally {
+      // Also after a failure, so the Select stops spinning on an empty list.
+      if (isMounted() && request === rolesRequest.current) {
+        setRolesLoaded(true);
+      }
     }
   }
 

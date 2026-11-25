@@ -14,9 +14,9 @@ pub const MARKER: &str = "default_roles";
 /// Who the audit columns name for what the migration creates.
 pub const CREATED_BY: &str = "system";
 
-/// Seeds the default roles of every organization and moves the built-in
-/// rules onto them, unless the marker says it was done. Returns how many
-/// rules it moved.
+/// Seeds the default roles of every organization, unless the marker says it
+/// was done, and moves the built-in rules onto them (on every start: an old
+/// binary may have written one since). Returns how many rules it moved.
 ///
 /// Every step is idempotent and ordered so a crash anywhere is repaired by
 /// the next start: the new relationships are written before the old one is
@@ -26,13 +26,12 @@ pub async fn migrate_default_roles(store: &Store, authz: &dyn Authz) -> Result<u
         .migration_applied(MARKER)
         .await
         .map_err(|e| format!("Cannot read the migration marker {MARKER}: {e}"))?;
-    if applied {
-        return Ok(0);
-    }
     let spicedb = |e| format!("Cannot write the default roles to SpiceDB (SPICEDB_ENDPOINT): {e}");
     let db = |e| format!("{MARKER}: cannot read or write the roles and rules: {e}");
 
-    for org in store.organization_ids().await.map_err(db)? {
+    // Seeding runs once: a default role deleted later is not created again.
+    let orgs = if applied { Vec::new() } else { store.organization_ids().await.map_err(db)? };
+    for org in orgs {
         let roles = store.seed_default_roles(org, CREATED_BY).await.map_err(db)?;
         for role in &roles {
             let grants = wildcard_grants(role.id, &role.permissions);
@@ -52,11 +51,19 @@ pub async fn migrate_default_roles(store: &Store, authz: &dyn Authz) -> Result<u
         let Some(key) = rule.role.as_deref() else {
             continue;
         };
-        let role = store
+        let Some(role) = store
             .default_role(org, key)
             .await
             .map_err(db)?
-            .ok_or_else(|| format!("{MARKER}: organization {org} has no {key} role"))?;
+        else {
+            // The role was deleted: the rule keeps working through the
+            // schema's `*_rule` relations, so it stays as it is.
+            tracing::warn!(
+                "{MARKER}: rule {} keeps its built-in {key} role: organization {org} has no {key} role",
+                rule.id
+            );
+            continue;
+        };
         let new = [
             Relationship {
                 resource: workspace_ref(rule.workspace_id),
@@ -100,10 +107,14 @@ pub async fn migrate_default_roles(store: &Store, authz: &dyn Authz) -> Result<u
         moved += 1;
     }
 
-    store
-        .record_migration(MARKER)
-        .await
-        .map_err(|e| format!("Cannot record the migration marker {MARKER}: {e}"))?;
-    tracing::info!("{MARKER}: {moved} rules moved to their organization's default roles");
+    if !applied {
+        store
+            .record_migration(MARKER)
+            .await
+            .map_err(|e| format!("Cannot record the migration marker {MARKER}: {e}"))?;
+    }
+    if !applied || moved > 0 {
+        tracing::info!("{MARKER}: {moved} rules moved to their organization's default roles");
+    }
     Ok(moved)
 }

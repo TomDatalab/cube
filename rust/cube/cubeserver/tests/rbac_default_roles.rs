@@ -175,3 +175,37 @@ db_test!(a_rerun_after_spicedb_moved_but_the_row_did_not_finishes_the_move, |sto
     assert!(can(&authz, ws, "query").await);
     assert!(!can(&authz, ws, "write_objects").await);
 });
+
+db_test!(a_builtin_rule_written_after_the_marker_is_moved_on_the_next_run, |store| {
+    let authz = FakeAuthz::new();
+    assert_eq!(migrate_default_roles(&store, &authz).await.unwrap(), 0);
+    assert!(store.migration_applied(MARKER).await.unwrap());
+    // An old binary writes a built-in rule after the marker was recorded, in
+    // an organization that already has its default roles.
+    let (org, ws, rule) = old_rule(&store, &authz, "editor").await;
+    let roles = store.seed_default_roles(org, "system").await.unwrap();
+    let editor = roles.iter().find(|r| r.builtin.as_deref() == Some("editor")).unwrap();
+
+    assert_eq!(migrate_default_roles(&store, &authz).await.unwrap(), 1);
+
+    let r = store.rule(rule).await.unwrap().unwrap();
+    assert_eq!((r.role_id, r.role), (Some(editor.id), None));
+    let rels = all(&authz).await.join("\n");
+    assert!(!rels.contains("_rule"), "{rels}");
+    assert!(rels.contains(&editor.id.to_string()), "{rels}");
+    let _ = ws;
+});
+
+db_test!(a_deleted_default_role_is_neither_recreated_nor_an_error, |store| {
+    let authz = FakeAuthz::new();
+    let (org, ws, rule) = old_rule(&store, &authz, "viewer").await;
+    store.seed_default_roles(org, "system").await.unwrap();
+    store.delete_role(store.default_role(org, "viewer").await.unwrap().unwrap().id).await.unwrap();
+    store.record_migration(MARKER).await.unwrap();
+
+    assert_eq!(migrate_default_roles(&store, &authz).await.unwrap(), 0);
+
+    assert!(store.default_role(org, "viewer").await.unwrap().is_none());
+    assert_eq!(store.rule(rule).await.unwrap().unwrap().role.as_deref(), Some("viewer"));
+    assert!(can(&authz, ws, "query").await);
+});
