@@ -32,27 +32,41 @@ const SYNC_MESSAGE: &str = "Este arquivo é gerado a partir do catálogo do Sofi
 const TEMPLATE_MESSAGE: &str = "Arquivos .jinja e .j2 não são editáveis aqui";
 
 /// Whose files a route serves.
-struct Scope {
-    organization: Option<Uuid>,
-    slug: String,
+pub(crate) struct Scope {
+    pub(crate) organization: Option<Uuid>,
+    pub(crate) slug: String,
     /// The caller owns the organization without being a platform admin:
     /// nothing returned may reveal another organization's files.
-    owner_only: bool,
+    pub(crate) owner_only: bool,
 }
 
 /// `e` as `owner_only` callers may see it.
-fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> WriteError {
+pub(crate) fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> WriteError {
     if owner_only && !e.problems.is_empty() {
         e.problems = redact(&e.problems, &e.problems, slug, &e.defs);
     }
     e
 }
 
-async fn detail_of(state: &AppState, scope: &Scope) -> Result<Value, ApiError> {
-    org_detail_for(state, &scope.slug, scope.owner_only).await
+/// The node's detail; an organization's also lists its models
+/// (`models: [{id, name, cubeName}]`, by name).
+pub(crate) async fn detail_of(state: &AppState, scope: &Scope) -> Result<Value, ApiError> {
+    let mut detail = org_detail_for(state, &scope.slug, scope.owner_only).await?;
+    if let Some(org) = scope.organization {
+        let models: Vec<Value> = super::rbac_of(state)?
+            .store
+            .cube_models_of(org)
+            .await
+            .map_err(|e| store_error(e, "Conflict"))?
+            .iter()
+            .map(|m| json!({ "id": m.id, "name": m.name, "cubeName": m.cube_name }))
+            .collect();
+        detail["models"] = json!(models);
+    }
+    Ok(detail)
 }
 
-fn writer(state: &AppState) -> Result<Arc<ModelWriter>, ApiError> {
+pub(crate) fn writer(state: &AppState) -> Result<Arc<ModelWriter>, ApiError> {
     state
         .model_writer
         .clone()
@@ -86,7 +100,8 @@ fn check_editable(file: &ModelFile) -> Result<(), WriteError> {
     ))
 }
 
-async fn org_scope(
+/// The organization `id` as its admins reach it, and the caller's username.
+pub(crate) async fn org_scope(
     state: &AppState,
     ctx: &RequestContext,
     id: &str,

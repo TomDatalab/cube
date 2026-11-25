@@ -92,6 +92,27 @@ export const SECTIONS: Section[] = [
       {
         method: 'POST', path: '/v1/organizations/:id/model/generate', summary: 'Generate cubes from tables of the organization\'s connections', who: 'org owner', body: { tables: [['public', 'orders']] },
       },
+      { method: 'GET', path: '/v1/organizations/:id/cube-models', summary: 'An organization\'s models (tables joined on a canvas, built into one cube)', who: 'org owner' },
+      {
+        method: 'POST',
+        path: '/v1/organizations/:id/cube-models',
+        summary: 'Create a model',
+        who: 'org owner',
+        body: {
+          name: 'Orders',
+          definition: {
+            dataSource: 'default', tables: [{ alias: 'orders', schema: 'public', table: 'orders', x: 0, y: 0 }], primary: 'orders', primaryKey: 'id', joins: [],
+          },
+        },
+      },
+      { method: 'GET', path: '/v1/cube-models/:id', summary: 'One model', who: 'org owner' },
+      {
+        method: 'PUT', path: '/v1/cube-models/:id', summary: 'Rename a model or change its tables and links (with the version read)', who: 'org owner', body: { name: 'Orders', version: 1 },
+      },
+      { method: 'DELETE', path: '/v1/cube-models/:id', summary: 'Delete a model; its cube file stays', who: 'org owner', query: '?version=1' },
+      {
+        method: 'POST', path: '/v1/cube-models/:id/build', summary: 'Build the model into its cube file (force: over a file edited by hand)', who: 'org owner', body: { force: false },
+      },
       { method: 'GET', path: '/v1/platform/model', summary: 'The Platform\'s files, cubes and problems', who: 'platform admin' },
       { method: 'GET', path: '/v1/platform/model/files/:file', summary: 'One Platform file', who: 'platform admin' },
       {

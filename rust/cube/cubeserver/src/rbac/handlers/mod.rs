@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod connections;
+pub mod cube_models;
 pub mod groups;
 pub mod model;
 pub mod objects;
@@ -179,6 +180,20 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/organizations/:id/model/generate"),
             post(model::org_generate),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/cube-models"),
+            get(cube_models::list).post(cube_models::create),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id"),
+            get(cube_models::get)
+                .put(cube_models::update)
+                .delete(cube_models::delete),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/build"),
+            post(cube_models::build),
         )
         .route(
             &format!("{base}/v1/platform/model/generate"),
