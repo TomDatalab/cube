@@ -23,7 +23,7 @@ const detail = {
 describe('organization tree helpers', () => {
   it('detailNodes returns Cubes, Views, Tables and Files with counts', () => {
     const nodes = detailNodes('digital', detail);
-    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Views (0)', 'Models (0)', 'Tables (2)', 'Files (2)']);
+    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Models (0)', 'Views (0)', 'Tables (2)', 'Files (2)']);
   });
 
   it('detailNodes puts views under Views and cubes under Cubes', () => {
@@ -36,8 +36,8 @@ describe('organization tree helpers', () => {
     };
     const nodes = detailNodes('digital', { ...detail, cubes: [...detail.cubes, view] });
     expect(nodes[0].children!.map((c) => c.key)).toEqual(['cube:digital:dfos_fibercable']);
-    expect(nodes[1].key).toBe('org:digital:views');
-    expect(nodes[1].children!.map((c) => c.key)).toEqual(['cube:digital:network']);
+    expect(nodes[2].key).toBe('org:digital:views');
+    expect(nodes[2].children!.map((c) => c.key)).toEqual(['cube:digital:network']);
   });
 
   it('filterTree keeps matches and their ancestors', () => {
@@ -184,15 +184,15 @@ describe('loadedTreeKeys', () => {
 });
 
 describe('models in the tree', () => {
-  it('detailNodes adds a Models group after Views with a leaf per model', () => {
+  it('detailNodes adds a Models group directly after Cubes with a leaf per model', () => {
     const nodes = detailNodes('acme', { ...detail, models: [{ id: 'm1', name: 'Sales' }] });
-    expect(nodes[2].key).toBe('org:acme:models');
-    expect(nodes[2].title).toBe('Models (1)');
-    expect(nodes[2].children!.map((c) => [c.key, c.title])).toEqual([['model:acme:m1', 'Sales']]);
+    expect(nodes[1].key).toBe('org:acme:models');
+    expect(nodes[1].title).toBe('Models (1)');
+    expect(nodes[1].children!.map((c) => [c.key, c.title])).toEqual([['model:acme:m1', 'Sales']]);
   });
 
   it('detailNodes shows Models (0) without models', () => {
-    expect(detailNodes('acme', detail)[2].title).toBe('Models (0)');
+    expect(detailNodes('acme', detail)[1].title).toBe('Models (0)');
   });
 
   it('parseKey reads model and models keys', () => {

@@ -103,7 +103,6 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
 
   return [
     group('cubes', 'Cubes', 'cube'),
-    group('views', 'Views', 'view'),
     {
       key: `org:${slug}:models`,
       title: `Models (${(d.models || []).length})`,
@@ -115,6 +114,7 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
         checkable: false,
       })),
     },
+    group('views', 'Views', 'view'),
     {
       key: `tables:${slug}`,
       title: `Tables (${tableCount})`,
