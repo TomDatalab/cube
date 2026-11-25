@@ -726,7 +726,7 @@ mod q {
 
     /// Inserts the default roles the organization lacks and returns all
     /// three. A default role takes its key as name, or `<key> (default)`
-    /// when a role of that name exists.
+    /// when a role of that name exists, then `<key> (default 2)`, ...
     pub async fn seed_default_roles(
         c: &tokio_postgres::Client,
         organization_id: Uuid,
@@ -741,18 +741,23 @@ mod q {
                 out.push(role_from(&row)?);
                 continue;
             }
-            let taken = c
+            let mut name = key.to_string();
+            let mut n = 1;
+            while c
                 .query_opt(
                     "SELECT 1 FROM roles WHERE organization_id = $1 AND name = $2",
-                    &[&organization_id, &key],
+                    &[&organization_id, &name],
                 )
                 .await?
-                .is_some();
-            let name = if taken {
-                format!("{key} (default)")
-            } else {
-                key.to_string()
-            };
+                .is_some()
+            {
+                n += 1;
+                name = if n == 2 {
+                    format!("{key} (default)")
+                } else {
+                    format!("{key} (default {})", n - 1)
+                };
+            }
             let perms: Vec<String> = perms.iter().map(|p| p.to_string()).collect();
             let restrictions = restrictions_json(&Restrictions::default())?;
             let sql = format!(

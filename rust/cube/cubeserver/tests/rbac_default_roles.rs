@@ -94,30 +94,31 @@ macro_rules! db_test {
 }
 
 db_test!(a_builtin_rule_moves_to_the_default_role_and_keeps_its_permissions, |store| {
-    // (key, manage, write_objects, query)
-    let cases = [
-        ("owner", true, true, true),
-        ("editor", false, true, true),
-        ("viewer", false, false, true),
+    // Per key: the permissions it holds among those checked below.
+    const CHECKED: [&str; 6] = ["view", "query", "read_objects", "write_objects", "execute", "manage"];
+    let cases: [(&str, &[&str]); 3] = [
+        ("owner", &CHECKED),
+        ("editor", &["view", "query", "read_objects", "write_objects"]),
+        ("viewer", &["view", "query", "read_objects"]),
     ];
     let authz = FakeAuthz::new();
     let mut made = Vec::new();
-    for (key, manage, write, query) in cases {
+    for (key, held) in cases {
         let (org, ws, rule) = old_rule(&store, &authz, key).await;
-        assert_eq!(can(&authz, ws, "manage").await, manage, "{key} before");
-        assert_eq!(can(&authz, ws, "write_objects").await, write, "{key} before");
-        assert_eq!(can(&authz, ws, "query").await, query, "{key} before");
-        made.push((key, org, ws, rule, manage, write, query));
+        for p in CHECKED {
+            assert_eq!(can(&authz, ws, p).await, held.contains(&p), "{key} before {p}");
+        }
+        made.push((key, org, ws, rule, held));
     }
 
     assert_eq!(migrate_default_roles(&store, &authz).await.unwrap(), 3);
 
     let rels = all(&authz).await.join("\n");
     assert!(!rels.contains("_rule"), "{rels}");
-    for (key, org, ws, rule, manage, write, query) in made {
-        assert_eq!(can(&authz, ws, "manage").await, manage, "{key} after");
-        assert_eq!(can(&authz, ws, "write_objects").await, write, "{key} after");
-        assert_eq!(can(&authz, ws, "query").await, query, "{key} after");
+    for (key, org, ws, rule, held) in made {
+        for p in CHECKED {
+            assert_eq!(can(&authz, ws, p).await, held.contains(&p), "{key} after {p}");
+        }
 
         let role = store.default_role(org, key).await.unwrap().unwrap();
         let moved = store.rule(rule).await.unwrap().unwrap();

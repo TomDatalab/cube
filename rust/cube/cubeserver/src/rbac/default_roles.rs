@@ -79,18 +79,24 @@ pub async fn migrate_default_roles(store: &Store, authz: &dyn Authz) -> Result<u
             subject: rule_ref(rule.id),
         };
         authz.touch(&new).await.map_err(spicedb)?;
+        tracing::info!(
+            "{MARKER}: workspace:{}#rule@rule:{} and rule:{}#role@role:{} written ({key})",
+            rule.workspace_id,
+            rule.id,
+            rule.id,
+            role.id
+        );
         authz
             .delete(std::slice::from_ref(&old))
             .await
             .map_err(spicedb)?;
-        store.set_rule_role_id(rule.id, role.id).await.map_err(db)?;
         tracing::info!(
-            "{MARKER}: rule:{} workspace:{}#{}@rule -> workspace#rule + rule#role@role:{} ({key})",
-            rule.id,
+            "{MARKER}: workspace:{}#{}@rule:{} deleted",
             rule.workspace_id,
             old.relation,
-            role.id
+            rule.id
         );
+        store.set_rule_role_id(rule.id, role.id).await.map_err(db)?;
         moved += 1;
     }
 

@@ -1310,6 +1310,23 @@ db_test!(
     }
 );
 
+db_test!(seeding_finds_a_free_name_when_default_names_are_taken, |store, _url| {
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
+    for name in ["viewer", "viewer (default)", "viewer (default 2)"] {
+        store
+            .create_role(o.id, name, &["view".into()], &Restrictions::default(), "ann")
+            .await
+            .unwrap();
+    }
+    let roles = store.seed_default_roles(o.id, "ann").await.unwrap();
+    let viewer = roles
+        .iter()
+        .find(|r| r.builtin.as_deref() == Some("viewer"))
+        .unwrap();
+    assert_eq!(viewer.name, "viewer (default 3)");
+});
+
 db_test!(default_role_is_found_by_key_after_a_rename, |store, _url| {
     store.create_user(&user("ann")).await.unwrap();
     let o = store.create_organization("o", "o", "ann").await.unwrap();
