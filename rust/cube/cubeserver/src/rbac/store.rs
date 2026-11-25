@@ -189,6 +189,23 @@ pub struct Group {
     pub created_by: String,
 }
 
+/// A model: a canvas of joined tables built into one Cube YAML cube.
+#[derive(Debug, Clone)]
+pub struct CubeModel {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub definition: serde_json::Value,
+    pub cube_name: Option<String>,
+    pub cube_file_id: Option<Uuid>,
+    pub cube_built_hash: Option<String>,
+    pub version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub created_by: String,
+    pub updated_by: String,
+}
+
 /// A group with the name of its organization.
 #[derive(Debug, Clone)]
 pub struct GroupListing {
@@ -454,6 +471,26 @@ fn group_from(r: &Row) -> Group {
         name: r.get(2),
         created_at: r.get(3),
         created_by: r.get(4),
+    }
+}
+
+const CUBE_MODEL_COLS: &str = "id, organization_id, name, definition, cube_name, cube_file_id, \
+     cube_built_hash, version, created_at, updated_at, created_by, updated_by";
+
+fn cube_model_from(r: &Row) -> CubeModel {
+    CubeModel {
+        id: r.get(0),
+        organization_id: r.get(1),
+        name: r.get(2),
+        definition: r.get(3),
+        cube_name: r.get(4),
+        cube_file_id: r.get(5),
+        cube_built_hash: r.get(6),
+        version: r.get(7),
+        created_at: r.get(8),
+        updated_at: r.get(9),
+        created_by: r.get(10),
+        updated_by: r.get(11),
     }
 }
 
@@ -1976,6 +2013,115 @@ impl Store {
                 }
             }
         }
+    }
+
+    pub async fn cube_models_of(&self, organization_id: Uuid) -> Result<Vec<CubeModel>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "SELECT {CUBE_MODEL_COLS} FROM cube_models WHERE organization_id = $1 ORDER BY name, id"
+        );
+        Ok(c.query(&sql, &[&organization_id]).await?.iter().map(cube_model_from).collect())
+    }
+
+    pub async fn cube_model(&self, id: Uuid) -> Result<Option<CubeModel>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {CUBE_MODEL_COLS} FROM cube_models WHERE id = $1");
+        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(cube_model_from))
+    }
+
+    /// A name already used in the organization is `Conflict`.
+    pub async fn create_cube_model(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+        definition: &serde_json::Value,
+        actor: &str,
+    ) -> Result<CubeModel, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "INSERT INTO cube_models (id, organization_id, name, definition, created_by, updated_by) \
+             VALUES ($1, $2, $3, $4, $5, $5) RETURNING {CUBE_MODEL_COLS}"
+        );
+        let row = c
+            .query_one(&sql, &[&Uuid::new_v4(), &organization_id, &name, definition, &actor])
+            .await?;
+        Ok(cube_model_from(&row))
+    }
+
+    /// Optimistic update like `update_object`: `Conflict` on a stale
+    /// version (or a name taken), `NotFound` when the model does not exist.
+    /// `None` fields are kept.
+    pub async fn update_cube_model(
+        &self,
+        id: Uuid,
+        name: Option<&str>,
+        definition: Option<&serde_json::Value>,
+        expected_version: i32,
+        actor: &str,
+    ) -> Result<CubeModel, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "UPDATE cube_models SET name = COALESCE($3, name), \
+             definition = COALESCE($4, definition), version = version + 1, \
+             updated_at = now(), updated_by = $5 \
+             WHERE id = $1 AND version = $2 RETURNING {CUBE_MODEL_COLS}"
+        );
+        match c
+            .query_opt(&sql, &[&id, &expected_version, &name, &definition, &actor])
+            .await?
+        {
+            Some(r) => Ok(cube_model_from(&r)),
+            None => Err(self.cube_model_miss(&c, id).await?),
+        }
+    }
+
+    /// Records the last build. The version is not bumped.
+    pub async fn set_cube_model_build(
+        &self,
+        id: Uuid,
+        cube_name: &str,
+        file_id: Uuid,
+        hash: &str,
+    ) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        let n = c
+            .execute(
+                "UPDATE cube_models SET cube_name = $2, cube_file_id = $3, cube_built_hash = $4 \
+                 WHERE id = $1",
+                &[&id, &cube_name, &file_id, &hash],
+            )
+            .await?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// `Conflict` on a stale version, `NotFound` when it does not exist.
+    pub async fn delete_cube_model(&self, id: Uuid, expected_version: i32) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        let n = c
+            .execute(
+                "DELETE FROM cube_models WHERE id = $1 AND version = $2",
+                &[&id, &expected_version],
+            )
+            .await?;
+        if n == 0 {
+            return Err(self.cube_model_miss(&c, id).await?);
+        }
+        Ok(())
+    }
+
+    async fn cube_model_miss(&self, c: &Object, id: Uuid) -> Result<StoreError, StoreError> {
+        let exists = c
+            .query_opt("SELECT 1 FROM cube_models WHERE id = $1", &[&id])
+            .await?
+            .is_some();
+        Ok(if exists {
+            StoreError::Conflict("stale model version".into())
+        } else {
+            StoreError::NotFound
+        })
     }
 
     pub async fn delete_object(&self, id: Uuid) -> Result<bool, StoreError> {

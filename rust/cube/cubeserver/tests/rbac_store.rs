@@ -1393,3 +1393,57 @@ db_test!(a_reboot_keeps_rules_with_an_organization_role, |store, url| {
     assert_eq!(kept.role_id, Some(viewer.id));
     assert!(kept.role.is_none());
 });
+
+db_test!(cube_models_crud, |store, _url| {
+    use serde_json::json;
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
+    let def = json!({"tables": [], "joins": []});
+    let m = store.create_cube_model(o.id, "sales", &def, "ann").await.unwrap();
+    assert_eq!((m.version, m.definition.clone()), (1, def.clone()));
+    assert!(m.cube_name.is_none() && m.cube_file_id.is_none() && m.cube_built_hash.is_none());
+    assert!(matches!(
+        store.create_cube_model(o.id, "sales", &def, "ann").await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(store.cube_models_of(o.id).await.unwrap().len(), 1);
+
+    let def2 = json!({"tables": [1]});
+    let u = store
+        .update_cube_model(m.id, Some("sales2"), Some(&def2), 1, "bob")
+        .await
+        .unwrap();
+    assert_eq!((u.version, u.name.as_str(), u.updated_by.as_str()), (2, "sales2", "bob"));
+    assert_eq!(u.definition, def2);
+    assert!(matches!(
+        store.update_cube_model(m.id, None, None, 1, "bob").await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        store.update_cube_model(Uuid::new_v4(), None, None, 1, "bob").await,
+        Err(StoreError::NotFound)
+    ));
+
+    let f = Uuid::new_v4();
+    store.set_cube_model_build(m.id, "sales_cube", f, "h1").await.unwrap();
+    let b = store.cube_model(m.id).await.unwrap().unwrap();
+    assert_eq!(b.version, 2);
+    assert_eq!(b.cube_name.as_deref(), Some("sales_cube"));
+    assert_eq!(b.cube_file_id, Some(f));
+    assert_eq!(b.cube_built_hash.as_deref(), Some("h1"));
+
+    assert!(matches!(
+        store.delete_cube_model(m.id, 1).await,
+        Err(StoreError::Conflict(_))
+    ));
+    store.delete_cube_model(m.id, 2).await.unwrap();
+    assert!(store.cube_model(m.id).await.unwrap().is_none());
+    assert!(matches!(
+        store.delete_cube_model(m.id, 2).await,
+        Err(StoreError::NotFound)
+    ));
+
+    let m2 = store.create_cube_model(o.id, "again", &def, "ann").await.unwrap();
+    assert!(store.delete_organization(o.id).await.unwrap());
+    assert!(store.cube_model(m2.id).await.unwrap().is_none());
+});

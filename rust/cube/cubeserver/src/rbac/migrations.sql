@@ -245,3 +245,21 @@ CREATE TABLE IF NOT EXISTS groups (
     created_by text NOT NULL,
     UNIQUE (organization_id, name)
 );
+
+-- A model: a canvas of joined tables (`definition`) built into one Cube YAML
+-- cube. `cube_*` record the last build; they do not bump `version`.
+CREATE TABLE IF NOT EXISTS cube_models (
+    id uuid PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations (id) ON DELETE CASCADE,
+    name text NOT NULL,
+    definition jsonb NOT NULL,
+    cube_name text,
+    cube_file_id uuid,
+    cube_built_hash text,
+    version int NOT NULL DEFAULT 1,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    updated_by text NOT NULL,
+    UNIQUE (organization_id, name)
+);
