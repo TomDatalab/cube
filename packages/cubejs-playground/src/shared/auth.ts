@@ -184,6 +184,22 @@ export function chooseWorkspace(id: string | null, reload = () => window.locatio
   }
 }
 
+// Switch to `scope` (an organization of `null`/`_platform`: the Platform),
+// then run `then` (a navigation), then reload like `chooseWorkspace`, so the
+// page `then` opened starts over in the new scope.
+export function switchScope(
+  scope: { workspace: string | null; organization: string | null },
+  then: () => void,
+  reload = () => window.location.reload()
+) {
+  const organization = scope.organization === PLATFORM_SCOPE ? null : scope.organization;
+  const survives = setScope(scope.workspace, scope.workspace ? null : organization);
+  then();
+  if (survives) {
+    reload();
+  }
+}
+
 // Switch to an organization's model (`null` or `_platform`: the Platform),
 // clearing the workspace; reloads like `chooseWorkspace`.
 export function chooseOrganizationScope(

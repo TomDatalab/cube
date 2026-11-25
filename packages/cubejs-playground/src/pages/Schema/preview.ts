@@ -44,6 +44,53 @@ export function previewHeaders({ isAdmin, slug, workspace }: {
   return workspace ? { 'X-Cube-Workspace': workspace } : null;
 }
 
+const PLATFORM = '_platform';
+
+/**
+ * The workspace an owner queries a cube of an organization in: the one chosen
+ * in the header when it is of that organization, else its first one; null
+ * when it has none. While its workspaces load (null), the chosen one.
+ */
+export function orgWorkspace(
+  chosen: string | null,
+  workspaces: { id: string }[] | null
+): string | null {
+  if (workspaces === null) {
+    return chosen;
+  }
+  if (chosen && workspaces.some((w) => w.id === chosen)) {
+    return chosen;
+  }
+  return workspaces[0]?.id ?? null;
+}
+
+/**
+ * The header scope "Open in Playground" moves to, so the query reaches the
+ * model of the cube's organization (`slug`), or null when the current one
+ * already does: a platform admin in a workspace of it or in its model, an
+ * owner in one of its workspaces. An owner of an organization without
+ * workspaces stays (the button is disabled then).
+ */
+export function openScope({ isAdmin, slug, workspace, organization, workspaces }: {
+  isAdmin: boolean;
+  slug: string;
+  workspace: string | null;
+  organization: string | null;
+  workspaces: { id: string }[];
+}): { workspace: string | null; organization: string | null } | null {
+  const inOrg = Boolean(workspace && workspaces.some((w) => w.id === workspace));
+  if (isAdmin) {
+    if (inOrg || (!workspace && (organization ?? PLATFORM) === slug)) {
+      return null;
+    }
+    return { workspace: null, organization: slug === PLATFORM ? null : slug };
+  }
+  if (inOrg || !workspaces.length) {
+    return null;
+  }
+  return { workspace: workspaces[0].id, organization: null };
+}
+
 const WAIT_TRIES = 30;
 
 /**

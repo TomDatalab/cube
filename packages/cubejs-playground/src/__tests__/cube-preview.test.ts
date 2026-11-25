@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  formatValue, isNumeric, loadRows, previewHeaders, previewQueries,
+  formatValue, isNumeric, loadRows, openScope, orgWorkspace, previewHeaders, previewQueries,
 } from '../pages/Schema/preview';
 
 const cube = {
@@ -47,6 +47,50 @@ describe('previewHeaders', () => {
   it('queries an owner in the chosen workspace, and says so when none is', () => {
     expect(previewHeaders({ isAdmin: false, slug: 'bossa', workspace: 'w1' })).toEqual({ 'X-Cube-Workspace': 'w1' });
     expect(previewHeaders({ isAdmin: false, slug: 'bossa', workspace: null })).toBeNull();
+  });
+});
+
+describe('orgWorkspace', () => {
+  const bossa = [{ id: 'wb1' }, { id: 'wb2' }];
+
+  it('keeps the chosen workspace when it is one of the organization', () => {
+    expect(orgWorkspace('wb2', bossa)).toBe('wb2');
+  });
+
+  it('falls back to a workspace of the organization when the chosen one is of another', () => {
+    expect(orgWorkspace('w-on', bossa)).toBe('wb1');
+    expect(orgWorkspace(null, bossa)).toBe('wb1');
+  });
+
+  it('has none when the organization has no workspace, and keeps the choice while they load', () => {
+    expect(orgWorkspace('w-on', [])).toBeNull();
+    expect(orgWorkspace('w-on', null)).toBe('w-on');
+  });
+});
+
+describe('openScope', () => {
+  const bossa = [{ id: 'wb1' }];
+
+  it('moves an admin to the organization of the cube when the header is elsewhere', () => {
+    expect(openScope({ isAdmin: true, slug: 'bossa', workspace: 'w-on', organization: null, workspaces: bossa }))
+      .toEqual({ workspace: null, organization: 'bossa' });
+    expect(openScope({ isAdmin: true, slug: 'bossa', workspace: null, organization: 'on', workspaces: bossa }))
+      .toEqual({ workspace: null, organization: 'bossa' });
+    expect(openScope({ isAdmin: true, slug: '_platform', workspace: null, organization: 'on', workspaces: [] }))
+      .toEqual({ workspace: null, organization: null });
+  });
+
+  it('leaves an admin already in the organization, by its scope or one of its workspaces', () => {
+    expect(openScope({ isAdmin: true, slug: 'bossa', workspace: null, organization: 'bossa', workspaces: bossa })).toBeNull();
+    expect(openScope({ isAdmin: true, slug: 'bossa', workspace: 'wb1', organization: null, workspaces: bossa })).toBeNull();
+    expect(openScope({ isAdmin: true, slug: '_platform', workspace: null, organization: null, workspaces: [] })).toBeNull();
+  });
+
+  it('moves an owner to a workspace of the organization', () => {
+    expect(openScope({ isAdmin: false, slug: 'bossa', workspace: 'w-on', organization: null, workspaces: bossa }))
+      .toEqual({ workspace: 'wb1', organization: null });
+    expect(openScope({ isAdmin: false, slug: 'bossa', workspace: 'wb1', organization: null, workspaces: bossa })).toBeNull();
+    expect(openScope({ isAdmin: false, slug: 'bossa', workspace: 'w-on', organization: null, workspaces: [] })).toBeNull();
   });
 });
 

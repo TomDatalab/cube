@@ -12,7 +12,7 @@ export function useOpenBlock(
   org: OrgNode | undefined,
   owner: boolean,
   cube: TreeCube
-): OpenBlock {
+): OpenBlock & { workspaces: { id: string; name: string }[] | null } {
   const chosen = useWorkspace();
   const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[] | null>(null);
   const [released, setReleased] = useState<string[] | null>(null);
@@ -48,5 +48,9 @@ export function useOpenBlock(
   }, [api, chosen, workspaces]);
 
   // Unknown workspaces (still loading, or failed) block nothing.
-  return openBlock(cube, { owner: owner && workspaces !== null, workspaces: workspaces ?? [], chosen, released });
+  return {
+    ...openBlock(cube, { owner: owner && workspaces !== null, workspaces: workspaces ?? [], chosen, released }),
+    // The organization's workspaces, null while unknown.
+    workspaces,
+  };
 }

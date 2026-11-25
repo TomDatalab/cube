@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   authHeaders, chooseOrganizationScope, getOrganizationScope, getSession, getWorkspace, login, logout,
-  setWorkspace, workspaceHeaders,
+  setWorkspace, switchScope, workspaceHeaders,
 } from '../shared/auth';
 
 function answer(status: number, body: unknown) {
@@ -123,6 +123,19 @@ describe('Playground login', () => {
     chooseOrganizationScope('acme', () => {});
     expect(getWorkspace()).toBeNull();
     expect(workspaceHeaders()).toEqual({ 'X-Cube-Organization': 'acme' });
+  });
+
+  it('switchScope moves the scope, navigates, then reloads', () => {
+    setWorkspace('ws-on');
+    const calls: string[] = [];
+    switchScope({ workspace: null, organization: 'bossa' }, () => {
+      calls.push(`go ${JSON.stringify(workspaceHeaders())}`);
+    }, () => calls.push('reload'));
+    expect(calls).toEqual(['go {"X-Cube-Organization":"bossa"}', 'reload']);
+    switchScope({ workspace: null, organization: '_platform' }, () => {}, () => {});
+    expect(workspaceHeaders()).toEqual({});
+    switchScope({ workspace: 'ws-b', organization: null }, () => {}, () => {});
+    expect(workspaceHeaders()).toEqual({ 'X-Cube-Workspace': 'ws-b' });
   });
 
   it('forgets the workspace on log out and on a new login', async () => {

@@ -8,15 +8,15 @@ import { Menu, Tree } from '../../components';
 import { Alert, CubeLoader } from '../../atoms';
 import { AppContext } from '../../components/AppContext';
 import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
-import { useRbac, useWorkspace } from '../../hooks';
-import { authHeaders, onUnauthorized } from '../../shared/auth';
+import { useOrganizationScope, useRbac, useWorkspace } from '../../hooks';
+import { authHeaders, onUnauthorized, switchScope } from '../../shared/auth';
 import { SchemaFormat } from '../../types';
 import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
 import { CubeChange, CubeDetail } from './CubeDetail';
 import { cubeEditBlock, cubeFileOf } from './cubeEdit';
-import { loadRows, previewHeaders, PreviewQuery } from './preview';
+import { loadRows, openScope, orgWorkspace, previewHeaders, PreviewQuery } from './preview';
 import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
 import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
@@ -90,8 +90,24 @@ function CubePanel({
   const open = useOpenBlock(api, org, owner, cube);
   // The preview queries with the user's own access: an admin in the cube's
   // organization, an owner in the workspace chosen in the header.
-  const workspace = useWorkspace();
+  // The header may be in another organization: an owner queries in a
+  // workspace of the cube's own (the chosen one when it is of it).
+  const chosen = useWorkspace();
+  const organization = useOrganizationScope();
+  const workspace = orgWorkspace(chosen, open.workspaces);
   const scope = org ? previewHeaders({ isAdmin: !owner, slug: org.slug, workspace }) : null;
+  // "Open in Playground" runs in the header's scope: move it to the cube's
+  // organization first, or the query reaches a model without the cube.
+  const openHere = () => {
+    const next = org && openScope({
+      isAdmin: !owner, slug: org.slug, workspace: chosen, organization, workspaces: open.workspaces ?? [],
+    });
+    if (next) {
+      switchScope(next, onOpen);
+    } else {
+      onOpen();
+    }
+  };
   let previewBlock: string | null = null;
   if (!scope) {
     previewBlock = 'Choose a workspace in the header to preview this cube';
@@ -126,7 +142,7 @@ function CubePanel({
       cube={cube}
       errors={errors}
       open={open}
-      onOpen={onOpen}
+      onOpen={openHere}
       editBlock={editBlock}
       onEdit={onEdit}
       preview={{
