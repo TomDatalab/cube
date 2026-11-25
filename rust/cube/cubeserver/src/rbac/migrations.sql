@@ -72,9 +72,20 @@ CREATE INDEX IF NOT EXISTS rules_workspace_idx ON rules (workspace_id);
 
 -- Rules from before `role` existed had the role in `type`, restricted to the
 -- three roles: it becomes their role, and `type` any label.
+-- Only before `role_id` exists: once it does, a rule with an organization's
+-- role has no `role`, and filling it would break `rules_one_role` (and with
+-- it every boot).
 ALTER TABLE rules ADD COLUMN IF NOT EXISTS role text;
-UPDATE rules SET role = type WHERE role IS NULL;
-ALTER TABLE rules ALTER COLUMN role SET NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'rules' AND column_name = 'role_id'
+    ) THEN
+        UPDATE rules SET role = type WHERE role IS NULL;
+        ALTER TABLE rules ALTER COLUMN role SET NOT NULL;
+    END IF;
+END $$;
 ALTER TABLE rules DROP CONSTRAINT IF EXISTS rules_type_check;
 DO $$
 BEGIN

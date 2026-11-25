@@ -1371,3 +1371,25 @@ db_test!(a_rule_moves_from_its_builtin_role_to_a_role_id, |store, _url| {
     assert!(moved.role.is_none());
     assert!(store.rules_with_builtin_role().await.unwrap().is_empty());
 });
+
+// Every boot runs the migrations again: a rule with an organization's role
+// (no `role`) must not be filled from `type`, which broke the boot.
+db_test!(a_reboot_keeps_rules_with_an_organization_role, |store, url| {
+    use cubeserver::rbac::store::RuleRole;
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
+    let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
+    let roles = store.seed_default_roles(o.id, "ann").await.unwrap();
+    let viewer = roles.iter().find(|r| r.builtin.as_deref() == Some("viewer")).unwrap();
+    let rule = store
+        .create_rule(w.id, "d", "Testing", RuleRole::Custom(viewer.id), "ann")
+        .await
+        .unwrap();
+    drop(store);
+    let again = cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1)
+        .await
+        .expect("the migrations run again");
+    let kept = again.rule(rule.id).await.unwrap().unwrap();
+    assert_eq!(kept.role_id, Some(viewer.id));
+    assert!(kept.role.is_none());
+});
