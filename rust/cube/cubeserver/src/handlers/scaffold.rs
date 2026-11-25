@@ -471,7 +471,7 @@ fn cube_yaml(
 
 /// Cube's type for a raw database type, or `None` for one it has no type for
 /// (arrays, maps, JSON, ...), which is left out.
-fn cube_type(raw: &str) -> Option<&'static str> {
+pub(crate) fn cube_type(raw: &str) -> Option<&'static str> {
     let mut t = raw.trim().to_ascii_lowercase();
     // ClickHouse wrappers that do not change what the value is.
     for wrapper in ["nullable(", "lowcardinality("] {
@@ -527,7 +527,7 @@ fn cube_type(raw: &str) -> Option<&'static str> {
 /// Quotes an identifier the way its database expects. Always: the name is
 /// exactly as the database reported it, and left bare it could be a reserved
 /// word (`order`) or fold to another case (Snowflake, Oracle).
-fn quote(db_type: &str, ident: &str) -> String {
+pub(crate) fn quote(db_type: &str, ident: &str) -> String {
     match db_type {
         // A backtick inside is doubled...
         "mysql" | "databricks-jdbc" => format!("`{}`", ident.replace('`', "``")),
@@ -540,7 +540,7 @@ fn quote(db_type: &str, ident: &str) -> String {
 }
 
 /// `fiberCableId` → `fiber_cable_id`, matching the SofiaDB sync's names.
-fn snake(name: &str) -> String {
+pub(crate) fn snake(name: &str) -> String {
     let mut out = String::new();
     let mut prev: Option<char> = None;
     for c in name.chars() {
