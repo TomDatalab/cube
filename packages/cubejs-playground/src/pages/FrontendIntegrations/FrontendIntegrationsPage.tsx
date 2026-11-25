@@ -57,7 +57,7 @@ export function FrontendIntegrationsPage() {
   return (
     <Layout>
       <Header>
-        <Title>Frontend Integrations</Title>
+        <Title>API</Title>
       </Header>
 
       <Content>

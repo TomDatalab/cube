@@ -1,7 +1,7 @@
 // With RBAC on, `playground/context` hands out no token (`authRequired`):
 // a user logs in, and the token goes on every request after. Platform admins
 // see the whole Playground; anyone else gets the query builder and the
-// Frontend Integrations page, scoped to a workspace they pick.
+// API page, scoped to a workspace they pick.
 // Both live in sessionStorage, so they end with the tab.
 
 const STORAGE_KEY = 'cubePlaygroundSession';

@@ -66,7 +66,7 @@ describe('Sidebar', () => {
     rbac = ADMIN;
     render();
 
-    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'Frontend Integrations']);
+    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'API']);
     expect(host.textContent).toContain('Administração');
     expect(group()?.getAttribute('aria-expanded')).toBe('false');
   });
@@ -98,7 +98,7 @@ describe('Sidebar', () => {
     rbac = USER;
     render();
 
-    expect(labels()).toEqual(['Playground', 'Frontend Integrations']);
+    expect(labels()).toEqual(['Playground', 'API']);
     expect(host.textContent).not.toContain('Administração');
     expect(group()).toBeNull();
   });
@@ -107,7 +107,7 @@ describe('Sidebar', () => {
     rbac = NO_RBAC;
     render();
 
-    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'Frontend Integrations']);
+    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'API']);
     expect(group()).toBeNull();
   });
 
