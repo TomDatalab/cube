@@ -593,19 +593,21 @@ export function SchemaPage({ history }: RouterProps) {
       );
     }
 
-    if (selected.kind === 'cubes') {
+    if (selected.kind === 'cubes' || selected.kind === 'views') {
       if (!detail) {
         return <CubeLoader />;
       }
       const orgKey = `org:${selected.slug}`;
+      const group = selected.kind;
       return (
         <CubeList
           orgName={known.current[selected.slug]?.name ?? selected.slug}
           cubes={detail.cubes}
           errors={detail.errors || []}
+          type={group === 'views' ? 'view' : 'cube'}
           onOpen={(name) => {
-            // The cube's node shows selected under its open "Cubes" node.
-            setExpandedKeys((keys) => Array.from(new Set([...keys, orgKey, `${orgKey}:cubes`])));
+            // The node shows selected under its open "Cubes" or "Views" node.
+            setExpandedKeys((keys) => Array.from(new Set([...keys, orgKey, `${orgKey}:${group}`])));
             setSelectedKey(`cube:${selected.slug}:${name}`);
           }}
         />

@@ -1,5 +1,5 @@
-// The right panel for an organization's "Cubes" node: its cubes and views,
-// each opening its own panel.
+// The right panel for an organization's "Cubes" or "Views" node: its cubes
+// (or views), each opening its own panel.
 
 import { Button, Table, Tag, Typography } from 'antd';
 
@@ -14,18 +14,16 @@ export type CubeListRow = {
   measures: number;
   dimensions: number;
   file: string;
+  // A view's source cubes.
+  includes: string[];
   errors: number;
 };
 
-/** Cubes before views, each by name, with how many problems name it. */
-export function cubeListRows(cubes: TreeCube[], errors: OrgDetail['errors']): CubeListRow[] {
-  return [...cubes]
-    .sort((a, b) => {
-      if (a.type !== b.type) {
-        return a.type === 'cube' ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    })
+/** The cubes (or the views) by name, with how many problems name each. */
+export function cubeListRows(cubes: TreeCube[], errors: OrgDetail['errors'], type: TreeCube['type']): CubeListRow[] {
+  return cubes
+    .filter((c) => c.type === type)
+    .sort((a, b) => a.name.localeCompare(b.name))
     .map((c) => ({
       key: c.name,
       name: c.name,
@@ -35,26 +33,31 @@ export function cubeListRows(cubes: TreeCube[], errors: OrgDetail['errors']): Cu
       measures: c.members.measures,
       dimensions: c.members.dimensions,
       file: c.file,
+      includes: c.includes ?? [],
       errors: errors.filter((e) => e.cube === c.name || (!e.cube && e.file === c.file)).length,
     }));
 }
 
-export function CubeList({ orgName, cubes, errors, onOpen }: {
+export function CubeList({ orgName, cubes, errors, type, onOpen }: {
   orgName: string;
   cubes: TreeCube[];
   errors: OrgDetail['errors'];
+  type: TreeCube['type'];
   onOpen: (name: string) => void;
 }) {
-  const rows = cubeListRows(cubes, errors);
+  const rows = cubeListRows(cubes, errors, type);
+  const views = type === 'view';
   return (
-    <div data-testid="cube-list">
-      <Typography.Title level={4}>{`Cubes of ${orgName} (${rows.length})`}</Typography.Title>
+    <div data-testid={views ? 'view-list' : 'cube-list'}>
+      <Typography.Title level={4}>{`${views ? 'Views' : 'Cubes'} of ${orgName} (${rows.length})`}</Typography.Title>
       <Table<CubeListRow>
         size="small"
         rowKey="key"
         pagination={rows.length > 50 ? { pageSize: 50, showSizeChanger: false } : false}
         dataSource={rows}
-        locale={{ emptyText: 'No cubes yet: select tables to generate them' }}
+        locale={{
+          emptyText: views ? 'No views: define them in a file' : 'No cubes yet: select tables to generate them',
+        }}
         columns={[
           {
             title: 'Name',
@@ -71,13 +74,13 @@ export function CubeList({ orgName, cubes, errors, onOpen }: {
               </>
             ),
           },
-          {
-            title: 'Type',
-            key: 'type',
-            width: 70,
-            render: (_: unknown, row) => <Tag color={row.type === 'view' ? 'purple' : 'blue'}>{row.type}</Tag>,
-          },
-          { title: 'Data source', dataIndex: 'dataSource', key: 'dataSource' },
+          views
+            ? {
+              title: 'Cubes',
+              key: 'includes',
+              render: (_: unknown, row) => row.includes.join(', '),
+            }
+            : { title: 'Data source', dataIndex: 'dataSource', key: 'dataSource' },
           { title: 'Measures', dataIndex: 'measures', key: 'measures', width: 90, align: 'right' },
           { title: 'Dimensions', dataIndex: 'dimensions', key: 'dimensions', width: 100, align: 'right' },
           { title: 'File', dataIndex: 'file', key: 'file', ellipsis: true },

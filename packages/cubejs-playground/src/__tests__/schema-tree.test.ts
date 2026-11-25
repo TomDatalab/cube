@@ -18,9 +18,23 @@ const detail = {
 };
 
 describe('organization tree helpers', () => {
-  it('detailNodes returns Cubes, Tables and Files with counts', () => {
+  it('detailNodes returns Cubes, Views, Tables and Files with counts', () => {
     const nodes = detailNodes('digital', detail);
-    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Tables (2)', 'Files (2)']);
+    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Views (0)', 'Tables (2)', 'Files (2)']);
+  });
+
+  it('detailNodes puts views under Views and cubes under Cubes', () => {
+    const view = {
+      name: 'network',
+      type: 'view' as const,
+      dataSource: 'default',
+      file: 'digital/v.yml',
+      members: { measures: 1, dimensions: 1 },
+    };
+    const nodes = detailNodes('digital', { ...detail, cubes: [...detail.cubes, view] });
+    expect(nodes[0].children!.map((c) => c.key)).toEqual(['cube:digital:dfos_fibercable']);
+    expect(nodes[1].key).toBe('org:digital:views');
+    expect(nodes[1].children!.map((c) => c.key)).toEqual(['cube:digital:network']);
   });
 
   it('filterTree keeps matches and their ancestors', () => {
@@ -59,6 +73,7 @@ describe('organization tree helpers', () => {
       .toEqual({ kind: 'file', slug: 'digital', rest: 'digital/sofiadb/a.yml' });
     expect(parseKey('org:digital')).toEqual({ kind: 'org', slug: 'digital', rest: undefined });
     expect(parseKey('org:digital:cubes').kind).toBe('cubes');
+    expect(parseKey('org:digital:views')).toEqual({ kind: 'views', slug: 'digital', rest: undefined });
     expect(parseKey('datasource:digital:sofiadb'))
       .toEqual({ kind: 'datasource', slug: 'digital', rest: 'sofiadb' });
     expect(parseKey('schema:digital:sofiadb.dfos'))
@@ -93,6 +108,7 @@ describe('organization tree helpers', () => {
 describe('iconKind', () => {
   it('gives the Cubes group and every cube the cube icon', () => {
     expect(iconKind('org:digital:cubes')).toBe('cube');
+    expect(iconKind('org:digital:views')).toBe('cube');
     expect(iconKind('cube:digital:fatos')).toBe('cube');
   });
 
@@ -116,13 +132,13 @@ describe('iconKind', () => {
 
 describe('file titles', () => {
   it('drop the organization folder they all share, keeping the full path in the key', () => {
-    const files = detailNodes('digital', detail)[2].children!;
+    const files = detailNodes('digital', detail)[3].children!;
     expect(files.map((n) => n.title)).toEqual(['sofiadb/a.yml', 'b.yml']);
     expect(files.map((n) => n.key)).toEqual(['file:digital:digital/sofiadb/a.yml', 'file:digital:b.yml']);
   });
 
   it('drop the Platform folder too', () => {
-    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[2].children!;
+    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[3].children!;
     expect(files.map((n) => n.title)).toEqual(['orders.yml']);
   });
 });
@@ -139,7 +155,7 @@ describe('loadedTreeKeys', () => {
     const [on, bossa] = orgNodes([summary('on'), summary('bossa')]);
     const tree = [{ ...on, children: detailNodes('on', empty) }, bossa];
     const keys = loadedTreeKeys(tree, ['on']);
-    expect(keys).toEqual(expect.arrayContaining(['org:on', 'org:on:cubes', 'tables:on', 'files:on']));
+    expect(keys).toEqual(expect.arrayContaining(['org:on', 'org:on:cubes', 'org:on:views', 'tables:on', 'files:on']));
     expect(keys).not.toContain('org:bossa');
   });
 

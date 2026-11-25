@@ -43,7 +43,7 @@ export type OrgDetail = {
 export type NodeKey = string;
 
 export type ParsedKey = {
-  kind: 'org' | 'cubes' | 'cube' | 'tables' | 'table' | 'files' | 'file' | 'datasource' | 'schema';
+  kind: 'org' | 'cubes' | 'views' | 'cube' | 'tables' | 'table' | 'files' | 'file' | 'datasource' | 'schema';
   slug: string;
   rest?: string;
 };
@@ -84,18 +84,25 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
     });
   });
 
-  return [
-    {
-      key: `org:${slug}:cubes`,
-      title: `Cubes (${d.cubes.length})`,
+  // A view opens the same panel as a cube (`cube:` key), under its own group.
+  const group = (kind: 'cubes' | 'views', label: string, type: TreeCube['type']): DataNode => {
+    const members = d.cubes.filter((cube) => cube.type === type);
+    return {
+      key: `org:${slug}:${kind}`,
+      title: `${label} (${members.length})`,
       checkable: false,
-      children: d.cubes.map((cube) => ({
+      children: members.map((cube) => ({
         key: `cube:${slug}:${cube.name}`,
         title: cube.title || cube.name,
         isLeaf: true,
         checkable: false,
       })),
-    },
+    };
+  };
+
+  return [
+    group('cubes', 'Cubes', 'cube'),
+    group('views', 'Views', 'view'),
     {
       key: `tables:${slug}`,
       title: `Tables (${tableCount})`,
@@ -180,7 +187,7 @@ export function filterTree(nodes: DataNode[], term: string): DataNode[] {
 }
 
 const KINDS: ParsedKey['kind'][] = [
-  'org', 'cubes', 'cube', 'tables', 'table', 'files', 'file', 'datasource', 'schema',
+  'org', 'cubes', 'views', 'cube', 'tables', 'table', 'files', 'file', 'datasource', 'schema',
 ];
 
 export function parseKey(key: NodeKey): ParsedKey {
@@ -194,8 +201,8 @@ export function parseKey(key: NodeKey): ParsedKey {
   const slug = first === -1 ? '' : key.slice(first + 1, second === -1 ? undefined : second);
   const rest = second === -1 ? undefined : key.slice(second + 1);
 
-  if (kind === 'org' && rest === 'cubes') {
-    return { kind: 'cubes', slug, rest: undefined };
+  if (kind === 'org' && (rest === 'cubes' || rest === 'views')) {
+    return { kind: rest, slug, rest: undefined };
   }
   return { kind, slug, rest };
 }
@@ -240,6 +247,7 @@ export function iconKind(key: NodeKey): TreeIconKind | null {
   }
   switch (kind) {
     case 'cubes':
+    case 'views':
     case 'cube':
       return 'cube';
     case 'tables':
