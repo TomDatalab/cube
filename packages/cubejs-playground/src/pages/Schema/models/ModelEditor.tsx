@@ -32,6 +32,8 @@ import {
   removeTable, setPrimary, unlinked, updateJoin,
 } from './modelGraph';
 import { TableFlowNode, TableNode } from './TableNode';
+import { PanelToggle } from '../PanelToggle';
+import { useCollapsed } from '../useCollapsed';
 
 // What a table of the panel carries while dragged to the canvas.
 export const TABLE_MIME = 'application/x-cube-table';
@@ -117,6 +119,7 @@ function TablePanel({
   locked: boolean;
 }) {
   const [search, setSearch] = useState('');
+  const [collapsed, toggle] = useCollapsed('cubePlayground.modelTablesCollapsed');
   const needle = search.trim().toLowerCase();
   const tree = Object.entries(tables || {}).map(([ds, schemas]) => ({
     ds,
@@ -128,9 +131,28 @@ function TablePanel({
     })).filter((s) => s.tables.length > 0),
   })).filter((d) => d.schemas.length > 0);
 
+  if (collapsed) {
+    return (
+      <aside
+        data-slot="model-table-panel"
+        className="tw:flex tw:w-12 tw:shrink-0 tw:flex-col tw:items-center tw:border-r tw:py-3"
+      >
+        <PanelToggle collapsed onToggle={toggle} label="tables" />
+      </aside>
+    );
+  }
+
   return (
-    <aside className="tw:flex tw:w-64 tw:shrink-0 tw:flex-col tw:gap-2 tw:overflow-hidden tw:border-r tw:p-3">
-      <SearchInput value={search} onChange={setSearch} placeholder="Search tables" />
+    <aside
+      data-slot="model-table-panel"
+      className="tw:flex tw:w-64 tw:shrink-0 tw:flex-col tw:gap-2 tw:overflow-hidden tw:border-r tw:p-3"
+    >
+      <div className="tw:flex tw:items-center tw:gap-1">
+        <div className="tw:min-w-0 tw:flex-1">
+          <SearchInput value={search} onChange={setSearch} placeholder="Search tables" />
+        </div>
+        <PanelToggle collapsed={false} onToggle={toggle} label="tables" />
+      </div>
       <p className="tw:m-0 tw:text-xs tw:text-muted-foreground">Drag a table onto the canvas</p>
       <div className="tw:min-h-0 tw:flex-1 tw:overflow-y-auto">
         {tree.length === 0 ? <EmptyState>No table matches</EmptyState> : null}

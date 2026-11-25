@@ -31,6 +31,8 @@ import {
   CubeModelView, FileContent, OrgNode, PLATFORM, modelApi,
 } from './api';
 import { useOpenBlock } from './useOpenBlock';
+import { useCollapsed } from './useCollapsed';
+import { PanelToggle } from './PanelToggle';
 import { ModelEditor } from './models/ModelEditor';
 import { emptyDefinition } from './models/modelGraph';
 import { NameDialog } from '../Admin/NameDialog';
@@ -239,6 +241,7 @@ export function SchemaPage({ history }: RouterProps) {
   const { playgroundContext } = useContext(AppContext);
   const rbac = useRbac();
   const token = rbac.session?.token;
+  const [treeCollapsed, toggleTree] = useCollapsed('cubePlayground.schemaTreeCollapsed');
   const api = useMemo(
     () => modelApi(rbac, playgroundContext.basePath),
     [rbac.isAdmin, token, playgroundContext.basePath]
@@ -971,53 +974,69 @@ export function SchemaPage({ history }: RouterProps) {
 
   return (
     <Layout style={{ height: '100%' }}>
-      <Sider width={340} className="schema-sidebar">
-        <div style={{ display: 'flex', gap: 8, padding: 8, alignItems: 'center' }}>
-          <Input
-            allowClear
-            placeholder="Search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            suffix={searching ? <Spin size="small" /> : undefined}
-          />
-          <Tooltip title={mixedOrgs ? 'Escolha tabelas de uma única organização' : ''}>
-            <span>
-              <ButtonDropdown
-                show={shown}
-                disabled={!checkedKeys.length || mixedOrgs}
-                type="primary"
-                data-testid="chart-type-btn"
-                overlay={(
-                  <Menu data-testid="generate-schema">
-                    <Menu.Item
-                      title={
-                        !isYamlFormatSupported
-                          ? 'yaml schema format is supported by Cube 0.31.0 and later'
-                          : ''
-                      }
-                      disabled={!isYamlFormatSupported}
-                      onClick={() => generateSchema(SchemaFormat.yaml)}
-                    >
-                      YAML
-                    </Menu.Item>
-                    {offersJavaScript(rbac.enabled) && (
-                      <Menu.Item onClick={() => generateSchema()}>
-                        JavaScript
-                      </Menu.Item>
+      <Sider
+        width={340}
+        collapsible
+        collapsed={treeCollapsed}
+        collapsedWidth={48}
+        trigger={null}
+        className="schema-sidebar"
+      >
+        {treeCollapsed ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 8 }}>
+            <PanelToggle collapsed onToggle={toggleTree} label="the data model tree" />
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 8, padding: 8, alignItems: 'center' }}>
+              <PanelToggle collapsed={false} onToggle={toggleTree} label="the data model tree" />
+              <Input
+                allowClear
+                placeholder="Search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                suffix={searching ? <Spin size="small" /> : undefined}
+              />
+              <Tooltip title={mixedOrgs ? 'Escolha tabelas de uma única organização' : ''}>
+                <span>
+                  <ButtonDropdown
+                    show={shown}
+                    disabled={!checkedKeys.length || mixedOrgs}
+                    type="primary"
+                    data-testid="chart-type-btn"
+                    overlay={(
+                      <Menu data-testid="generate-schema">
+                        <Menu.Item
+                          title={
+                            !isYamlFormatSupported
+                              ? 'yaml schema format is supported by Cube 0.31.0 and later'
+                              : ''
+                          }
+                          disabled={!isYamlFormatSupported}
+                          onClick={() => generateSchema(SchemaFormat.yaml)}
+                        >
+                          YAML
+                        </Menu.Item>
+                        {offersJavaScript(rbac.enabled) && (
+                          <Menu.Item onClick={() => generateSchema()}>
+                            JavaScript
+                          </Menu.Item>
+                        )}
+                      </Menu>
                     )}
-                  </Menu>
-                )}
-                style={{ border: 0 }}
-                onOverlayOpen={() => setShown(true)}
-                onOverlayClose={() => setShown(false)}
-                onItemClick={() => setShown(false)}
-              >
-                Generate Data Model
-              </ButtonDropdown>
-            </span>
-          </Tooltip>
-        </div>
-        {renderTree()}
+                    style={{ border: 0 }}
+                    onOverlayOpen={() => setShown(true)}
+                    onOverlayClose={() => setShown(false)}
+                    onItemClick={() => setShown(false)}
+                  >
+                    Generate Data Model
+                  </ButtonDropdown>
+                </span>
+              </Tooltip>
+            </div>
+            {renderTree()}
+          </>
+        )}
       </Sider>
 
       <Content style={{ minHeight: 280, padding: 24 }}>

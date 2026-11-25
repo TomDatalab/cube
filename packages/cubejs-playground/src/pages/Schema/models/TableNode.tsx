@@ -18,6 +18,15 @@ export type TableNodeData = {
 
 export type TableFlowNode = Node<TableNodeData, 'table'>;
 
+// React Flow's 6px dot is hard to grab; its stylesheet is unlayered, so it
+// would win over Tailwind classes, hence the inline style.
+const HANDLE_STYLE = {
+  width: 12,
+  height: 12,
+  background: 'var(--primary)',
+  border: '2px solid var(--card)',
+};
+
 // A table on the canvas: its alias, the principal badge and its columns,
 // each with a handle on both sides named after the column.
 export const TableNode = memo(({ data }: Pick<NodeProps<TableFlowNode>, 'data'>) => (
@@ -50,10 +59,10 @@ export const TableNode = memo(({ data }: Pick<NodeProps<TableFlowNode>, 'data'>)
       <ul className="tw:m-0 tw:list-none tw:p-0 tw:py-1">
         {data.columns.map((c) => (
           <li key={c.name} className="tw:relative tw:flex tw:items-center tw:gap-3 tw:px-3 tw:py-1">
-            <Handle type="target" position={Position.Left} id={c.name} />
+            <Handle type="target" position={Position.Left} id={c.name} style={HANDLE_STYLE} />
             <span className="tw:flex-1 tw:truncate">{c.name}</span>
             <span className="tw:text-muted-foreground">{c.type}</span>
-            <Handle type="source" position={Position.Right} id={c.name} />
+            <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
           </li>
         ))}
       </ul>
