@@ -23,7 +23,8 @@ import {
   EmptyState, Field, SearchInput, SimpleSelect, Spinner, notify,
 } from '@/components/kit';
 
-import { ApiError, OrgNode, modelApi } from '../api';
+import { ApiError, CubeModelView, OrgNode, modelApi } from '../api';
+import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
@@ -61,9 +62,10 @@ export type ModelEditorProps = {
   org: OrgNode;
   modelId: string;
   tables: OrgDetail['tables'];
-  onBuilt(cubeName: string): void;
+  // After a build: the cube's name and the organization's refreshed detail.
+  onBuilt(cubeName: string, detail: OrgDetail): void;
   // After a save: the tree shows the model's name.
-  onSaved?(): void;
+  onSaved?(saved: CubeModelView): void;
   // After the model is deleted.
   onDeleted?(): void;
   // Tells the page when there are changes not saved, so leaving can warn.
@@ -71,9 +73,15 @@ export type ModelEditorProps = {
 };
 
 type JoinEdit = { kind: 'new'; from: End; to: End } | { kind: 'edit'; index: number };
-type Ask = 'unlinked' | 'overwrite' | 'delete';
+type Ask = 'overwrite' | 'delete';
 
 const STALE = 'Changed elsewhere: reopen';
+// The server's 409 for a version that is not the stored one. Its other 409
+// (a duplicate name) says its own reason.
+const STALE_SERVER = 'O model mudou desde que você abriu; abra de novo';
+const conflict = (e: any): string => (
+  e instanceof ApiError && e.status === 409 && e.message === STALE_SERVER ? STALE : e.message
+);
 
 // The theme the app shows (`data-theme` on <html>), followed as it changes.
 // It only reads the attribute: the app's own theme hook writes it.
@@ -193,7 +201,9 @@ function Editor({
   const [busy, setBusy] = useState<'save' | 'build' | 'delete' | null>(null);
   const [joinEdit, setJoinEdit] = useState<JoinEdit | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
-  const lastAsk = useRef<Ask>('unlinked');
+  // The reasons the ModelWriter gave for a change that does not compile.
+  const [problems, setProblems] = useState<string[]>([]);
+  const lastAsk = useRef<Ask>('overwrite');
   if (ask) {
     lastAsk.current = ask;
   }
@@ -362,6 +372,7 @@ function Editor({
 
   const save = async (): Promise<boolean> => {
     setBusy('save');
+    setProblems([]);
     const sent = revision.current;
     try {
       const saved = await api.saveModel(modelId, { name, definition: def, version });
@@ -369,10 +380,10 @@ function Editor({
       if (revision.current === sent) {
         setDirty(false);
       }
-      onSaved?.();
+      onSaved?.(saved);
       return true;
     } catch (e: any) {
-      notify.error(e instanceof ApiError && e.status === 409 ? STALE : e.message);
+      notify.error(conflict(e));
       return false;
     } finally {
       setBusy(null);
@@ -386,13 +397,17 @@ function Editor({
       return;
     }
     setBusy('build');
+    setProblems([]);
     try {
       const result = force ? await api.buildModel(modelId, true) : await api.buildModel(modelId);
-      onBuilt(result.cubeName);
+      onBuilt(result.cubeName, result.detail);
     } catch (e: any) {
       if (e instanceof ApiError && e.status === 409 && e.message === EDITED) {
         setAsk('overwrite');
       } else {
+        if (e instanceof ApiError && e.status === 400 && e.problems?.length) {
+          setProblems(problemLines(e.problems));
+        }
         notify.error(e.message);
       }
     } finally {
@@ -405,7 +420,7 @@ function Editor({
     try {
       await api.deleteModel(modelId, version);
     } catch (e: any) {
-      notify.error(e instanceof ApiError && e.status === 409 ? STALE : e.message);
+      notify.error(conflict(e));
       setBusy(null);
       return;
     }
@@ -417,7 +432,8 @@ function Editor({
   const loose = unlinked(def);
   const build = () => {
     if (loose.length) {
-      setAsk('unlinked');
+      setProblems([]);
+      notify.error(`Link every table to the principal before building: ${loose.join(', ')}`);
     } else {
       runBuild();
     }
@@ -439,11 +455,6 @@ function Editor({
   // What the confirm asks; the last question stays while it closes.
   const asked = ask ?? lastAsk.current;
   const question = {
-    unlinked: {
-      title: 'Build with tables not linked?',
-      text: `Not linked to the principal: ${loose.join(', ')}. The build fails until every table is linked.`,
-      ok: 'Build anyway',
-    },
     overwrite: {
       title: 'Overwrite the cube?',
       text: 'The cube was edited by hand since the last build. Overwrite?',
@@ -526,6 +537,17 @@ function Editor({
           </AlertDescription>
         </Alert>
       ) : null}
+      {problems.length ? (
+        <Alert variant="destructive" data-slot="model-problems">
+          <CircleAlert />
+          <AlertTitle>The change does not compile</AlertTitle>
+          <AlertDescription>
+            <ul className="tw:m-0 tw:list-disc tw:pl-4">
+              {problems.map((p) => <li key={p}>{p}</li>)}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {loose.length ? (
         <p className="tw:m-0 tw:text-sm tw:text-muted-foreground">
           {`Not linked to the principal yet: ${loose.join(', ')}`}
@@ -588,7 +610,7 @@ function Editor({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              variant={asked === 'unlinked' ? 'default' : 'destructive'}
+              variant="destructive"
               onClick={() => {
                 setAsk(null);
                 if (asked === 'delete') {

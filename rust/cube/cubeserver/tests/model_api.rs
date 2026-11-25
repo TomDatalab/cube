@@ -1341,7 +1341,7 @@ api_test!(cube_models_crud_and_scope, |store| {
     let (status, body) = call(&env, Method::PUT, &token, &one,
         Some(json!({ "definition": { "dataSource": "sofiadb", "tables": [], "joins": [], "extra": 1 }, "version": 2 }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    for name in ["   ", "a\nb", "tab\there"] {
+    for name in ["   ", "a\nb", "tab\there", "a\u{2028}b", "a\u{2029}b"] {
         let (status, body) = call(&env, Method::POST, &token, &list,
             Some(json!({ "name": name, "definition": model_def("sofiadb") }))).await;
         assert_eq!((status, &body["error"]), (StatusCode::BAD_REQUEST, &json!("Nome inválido")), "{name:?}");

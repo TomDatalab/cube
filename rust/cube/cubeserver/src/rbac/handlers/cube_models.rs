@@ -74,10 +74,11 @@ fn model_error(e: StoreError) -> ApiError {
 }
 
 /// The name goes into a comment line of the cube file: trimmed, not empty,
-/// no control characters (a newline would end the comment).
+/// no control characters (a newline would end the comment), and neither
+/// U+2028 nor U+2029, which libyaml also takes as line breaks.
 fn model_name(name: &str) -> Result<String, ApiError> {
     let name = name.trim();
-    if name.is_empty() || name.chars().any(char::is_control) {
+    if name.is_empty() || name.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}') {
         return Err(ApiError::bad_request("Nome inválido"));
     }
     Ok(name.to_string())

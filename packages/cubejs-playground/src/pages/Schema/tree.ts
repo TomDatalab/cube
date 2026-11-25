@@ -101,19 +101,22 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
     };
   };
 
+  // Only organization scopes carry models (Platform and the legacy tree do not).
+  const modelsGroup: DataNode[] = d.models === undefined ? [] : [{
+    key: `org:${slug}:models`,
+    title: `Models (${d.models.length})`,
+    checkable: false,
+    children: d.models.map((model) => ({
+      key: `model:${slug}:${model.id}`,
+      title: model.name,
+      isLeaf: true,
+      checkable: false,
+    })),
+  }];
+
   return [
     group('cubes', 'Cubes', 'cube'),
-    {
-      key: `org:${slug}:models`,
-      title: `Models (${(d.models || []).length})`,
-      checkable: false,
-      children: (d.models || []).map((model) => ({
-        key: `model:${slug}:${model.id}`,
-        title: model.name,
-        isLeaf: true,
-        checkable: false,
-      })),
-    },
+    ...modelsGroup,
     group('views', 'Views', 'view'),
     {
       key: `tables:${slug}`,

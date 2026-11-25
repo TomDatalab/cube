@@ -27,7 +27,9 @@ import { removeCube } from './cubeYaml';
 import { loadRows, openScope, orgWorkspace, previewHeaders, PreviewQuery } from './preview';
 import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
-import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
+import {
+  CubeModelView, FileContent, OrgNode, PLATFORM, modelApi,
+} from './api';
 import { useOpenBlock } from './useOpenBlock';
 import { ModelEditor } from './models/ModelEditor';
 import { emptyDefinition } from './models/modelGraph';
@@ -625,8 +627,24 @@ export function SchemaPage({ history }: RouterProps) {
     refreshOrgs();
   };
 
-  const afterBuild = async (slug: string, cubeName: string) => {
-    await loadDetail(slug, true);
+  // A save changes only the model's entry (its name may change): the list
+  // stays sorted by name, and nothing is introspected again.
+  const afterModelSave = (slug: string, saved: CubeModelView) => {
+    setDetails((current) => {
+      const detail = current[slug];
+      if (!detail) {
+        return current;
+      }
+      const entry = { id: saved.id, name: saved.name, cubeName: saved.cubeName };
+      const models = [...(detail.models || []).filter((m) => m.id !== saved.id), entry]
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return { ...current, [slug]: { ...detail, models } };
+    });
+  };
+
+  // The build answers with the organization's refreshed detail.
+  const afterBuild = (slug: string, cubeName: string, detail: OrgDetail) => {
+    setDetails((current) => ({ ...current, [slug]: detail }));
     refreshOrgs();
     toast.success(`Cube ${cubeName} built`, {
       action: { label: 'Open cube', onClick: () => openUnder(slug, 'cubes', `cube:${slug}:${cubeName}`) },
@@ -752,8 +770,8 @@ export function SchemaPage({ history }: RouterProps) {
           org={org}
           modelId={selected.rest}
           tables={detail.tables || {}}
-          onBuilt={(cubeName) => afterBuild(selected.slug, cubeName)}
-          onSaved={() => loadDetail(selected.slug, true)}
+          onBuilt={(cubeName, built) => afterBuild(selected.slug, cubeName, built)}
+          onSaved={(saved) => afterModelSave(selected.slug, saved)}
           onDeleted={() => afterModelDelete(selected.slug)}
           onDirtyChange={setModelDirty}
         />

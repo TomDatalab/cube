@@ -5,6 +5,7 @@ import {
   afterEach, beforeEach, describe, expect, it, Mock, vi,
 } from 'vitest';
 
+import { notify } from '@/components/kit';
 import { ApiError, CubeModelView } from '../pages/Schema/api';
 import { ModelEditor } from '../pages/Schema/models/ModelEditor';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
@@ -104,7 +105,7 @@ const built = { fileName: 'model/sales.yml', content: '', cubeName: 'sales', det
 describe('ModelEditor', () => {
   let root: ReturnType<typeof createRoot>;
   let api: Record<string, ReturnType<typeof vi.fn>>;
-  let onBuilt: Mock<(cubeName: string) => void>;
+  let onBuilt: Mock<(cubeName: string, detail: any) => void>;
   let onDeleted: Mock<() => void>;
 
   beforeEach(() => {
@@ -116,7 +117,7 @@ describe('ModelEditor', () => {
       buildModel: vi.fn(async () => built),
       deleteModel: vi.fn(async () => undefined),
     };
-    onBuilt = vi.fn<(cubeName: string) => void>();
+    onBuilt = vi.fn<(cubeName: string, detail: any) => void>();
     onDeleted = vi.fn<() => void>();
     const host = document.createElement('div');
     document.body.appendChild(host);
@@ -174,7 +175,7 @@ describe('ModelEditor', () => {
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(api.buildModel.mock.calls[0][0]).toBe('m1');
     expect(api.buildModel.mock.calls[0][1]).toBeFalsy();
-    expect(onBuilt).toHaveBeenCalledWith('sales');
+    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
   });
 
   it('asks before overwriting a cube edited by hand, then builds with force', async () => {
@@ -186,7 +187,49 @@ describe('ModelEditor', () => {
     await act(async () => button('Overwrite').click());
     expect(api.buildModel).toHaveBeenCalledTimes(2);
     expect(api.buildModel.mock.calls[1]).toEqual(['m1', true]);
-    expect(onBuilt).toHaveBeenCalledWith('sales');
+    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
+  });
+
+  it('shows the server reason for a duplicate name, not the stale hint', async () => {
+    api.saveModel.mockRejectedValueOnce(new ApiError('Já existe um model com este nome nesta organização', 409));
+    const error = vi.spyOn(notify, 'error');
+    await render();
+    await rename('Outro');
+    await act(async () => button('Save').click());
+    expect(error).toHaveBeenCalledWith('Já existe um model com este nome nesta organização');
+    api.saveModel.mockRejectedValueOnce(new ApiError('O model mudou desde que você abriu; abra de novo', 409));
+    await act(async () => button('Save').click());
+    expect(error).toHaveBeenLastCalledWith('Changed elsewhere: reopen');
+    error.mockRestore();
+  });
+
+  it('lists the problems of a build the ModelWriter refused', async () => {
+    api.buildModel.mockRejectedValueOnce(new ApiError('A mudança não compila', 400, [
+      { file: 'model/sales.yml', cube: 'sales', message: 'coluna inexistente' },
+    ]));
+    await render();
+    await act(async () => button('Build cube').click());
+    const box = document.querySelector('[data-slot="model-problems"]')!;
+    expect(box.textContent).toContain('model/sales.yml: coluna inexistente');
+    expect(onBuilt).not.toHaveBeenCalled();
+    await act(async () => button('Build cube').click());
+    expect(document.querySelector('[data-slot="model-problems"]')).toBeNull();
+  });
+
+  it('does not build while a table is not linked, and says which', async () => {
+    api.model.mockResolvedValueOnce(view({
+      ...saved(),
+      tables: [...saved().tables, {
+        alias: 'products', schema: 'public', table: 'products', x: 0, y: 300,
+      }],
+    }));
+    const error = vi.spyOn(notify, 'error');
+    await render();
+    await act(async () => button('Build cube').click());
+    expect(error).toHaveBeenCalledWith('Link every table to the principal before building: products');
+    expect(api.buildModel).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain('Build anyway');
+    error.mockRestore();
   });
 
   it('does not retry a build whose path belongs to another file', async () => {
@@ -260,7 +303,7 @@ describe('ModelEditor', () => {
     expect(change.definition.joins).toHaveLength(2);
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(api.saveModel.mock.invocationCallOrder[0]).toBeLessThan(api.buildModel.mock.invocationCallOrder[0]);
-    expect(onBuilt).toHaveBeenCalledWith('sales');
+    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
   });
 
   it('refuses a second link between the same two tables', async () => {

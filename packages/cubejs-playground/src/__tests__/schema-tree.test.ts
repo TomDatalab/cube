@@ -23,7 +23,7 @@ const detail = {
 describe('organization tree helpers', () => {
   it('detailNodes returns Cubes, Views, Tables and Files with counts', () => {
     const nodes = detailNodes('digital', detail);
-    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Models (0)', 'Views (0)', 'Tables (2)', 'Files (2)']);
+    expect(nodes.map((n) => n.title)).toEqual(['Cubes (1)', 'Views (0)', 'Tables (2)', 'Files (2)']);
   });
 
   it('detailNodes puts views under Views and cubes under Cubes', () => {
@@ -36,8 +36,8 @@ describe('organization tree helpers', () => {
     };
     const nodes = detailNodes('digital', { ...detail, cubes: [...detail.cubes, view] });
     expect(nodes[0].children!.map((c) => c.key)).toEqual(['cube:digital:dfos_fibercable']);
-    expect(nodes[2].key).toBe('org:digital:views');
-    expect(nodes[2].children!.map((c) => c.key)).toEqual(['cube:digital:network']);
+    expect(nodes[1].key).toBe('org:digital:views');
+    expect(nodes[1].children!.map((c) => c.key)).toEqual(['cube:digital:network']);
   });
 
   it('filterTree keeps matches and their ancestors', () => {
@@ -146,13 +146,13 @@ describe('iconKind', () => {
 
 describe('file titles', () => {
   it('drop the organization folder they all share, keeping the full path in the key', () => {
-    const files = detailNodes('digital', detail)[4].children!;
+    const files = detailNodes('digital', detail)[3].children!;
     expect(files.map((n) => n.title)).toEqual(['sofiadb/a.yml', 'b.yml']);
     expect(files.map((n) => n.key)).toEqual(['file:digital:digital/sofiadb/a.yml', 'file:digital:b.yml']);
   });
 
   it('drop the Platform folder too', () => {
-    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[4].children!;
+    const files = detailNodes('_platform', { ...detail, files: [{ fileName: '_platform/orders.yml' }] })[3].children!;
     expect(files.map((n) => n.title)).toEqual(['orders.yml']);
   });
 });
@@ -191,8 +191,12 @@ describe('models in the tree', () => {
     expect(nodes[1].children!.map((c) => [c.key, c.title])).toEqual([['model:acme:m1', 'Sales']]);
   });
 
-  it('detailNodes shows Models (0) without models', () => {
-    expect(detailNodes('acme', detail)[1].title).toBe('Models (0)');
+  it('detailNodes has no Models group without `models`', () => {
+    expect(detailNodes('acme', detail).map((n) => n.key)).not.toContain('org:acme:models');
+  });
+
+  it('detailNodes shows Models (0) for an organization with `models: []`', () => {
+    expect(detailNodes('acme', { ...detail, models: [] })[1].title).toBe('Models (0)');
   });
 
   it('parseKey reads model and models keys', () => {
