@@ -1261,3 +1261,96 @@ db_test!(spicedb_user_subjects_move_to_uuids_once, |store, _url| {
     assert_eq!(migrate_user_subjects(&store, &authz).await.unwrap(), 0);
     assert_eq!(read().await.len(), 2);
 });
+
+db_test!(seeding_creates_the_three_default_roles_once, |store, _url| {
+    use cubeserver::rbac::store::DEFAULT_ROLES;
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
+    let first = store.seed_default_roles(o.id, "ann").await.unwrap();
+    let second = store.seed_default_roles(o.id, "ann").await.unwrap();
+    assert_eq!(first.len(), 3);
+    assert_eq!(store.roles_of_organization(o.id).await.unwrap().len(), 3);
+    let ids = |v: &[cubeserver::rbac::store::Role]| {
+        let mut ids: Vec<_> = v.iter().map(|r| r.id).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(&first), ids(&second));
+    for (key, perms) in DEFAULT_ROLES {
+        let r = first
+            .iter()
+            .find(|r| r.builtin.as_deref() == Some(key))
+            .unwrap();
+        assert_eq!(r.name, key);
+        assert_eq!(r.permissions, perms.to_vec());
+        assert!(r.restrictions.is_empty());
+    }
+    let owner = first.iter().find(|r| r.name == "owner").unwrap();
+    assert_eq!(owner.permissions.len(), 6);
+});
+
+db_test!(
+    seeding_beside_a_custom_role_named_viewer_names_the_default_viewer_default,
+    |store, _url| {
+        store.create_user(&user("ann")).await.unwrap();
+        let o = store.create_organization("o", "o", "ann").await.unwrap();
+        let custom = store
+            .create_role(o.id, "viewer", &["view".into()], &Restrictions::default(), "ann")
+            .await
+            .unwrap();
+        assert!(custom.builtin.is_none());
+        let roles = store.seed_default_roles(o.id, "ann").await.unwrap();
+        let viewer = roles
+            .iter()
+            .find(|r| r.builtin.as_deref() == Some("viewer"))
+            .unwrap();
+        assert_eq!(viewer.name, "viewer (default)");
+        assert_ne!(viewer.id, custom.id);
+        assert_eq!(store.role(custom.id).await.unwrap().unwrap().name, "viewer");
+    }
+);
+
+db_test!(default_role_is_found_by_key_after_a_rename, |store, _url| {
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
+    assert!(store.default_role(o.id, "editor").await.unwrap().is_none());
+    let roles = store.seed_default_roles(o.id, "ann").await.unwrap();
+    let editor = roles
+        .iter()
+        .find(|r| r.builtin.as_deref() == Some("editor"))
+        .unwrap();
+    store
+        .update_role(editor.id, "writers", &editor.permissions, &Restrictions::default())
+        .await
+        .unwrap();
+    let found = store.default_role(o.id, "editor").await.unwrap().unwrap();
+    assert_eq!(found.id, editor.id);
+    assert_eq!(found.name, "writers");
+    assert_eq!(found.builtin.as_deref(), Some("editor"));
+    assert!(store.organization_ids().await.unwrap().contains(&o.id));
+});
+
+db_test!(a_rule_moves_from_its_builtin_role_to_a_role_id, |store, _url| {
+    use cubeserver::rbac::store::RuleRole;
+    store.create_user(&user("ann")).await.unwrap();
+    let o = store.create_organization("o", "o", "ann").await.unwrap();
+    let w = store.create_workspace(o.id, "w", "ann").await.unwrap();
+    let rule = store
+        .create_rule(w.id, "d", "finance", RuleRole::Builtin("editor"), "ann")
+        .await
+        .unwrap();
+    let pending = store.rules_with_builtin_role().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0.id, rule.id);
+    assert_eq!(pending[0].1, o.id);
+    let roles = store.seed_default_roles(o.id, "ann").await.unwrap();
+    let editor = roles
+        .iter()
+        .find(|r| r.builtin.as_deref() == Some("editor"))
+        .unwrap();
+    store.set_rule_role_id(rule.id, editor.id).await.unwrap();
+    let moved = store.rule(rule.id).await.unwrap().unwrap();
+    assert_eq!(moved.role_id, Some(editor.id));
+    assert!(moved.role.is_none());
+    assert!(store.rules_with_builtin_role().await.unwrap().is_empty());
+});

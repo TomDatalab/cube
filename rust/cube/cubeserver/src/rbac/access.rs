@@ -1039,6 +1039,7 @@ mod tests {
         i.roles = vec![Role {
             id: role,
             organization_id: O,
+            builtin: None,
             name: "Analyst".into(),
             permissions: vec!["view".into(), "query".into()],
             restrictions: Default::default(),
@@ -1070,6 +1071,7 @@ mod tests {
         i.roles = vec![Role {
             id: role,
             organization_id: O,
+            builtin: None,
             name: "Analyst".into(),
             permissions: vec!["view".into(), "query".into()],
             restrictions: Restrictions {
@@ -1326,6 +1328,7 @@ mod tests {
         i.roles = vec![Role {
             id: x,
             organization_id: O,
+            builtin: None,
             name: "Analyst".into(),
             permissions: vec!["view".into(), "query".into()],
             restrictions: Restrictions {
@@ -1580,6 +1583,7 @@ mod tests {
         i.roles = vec![Role {
             id: x,
             organization_id: O,
+            builtin: None,
             name: "Analyst".into(),
             permissions: vec!["view".into(), "query".into()],
             restrictions: Default::default(),

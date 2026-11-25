@@ -209,3 +209,16 @@ END $$;
 -- username (a legacy `sub`) issued before it no longer authenticates, so a
 -- name given up by a rename cannot be picked up by someone else's old token.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changed_at timestamptz;
+
+-- The key of a default role of an organization (`owner`, `editor`,
+-- `viewer`); one per key per organization. Null for any other role.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS builtin text;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'roles_builtin_check') THEN
+        ALTER TABLE roles ADD CONSTRAINT roles_builtin_check
+            CHECK (builtin IN ('owner', 'editor', 'viewer'));
+    END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS roles_builtin_idx
+    ON roles (organization_id, builtin) WHERE builtin IS NOT NULL;

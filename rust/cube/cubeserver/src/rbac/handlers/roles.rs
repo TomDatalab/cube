@@ -23,7 +23,7 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::restrictions::Restrictions;
-use crate::rbac::store::{Role, StoreError};
+use crate::rbac::store::{Role, StoreError, DEFAULT_ROLES};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
 
@@ -40,11 +40,12 @@ pub const PERMISSIONS: [&str; 6] = [
 /// The permissions of the built-in roles of a rule, as a role would grant
 /// them.
 pub(crate) fn builtin_permissions(role: &str) -> &'static [&'static str] {
-    match role {
-        "owner" => &PERMISSIONS,
-        "editor" => &["view", "query", "read_objects", "write_objects"],
-        _ => &["view", "query", "read_objects"],
-    }
+    let viewer = DEFAULT_ROLES[2];
+    DEFAULT_ROLES
+        .iter()
+        .find(|(key, _)| *key == role)
+        .unwrap_or(&viewer)
+        .1
 }
 
 /// The longest name a role takes.

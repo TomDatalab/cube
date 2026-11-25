@@ -149,7 +149,27 @@ pub struct Role {
     pub restrictions: Restrictions,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
+    /// The key (`owner`, `editor`, `viewer`) of a default role of the
+    /// organization, `None` for any other role. It survives a rename.
+    pub builtin: Option<String>,
 }
+
+/// The default roles every organization holds: key and permissions.
+pub const DEFAULT_ROLES: [(&str, &[&str]); 3] = [
+    (
+        "owner",
+        &[
+            "view",
+            "query",
+            "read_objects",
+            "write_objects",
+            "execute",
+            "manage",
+        ],
+    ),
+    ("editor", &["view", "query", "read_objects", "write_objects"]),
+    ("viewer", &["view", "query", "read_objects"]),
+];
 
 /// A role with the number of rules that use it.
 #[derive(Debug, Clone)]
@@ -383,7 +403,7 @@ fn workspace_from(r: &Row) -> Workspace {
 const RULE_COLS: &str =
     "id, workspace_id, description, type, role, role_id, created_at, created_by";
 const ROLE_COLS: &str =
-    "id, organization_id, name, permissions, restrictions, created_at, created_by";
+    "id, organization_id, name, permissions, restrictions, created_at, created_by, builtin";
 
 fn rule_from(r: &Row) -> Rule {
     Rule {
@@ -419,6 +439,7 @@ fn role_from(r: &Row) -> Result<Role, StoreError> {
         restrictions,
         created_at: r.get(5),
         created_by: r.get(6),
+        builtin: r.get(7),
     })
 }
 
@@ -703,6 +724,60 @@ mod q {
         role_from(&row)
     }
 
+    /// Inserts the default roles the organization lacks and returns all
+    /// three. A default role takes its key as name, or `<key> (default)`
+    /// when a role of that name exists.
+    pub async fn seed_default_roles(
+        c: &tokio_postgres::Client,
+        organization_id: Uuid,
+        created_by: &str,
+    ) -> Result<Vec<Role>, StoreError> {
+        let mut out = Vec::with_capacity(DEFAULT_ROLES.len());
+        for (key, perms) in DEFAULT_ROLES {
+            let sql = format!(
+                "SELECT {ROLE_COLS} FROM roles WHERE organization_id = $1 AND builtin = $2"
+            );
+            if let Some(row) = c.query_opt(&sql, &[&organization_id, &key]).await? {
+                out.push(role_from(&row)?);
+                continue;
+            }
+            let taken = c
+                .query_opt(
+                    "SELECT 1 FROM roles WHERE organization_id = $1 AND name = $2",
+                    &[&organization_id, &key],
+                )
+                .await?
+                .is_some();
+            let name = if taken {
+                format!("{key} (default)")
+            } else {
+                key.to_string()
+            };
+            let perms: Vec<String> = perms.iter().map(|p| p.to_string()).collect();
+            let restrictions = restrictions_json(&Restrictions::default())?;
+            let sql = format!(
+                "INSERT INTO roles (id, organization_id, name, permissions, restrictions, \
+                 created_by, builtin) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {ROLE_COLS}"
+            );
+            let row = c
+                .query_one(
+                    &sql,
+                    &[
+                        &Uuid::new_v4(),
+                        &organization_id,
+                        &name,
+                        &perms,
+                        &restrictions,
+                        &created_by,
+                        &key,
+                    ],
+                )
+                .await?;
+            out.push(role_from(&row)?);
+        }
+        Ok(out)
+    }
+
     pub async fn update_role(
         c: &tokio_postgres::Client,
         id: Uuid,
@@ -900,6 +975,16 @@ macro_rules! shared_creates {
                 created_by,
             )
             .await
+        }
+        /// Inserts the organization's missing default roles; returns all three.
+        pub async fn seed_default_roles(
+            &self,
+            organization_id: Uuid,
+            created_by: &str,
+        ) -> Result<Vec<Role>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::seed_default_roles(c, organization_id, created_by).await
         }
         pub async fn update_role(
             &self,
@@ -1364,6 +1449,58 @@ impl Store {
     }
 
     // roles
+    /// The organization's default role with the key, wherever it was renamed.
+    pub async fn default_role(
+        &self,
+        organization_id: Uuid,
+        key: &str,
+    ) -> Result<Option<Role>, StoreError> {
+        let c = self.conn().await?;
+        let sql =
+            format!("SELECT {ROLE_COLS} FROM roles WHERE organization_id = $1 AND builtin = $2");
+        c.query_opt(&sql, &[&organization_id, &key])
+            .await?
+            .as_ref()
+            .map(role_from)
+            .transpose()
+    }
+
+    pub async fn organization_ids(&self) -> Result<Vec<Uuid>, StoreError> {
+        let c = self.conn().await?;
+        let rows = c.query("SELECT id FROM organizations ORDER BY id", &[]).await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Rules still on a built-in `role`, with their workspace's organization.
+    pub async fn rules_with_builtin_role(&self) -> Result<Vec<(Rule, Uuid)>, StoreError> {
+        let c = self.conn().await?;
+        let cols = RULE_COLS
+            .split(", ")
+            .map(|c| format!("r.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {cols}, w.organization_id FROM rules r \
+             JOIN workspaces w ON w.id = r.workspace_id WHERE r.role IS NOT NULL ORDER BY r.id"
+        );
+        Ok(c.query(&sql, &[])
+            .await?
+            .iter()
+            .map(|r| (rule_from(r), r.get(8)))
+            .collect())
+    }
+
+    /// Points the rule at the role and clears its built-in `role`.
+    pub async fn set_rule_role_id(&self, rule: Uuid, role_id: Uuid) -> Result<bool, StoreError> {
+        let c = self.conn().await?;
+        Ok(c.execute(
+            "UPDATE rules SET role_id = $2, role = NULL WHERE id = $1",
+            &[&rule, &role_id],
+        )
+        .await?
+            > 0)
+    }
+
     pub async fn role(&self, id: Uuid) -> Result<Option<Role>, StoreError> {
         let c = self.conn().await?;
         let sql = format!("SELECT {ROLE_COLS} FROM roles WHERE id = $1");
@@ -1400,7 +1537,7 @@ impl Store {
             .map(|r| {
                 Ok(RoleListing {
                     role: role_from(r)?,
-                    rules: r.get(7),
+                    rules: r.get(8),
                 })
             })
             .collect()
