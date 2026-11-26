@@ -1,4 +1,5 @@
 import { useMemo, useRef } from 'react';
+import Prism from 'prismjs';
 
 import PrismCode from '../../PrismCode';
 
@@ -33,8 +34,25 @@ export function CodeView({ code }: { code: string }) {
   );
 }
 
-// A file being edited, with its line numbers. The textarea scrolls on its own;
-// the gutter follows it.
+// The language PrismCode colors files with, so editing looks like viewing.
+const LANGUAGE = 'javascript';
+
+// The text as Prism colors it. Prism escapes it; the extra line lets the last,
+// empty line of the text show (a trailing newline alone has no height).
+export function highlighted(text: string): string {
+  const grammar = Prism.languages[LANGUAGE];
+  const body = grammar ? Prism.highlight(text, grammar, LANGUAGE) : escape(text);
+  return `${body}\n`;
+}
+
+function escape(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// A file being edited, with its line numbers and the view's colors: the
+// colored code is drawn under a textarea whose own text is transparent, so
+// typing, the caret and the selection stay the browser's. The textarea
+// scrolls; the colored code and the gutter follow it.
 export function CodeEditor({
   value, disabled, onChange, rows = 24,
 }: {
@@ -44,24 +62,37 @@ export function CodeEditor({
   rows?: number;
 }) {
   const gutter = useRef<HTMLDivElement>(null);
+  const colored = useRef<HTMLPreElement>(null);
+  const html = useMemo(() => highlighted(value), [value]);
   return (
     <div data-slot="code-editor" className="numbered-code numbered-code-editor" style={{ height: rows * 20 + 16 }}>
       <div ref={gutter} className="numbered-code-gutter-scroll">
         <Gutter lines={lineCount(value)} />
       </div>
-      <textarea
-        aria-label="File content"
-        spellCheck={false}
-        wrap="off"
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
-        onScroll={(e) => {
-          if (gutter.current) {
-            gutter.current.scrollTop = e.currentTarget.scrollTop;
-          }
-        }}
-      />
+      <div className="numbered-code-input">
+        <pre ref={colored} aria-hidden="true" data-slot="code-colors" className={`language-${LANGUAGE}`}>
+          {/* eslint-disable-next-line react/no-danger -- Prism's output, escaped by it */}
+          <code className={`language-${LANGUAGE}`} dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
+        <textarea
+          aria-label="File content"
+          spellCheck={false}
+          wrap="off"
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+          onScroll={(e) => {
+            const { scrollTop, scrollLeft } = e.currentTarget;
+            if (gutter.current) {
+              gutter.current.scrollTop = scrollTop;
+            }
+            if (colored.current) {
+              colored.current.scrollTop = scrollTop;
+              colored.current.scrollLeft = scrollLeft;
+            }
+          }}
+        />
+      </div>
     </div>
   );
 }

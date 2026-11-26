@@ -3,9 +3,19 @@ import { act, createElement, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CodeEditor, CodeView, lineCount } from '../pages/Schema/NumberedCode';
+import {
+  CodeEditor, CodeView, highlighted, lineCount,
+} from '../pages/Schema/NumberedCode';
 
-vi.mock('prismjs', () => ({ default: { highlightAll: () => undefined } }));
+vi.mock('prismjs', () => ({
+  default: {
+    highlightAll: () => undefined,
+    languages: { javascript: {} },
+    // Marks every "name" so the test sees Prism's output, escaped like Prism.
+    highlight: (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/name/g, '<span class="token property">name</span>'),
+  },
+}));
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -38,6 +48,16 @@ describe('files with line numbers', () => {
     expect(host.querySelector('[data-testid="prism-code"]')!.textContent).toBe('cubes:\n  - name: a\n    sql: x');
   });
 
+  it('colors the text being edited like the view, escaped', async () => {
+    expect(highlighted('a <b> & name')).toBe('a &lt;b> &amp; <span class="token property">name</span>\n');
+    await act(async () => root.render(createElement(CodeEditor, { value: '- name: x', onChange: () => undefined })));
+    const colors = host.querySelector('[data-slot="code-colors"]')!;
+    expect(colors.getAttribute('aria-hidden')).toBe('true');
+    expect(colors.querySelector('code')!.className).toBe('language-javascript');
+    expect(colors.querySelector('.token.property')!.textContent).toBe('name');
+    expect(colors.textContent).toBe('- name: x\n');
+  });
+
   it('renumbers while editing and keeps the gutter with the text when it scrolls', async () => {
     const seen: string[] = [];
     function Edit() {
@@ -66,5 +86,6 @@ describe('files with line numbers', () => {
     area.scrollTop = 40;
     await act(async () => area.dispatchEvent(new Event('scroll')));
     expect((host.querySelector('.numbered-code-gutter-scroll') as HTMLElement).scrollTop).toBe(40);
+    expect((host.querySelector('[data-slot="code-colors"]') as HTMLElement).scrollTop).toBe(40);
   });
 });

@@ -143,17 +143,45 @@ const GlobalStyles = createGlobalStyle`
     padding-bottom: 32px !important;
   }
 
-  .numbered-code-editor textarea {
+  .numbered-code-input {
+    position: relative;
     flex: 1;
     min-width: 0;
+  }
+
+  /* The colored copy under the textarea: same box, same text, no events.
+     Extra room at the end so it can scroll as far as the textarea, whose
+     scrollbars take part of its box. */
+  .numbered-code-input pre[data-slot="code-colors"] {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 8px 44px 40px 12px;
+    overflow: hidden;
+    pointer-events: none;
+    background: transparent;
+  }
+
+  .numbered-code-editor textarea {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     margin: 0;
     padding: 8px 12px;
     border: 0;
     outline: none;
     resize: none;
     overflow: auto;
-    color: inherit;
     background: transparent;
+    /* The text is the colored copy's; the caret keeps the text color. */
+    color: var(--pg-text, #141446);
+    -webkit-text-fill-color: transparent;
+    caret-color: var(--pg-text, #141446);
+  }
+
+  .numbered-code-editor textarea::selection {
+    background: color-mix(in srgb, var(--pg-accent, #2f5597) 25%, transparent);
   }
 
   .numbered-code-editor:focus-within {
