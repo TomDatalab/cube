@@ -35,6 +35,7 @@ import {
 } from './clipboard';
 import { useHistory } from './history';
 import { Dialect, convertDrafts } from './dialect';
+import { addReference, ensureIds } from './physical';
 import { issues } from './validate';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
@@ -237,7 +238,12 @@ function Editor({
   // The nodes selected on the canvas (tables and shortcuts) and the
   // selected reference, by index.
   const [selection, setSelection] = useState<string[]>([]);
-  const [selectedEdge, setSelectedEdge] = useState<number | null>(null);
+  // The selected reference, by id: undo and deletes move places, not ids.
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
+  const joinsRef = useRef<ModelDefinition['joins']>([]);
+  joinsRef.current = def.joins;
+  const foundEdge = selectedEdge === null ? -1 : def.joins.findIndex((j) => j.id === selectedEdge);
+  const edgeAt: number | null = foundEdge < 0 ? null : foundEdge;
   const selected = selection.length ? parseNodeId(selection[0]).alias : null;
   const [clip, setClip] = useState<Clip | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
@@ -265,7 +271,7 @@ function Editor({
         const read = definitionOf(m.definition);
         // Old models' portable types as the connection's dialect writes them;
         // the next save stores them.
-        history.reset(convertDrafts(read, known[read.dataSource] ?? null));
+        history.reset(ensureIds(convertDrafts(read, known[read.dataSource] ?? null)));
         setDirty(false);
         setLoaded(true);
       },
@@ -300,8 +306,9 @@ function Editor({
     setDirty(true);
   };
 
+  // Every reference keeps an id, so new links get one as they are made.
   const change = (next: ModelDefinition) => {
-    setDef(next);
+    setDef(ensureIds(next));
     edited();
   };
 
@@ -428,7 +435,7 @@ function Editor({
     targetHandle: j.to.column,
     label: joinLabel(j),
     type: 'reference' as const,
-    selected: selectedEdge === index,
+    selected: Boolean(j.id) && selectedEdge === j.id,
     data: {
       index, join: j, label: joinLabel(j), onMovePoint,
     },
@@ -447,7 +454,8 @@ function Editor({
     // A picked node wins: React Flow cannot unselect our controlled edges,
     // so it may still report the reference picked before.
     const edge = lines[0]?.data as { index?: number } | undefined;
-    setSelectedEdge(ids.length === 0 && typeof edge?.index === 'number' ? edge.index : null);
+    const id = typeof edge?.index === 'number' ? joinsRef.current[edge.index]?.id ?? null : null;
+    setSelectedEdge(ids.length === 0 ? id : null);
   }, []);
 
   const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
@@ -504,18 +512,17 @@ function Editor({
       change(cut(def, selection).def);
       setSelection([]);
       setSelectedEdge(null);
-    } else if (selectedEdge !== null && def.joins[selectedEdge]) {
-      change(removeJoin(def, selectedEdge));
+    } else if (edgeAt !== null) {
+      change(removeJoin(def, edgeAt));
       setSelectedEdge(null);
     }
   };
 
-  // References are selected by their place, which undo and redo may give
-  // to another one.
+  // A selection whose reference undo or redo takes away selects nothing:
+  // `edgeAt` finds no reference with its id.
   const undo = () => {
     if (history.canUndo) {
       history.undo();
-      setSelectedEdge(null);
       edited();
     }
   };
@@ -523,7 +530,6 @@ function Editor({
   const redo = () => {
     if (history.canRedo) {
       history.redo();
-      setSelectedEdge(null);
       edited();
     }
   };
@@ -573,7 +579,7 @@ function Editor({
     const index = Number((edge.data as { index?: number } | undefined)?.index);
     if (def.joins[index]) {
       setSelection([]);
-      setSelectedEdge(index);
+      setSelectedEdge(def.joins[index].id ?? null);
     }
   };
 
@@ -746,7 +752,7 @@ function Editor({
       if (result.model) {
         // What the server created is no draft any more: undoing past it
         // would offer to create it again.
-        history.reset(definitionOf(result.model.definition));
+        history.reset(ensureIds(definitionOf(result.model.definition)));
         setVersion(result.model.version);
         setDirty(false);
       }
@@ -858,16 +864,16 @@ function Editor({
   };
 
   const onReference = (what: 'add' | 'reduce' | 'swap') => {
-    const j = selectedEdge === null ? undefined : def.joins[selectedEdge];
-    if (!j || selectedEdge === null) {
+    const j = edgeAt === null ? undefined : def.joins[edgeAt];
+    if (!j || edgeAt === null) {
       return;
     }
     if (what === 'swap') {
-      change(setJoin(def, selectedEdge, { swapped: !j.swapped }));
+      change(setJoin(def, edgeAt, { swapped: !j.swapped }));
     } else if (what === 'add') {
-      change(setJoin(def, selectedEdge, { points: addPoint(j.points ?? [], referencePath(selectedEdge)) }));
+      change(setJoin(def, edgeAt, { points: addPoint(j.points ?? [], referencePath(edgeAt)) }));
     } else {
-      change(setJoin(def, selectedEdge, { points: reducePoint(j.points ?? []) }));
+      change(setJoin(def, edgeAt, { points: reducePoint(j.points ?? []) }));
     }
   };
 
@@ -897,7 +903,7 @@ function Editor({
 
   const pickEdge = (index: number) => {
     setSelection([]);
-    setSelectedEdge(index);
+    setSelectedEdge(def.joins[index]?.id ?? null);
     const j = def.joins[index];
     if (j) {
       centerOn(j.from.alias);
@@ -916,8 +922,8 @@ function Editor({
     setTool(next);
   };
 
-  // The reference tool: a click on the parent, then on the child. The
-  // child's column is `<parent>_<key>`, or the key's own name, or its first.
+  // The reference tool, as Redgate's: a click on the parent, then on the
+  // child; the reference is made at once, a new child getting the column.
   const onNodeClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
     if (tool !== 'reference') {
       return;
@@ -927,15 +933,13 @@ function Editor({
       setRefFrom(alias);
       return;
     }
-    const parent = nodes.find((n) => n.id === refFrom)?.data;
-    const child = node.data;
-    const key = parent?.keys[0] ?? parent?.columns[0]?.name;
-    const names = child.columns.map((c) => c.name);
-    const column = [`${refFrom}_${key}`, key].find((c) => c && names.includes(c)) ?? names[0];
+    const result = addReference(def, refFrom, alias, columnsOfTable);
     setRefFrom(null);
     setTool('select');
-    if (key && column) {
-      link({ alias, column }, { alias: refFrom, column: key });
+    if (result.id) {
+      change(result.def);
+      setSelection([]);
+      setSelectedEdge(result.id);
     }
   };
 
@@ -998,8 +1002,8 @@ function Editor({
   }[asked];
 
   let propertiesOf: Selected = { kind: 'model' };
-  if (selectedEdge !== null && def.joins[selectedEdge]) {
-    propertiesOf = { kind: 'reference', index: selectedEdge };
+  if (edgeAt !== null) {
+    propertiesOf = { kind: 'reference', index: edgeAt };
   } else if (selected && def.tables.some((t) => t.alias === selected)) {
     propertiesOf = { kind: 'table', alias: selected };
   }
@@ -1073,7 +1077,7 @@ function Editor({
           onArrange: arrange,
         }}
         references={{
-          edgeSelected: selectedEdge !== null && Boolean(def.joins[selectedEdge]),
+          edgeSelected: edgeAt !== null,
           anyHidden: def.joins.some((j) => j.hidden),
           onShowAll: () => change(showAllJoins(def)),
           onAddPoint: () => onReference('add'),
@@ -1105,7 +1109,7 @@ function Editor({
             def={def}
             columnsOf={columnsOfTable}
             selection={selection}
-            selectedEdge={selectedEdge}
+            selectedEdge={edgeAt}
             onPickNode={pickNode}
             onPickEdge={pickEdge}
             tables={tables}

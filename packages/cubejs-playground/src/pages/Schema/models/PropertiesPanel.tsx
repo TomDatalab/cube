@@ -6,9 +6,10 @@ import type { Dialect } from './dialect';
 import type { Issue } from './validate';
 import { DraftText, Section, Value } from './PanelParts';
 import { TableProperties } from './TableProperties';
+import { ReferenceProperties } from './ReferenceProperties';
 
 import {
-  JoinKind, ModelDefinition, ModelTable, Relationship, joinLabel, removeJoin, setJoin, setPrimary,
+  ModelDefinition, ModelTable, setPrimary,
 } from './modelGraph';
 
 type Columns = { name: string; type: string }[];
@@ -44,18 +45,6 @@ const TITLE: Record<Selected['kind'], string> = {
   table: 'Table properties',
   reference: 'Reference properties',
 };
-
-const RELATIONSHIPS: { value: Relationship; label: string }[] = [
-  { value: 'many_to_one', label: 'N:1 (many to one)' },
-  { value: 'one_to_many', label: '1:N (one to many)' },
-  { value: 'one_to_one', label: '1:1 (one to one)' },
-];
-const JOINS: { value: JoinKind; label: string }[] = [
-  { value: 'left', label: 'LEFT' },
-  { value: 'inner', label: 'INNER' },
-];
-
-const NATIVE_SELECT = 'tw:h-8 tw:w-full tw:rounded-md tw:border tw:bg-background tw:px-2 tw:text-sm tw:text-foreground';
 
 function ModelProperties({
   def, name, columnsOf, onChange, onName, onDeleteModel, deleting, busy,
@@ -110,63 +99,6 @@ function ModelProperties({
   );
 }
 
-function ReferenceProperties({
-  def, index, onChange, onDeselect,
-}: PropertiesPanelProps & { index: number }) {
-  const join = def.joins[index];
-  if (!join) {
-    return null;
-  }
-  return (
-    <Section title="General">
-      <Value label="From">{`${join.from.alias}.${join.from.column}`}</Value>
-      <Value label="To">{`${join.to.alias}.${join.to.column}`}</Value>
-      <Field label="Relationship" htmlFor="model-reference-relationship">
-        <select
-          id="model-reference-relationship"
-          aria-label="Relationship"
-          className={NATIVE_SELECT}
-          value={join.relationship}
-          onChange={(e) => onChange(setJoin(def, index, { relationship: e.target.value as Relationship }))}
-        >
-          {RELATIONSHIPS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-        </select>
-      </Field>
-      <Field label="Join" htmlFor="model-reference-join">
-        <select
-          id="model-reference-join"
-          aria-label="Join"
-          className={NATIVE_SELECT}
-          value={join.join}
-          onChange={(e) => onChange(setJoin(def, index, { join: e.target.value as JoinKind }))}
-        >
-          {JOINS.map((j) => <option key={j.value} value={j.value}>{j.label}</option>)}
-        </select>
-      </Field>
-      <Value label="Label">{joinLabel(join)}</Value>
-      <label className="tw:flex tw:items-center tw:gap-2 tw:text-sm" htmlFor="model-reference-hidden">
-        <input
-          id="model-reference-hidden"
-          type="checkbox"
-          checked={Boolean(join.hidden)}
-          onChange={(e) => onChange(setJoin(def, index, { hidden: e.target.checked }))}
-        />
-        Hidden on the canvas
-      </label>
-      <Button
-        variant="destructive"
-        size="sm"
-        onClick={() => {
-          onChange(removeJoin(def, index));
-          onDeselect();
-        }}
-      >
-        Delete reference
-      </Button>
-    </Section>
-  );
-}
-
 // The right pane: the properties of what is selected, or of the model.
 export function PropertiesPanel(props: PropertiesPanelProps) {
   const { selected } = props;
@@ -192,7 +124,16 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           onSqlPreview={props.onSqlPreview}
         />
       ) : null}
-      {selected.kind === 'reference' ? <ReferenceProperties {...props} index={selected.index} /> : null}
+      {selected.kind === 'reference' ? (
+        <ReferenceProperties
+          def={props.def}
+          index={selected.index}
+          columnsOf={props.columnsOf}
+          issues={props.issues.filter((i) => i.target.kind === 'reference' && i.target.id === props.def.joins[selected.index]?.id)}
+          onChange={props.onChange}
+          onDeselect={props.onDeselect}
+        />
+      ) : null}
     </aside>
   );
 }

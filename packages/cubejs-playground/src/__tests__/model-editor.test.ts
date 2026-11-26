@@ -7,7 +7,7 @@ import {
 
 import { notify } from '@/components/kit';
 import { ApiError, CubeModelView } from '../pages/Schema/api';
-import { ModelEditor } from '../pages/Schema/models/ModelEditor';
+import { ModelEditor, ModelEditorProps } from '../pages/Schema/models/ModelEditor';
 import { TableNode } from '../pages/Schema/models/TableNode';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
 
@@ -180,15 +180,18 @@ describe('ModelEditor', () => {
   });
 
   const render = async () => {
-    await act(async () => root.render(createElement(ModelEditor, {
+    const props: ModelEditorProps = {
       api: api as any,
-      org: { id: 'o1', slug: 'acme', name: 'Acme' },
+      org: { id: 'o1', slug: 'acme', name: 'Acme' } as any,
       modelId: 'm1',
       tables,
       onBuilt,
       onDeleted,
       onTablesCreated,
-    })));
+    };
+    // tsc's createElement inference gives up on this large file now and then;
+    // the props are typed above.
+    await act(async () => root.render(createElement(ModelEditor as any, props)));
   };
   const button = (text: string | RegExp) => [...document.querySelectorAll('button')]
     .find((b) => (typeof text === 'string' ? b.textContent!.trim() === text : text.test(b.textContent!))) as HTMLButtonElement;
@@ -497,25 +500,12 @@ describe('ModelEditor', () => {
     expect(document.body.textContent).not.toContain('INNER keeps only rows');
   });
 
-  it('edits a reference\'s relationship from its properties and deletes it', async () => {
+  it('shows a reference\'s properties from its edge and deletes it', async () => {
     await render();
     await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
     const pane = document.querySelector('[data-slot="model-properties"]')!;
     expect(pane.textContent).toContain('Reference properties');
-    expect(pane.textContent).toContain('orders.customer_id');
-    expect(pane.textContent).toContain('customers.id');
-    const join = pane.querySelector('select[aria-label="Join"]') as HTMLSelectElement;
-    await act(async () => {
-      join.value = 'inner';
-      join.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    expect(document.querySelector('[data-edge]')!.textContent).toBe('N:1 · INNER');
-    const relationship = pane.querySelector('select[aria-label="Relationship"]') as HTMLSelectElement;
-    await act(async () => {
-      relationship.value = 'one_to_one';
-      relationship.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    expect(document.querySelector('[data-edge]')!.textContent).toBe('1:1 · INNER');
+    expect(pane.textContent).toContain('N:1 · LEFT');
     await act(async () => button('Delete reference').click());
     expect(document.querySelectorAll('[data-edge]').length).toBe(0);
     expect(document.querySelector('[data-slot="model-properties"]')!.textContent).toContain('Model properties');
@@ -907,10 +897,13 @@ describe('ModelEditor', () => {
       expect((document.querySelector('textarea[aria-label="Table comment"]') as HTMLTextAreaElement).value).toBe('');
     });
 
-    it('undo drops a selected reference, whose index may now be another', async () => {
+    it('undo that takes the selected reference away selects nothing', async () => {
+      api.model.mockResolvedValueOnce(view(threeTables()));
       await render();
-      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 410, y: 20 } }]));
-      await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
+      await act(async () => tool('New reference').click());
+      await act(async () => flow.props.onNodeClick({}, flow.props.nodes.find((n: any) => n.id === 'orders')));
+      await act(async () => flow.props.onNodeClick({}, flow.props.nodes.find((n: any) => n.id === 'products')));
+      expect(pane().textContent).toContain('Reference properties');
       await act(async () => tool('Undo').click());
       expect(pane().textContent).toContain('Model properties');
     });
@@ -1310,6 +1303,94 @@ describe('ModelEditor', () => {
     });
   });
 
+  describe('reference properties', () => {
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const pick = async () => act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
+    const pickOption = async (label: string, value: string) => {
+      const el = pane().querySelector(`select[aria-label="${label}"]`) as HTMLSelectElement;
+      await act(async () => {
+        el.value = value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    };
+    const click = async (label: string) => act(async () => (pane().querySelector(`[aria-label="${label}"]`) as HTMLElement).click());
+    const savedJoin = async () => {
+      await act(async () => tool('Save changes').click());
+      return api.saveModel.mock.calls[api.saveModel.mock.calls.length - 1][1].definition.joins[0];
+    };
+
+    it('sets cardinality 1..1 and the cube join becomes 1:1', async () => {
+      await render();
+      await pick();
+      await pickOption('Cardinality', '1..1');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('1:1 · LEFT');
+      expect(pane().textContent).toContain('1:1 · LEFT');
+      expect((await savedJoin()).cardinality).toBe('1..1');
+    });
+
+    it('checking and unchecking mandatory sets the join INNER and LEFT', async () => {
+      await render();
+      await pick();
+      const mandatory = () => pane().querySelector('input[aria-label="Mandatory"]') as HTMLInputElement;
+      expect(mandatory().checked).toBe(false);
+      await click('Mandatory');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('N:1 · INNER');
+      await click('Mandatory');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('N:1 · LEFT');
+    });
+
+    it('sets the constraint actions and the name', async () => {
+      await render();
+      await pick();
+      await pickOption('Delete constraint action', 'cascade');
+      await pickOption('Update constraint action', 'restrict');
+      await fill('[data-slot="model-properties"] input[aria-label="Reference name"]', 'fk_orders_customers');
+      await act(async () => {
+        pane().querySelector('input[aria-label="Reference name"]')!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
+      expect(await savedJoin()).toMatchObject({ onDelete: 'cascade', onUpdate: 'restrict', name: 'fk_orders_customers' });
+    });
+
+    it('swap reference makes the other table the parent', async () => {
+      await render();
+      await pick();
+      const primary = () => pane().querySelector('[data-slot="model-reference-primary"]')!.textContent;
+      expect(primary()).toBe('customers');
+      await act(async () => button('Swap reference').click());
+      expect(primary()).toBe('orders');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('1:N · LEFT');
+    });
+
+    it('adds a column pair and picks its columns', async () => {
+      await render();
+      await pick();
+      await act(async () => button('Add pair').click());
+      await pickOption('Pair 2 primary column', 'name');
+      await pickOption('Pair 2 foreign column', 'amount');
+      expect((await savedJoin()).pairs).toEqual([{ from: 'amount', to: 'name' }]);
+    });
+
+    it('the reference tool adds the FK column to a new child table and selects the reference', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await act(async () => tool('New reference').click());
+      await act(async () => flow.props.onNodeClick({}, flow.props.nodes.find((n: any) => n.id === 'customers')));
+      await act(async () => flow.props.onNodeClick({}, flow.props.nodes.find((n: any) => n.id === 'items')));
+      expect(node('items').textContent).toContain('customers_id');
+      expect(pane().textContent).toContain('Reference properties');
+      expect(document.body.textContent).not.toContain('New link');
+    });
+
+    it('undo keeps the same reference selected by id', async () => {
+      await render();
+      await pick();
+      await click('Mandatory');
+      await act(async () => tool('Undo').click());
+      expect(pane().textContent).toContain('Reference properties');
+      expect((pane().querySelector('input[aria-label="Mandatory"]') as HTMLInputElement).checked).toBe(false);
+    });
+  });
+
   describe('create in database', () => {
     const statements = ['CREATE TABLE shop.items (id integer NOT NULL, label text, PRIMARY KEY (id))'];
     const detail = { tables: {} } as any;
@@ -1461,9 +1542,9 @@ describe('ModelEditor', () => {
         onPick: noop,
         onResize: noop,
       };
-      act(() => own.render(createElement(TableNode, { id: 'orders~s1', data: { ...data, shortcut: 's1' } } as any)));
+      act(() => own.render(createElement(TableNode as any, { id: 'orders~s1', data: { ...data, shortcut: 's1' } })));
       expect(host.querySelector('[aria-label="shortcut"]')).not.toBeNull();
-      act(() => own.render(createElement(TableNode, { id: 'orders', data } as any)));
+      act(() => own.render(createElement(TableNode as any, { id: 'orders', data })));
       expect(host.querySelector('[aria-label="shortcut"]')).toBeNull();
       act(() => own.unmount());
     });
