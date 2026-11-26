@@ -135,7 +135,7 @@ describe('validate', () => {
 
   it('dialect rules are off without a dialect', () => {
     expect(messages(model(), null).some((m) => m.includes('is not a'))).toBe(false);
-    expect(RULES.filter((r) => r.dialect).map((r) => r.id)).toEqual(['column.supportedType']);
+    expect(RULES.filter((r) => r.dialect).map((r) => r.id)).toEqual(['column.supportedType', 'viewColumn.supportedType']);
   });
 
   it('every rule has a group, a label and a severity', () => {
@@ -144,5 +144,34 @@ describe('validate', () => {
       expect(r.label, r.id).toBeTruthy();
       expect(['error', 'warning']).toContain(r.severity);
     });
+  });
+
+  const view = (over = {}) => ({
+    id: 'v1', name: 'v_a', schema: 's', sql: 'select 1', columns: [], dependsOnTables: [], dependsOnViews: [], x: 0, y: 0, ...over,
+  });
+
+  it('flags a view with no query and a repeated column', () => {
+    const def = {
+      ...model(),
+      views: [view({ sql: ' ', columns: [{ name: 'a', type: 'integer' }, { name: 'A', type: 'integer' }] }), view({ id: 'v2' })],
+    };
+    const found = issues(def, columnsOf, 'postgres').filter((i) => i.target.kind === 'view');
+    expect(found.map((i) => i.rule).sort()).toEqual(['view.emptyQuery', 'view.uniqueName', 'viewColumn.uniqueName']);
+    expect(found.every((i) => (i.target as { id: string }).id.startsWith('v'))).toBe(true);
+  });
+
+  it('a dialect-less model gives no view column type issue', () => {
+    const def = { ...model(), views: [view({ columns: [{ name: 'a', type: 'money' }] })] };
+    expect(issues(def, columnsOf, 'postgres').map((i) => i.rule)).toContain('viewColumn.supportedType');
+    expect(issues(def, columnsOf, null).map((i) => i.rule)).not.toContain('viewColumn.supportedType');
+  });
+
+  it('a disabled view rule gives no issue', () => {
+    const def = { ...model(), views: [view({ sql: '' })], settings: { validation: { 'view.emptyQuery': false } } };
+    expect(issues(def, columnsOf, 'postgres').map((i) => i.rule)).not.toContain('view.emptyQuery');
+  });
+
+  it('a view with no columns has no issue', () => {
+    expect(issues({ ...model(), views: [view()] }, columnsOf, 'postgres').filter((i) => i.target.kind === 'view')).toEqual([]);
   });
 });

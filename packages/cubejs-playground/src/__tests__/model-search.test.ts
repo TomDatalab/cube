@@ -39,4 +39,21 @@ describe('searchModel', () => {
   it('caps the hits at the limit', () => {
     expect(searchModel(model(), columnsOf, 'i', 2)).toHaveLength(2);
   });
+
+  it('search finds notes, areas, views and view columns', () => {
+    const def: ModelDefinition = {
+      ...model(),
+      notes: [{ id: 'n1', x: 0, y: 0, text: `zeta line one\nzeta line two and a long tail beyond forty` }],
+      areas: [{ id: 'a1', name: 'Zeta area', x: 0, y: 0, width: 1, height: 1 }],
+      views: [{
+        id: 'v1', name: 'zeta_view', schema: 's', sql: '', columns: [{ name: 'zeta_col', type: 'int' }], dependsOnTables: [], dependsOnViews: [], x: 0, y: 0,
+      }],
+    };
+    expect(searchModel(def, columnsOf, 'zeta')).toEqual([
+      { kind: 'note', label: 'zeta line one zeta line two and a long t', nodeId: 'note:n1' },
+      { kind: 'area', label: 'Zeta area', nodeId: 'area:a1' },
+      { kind: 'view', label: 'zeta_view', nodeId: 'view:v1' },
+      { kind: 'view', label: 'zeta_view.zeta_col', nodeId: 'view:v1' },
+    ]);
+  });
 });

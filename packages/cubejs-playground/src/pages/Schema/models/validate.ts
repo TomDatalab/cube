@@ -3,11 +3,11 @@ import { IDENTIFIER, ModelDefinition, ModelJoin, ModelTable } from './modelGraph
 import { referenceEnds } from './physical';
 
 // What a problem is about: a table (its columns, keys, indexes and checks
-// included) or a reference.
-export type IssueTarget = { kind: 'table'; alias: string } | { kind: 'reference'; id: string };
+// included), a reference or a view (its columns included).
+export type IssueTarget = { kind: 'table'; alias: string } | { kind: 'reference'; id: string } | { kind: 'view'; id: string };
 export type Issue = { rule: string; severity: 'error' | 'warning'; target: IssueTarget; message: string };
 
-type Group = 'Table' | 'Table column' | 'Table alternate key' | 'Table check' | 'Table index' | 'Reference';
+type Group = 'Table' | 'Table column' | 'Table alternate key' | 'Table check' | 'Table index' | 'Reference' | 'View' | 'View column';
 export type Rule = { id: string; group: Group; label: string; severity: 'error' | 'warning'; dialect?: true };
 
 // Redgate's model validation rules for the objects this model has, in its
@@ -115,6 +115,33 @@ export const RULES: Rule[] = [
   {
     id: 'reference.selfMandatory', group: 'Reference', label: 'Check if self reference is not mandatory', severity: 'warning',
   },
+  {
+    id: 'view.emptyName', group: 'View', label: "Name can't be empty", severity: 'error',
+  },
+  {
+    id: 'view.uniqueName', group: 'View', label: 'Unique name', severity: 'error',
+  },
+  {
+    id: 'view.emptyQuery', group: 'View', label: "Query can't be empty", severity: 'error',
+  },
+  {
+    id: 'view.invalidName', group: 'View', label: 'Invalid name', severity: 'warning',
+  },
+  {
+    id: 'view.nameLength', group: 'View', label: 'Name length', severity: 'warning',
+  },
+  {
+    id: 'viewColumn.emptyName', group: 'View column', label: "Name can't be empty", severity: 'error',
+  },
+  {
+    id: 'viewColumn.uniqueName', group: 'View column', label: 'Unique name', severity: 'error',
+  },
+  {
+    id: 'viewColumn.emptyType', group: 'View column', label: 'Empty type', severity: 'error',
+  },
+  {
+    id: 'viewColumn.supportedType', group: 'View column', label: 'Supported database type', severity: 'warning', dialect: true,
+  },
 ];
 
 const MAX_NAME = 63;
@@ -161,7 +188,7 @@ export function issues(
     });
   };
   const nameRules = (
-    prefix: 'table' | 'column' | 'ak' | 'index' | 'reference',
+    prefix: 'table' | 'column' | 'ak' | 'index' | 'reference' | 'view',
     target: IssueTarget,
     what: string,
     name: string
@@ -311,6 +338,39 @@ export function issues(
     }
     if (j.from.alias === j.to.alias && (j.mandatory ?? j.join === 'inner')) {
       add('reference.selfMandatory', target, `Reference ${id} links ${j.from.alias} to itself and is mandatory`);
+    }
+  }
+
+  const viewNames = new Set<string>();
+  for (const v of def.views ?? []) {
+    const target: IssueTarget = { kind: 'view', id: v.id };
+    const what = `View ${v.name || v.id}`;
+    if (!v.name.trim()) {
+      add('view.emptyName', target, `View ${v.id} has an empty name`);
+    } else {
+      nameRules('view', target, what, v.name);
+      if (viewNames.has(v.name)) {
+        add('view.uniqueName', target, `${what} is used by another view`);
+      }
+      viewNames.add(v.name);
+    }
+    if (!v.sql.trim()) {
+      add('view.emptyQuery', target, `${what} has an empty query`);
+    }
+    const seen = new Set<string>();
+    for (const c of v.columns) {
+      const col = `Column ${v.name || v.id}.${c.name}`;
+      if (!c.name.trim()) {
+        add('viewColumn.emptyName', target, `A column of ${what} has an empty name`);
+      } else if (seen.has(c.name.toLowerCase())) {
+        add('viewColumn.uniqueName', target, `${col} is repeated`);
+      }
+      seen.add(c.name.toLowerCase());
+      if (!c.type.trim()) {
+        add('viewColumn.emptyType', target, `${col} has no type`);
+      } else if (!validType(dialect, c.type)) {
+        add('viewColumn.supportedType', target, `${col}: ${c.type} is not a ${dialect} type`);
+      }
     }
   }
   return out;

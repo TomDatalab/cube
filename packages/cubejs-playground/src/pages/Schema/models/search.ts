@@ -1,8 +1,9 @@
+import { nodeIdOf } from './objects';
 import type { ModelDefinition, ModelTable } from './modelGraph';
 
 // A thing of the model the search found, and where it is on the canvas.
 export type Hit = {
-  kind: 'table' | 'column' | 'reference';
+  kind: 'table' | 'column' | 'reference' | 'note' | 'area' | 'view';
   label: string;
   nodeId: string;
   edgeIndex?: number;
@@ -42,5 +43,25 @@ export function searchModel(
       });
     }
   });
+  for (const n of def.notes ?? []) {
+    if (has(n.text)) {
+      hits.push({ kind: 'note', label: n.text.slice(0, 40).replace(/\r?\n/g, ' '), nodeId: nodeIdOf('note', n.id) });
+    }
+  }
+  for (const a of def.areas ?? []) {
+    if (has(a.name)) {
+      hits.push({ kind: 'area', label: a.name, nodeId: nodeIdOf('area', a.id) });
+    }
+  }
+  for (const v of def.views ?? []) {
+    if (has(v.name)) {
+      hits.push({ kind: 'view', label: v.name, nodeId: nodeIdOf('view', v.id) });
+    }
+    for (const c of v.columns) {
+      if (has(c.name)) {
+        hits.push({ kind: 'view', label: `${v.name}.${c.name}`, nodeId: nodeIdOf('view', v.id) });
+      }
+    }
+  }
   return hits.slice(0, limit);
 }
