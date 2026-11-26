@@ -2,7 +2,7 @@ import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { Node, NodeProps } from '@xyflow/react';
 import {
-  Calendar, Hash, KeyRound, Link2, Table2, ToggleLeft, Type, X,
+  Calendar, ChevronDown, ChevronRight, Hash, KeyRound, Link2, Table2, ToggleLeft, Type, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -28,6 +28,12 @@ export type TableNodeData = {
   // The columns that are an end of a link.
   linked: string[];
   onRemove: (alias: string) => void;
+  // Shown as its header only; its links still end on it.
+  collapsed: boolean;
+  onToggle: (alias: string) => void;
+  // The column of this table picked to start a link, if any.
+  picked: string | null;
+  onPick: (alias: string, column: string) => void;
 };
 
 export type TableFlowNode = Node<TableNodeData, 'table'>;
@@ -40,6 +46,10 @@ const HANDLE_STYLE = {
   background: 'var(--primary)',
   border: '2px solid var(--card)',
 };
+
+// The handles of a collapsed table: kept, so its links stay drawn, but out
+// of sight in the middle of its header.
+const HIDDEN_HANDLE_STYLE = { ...HANDLE_STYLE, opacity: 0, pointerEvents: 'none' as const };
 
 const NUMBER = ['int', 'numeric', 'decimal', 'double', 'float', 'real', 'number', 'money', 'serial'];
 const TEXT = ['text', 'char', 'string', 'uuid', 'json', 'enum'];
@@ -62,6 +72,15 @@ export function typeIcon(type: string): LucideIcon | null {
   return null;
 }
 
+// The table and column of a row under the pointer, so a link dropped
+// anywhere on a column's row, not only on its small handle, still links.
+export function columnAt(element: Element | null): { alias: string; column: string } | null {
+  const row = element?.closest('[data-column]');
+  const alias = row?.closest('.react-flow__node')?.getAttribute('data-id');
+  const column = row?.getAttribute('data-column');
+  return alias && column ? { alias, column } : null;
+}
+
 type TableNodeProps = Pick<NodeProps<TableFlowNode>, 'data'> & { selected?: boolean };
 
 // A table on the canvas: a band of its color, its alias, the principal and
@@ -81,11 +100,27 @@ export const TableNode = memo(({ data, selected }: TableNodeProps) => (
       className="tw:h-1.5"
       style={{ background: data.color ? `var(--model-${data.color})` : 'var(--muted)' }}
     />
-    <div className="tw:flex tw:items-center tw:gap-2 tw:border-b tw:px-3 tw:py-2">
+    <div className={cn('tw:relative tw:flex tw:items-center tw:gap-2 tw:px-3 tw:py-2', !data.collapsed && 'tw:border-b')}>
+      <button
+        type="button"
+        data-slot="model-table-toggle"
+        aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} ${data.alias}`}
+        aria-expanded={!data.collapsed}
+        title={data.collapsed ? 'Show the columns' : 'Hide the columns'}
+        className="nodrag tw:flex tw:size-5 tw:shrink-0 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded tw:border-0 tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent tw:hover:text-foreground"
+        onClick={() => data.onToggle(data.alias)}
+      >
+        {data.collapsed ? <ChevronRight className="tw:size-3.5" /> : <ChevronDown className="tw:size-3.5" />}
+      </button>
       <Table2 aria-hidden className="tw:size-4 tw:shrink-0 tw:text-muted-foreground" />
       <div className="tw:min-w-0 tw:flex-1">
         <div className="tw:truncate tw:text-sm tw:font-medium">{data.alias}</div>
-        {data.alias !== data.table ? (
+        {data.collapsed ? (
+          <div className="tw:truncate tw:text-muted-foreground">
+            {`${data.columns.length} ${data.columns.length === 1 ? 'column' : 'columns'}`}
+          </div>
+        ) : null}
+        {!data.collapsed && data.alias !== data.table ? (
           <div className="tw:truncate tw:text-muted-foreground">{`${data.schema}.${data.table}`}</div>
         ) : null}
       </div>
@@ -101,20 +136,43 @@ export const TableNode = memo(({ data, selected }: TableNodeProps) => (
       >
         <X className="tw:size-3.5" />
       </button>
+      {data.collapsed ? data.columns.map((c) => (
+        <span key={c.name}>
+          <Handle type="target" position={Position.Left} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
+          <Handle type="source" position={Position.Right} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
+        </span>
+      )) : null}
     </div>
-    {data.missing ? (
+    {!data.collapsed && data.missing ? (
       <p className="tw:m-0 tw:px-3 tw:py-2 tw:text-destructive">Not in the connection</p>
-    ) : (
+    ) : null}
+    {!data.collapsed && !data.missing ? (
       <ul className="tw:m-0 tw:list-none tw:p-0 tw:py-1">
         {data.columns.map((c) => {
           const Icon = typeIcon(c.type);
           return (
-            <li key={c.name} className="tw:relative tw:flex tw:items-center tw:gap-2 tw:px-3 tw:py-1 tw:hover:bg-accent">
+            <li
+              key={c.name}
+              data-column={c.name}
+              data-picked={data.picked === c.name || undefined}
+              className={cn(
+                'tw:relative tw:flex tw:items-center tw:gap-2 tw:px-3 tw:py-1 tw:hover:bg-accent',
+                data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
+              )}
+            >
               <Handle type="target" position={Position.Left} id={c.name} style={HANDLE_STYLE} />
               <span className="tw:flex tw:size-3.5 tw:shrink-0 tw:items-center tw:text-muted-foreground">
                 {Icon ? <Icon aria-hidden className="tw:size-3.5" /> : null}
               </span>
-              <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
+              <button
+                type="button"
+                data-slot="model-column-name"
+                title="Click, then click a column of another table to link them"
+                className="nodrag tw:min-w-0 tw:flex-1 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
+                onClick={() => data.onPick(data.alias, c.name)}
+              >
+                {c.name}
+              </button>
               {data.keys.includes(c.name) ? (
                 <KeyRound aria-label="primary key" className="tw:size-3.5 tw:shrink-0 tw:text-primary" />
               ) : null}
@@ -127,7 +185,7 @@ export const TableNode = memo(({ data, selected }: TableNodeProps) => (
           );
         })}
       </ul>
-    )}
+    ) : null}
   </div>
 ));
 TableNode.displayName = 'TableNode';

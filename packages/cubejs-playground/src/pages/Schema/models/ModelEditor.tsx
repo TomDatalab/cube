@@ -4,10 +4,11 @@ import {
   CSSProperties, DragEvent, useCallback, useEffect, useMemo, useRef, useState,
 } from 'react';
 import {
-  Background, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
+  Background, ConnectionMode, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
 } from '@xyflow/react';
 import type {
-  Connection, Edge, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnNodeDrag, OnSelectionChangeParams,
+  Connection, Edge, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnConnectEnd, OnNodeDrag,
+  OnSelectionChangeParams,
 } from '@xyflow/react';
 import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
 
@@ -32,7 +33,7 @@ import {
   emptyDefinition, joinLabel, layout, removeJoin, removeTable, setColor, setPrimary, unlinked,
   updateDraftTable, updateJoin,
 } from './modelGraph';
-import { TableFlowNode, TableNode } from './TableNode';
+import { TableFlowNode, TableNode, columnAt } from './TableNode';
 import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
@@ -282,6 +283,35 @@ function TablePanel({
   );
 }
 
+function readAliases(key: string): string[] {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(key) ?? '[]');
+    return Array.isArray(raw) ? raw.filter((a): a is string => typeof a === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+// The tables of a model shown collapsed, remembered in this browser: a view
+// setting of the viewer, not part of the model.
+function useCollapsedTables(modelId: string): [string[], (alias: string) => void] {
+  const key = `cubePlayground.modelCollapsed.${modelId}`;
+  const [aliases, setAliases] = useState(() => readAliases(key));
+  useEffect(() => setAliases(readAliases(key)), [key]);
+  const toggle = useCallback((alias: string) => {
+    setAliases((was) => {
+      const next = was.includes(alias) ? was.filter((a) => a !== alias) : [...was, alias];
+      try {
+        window.localStorage.setItem(key, JSON.stringify(next));
+      } catch {
+        // Kept for this visit only.
+      }
+      return next;
+    });
+  }, [key]);
+  return [aliases, toggle];
+}
+
 function Editor({
   api, modelId, tables, onBuilt, onTablesCreated, onSaved, onDeleted, onDirtyChange,
 }: ModelEditorProps) {
@@ -372,6 +402,26 @@ function Editor({
     .filter((t) => !t.draft && !columnsOf(t.schema, t.table))
     .map((t) => `${t.schema}.${t.table}`);
 
+  const [collapsedTables, toggleTable] = useCollapsedTables(modelId);
+  // The column picked by a click to start a link; a click on a column of
+  // another table ends it.
+  const [picked, setPicked] = useState<{ alias: string; column: string } | null>(null);
+  const pickRef = useRef<(alias: string, column: string) => void>(() => {});
+  const onPick = useCallback((alias: string, column: string) => pickRef.current(alias, column), []);
+
+  useEffect(() => {
+    if (!picked) {
+      return undefined;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPicked(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [picked]);
+
   const onRemove = useCallback((alias: string) => {
     setDef((d) => removeTable(d, alias));
     revision.current += 1;
@@ -411,10 +461,14 @@ function Editor({
           keys,
           linked,
           onRemove,
+          collapsed: collapsedTables.includes(t.alias),
+          onToggle: toggleTable,
+          picked: picked?.alias === t.alias ? picked.column : null,
+          onPick,
         },
       };
     }));
-  }, [def, columnsOf, onRemove]);
+  }, [def, columnsOf, onRemove, collapsedTables, toggleTable, picked, onPick]);
 
   const edges: Edge[] = useMemo(() => def.joins.map((j, index) => ({
     id: `join-${index}`,
@@ -423,6 +477,8 @@ function Editor({
     target: j.to.alias,
     targetHandle: j.to.column,
     label: joinLabel(j),
+    // Square lines, as a modeling tool draws them.
+    type: 'step',
     data: { index },
   })), [def.joins]);
 
@@ -433,8 +489,8 @@ function Editor({
   }, []);
 
   // React Flow asks for a stable handler.
-  const onSelectionChange = useCallback(({ nodes: picked }: OnSelectionChangeParams) => {
-    setSelected(picked[0]?.id ?? null);
+  const onSelectionChange = useCallback(({ nodes: chosen }: OnSelectionChangeParams) => {
+    setSelected(chosen[0]?.id ?? null);
   }, []);
 
   const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
@@ -454,18 +510,40 @@ function Editor({
     });
   };
 
-  const onConnect = (c: Connection) => {
-    if (!c.source || !c.target || !c.sourceHandle || !c.targetHandle) {
-      return;
-    }
-    const from = { alias: c.source, column: c.sourceHandle };
-    const to = { alias: c.target, column: c.targetHandle };
+  const link = (from: { alias: string; column: string }, to: { alias: string; column: string }) => {
     const error = canConnect(def, from, to);
     if (error) {
       notify.error(error);
       return;
     }
     setJoinEdit({ kind: 'new', from, to });
+  };
+
+  pickRef.current = (alias, column) => {
+    if (!picked || picked.alias === alias || !def.tables.some((t) => t.alias === picked.alias)) {
+      setPicked(picked?.alias === alias && picked.column === column ? null : { alias, column });
+      return;
+    }
+    setPicked(null);
+    link(picked, { alias, column });
+  };
+
+  const onConnect = (c: Connection) => {
+    if (c.source && c.target && c.sourceHandle && c.targetHandle) {
+      link({ alias: c.source, column: c.sourceHandle }, { alias: c.target, column: c.targetHandle });
+    }
+  };
+
+  // A link dropped on a column's row, away from its handle.
+  const onConnectEnd: OnConnectEnd = (event, state) => {
+    if (state.isValid || !state.fromNode || !state.fromHandle?.id) {
+      return;
+    }
+    const point = 'changedTouches' in event ? event.changedTouches[0] : event;
+    const to = point && columnAt(document.elementFromPoint(point.clientX, point.clientY));
+    if (to && to.alias !== state.fromNode.id) {
+      link({ alias: state.fromNode.id, column: state.fromHandle.id }, to);
+    }
   };
 
   const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
@@ -841,7 +919,7 @@ function Editor({
         <TablePanel tables={tables} dataSource={def.dataSource} locked={def.tables.length > 0} />
         <div
           ref={canvas}
-          className="tw:min-w-0 tw:flex-1"
+          className="tw:relative tw:min-w-0 tw:flex-1"
           data-slot="model-canvas"
           onDragOver={onDragOver}
           onDrop={onDrop}
@@ -855,6 +933,10 @@ function Editor({
             onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
+            onConnectEnd={onConnectEnd}
+            onPaneClick={() => setPicked(null)}
+            connectionMode={ConnectionMode.Loose}
+            connectionRadius={30}
             onEdgeClick={onEdgeClick}
             onSelectionChange={onSelectionChange}
             onNodeDoubleClick={onNodeDoubleClick}
@@ -865,6 +947,15 @@ function Editor({
           >
             <Background />
           </ReactFlow>
+          {picked ? (
+            <div
+              role="status"
+              data-slot="model-link-hint"
+              className="tw:pointer-events-none tw:absolute tw:top-2 tw:left-1/2 tw:z-10 tw:-translate-x-1/2 tw:rounded-md tw:border tw:bg-popover tw:px-3 tw:py-1.5 tw:text-xs tw:text-popover-foreground tw:shadow-md"
+            >
+              {`Linking ${picked.alias}.${picked.column}: click a column of another table (Esc cancels)`}
+            </div>
+          ) : null}
         </div>
       </div>
 

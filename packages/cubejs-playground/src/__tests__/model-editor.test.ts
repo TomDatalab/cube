@@ -31,7 +31,7 @@ vi.mock('@xyflow/react', async () => {
         { 'data-testid': 'flow' },
         h('ul', null, props.nodes.map((n: any) => h(
           'li',
-          { key: n.id, 'data-node': n.id },
+          { key: n.id, 'data-node': n.id, className: 'react-flow__node', 'data-id': n.id },
           h(props.nodeTypes[n.type], { id: n.id, data: n.data, selected: n.selected })
         ))),
         h('ul', null, props.edges.map((e: any) => h(
@@ -46,6 +46,7 @@ vi.mock('@xyflow/react', async () => {
     },
     ReactFlowProvider: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
+    ConnectionMode: { Strict: 'strict', Loose: 'loose' },
     Position: { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' },
     Background: () => null,
     Controls: () => null,
@@ -129,6 +130,7 @@ describe('ModelEditor', () => {
   let onTablesCreated: Mock<(detail: any) => void>;
 
   beforeEach(() => {
+    window.localStorage.clear();
     Element.prototype.hasPointerCapture = vi.fn(() => false) as any;
     Element.prototype.scrollIntoView = vi.fn() as any;
     flow.zoomIn = vi.fn();
@@ -356,6 +358,97 @@ describe('ModelEditor', () => {
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(api.saveModel.mock.invocationCallOrder[0]).toBeLessThan(api.buildModel.mock.invocationCallOrder[0]);
     expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
+  });
+
+  it('links a column dropped on the row of another table, away from its handle', async () => {
+    api.model.mockResolvedValueOnce(view({
+      ...saved(),
+      tables: [...saved().tables, {
+        alias: 'products', schema: 'public', table: 'products', x: 0, y: 300,
+      }],
+    }));
+    await render();
+    expect(flow.props.connectionMode).toBe('loose');
+    const row = document.querySelector('[data-node="products"] [data-column="id"]')!;
+    // jsdom has no layout, so it has no elementFromPoint either.
+    document.elementFromPoint = () => row.querySelector('span:not([data-handle])');
+    try {
+      await act(async () => flow.props.onConnectEnd(
+        { clientX: 10, clientY: 20 },
+        { isValid: false, fromNode: { id: 'orders' }, fromHandle: { id: 'id' } }
+      ));
+    } finally {
+      delete (document as any).elementFromPoint;
+    }
+    await act(async () => button('Link').click());
+    expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent))
+      .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
+  });
+
+  it('ignores a link dropped on its own table or that React Flow already made', async () => {
+    await render();
+    const row = document.querySelector('[data-node="orders"] [data-column="amount"]')!;
+    document.elementFromPoint = () => row;
+    try {
+      await act(async () => flow.props.onConnectEnd(
+        { clientX: 1, clientY: 1 },
+        { isValid: false, fromNode: { id: 'orders' }, fromHandle: { id: 'id' } }
+      ));
+      await act(async () => flow.props.onConnectEnd(
+        { clientX: 1, clientY: 1 },
+        { isValid: true, fromNode: { id: 'customers' }, fromHandle: { id: 'id' } }
+      ));
+    } finally {
+      delete (document as any).elementFromPoint;
+    }
+    expect(document.body.textContent).not.toContain('INNER keeps only rows');
+  });
+
+  it('links two columns picked by a click on their names', async () => {
+    api.model.mockResolvedValueOnce(view({
+      ...saved(),
+      tables: [...saved().tables, {
+        alias: 'products', schema: 'public', table: 'products', x: 0, y: 300,
+      }],
+    }));
+    await render();
+    const name = (table: string, column: string) => document.querySelector(
+      `[data-node="${table}"] [data-column="${column}"] [data-slot="model-column-name"]`
+    ) as HTMLButtonElement;
+    await act(async () => name('orders', 'id').click());
+    expect(document.querySelector('[data-node="orders"] [data-column="id"]')!.hasAttribute('data-picked')).toBe(true);
+    expect(document.querySelector('[data-slot="model-link-hint"]')!.textContent).toContain('Linking orders.id');
+    await act(async () => name('products', 'id').click());
+    expect(document.querySelector('[data-slot="model-link-hint"]')).toBeNull();
+    await act(async () => button('Link').click());
+    expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent))
+      .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
+  });
+
+  it('drops a picked column on Escape, and on a second click on it', async () => {
+    await render();
+    const name = document.querySelector(
+      '[data-node="orders"] [data-column="id"] [data-slot="model-column-name"]'
+    ) as HTMLButtonElement;
+    await act(async () => name.click());
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
+    expect(document.querySelector('[data-picked]')).toBeNull();
+    await act(async () => name.click());
+    await act(async () => name.click());
+    expect(document.querySelector('[data-picked]')).toBeNull();
+  });
+
+  it('collapses a table to its header, keeping its links, and remembers it', async () => {
+    await render();
+    expect(flow.props.edges.every((e: any) => e.type === 'step')).toBe(true);
+    await act(async () => (document.querySelector('[aria-label="Collapse orders"]') as HTMLButtonElement).click());
+    const orders = document.querySelector('[data-node="orders"]')!;
+    expect(orders.querySelector('[data-column]')).toBeNull();
+    expect(orders.querySelectorAll('[data-handle]').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('[data-edge]').length).toBe(1);
+    expect(JSON.parse(window.localStorage.getItem('cubePlayground.modelCollapsed.m1')!)).toEqual(['orders']);
+    await act(async () => (document.querySelector('[aria-label="Expand orders"]') as HTMLButtonElement).click());
+    expect(orders.querySelector('[data-column]')).not.toBeNull();
   });
 
   it('refuses a second link between the same two tables', async () => {
