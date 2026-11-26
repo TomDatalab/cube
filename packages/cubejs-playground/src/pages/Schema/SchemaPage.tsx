@@ -37,6 +37,7 @@ import { ModelEditor } from './models/ModelEditor';
 import { emptyDefinition } from './models/modelGraph';
 import { NameDialog } from '../Admin/NameDialog';
 import {
+  ColumnNode,
   OrgDetail,
   OrgSummary,
   TreeCube,
@@ -79,6 +80,9 @@ function TreeTitle({ node }: { node: DataNode }) {
         </span>
       ) : null}
       <span className="schema-tree-label">{node.title}</span>
+      {'columnType' in node ? (
+        <span className="schema-tree-column-type">{(node as ColumnNode).columnType}</span>
+      ) : null}
     </span>
   );
 }

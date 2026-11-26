@@ -9,7 +9,7 @@ import {
 import type {
   Connection, Edge, EdgeMouseHandler, NodeChange, OnNodeDrag,
 } from '@xyflow/react';
-import { CircleAlert } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -109,6 +109,69 @@ function definitionOf(value: unknown): ModelDefinition {
   };
 }
 
+// A table of the panel: dragged to the canvas, its columns shown on demand.
+function TableItem({
+  ds, schema, table, columns, disabled, dataSource,
+}: {
+  ds: string;
+  schema: string;
+  table: string;
+  columns: { name: string; type: string }[];
+  disabled: boolean;
+  dataSource: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return (
+    <li>
+      <div className="tw:flex tw:items-center">
+        <button
+          type="button"
+          data-slot="model-table-expand"
+          aria-label={`${open ? 'Hide' : 'Show'} the columns of ${table}`}
+          aria-expanded={open}
+          disabled={columns.length === 0}
+          className="tw:flex tw:size-5 tw:shrink-0 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded tw:border-0 tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent tw:disabled:invisible"
+          onClick={() => setOpen((was) => !was)}
+        >
+          <Chevron className="tw:size-3.5" />
+        </button>
+        <div
+          data-slot="model-table-item"
+          draggable={!disabled}
+          aria-disabled={disabled || undefined}
+          title={disabled
+            ? `Tables of one connection only: this model reads ${dataSource}`
+            : `${ds}.${schema}.${table}`}
+          className={disabled
+            ? 'tw:min-w-0 tw:flex-1 tw:cursor-not-allowed tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:text-muted-foreground tw:opacity-50'
+            : 'tw:min-w-0 tw:flex-1 tw:cursor-grab tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:hover:bg-accent'}
+          onDragStart={(e) => {
+            if (disabled) {
+              e.preventDefault();
+              return;
+            }
+            e.dataTransfer.setData(TABLE_MIME, JSON.stringify({ ds, schema, table }));
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+        >
+          {table}
+        </div>
+      </div>
+      {open ? (
+        <ul data-slot="model-table-columns" className="tw:m-0 tw:list-none tw:p-0 tw:pl-6 tw:text-xs">
+          {columns.map((c) => (
+            <li key={c.name} className="tw:flex tw:gap-2 tw:py-0.5">
+              <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
+              <span className="tw:shrink-0 tw:text-muted-foreground">{c.type}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
 // The tables of the panel, ds › schema › table, matching the search.
 function TablePanel({
   tables, dataSource, locked,
@@ -125,9 +188,9 @@ function TablePanel({
     ds,
     schemas: Object.entries(schemas).map(([schema, list]) => ({
       schema,
-      tables: Object.keys(list).filter((t) => (
+      tables: Object.entries(list).filter(([t]) => (
         !needle || [ds, schema, t].some((part) => part.toLowerCase().includes(needle))
-      )),
+      )).map(([t, columns]) => ({ name: t, columns: columns || [] })),
     })).filter((s) => s.tables.length > 0),
   })).filter((d) => d.schemas.length > 0);
 
@@ -167,30 +230,16 @@ function TablePanel({
                     <li key={schema}>
                       <div className="tw:text-muted-foreground">{schema}</div>
                       <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-3">
-                        {names.map((table) => (
-                          <li key={table}>
-                            <div
-                              data-slot="model-table-item"
-                              draggable={!disabled}
-                              aria-disabled={disabled || undefined}
-                              title={disabled
-                                ? `Tables of one connection only: this model reads ${dataSource}`
-                                : `${ds}.${schema}.${table}`}
-                              className={disabled
-                                ? 'tw:cursor-not-allowed tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:text-muted-foreground tw:opacity-50'
-                                : 'tw:cursor-grab tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:hover:bg-accent'}
-                              onDragStart={(e) => {
-                                if (disabled) {
-                                  e.preventDefault();
-                                  return;
-                                }
-                                e.dataTransfer.setData(TABLE_MIME, JSON.stringify({ ds, schema, table }));
-                                e.dataTransfer.effectAllowed = 'move';
-                              }}
-                            >
-                              {table}
-                            </div>
-                          </li>
+                        {names.map(({ name: table, columns }) => (
+                          <TableItem
+                            key={table}
+                            ds={ds}
+                            schema={schema}
+                            table={table}
+                            columns={columns}
+                            disabled={disabled}
+                            dataSource={dataSource}
+                          />
                         ))}
                       </ul>
                     </li>

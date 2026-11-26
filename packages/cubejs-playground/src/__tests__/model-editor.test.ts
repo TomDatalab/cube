@@ -254,6 +254,19 @@ describe('ModelEditor', () => {
     expect(products.getAttribute('draggable')).toBe('true');
   });
 
+  it('shows a table\'s columns in the panel on demand', async () => {
+    await render();
+    const expand = document.querySelector('[aria-label="Show the columns of customers"]') as HTMLButtonElement;
+    expect(expand.getAttribute('aria-expanded')).toBe('false');
+    await act(async () => expand.click());
+    const list = expand.closest('li')!.querySelector('[data-slot="model-table-columns"]')!;
+    expect([...list.querySelectorAll('li')].map((li) => li.textContent)).toEqual(
+      tables.warehouse.public.customers.map((c) => `${c.name}${c.type}`),
+    );
+    await act(async () => expand.click());
+    expect(expand.closest('li')!.querySelector('[data-slot="model-table-columns"]')).toBeNull();
+  });
+
   it('drops a table from the panel onto the canvas', async () => {
     await render();
     const data: Record<string, string> = {};

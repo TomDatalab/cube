@@ -43,8 +43,11 @@ export type OrgDetail = {
 
 export type NodeKey = string;
 
+// A table's column in the tree: its database type shows after the name.
+export type ColumnNode = DataNode & { columnType: string };
+
 export type ParsedKey = {
-  kind: 'org' | 'cubes' | 'views' | 'models' | 'model' | 'cube' | 'tables' | 'table' | 'files' | 'file' | 'datasource' | 'schema';
+  kind: 'org' | 'cubes' | 'views' | 'models' | 'model' | 'cube' | 'tables' | 'table' | 'column' | 'files' | 'file' | 'datasource' | 'schema';
   slug: string;
   rest?: string;
 };
@@ -67,13 +70,23 @@ export function detailNodes(slug: string, d: OrgDetail): DataNode[] {
       key: `schema:${slug}:${ds}.${schema}`,
       title: schema,
       checkable: false,
-      children: Object.keys(tables).map((table) => {
+      children: Object.entries(tables).map(([table, columns]) => {
         tableCount += 1;
-        return {
-          key: `table:${slug}:${ds}.${schema}.${table}`,
-          title: table,
+        const key = `table:${slug}:${ds}.${schema}.${table}`;
+        const columnNodes: ColumnNode[] = (columns || []).map((column) => ({
+          key: `column:${slug}:${ds}.${schema}.${table}.${column.name}`,
+          title: column.name,
+          columnType: column.type,
           isLeaf: true,
+          checkable: false,
+          selectable: false,
+        }));
+        return {
+          key,
+          title: table,
+          isLeaf: columnNodes.length === 0,
           checkable: true,
+          children: columnNodes.length ? columnNodes : undefined,
         };
       }),
     }));
@@ -202,7 +215,7 @@ export function filterTree(nodes: DataNode[], term: string): DataNode[] {
 }
 
 const KINDS: ParsedKey['kind'][] = [
-  'org', 'cubes', 'views', 'models', 'model', 'cube', 'tables', 'table', 'files', 'file', 'datasource', 'schema',
+  'org', 'cubes', 'views', 'models', 'model', 'cube', 'tables', 'table', 'column', 'files', 'file', 'datasource', 'schema',
 ];
 
 export function parseKey(key: NodeKey): ParsedKey {

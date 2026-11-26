@@ -77,6 +77,25 @@ describe('organization tree helpers', () => {
     expect(tables[0].children!.map((c) => c.key)).toEqual(['tables:digital']);
   });
 
+  it('lists each table\'s columns with their types, not checkable', () => {
+    const tablesGroup = detailNodes('digital', detail).find((n) => n.key === 'tables:digital')!;
+    const [t1, t2] = tablesGroup.children![0].children![0].children!;
+    expect(t1.isLeaf).toBe(false);
+    expect(t1.checkable).toBe(true);
+    expect(t1.children).toEqual([{
+      key: 'column:digital:default.public.t1.id',
+      title: 'id',
+      columnType: 'int',
+      isLeaf: true,
+      checkable: false,
+      selectable: false,
+    }]);
+    // A table without columns stays a leaf.
+    expect(t2.isLeaf).toBe(true);
+    expect(t2.children).toBeUndefined();
+    expect(parseKey('column:digital:default.public.t1.id').kind).toBe('column');
+  });
+
   it('parseKey splits on the first two colons only', () => {
     expect(parseKey('file:digital:digital/sofiadb/a.yml'))
       .toEqual({ kind: 'file', slug: 'digital', rest: 'digital/sofiadb/a.yml' });

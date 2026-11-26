@@ -79,6 +79,14 @@ const GlobalStyles = createGlobalStyle`
     white-space: nowrap;
   }
 
+  .schema-tree-column-type {
+    flex: none;
+    margin-left: auto;
+    padding-left: 8px;
+    font-size: 12px;
+    opacity: 0.55;
+  }
+
   .schema-tree-icon {
     display: inline-flex;
     flex: none;
