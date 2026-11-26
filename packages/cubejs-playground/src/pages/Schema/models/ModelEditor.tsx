@@ -29,11 +29,12 @@ import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
-  End, ModelDefinition, TableColor, addDraftTable, addTable, canConnect, connect, drafts,
+  End, ModelDefinition, Place, TableColor, addDraftTable, placeTables, addTable, canConnect, connect, drafts,
   emptyDefinition, joinLabel, layout, removeJoin, removeTable, setColor, setPrimary, unlinked,
   updateDraftTable, updateJoin,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
+import { parseNodeId, removeShortcut } from './clipboard';
 import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
@@ -422,8 +423,17 @@ function Editor({
     return () => window.removeEventListener('keydown', onKey);
   }, [picked]);
 
-  const onRemove = useCallback((alias: string) => {
-    setDef((d) => removeTable(d, alias));
+  const onRemove = useCallback((nodeId: string) => {
+    const { alias, shortcut } = parseNodeId(nodeId);
+    setDef((d) => (shortcut ? removeShortcut(d, alias, shortcut) : removeTable(d, alias)));
+    revision.current += 1;
+    setDirty(true);
+  }, []);
+
+  const onResize = useCallback((nodeId: string, box: { x: number; y: number; width: number; height: number }) => {
+    const { alias, shortcut } = parseNodeId(nodeId);
+    const place: Place = shortcut ? { x: box.x, y: box.y } : box;
+    setDef((d) => placeTables(d, new Map([[shortcut ? nodeId : alias, place]])));
     revision.current += 1;
     setDirty(true);
   }, []);
@@ -444,11 +454,19 @@ function Editor({
       const linked = def.joins.flatMap((j) => [j.from, j.to])
         .filter((e) => e.alias === t.alias)
         .map((e) => e.column);
+      const fks = def.joins.flatMap((j) => {
+        if (j.relationship === 'many_to_one') {
+          return [j.from];
+        }
+        return j.relationship === 'one_to_many' ? [j.to] : [];
+      }).filter((e) => e.alias === t.alias).map((e) => e.column);
       return {
         ...old,
         id: t.alias,
         type: 'table' as const,
         position: { x: t.x, y: t.y },
+        ...(t.width !== undefined ? { width: t.width } : {}),
+        ...(t.height !== undefined ? { height: t.height } : {}),
         data: {
           alias: t.alias,
           schema: t.schema,
@@ -460,6 +478,9 @@ function Editor({
           color: t.color,
           keys,
           linked,
+          fks,
+          fixedSize: t.width !== undefined || t.height !== undefined,
+          onResize,
           onRemove,
           collapsed: collapsedTables.includes(t.alias),
           onToggle: toggleTable,
@@ -468,7 +489,7 @@ function Editor({
         },
       };
     }));
-  }, [def, columnsOf, onRemove, collapsedTables, toggleTable, picked, onPick]);
+  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick]);
 
   const edges: Edge[] = useMemo(() => def.joins.map((j, index) => ({
     id: `join-${index}`,

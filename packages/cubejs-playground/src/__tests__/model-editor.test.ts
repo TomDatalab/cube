@@ -8,6 +8,7 @@ import {
 import { notify } from '@/components/kit';
 import { ApiError, CubeModelView } from '../pages/Schema/api';
 import { ModelEditor } from '../pages/Schema/models/ModelEditor';
+import { TableNode } from '../pages/Schema/models/TableNode';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
 
 // React Flow measures its nodes before it draws edges, which jsdom cannot do:
@@ -46,6 +47,10 @@ vi.mock('@xyflow/react', async () => {
     },
     ReactFlowProvider: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
+    NodeResizer: () => null,
+    MiniMap: () => null,
+    BaseEdge: () => null,
+    EdgeLabelRenderer: () => null,
     ConnectionMode: { Strict: 'strict', Loose: 'loose' },
     Position: { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' },
     Background: () => null,
@@ -843,16 +848,48 @@ describe('ModelEditor', () => {
       expect(document.querySelector('[data-slot="alert"]')).toBeNull();
     });
 
-    it('marks the primary key and the linked columns', async () => {
+    it('draws a table like Redgate: name, then name | type | marks per column', async () => {
       await render();
-      const row = (alias: string, column: string) => [...node(alias).querySelectorAll('li')]
-        .find((li) => li.querySelector(`[data-id="${column}"]`)) as HTMLElement;
-      expect(row('orders', 'id').querySelector('[aria-label="primary key"]')).not.toBeNull();
-      expect(row('orders', 'amount').querySelector('[aria-label="primary key"]')).toBeNull();
-      expect(row('customers', 'id').querySelector('[aria-label="primary key"]')).toBeNull();
-      expect(row('orders', 'customer_id').querySelector('[aria-label="linked"]')).not.toBeNull();
-      expect(row('customers', 'id').querySelector('[aria-label="linked"]')).not.toBeNull();
-      expect(row('customers', 'name').querySelector('[aria-label="linked"]')).toBeNull();
+      const marks = (alias: string, column: string) => node(alias)
+        .querySelector(`[data-column="${column}"] [data-slot="model-column-marks"]`)!.textContent!.trim();
+      expect(marks('orders', 'id')).toBe('PK');
+      expect(marks('orders', 'customer_id')).toBe('FK');
+      expect(marks('orders', 'amount')).toBe('');
+      expect(marks('customers', 'id')).toBe('');
+      const row = node('orders').querySelector('[data-column="amount"]')!;
+      expect(row.textContent).toContain('amount');
+      expect(row.textContent).toContain('numeric');
+      expect(node('orders').querySelector('[data-slot="model-table-name"]')!.textContent).toBe('orders');
+    });
+
+    it('shows a shortcut icon on a shortcut node', () => {
+      const host = document.createElement('div');
+      const own = createRoot(host);
+      const noop = () => {};
+      const data = {
+        alias: 'orders',
+        schema: 'public',
+        table: 'orders',
+        columns: [{ name: 'id', type: 'integer' }],
+        principal: false,
+        missing: false,
+        draft: false,
+        keys: [],
+        fks: [],
+        linked: [],
+        fixedSize: false,
+        onRemove: noop,
+        collapsed: false,
+        onToggle: noop,
+        picked: null,
+        onPick: noop,
+        onResize: noop,
+      };
+      act(() => own.render(createElement(TableNode, { id: 'orders~s1', data: { ...data, shortcut: 's1' } } as any)));
+      expect(host.querySelector('[aria-label="shortcut"]')).not.toBeNull();
+      act(() => own.render(createElement(TableNode, { id: 'orders', data } as any)));
+      expect(host.querySelector('[aria-label="shortcut"]')).toBeNull();
+      act(() => own.unmount());
     });
 
     it('bands the header with the table color', async () => {

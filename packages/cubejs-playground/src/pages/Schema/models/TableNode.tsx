@@ -1,12 +1,10 @@
 import { memo } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { Handle, NodeResizer, Position } from '@xyflow/react';
 import type { Node, NodeProps } from '@xyflow/react';
 import {
-  Calendar, ChevronDown, ChevronRight, Hash, KeyRound, Link2, Table2, ToggleLeft, Type, X,
+  ChevronDown, ChevronRight, Forward, X,
 } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
 import type { TableColor } from './modelGraph';
@@ -27,7 +25,15 @@ export type TableNodeData = {
   keys: string[];
   // The columns that are an end of a link.
   linked: string[];
-  onRemove: (alias: string) => void;
+  // The columns that point at another table: shown FK.
+  fks: string[];
+  // Removes the table, or only the shortcut when this node is one.
+  onRemove: (nodeId: string) => void;
+  // The shortcut's id when this node is a shortcut of the table.
+  shortcut?: string;
+  // Sized by hand: the box fills the node's fixed size.
+  fixedSize: boolean;
+  onResize: (nodeId: string, box: { x: number; y: number; width: number; height: number }) => void;
   // Shown as its header only; its links still end on it.
   collapsed: boolean;
   onToggle: (alias: string) => void;
@@ -51,27 +57,6 @@ const HANDLE_STYLE = {
 // of sight in the middle of its header.
 const HIDDEN_HANDLE_STYLE = { ...HANDLE_STYLE, opacity: 0, pointerEvents: 'none' as const };
 
-const NUMBER = ['int', 'numeric', 'decimal', 'double', 'float', 'real', 'number', 'money', 'serial'];
-const TEXT = ['text', 'char', 'string', 'uuid', 'json', 'enum'];
-
-// The icon of a column's type, portable or as the database names it.
-export function typeIcon(type: string): LucideIcon | null {
-  const t = type.toLowerCase();
-  if (t.includes('bool')) {
-    return ToggleLeft;
-  }
-  if (t.includes('date') || t.includes('time')) {
-    return Calendar;
-  }
-  if (NUMBER.some((n) => t.includes(n))) {
-    return Hash;
-  }
-  if (TEXT.some((n) => t.includes(n))) {
-    return Type;
-  }
-  return null;
-}
-
 // The table and column of a row under the pointer, so a link dropped
 // anywhere on a column's row, not only on its small handle, still links.
 export function columnAt(element: Element | null): { alias: string; column: string } | null {
@@ -81,60 +66,79 @@ export function columnAt(element: Element | null): { alias: string; column: stri
   return alias && column ? { alias, column } : null;
 }
 
-type TableNodeProps = Pick<NodeProps<TableFlowNode>, 'data'> & { selected?: boolean };
+type TableNodeProps = Pick<NodeProps<TableFlowNode>, 'data'> & { id?: string; selected?: boolean };
 
-// A table on the canvas: a band of its color, its alias, the principal and
-// new badges and its columns, each with a handle on both sides named after
-// the column.
-export const TableNode = memo(({ data, selected }: TableNodeProps) => (
+// What a table row shows after its type, as Redgate writes it.
+function marks(data: TableNodeData, column: string) {
+  const pk = data.keys.includes(column);
+  const fk = data.fks.includes(column);
+  return (
+    <span data-slot="model-column-marks" className="tw:shrink-0 tw:text-right tw:whitespace-nowrap">
+      {pk ? <span aria-label="primary key">PK</span> : null}
+      {pk && fk ? ' ' : null}
+      {fk ? <span aria-label="foreign key">FK</span> : null}
+    </span>
+  );
+}
+
+const ICON_BUTTON = 'nodrag tw:flex tw:size-4 tw:shrink-0 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded-sm tw:border-0 tw:bg-transparent tw:p-0 tw:text-foreground/60 tw:hover:bg-background/60 tw:hover:text-foreground';
+
+// A table on the canvas, drawn as Redgate draws it: a thin box, its name
+// centred on a header of its color, then one row per column with its name,
+// its type and PK/FK. Each column has a handle on both sides named after it.
+export const TableNode = memo(({ id, data, selected }: TableNodeProps) => (
   <div
     data-slot="model-table-node"
     data-selected={selected || undefined}
     className={cn(
-      'tw:min-w-52 tw:overflow-hidden tw:rounded-md tw:border tw:bg-card tw:text-xs tw:text-card-foreground tw:shadow-md',
+      'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
+      data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
       selected && 'tw:ring-2 tw:ring-ring'
     )}
   >
+    <NodeResizer
+      isVisible={Boolean(selected)}
+      minWidth={160}
+      minHeight={28}
+      color="var(--ring)"
+      onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
+    />
     <div
       data-slot="model-table-band"
-      className="tw:h-1.5"
+      className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
       style={{ background: data.color ? `var(--model-${data.color})` : 'var(--muted)' }}
-    />
-    <div className={cn('tw:relative tw:flex tw:items-center tw:gap-2 tw:px-3 tw:py-2', !data.collapsed && 'tw:border-b')}>
+    >
       <button
         type="button"
         data-slot="model-table-toggle"
         aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} ${data.alias}`}
         aria-expanded={!data.collapsed}
         title={data.collapsed ? 'Show the columns' : 'Hide the columns'}
-        className="nodrag tw:flex tw:size-5 tw:shrink-0 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded tw:border-0 tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent tw:hover:text-foreground"
+        className={ICON_BUTTON}
         onClick={() => data.onToggle(data.alias)}
       >
-        {data.collapsed ? <ChevronRight className="tw:size-3.5" /> : <ChevronDown className="tw:size-3.5" />}
+        {data.collapsed ? <ChevronRight className="tw:size-3" /> : <ChevronDown className="tw:size-3" />}
       </button>
-      <Table2 aria-hidden className="tw:size-4 tw:shrink-0 tw:text-muted-foreground" />
-      <div className="tw:min-w-0 tw:flex-1">
-        <div className="tw:truncate tw:text-sm tw:font-medium">{data.alias}</div>
+      {data.shortcut ? <Forward aria-label="shortcut" className="tw:size-3 tw:shrink-0" /> : null}
+      <div className="tw:min-w-0 tw:flex-1 tw:text-center">
+        <div data-slot="model-table-name" className="tw:truncate tw:font-bold">{data.alias}</div>
         {data.collapsed ? (
-          <div className="tw:truncate tw:text-muted-foreground">
+          <div className="tw:truncate tw:text-foreground/60">
             {`${data.columns.length} ${data.columns.length === 1 ? 'column' : 'columns'}`}
           </div>
         ) : null}
-        {!data.collapsed && data.alias !== data.table ? (
-          <div className="tw:truncate tw:text-muted-foreground">{`${data.schema}.${data.table}`}</div>
-        ) : null}
       </div>
-      {data.principal ? <Badge>principal</Badge> : null}
-      {data.draft ? <Badge variant="secondary">new</Badge> : null}
+      {data.principal ? <span className="tw:text-[10px] tw:text-foreground/70">principal</span> : null}
+      {data.draft ? <span className="tw:text-[10px] tw:text-foreground/70">new</span> : null}
       <button
         type="button"
         data-slot="model-table-remove"
         aria-label={`Remove ${data.alias}`}
-        title="Remove from the model"
-        className="nodrag tw:flex tw:size-5 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded tw:border-0 tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent tw:hover:text-foreground"
-        onClick={() => data.onRemove(data.alias)}
+        title={data.shortcut ? 'Remove this shortcut' : 'Remove from the model'}
+        className={ICON_BUTTON}
+        onClick={() => data.onRemove(id ?? data.alias)}
       >
-        <X className="tw:size-3.5" />
+        <X className="tw:size-3" />
       </button>
       {data.collapsed ? data.columns.map((c) => (
         <span key={c.name}>
@@ -144,46 +148,35 @@ export const TableNode = memo(({ data, selected }: TableNodeProps) => (
       )) : null}
     </div>
     {!data.collapsed && data.missing ? (
-      <p className="tw:m-0 tw:px-3 tw:py-2 tw:text-destructive">Not in the connection</p>
+      <p className="tw:m-0 tw:px-2 tw:py-1 tw:text-destructive">Not in the connection</p>
     ) : null}
     {!data.collapsed && !data.missing ? (
-      <ul className="tw:m-0 tw:list-none tw:p-0 tw:py-1">
-        {data.columns.map((c) => {
-          const Icon = typeIcon(c.type);
-          return (
-            <li
-              key={c.name}
-              data-column={c.name}
-              data-picked={data.picked === c.name || undefined}
-              className={cn(
-                'tw:relative tw:flex tw:items-center tw:gap-2 tw:px-3 tw:py-1 tw:hover:bg-accent',
-                data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
-              )}
+      <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
+        {data.columns.map((c) => (
+          <li
+            key={c.name}
+            data-column={c.name}
+            data-picked={data.picked === c.name || undefined}
+            className={cn(
+              'tw:relative tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4 tw:hover:bg-accent',
+              data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
+            )}
+          >
+            <Handle type="target" position={Position.Left} id={c.name} style={HANDLE_STYLE} />
+            <button
+              type="button"
+              data-slot="model-column-name"
+              title="Click, then click a column of another table to link them"
+              className="nodrag tw:min-w-0 tw:flex-1 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
+              onClick={() => data.onPick(data.alias, c.name)}
             >
-              <Handle type="target" position={Position.Left} id={c.name} style={HANDLE_STYLE} />
-              <span className="tw:flex tw:size-3.5 tw:shrink-0 tw:items-center tw:text-muted-foreground">
-                {Icon ? <Icon aria-hidden className="tw:size-3.5" /> : null}
-              </span>
-              <button
-                type="button"
-                data-slot="model-column-name"
-                title="Click, then click a column of another table to link them"
-                className="nodrag tw:min-w-0 tw:flex-1 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
-                onClick={() => data.onPick(data.alias, c.name)}
-              >
-                {c.name}
-              </button>
-              {data.keys.includes(c.name) ? (
-                <KeyRound aria-label="primary key" className="tw:size-3.5 tw:shrink-0 tw:text-primary" />
-              ) : null}
-              {data.linked.includes(c.name) ? (
-                <Link2 aria-label="linked" className="tw:size-3.5 tw:shrink-0 tw:text-muted-foreground" />
-              ) : null}
-              <span className="tw:text-muted-foreground">{c.type}</span>
-              <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
-            </li>
-          );
-        })}
+              {c.name}
+            </button>
+            <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span>
+            <span className="tw:w-9 tw:shrink-0 tw:text-right">{marks(data, c.name)}</span>
+            <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
+          </li>
+        ))}
       </ul>
     ) : null}
   </div>
