@@ -26,6 +26,88 @@ pub struct Definition {
     pub joins: Vec<ModelJoin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Settings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<Area>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ModelView>,
+}
+
+/// Free text on the canvas.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Note {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<i32>,
+    pub text: String,
+    /// A palette name from [`COLORS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// A labelled rectangle drawn behind the other objects.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Area {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+}
+
+/// A view designed on the canvas; its query is free text.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelView {
+    pub id: String,
+    pub name: String,
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    pub sql: String,
+    pub columns: Vec<ViewColumn>,
+    /// Table aliases the view reads.
+    pub depends_on_tables: Vec<String>,
+    /// Ids of the views it reads.
+    pub depends_on_views: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_after: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ViewColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 /// The model's own options, as Redgate's model properties.
@@ -410,6 +492,16 @@ pub fn validate_types(def: &Definition, db_type: &str) -> Result<(), String> {
             }
         }
     }
+    for view in &def.views {
+        for column in &view.columns {
+            if !valid_type(d, &column.kind) {
+                return Err(format!(
+                    "Tipo inválido para {}.{}: {}",
+                    view.name, column.name, column.kind
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -610,6 +702,74 @@ pub fn validate(def: &Definition) -> Result<(), String> {
             ));
         }
         parent.insert(a, b);
+    }
+
+    let size_ok = |id: &str, sizes: &[Option<f64>]| -> Result<(), String> {
+        for size in sizes.iter().flatten() {
+            if !size.is_finite() || *size <= 0.0 {
+                return Err(format!("Tamanho inválido em {id}: {size}"));
+            }
+        }
+        Ok(())
+    };
+    let color_ok = |color: &Option<String>| -> Result<(), String> {
+        match color {
+            Some(c) if !COLORS.contains(&c.as_str()) => Err(format!("Cor inválida: {c}")),
+            _ => Ok(()),
+        }
+    };
+    let mut seen = HashSet::new();
+    for note in &def.notes {
+        if !seen.insert(note.id.as_str()) {
+            return Err(format!("O objeto {} se repete", note.id));
+        }
+        size_ok(&note.id, &[note.width, note.height])?;
+        color_ok(&note.color)?;
+    }
+    let mut seen = HashSet::new();
+    for area in &def.areas {
+        if !seen.insert(area.id.as_str()) {
+            return Err(format!("O objeto {} se repete", area.id));
+        }
+        size_ok(&area.id, &[Some(area.width), Some(area.height)])?;
+        color_ok(&area.fill)?;
+        color_ok(&area.border)?;
+    }
+    let view_ids: HashSet<&str> = def.views.iter().map(|v| v.id.as_str()).collect();
+    let mut seen = HashSet::new();
+    let mut names = HashSet::new();
+    for view in &def.views {
+        if !seen.insert(view.id.as_str()) {
+            return Err(format!("O objeto {} se repete", view.id));
+        }
+        size_ok(&view.id, &[view.width, view.height])?;
+        for ident in [&view.name, &view.schema] {
+            if !valid_ident(ident) {
+                return Err(format!("Nome de view inválido: {ident}"));
+            }
+        }
+        if !names.insert((view.schema.as_str(), view.name.as_str()))
+            || drafts.contains(&(view.schema.as_str(), view.name.as_str()))
+        {
+            return Err(format!("A view {}.{} se repete", view.schema, view.name));
+        }
+    }
+    for view in &def.views {
+        let missing = view
+            .depends_on_tables
+            .iter()
+            .find(|a| !aliases.contains(a.as_str()))
+            .or_else(|| {
+                view.depends_on_views
+                    .iter()
+                    .find(|v| **v == view.id || !view_ids.contains(v.as_str()))
+            });
+        if let Some(dep) = missing {
+            return Err(format!(
+                "A view {} depende de {dep}, que não está no model",
+                view.name
+            ));
+        }
     }
 
     Ok(())
@@ -1585,5 +1745,108 @@ mod tests {
         let e = validate_types(&def, "mysql").unwrap_err();
         assert_eq!(e, "Tipo inválido para shop.items.sku: jsonb");
         validate_types(&serde_json::from_value(physical_json()).unwrap(), "postgres").unwrap();
+    }
+
+    fn objects_json() -> serde_json::Value {
+        let mut v = v2_json();
+        v["notes"] = serde_json::json!([{
+            "id": "n1", "x": 1.0, "y": 2.0, "width": 200.0, "height": 100.0, "z": 3,
+            "text": "hello", "color": "amber"
+        }]);
+        v["areas"] = serde_json::json!([{
+            "id": "a1", "name": "Sales", "comment": "c", "x": 0.0, "y": 0.0,
+            "width": 400.0, "height": 300.0, "z": 1, "fill": "blue", "border": "red"
+        }]);
+        v["views"] = serde_json::json!([{
+            "id": "v1", "name": "recent", "schema": "public", "comment": "c",
+            "sql": "select 1", "columns": [{ "name": "id", "type": "integer" }],
+            "dependsOnTables": ["orders"], "dependsOnViews": [],
+            "scriptBefore": "-- a", "scriptAfter": "-- b",
+            "x": 5.0, "y": 6.0, "width": 180.0, "height": 90.0, "z": 2
+        }, {
+            "id": "v2", "name": "older", "schema": "public", "sql": "select 2",
+            "columns": [], "dependsOnTables": [], "dependsOnViews": ["v1"],
+            "x": 5.0, "y": 6.0
+        }]);
+        v
+    }
+
+    #[test]
+    fn accepts_notes_areas_views() {
+        let value = objects_json();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap(), value);
+        let old = serde_json::to_value(orders_customers()).unwrap();
+        let keys = old.as_object().unwrap();
+        for k in ["notes", "areas", "views"] {
+            assert!(!keys.contains_key(k), "{k}");
+        }
+    }
+
+    #[test]
+    fn refuses_bad_objects() {
+        let bad = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = objects_json();
+            edit(&mut value);
+            let def: Definition = serde_json::from_value(value).unwrap();
+            validate(&def).unwrap_err()
+        };
+        let e = bad(&|v| {
+            let first = v["notes"][0].clone();
+            v["notes"].as_array_mut().unwrap().push(first);
+        });
+        assert_eq!(e, "O objeto n1 se repete");
+        let e = bad(&|v| {
+            let first = v["areas"][0].clone();
+            v["areas"].as_array_mut().unwrap().push(first);
+        });
+        assert_eq!(e, "O objeto a1 se repete");
+        let e = bad(&|v| v["views"][1]["id"] = "v1".into());
+        assert_eq!(e, "O objeto v1 se repete");
+        let e = bad(&|v| v["areas"][0]["width"] = 0.0.into());
+        assert_eq!(e, "Tamanho inválido em a1: 0");
+        let e = bad(&|v| v["notes"][0]["height"] = (-1.0).into());
+        assert_eq!(e, "Tamanho inválido em n1: -1");
+        let e = bad(&|v| v["areas"][0]["fill"] = "pink2".into());
+        assert_eq!(e, "Cor inválida: pink2");
+        let e = bad(&|v| v["areas"][0]["border"] = "#fff".into());
+        assert_eq!(e, "Cor inválida: #fff");
+        let e = bad(&|v| v["notes"][0]["color"] = "nope".into());
+        assert_eq!(e, "Cor inválida: nope");
+        let e = bad(&|v| v["views"][0]["name"] = "1x".into());
+        assert_eq!(e, "Nome de view inválido: 1x");
+        let e = bad(&|v| v["views"][0]["schema"] = "a-b".into());
+        assert_eq!(e, "Nome de view inválido: a-b");
+        let e = bad(&|v| v["views"][1]["name"] = "recent".into());
+        assert_eq!(e, "A view public.recent se repete");
+        let e = bad(&|v| {
+            v["tables"][1]["draft"] = serde_json::json!({
+                "columns": [{ "name": "id", "type": "integer", "nullable": false }]
+            });
+            v["tables"][1]["schema"] = "public".into();
+            v["tables"][1]["table"] = "recent".into();
+        });
+        assert_eq!(e, "A view public.recent se repete");
+        let e = bad(&|v| v["views"][0]["dependsOnTables"] = serde_json::json!(["ghost"]));
+        assert_eq!(e, "A view recent depende de ghost, que não está no model");
+        let e = bad(&|v| v["views"][1]["dependsOnViews"] = serde_json::json!(["v9"]));
+        assert_eq!(e, "A view older depende de v9, que não está no model");
+        let e = bad(&|v| v["views"][1]["dependsOnViews"] = serde_json::json!(["v2"]));
+        assert_eq!(e, "A view older depende de v2, que não está no model");
+    }
+
+    #[test]
+    fn validate_types_checks_view_columns() {
+        let mut value = objects_json();
+        value["views"][0]["columns"][0]["type"] = "jsonb".into();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate_types(&def, "postgres").unwrap();
+        value["views"][0]["columns"][0]["type"] = "int".into();
+        let def: Definition = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            validate_types(&def, "postgres").unwrap_err(),
+            "Tipo inválido para recent.id: int"
+        );
     }
 }
