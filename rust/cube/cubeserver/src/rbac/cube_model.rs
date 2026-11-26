@@ -10,10 +10,16 @@ use uuid::Uuid;
 
 use crate::handlers::scaffold::{cube_type, quote, snake};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Definition {
+    /// 2 for a definition the Redgate-style editor wrote; none is the first
+    /// format, read the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub data_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub tables: Vec<ModelTable>,
     pub primary: Option<String>,
     pub primary_key: Option<String>,
@@ -21,7 +27,7 @@ pub struct Definition {
 }
 
 /// A table on the canvas. The same table dragged twice gets two aliases.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelTable {
     pub alias: String,
@@ -35,6 +41,31 @@ pub struct ModelTable {
     /// The design of a table not in the database yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftTable>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// A size fixed on the canvas; none follows the content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    /// The same table shown again elsewhere on the canvas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shortcuts: Vec<Shortcut>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Shortcut {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
 }
 
 /// A table being designed: it becomes real with [`create_statements`].
@@ -60,7 +91,13 @@ pub const COLORS: [&str; 8] = [
     "slate", "blue", "green", "amber", "red", "violet", "pink", "teal",
 ];
 pub const TYPES: [&str; 7] = [
-    "text", "integer", "bigint", "numeric", "boolean", "date", "timestamp",
+    "text",
+    "integer",
+    "bigint",
+    "numeric",
+    "boolean",
+    "date",
+    "timestamp",
 ];
 
 /// `^[A-Za-z_][A-Za-z0-9_]*$`, at most 63 characters.
@@ -102,10 +139,7 @@ fn validate_draft(table: &ModelTable, draft: &DraftTable) -> Result<(), String> 
 /// One `CREATE TABLE` per draft table, in table order, as `(schema.table,
 /// sql)`. Only postgres and mysql; identifiers are quoted, types come from
 /// the closed [`TYPES`] list.
-pub fn create_statements(
-    def: &Definition,
-    db_type: &str,
-) -> Result<Vec<(String, String)>, String> {
+pub fn create_statements(def: &Definition, db_type: &str) -> Result<Vec<(String, String)>, String> {
     if db_type != "postgres" && db_type != "mysql" {
         return Err(format!("Criar tabelas não é suportado para {db_type}"));
     }
@@ -166,16 +200,25 @@ pub fn create_statements(
 
 /// A link between two columns: `relationship` is one_to_one, one_to_many or
 /// many_to_one, read from `from` to `to`; `join` is left or inner.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelJoin {
     pub from: End,
     pub to: End,
     pub relationship: String,
     pub join: String,
+    /// Bends of the line, in canvas coordinates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<Point>,
+    /// The line leaves its tables on the other side.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub swapped: bool,
+    /// Not drawn on the canvas; still a link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct End {
     pub alias: String,
@@ -191,9 +234,28 @@ const JOINS: [&str; 2] = ["left", "inner"];
 /// (the editor saves while one is being placed); [`build`] refuses it. A
 /// model with no tables is a valid draft.
 pub fn validate(def: &Definition) -> Result<(), String> {
+    if let Some(v) = def.format_version {
+        if v != 2 {
+            return Err(format!("formatVersion inválido: {v}"));
+        }
+    }
     let mut aliases = HashSet::new();
     let mut drafts = HashSet::new();
+    let mut shortcuts = HashSet::new();
     for table in &def.tables {
+        for size in [table.width, table.height].into_iter().flatten() {
+            if !size.is_finite() || size <= 0.0 {
+                return Err(format!("Tamanho inválido em {}: {size}", table.alias));
+            }
+        }
+        for s in &table.shortcuts {
+            if !s.x.is_finite() || !s.y.is_finite() {
+                return Err(format!("Ponto inválido no atalho {}", s.id));
+            }
+            if !shortcuts.insert(s.id.as_str()) {
+                return Err(format!("O atalho {} se repete", s.id));
+            }
+        }
         if table.alias.trim().is_empty() {
             return Err("Toda tabela precisa de um alias".into());
         }
@@ -243,6 +305,16 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         }
         if !JOINS.contains(&join.join.as_str()) {
             return Err(format!("JOIN inválido: {}", join.join));
+        }
+        if join
+            .points
+            .iter()
+            .any(|p| !p.x.is_finite() || !p.y.is_finite())
+        {
+            return Err(format!(
+                "Ponto inválido na ligação {} → {}",
+                join.from.alias, join.to.alias
+            ));
         }
         let (a, b) = (
             root(&parent, &join.from.alias),
@@ -502,6 +574,7 @@ mod tests {
             y: 0.0,
             color: None,
             draft: None,
+            ..Default::default()
         }
     }
 
@@ -517,6 +590,7 @@ mod tests {
             },
             relationship: relationship.into(),
             join: kind.into(),
+            ..Default::default()
         }
     }
 
@@ -533,6 +607,7 @@ mod tests {
                 "many_to_one",
                 "left",
             )],
+            ..Default::default()
         }
     }
 
@@ -788,6 +863,7 @@ mod tests {
             primary: None,
             primary_key: None,
             joins: vec![],
+            ..Default::default()
         };
         assert_eq!(validate(&def), Ok(()));
     }
@@ -891,6 +967,7 @@ mod tests {
             primary: None,
             primary_key: None,
             joins: vec![],
+            ..Default::default()
         }
     }
 
@@ -917,12 +994,20 @@ mod tests {
         let bad = |t: ModelTable| validate(&with_draft(t));
         let e = bad(draft_table("i", "1x", ok.clone())).unwrap_err();
         assert!(e.contains("inválido"), "{e}");
-        assert!(bad(draft_table("i", "items", vec![dcol("id", "uuid", false, true)])).is_err());
+        assert!(bad(draft_table(
+            "i",
+            "items",
+            vec![dcol("id", "uuid", false, true)]
+        ))
+        .is_err());
         assert!(bad(draft_table("i", "items", vec![])).is_err());
         assert!(bad(draft_table(
             "i",
             "items",
-            vec![dcol("id", "integer", false, true), dcol("id", "text", true, false)]
+            vec![
+                dcol("id", "integer", false, true),
+                dcol("id", "text", true, false)
+            ]
         ))
         .is_err());
         let mut twice = with_draft(draft_table("i", "items", ok.clone()));
@@ -994,7 +1079,10 @@ mod tests {
         let def = with_draft(draft_table(
             "i",
             "items",
-            vec![dcol("Id", "integer", false, true), dcol("id", "text", true, false)],
+            vec![
+                dcol("Id", "integer", false, true),
+                dcol("id", "text", true, false),
+            ],
         ));
         assert_eq!(
             create_statements(&def, "postgres").unwrap_err(),
@@ -1015,12 +1103,87 @@ mod tests {
         let def = with_draft(draft_table(
             "i",
             "items",
-            vec![dcol("id", "integer", true, true), dcol("n", "text", true, false)],
+            vec![
+                dcol("id", "integer", true, true),
+                dcol("n", "text", true, false),
+            ],
         ));
         let sql = &create_statements(&def, "postgres").unwrap()[0].1;
         assert!(sql.contains(r#""id" integer NOT NULL"#), "{sql}");
-        let def = with_draft(draft_table("i", "items", vec![dcol("n", "text", true, false)]));
+        let def = with_draft(draft_table(
+            "i",
+            "items",
+            vec![dcol("n", "text", true, false)],
+        ));
         let sql = &create_statements(&def, "postgres").unwrap()[0].1;
         assert!(!sql.contains("PRIMARY KEY"), "{sql}");
+    }
+
+    fn v2_json() -> serde_json::Value {
+        serde_json::json!({
+            "formatVersion": 2,
+            "dataSource": "default",
+            "description": "Sales model",
+            "tables": [{
+                "alias": "orders", "schema": "public", "table": "orders", "x": 0.0, "y": 0.0,
+                "comment": "every order", "width": 220.0, "height": 140.0,
+                "shortcuts": [{ "id": "s1", "x": 400.0, "y": 10.0 }]
+            }, {
+                "alias": "customers", "schema": "public", "table": "customers", "x": 300.0, "y": 0.0
+            }],
+            "primary": "orders",
+            "primaryKey": "id",
+            "joins": [{
+                "from": { "alias": "orders", "column": "customer_id" },
+                "to": { "alias": "customers", "column": "id" },
+                "relationship": "many_to_one", "join": "left",
+                "points": [{ "x": 250.0, "y": 40.0 }], "swapped": true, "hidden": true
+            }]
+        })
+    }
+
+    #[test]
+    fn accepts_v2_fields() {
+        let value = v2_json();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap(), value);
+    }
+
+    #[test]
+    fn refuses_bad_v2_fields() {
+        let bad = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = v2_json();
+            edit(&mut value);
+            let def: Definition = serde_json::from_value(value).unwrap();
+            validate(&def).unwrap_err()
+        };
+        let e = bad(&|v| v["formatVersion"] = 3.into());
+        assert!(e.contains("formatVersion inválido: 3"), "{e}");
+        let e = bad(&|v| v["tables"][0]["width"] = 0.0.into());
+        assert!(e.contains("Tamanho inválido"), "{e}");
+        let e = bad(&|v| v["tables"][0]["height"] = (-5.0).into());
+        assert!(e.contains("Tamanho inválido"), "{e}");
+        let e = bad(&|v| {
+            v["tables"][1]["shortcuts"] = serde_json::json!([{ "id": "s1", "x": 1.0, "y": 1.0 }])
+        });
+        assert!(e.contains("O atalho s1 se repete"), "{e}");
+        let mut def: Definition = serde_json::from_value(v2_json()).unwrap();
+        def.joins[0].points[0].x = f64::INFINITY;
+        let e = validate(&def).unwrap_err();
+        assert!(e.contains("Ponto inválido"), "{e}");
+    }
+
+    #[test]
+    fn v1_definition_still_valid() {
+        let value = serde_json::to_value(orders_customers()).unwrap();
+        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["dataSource", "joins", "primary", "primaryKey", "tables"]
+        );
+        assert_eq!(value["tables"][0].as_object().unwrap().len(), 5);
+        assert_eq!(value["joins"][0].as_object().unwrap().len(), 4);
     }
 }
