@@ -1796,6 +1796,12 @@ describe('ModelEditor', () => {
       expect(flowNode('area:a1').zIndex).toBe(-999);
     });
 
+    it('a selected area stays behind the tables: selection does not raise a node', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      expect(flow.props.elevateNodesOnSelect).toBe(false);
+    });
+
     it('delete removes a selected view and its dependency line', async () => {
       api.model.mockResolvedValueOnce(view(withObjects()));
       await render();

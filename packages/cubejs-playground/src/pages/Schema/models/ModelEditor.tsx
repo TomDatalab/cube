@@ -541,8 +541,8 @@ function Editor({
       data: {},
     })));
   }, [def.views, def.tables]);
-  const edges = useMemo(
-    () => [...references, ...dependencies] as (ReferenceFlowEdge | DependencyFlowEdge)[],
+  const edges: (ReferenceFlowEdge | DependencyFlowEdge)[] = useMemo(
+    () => [...references, ...dependencies],
     [references, dependencies]
   );
 
@@ -1399,6 +1399,9 @@ function Editor({
             nodeTypes={NODE_TYPES}
             edgeTypes={EDGE_TYPES}
             multiSelectionKeyCode={['Control', 'Meta']}
+            // Selection never reorders, as in Redgate: a selected area stays
+            // behind the tables, whatever its z.
+            elevateNodesOnSelect={false}
             colorMode={theme}
             style={FLOW_STYLE}
             onNodesChange={onNodesChange}

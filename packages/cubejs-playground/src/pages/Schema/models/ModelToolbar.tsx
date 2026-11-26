@@ -272,8 +272,8 @@ export function ModelToolbar({
           label="Order"
           disabled={!arrange.order.canOrder}
           items={[
-            { label: 'Bring to front', onClick: arrange.order.onFront },
-            { label: 'Send to back', onClick: arrange.order.onBack },
+            { label: 'Bring to front', aria: 'Bring to front', onClick: arrange.order.onFront },
+            { label: 'Send to back', aria: 'Send to back', onClick: arrange.order.onBack },
           ]}
         >
           <Layers />
