@@ -454,7 +454,7 @@ pub fn script(
     let views: Vec<&ModelView> = def
         .views
         .iter()
-        .filter(|v| opts.only.as_ref().is_none_or(|only| only.contains(&v.id)))
+        .filter(|v| opts.only.as_ref().is_none_or(|only| only.contains(&format!("view:{}", v.id))))
         .collect();
     let views = view_order(&views)?;
     let scripts = def.settings.as_ref().and_then(|s| s.scripts.as_ref());
@@ -957,9 +957,22 @@ mod tests {
     fn only_selects_views() {
         let mut def = orders_customers();
         def.views = vec![view("v1", "select 1"), view("v2", "select 2")];
-        let sql = gen(&def, &ScriptOptions { only: Some(vec!["v1".into()]), ..Default::default() }).unwrap();
+        let sql = gen(&def, &ScriptOptions { only: Some(vec!["view:v1".into()]), ..Default::default() }).unwrap();
         assert!(sql.contains("\"v1\"") && !sql.contains("\"v2\"") && !sql.contains("CREATE TABLE"), "{sql}");
         let new = gen(&def, &ScriptOptions { only_new: true, ..Default::default() }).unwrap();
         assert!(new.contains("\"v1\"") && new.contains("\"v2\""), "{new}");
+    }
+
+    #[test]
+    fn only_view_id_does_not_pull_in_a_table_aliased_like_it() {
+        let mut def = orders_customers();
+        // A view whose id equals a table's alias.
+        def.views = vec![view("orders", "select 1")];
+        def.views[0].name = "report".into();
+        let sql = gen(&def, &ScriptOptions { only: Some(vec!["view:orders".into()]), ..Default::default() }).unwrap();
+        assert!(!sql.contains("CREATE TABLE"), "{sql}");
+        assert!(sql.contains("select 1"), "{sql}");
+        let table = gen(&def, &ScriptOptions { only: Some(vec!["orders".into()]), ..Default::default() }).unwrap();
+        assert!(table.contains("CREATE TABLE") && !table.contains("select 1"), "{table}");
     }
 }
