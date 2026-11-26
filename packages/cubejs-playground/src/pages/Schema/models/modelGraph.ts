@@ -185,20 +185,17 @@ export function connect(
 export type JoinPatch = Partial<Pick<ModelJoin, 'relationship' | 'join' | 'points' | 'swapped' | 'hidden'>>;
 
 // Copies `value` into `key`, or drops the key for an empty or false value.
-function patched<T extends object>(target: T, patch: Partial<T>): T {
-  const out: any = { ...target };
+function patched<T extends object>(target: T, patch: Record<string, unknown>): T {
+  const out = { ...target } as Record<string, unknown>;
   for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined) {
-      continue;
-    }
     const empty = value === false || value === null || value === '' || (Array.isArray(value) && value.length === 0);
     if (empty) {
       delete out[key];
-    } else {
+    } else if (value !== undefined) {
       out[key] = value;
     }
   }
-  return out;
+  return out as T;
 }
 
 export function setJoin(def: ModelDefinition, index: number, patch: JoinPatch): ModelDefinition {
@@ -499,7 +496,7 @@ export function placeTables(def: ModelDefinition, places: Map<string, Place>): M
           y: round(own.y),
           width: own.width === null ? null : round(own.width),
           height: own.height === null ? null : round(own.height),
-        } as any);
+        });
       }
       if (t.shortcuts?.some((sc) => places.has(`${t.alias}~${sc.id}`))) {
         out = {
