@@ -6,7 +6,7 @@ import {
 } from '../pages/Schema/models/objects';
 import { addShortcut } from '../pages/Schema/models/clipboard';
 import {
-  ModelDefinition, addTable, emptyDefinition, removeTable, renameTable,
+  ModelDefinition, addDraftTable, addTable, emptyDefinition, removeTable, renameTable,
 } from '../pages/Schema/models/modelGraph';
 
 function base(): ModelDefinition {
@@ -134,5 +134,14 @@ describe('model objects', () => {
     let { def } = addShortcut(base(), 'orders', 0, 0);
     def = addView(addArea(addNote(def, 0, 0).def, 0, 0).def, 0, 0, 'public').def;
     expect(nodeIdsOf(def)).toEqual(['orders', 'orders~s1', 'customers', 'note:n1', 'area:a1', 'view:v1']);
+  });
+
+  it('view names avoid draft tables of the same schema', () => {
+    const cols = [{ name: 'id', type: 'integer' as const, nullable: false, primaryKey: true }];
+    let { def } = addDraftTable(base(), 'ds', 'public', 'view_1', cols, 0, 0);
+    expect(addView(def, 0, 0, 'public').def.views![0].name).toBe('view_2');
+    expect(addView(def, 0, 0, 'other').def.views![0].name).toBe('view_1');
+    def = addView(def, 0, 0, 'public').def;
+    expect(renameView(def, 'v1', 'view_1').error).toBe('view_1 is already in this model');
   });
 });

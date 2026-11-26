@@ -145,4 +145,12 @@ describe('clipboard', () => {
     const both = paste(def, copy(def, [nodeIdOf('view', 'v1'), nodeIdOf('view', 'v2')]));
     expect(both.def.views!.find((v) => v.id === 'v4')!.dependsOnViews).toEqual(['v3']);
   });
+
+  it('pasting a view frees its name against draft tables', () => {
+    const cols = [{ name: 'id', type: 'integer' as const, nullable: false, primaryKey: true }];
+    let { def } = addView(model(), 0, 0, 'public');
+    def = addDraftTable(def, 'ds', 'public', 'view_1_1', cols, 0, 0).def;
+    const { def: next } = paste(def, copy(def, ['view:v1']));
+    expect(next.views![1].name).toBe('view_1_2');
+  });
 });

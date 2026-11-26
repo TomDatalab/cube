@@ -1,7 +1,6 @@
 import { Box } from './arrange';
-import { removeShortcut } from './clipboard';
 import {
-  Area, IDENTIFIER, ModelDefinition, ModelView, Note, Place, placeTables, removeTable,
+  Area, IDENTIFIER, ModelDefinition, ModelView, Note, Place, placeTables, removeShortcut, removeTable,
 } from './modelGraph';
 
 // Everything on the canvas: tables (and their shortcuts) plus the objects
@@ -39,13 +38,18 @@ function freeId(prefix: string, ids: string[]): string {
   return `${prefix}${n}`;
 }
 
-function freeName(base: string, names: string[]): string {
-  const taken = new Set(names);
+function freeName(base: string, isTaken: (name: string) => boolean): string {
   let n = 1;
-  while (taken.has(`${base}${n}`)) {
+  while (isTaken(`${base}${n}`)) {
     n += 1;
   }
   return `${base}${n}`;
+}
+
+// A view's name is taken by another view, or by a draft table of its schema.
+export function viewNameTaken(def: ModelDefinition, schema: string, name: string): boolean {
+  return (def.views ?? []).some((v) => v.name === name)
+    || def.tables.some((t) => t.draft && t.schema === schema && t.table === name);
 }
 
 const round = (n: number) => Math.round(n);
@@ -67,7 +71,7 @@ export function addNote(def: ModelDefinition, x: number, y: number): { def: Mode
 export function addArea(def: ModelDefinition, x: number, y: number): { def: ModelDefinition; id: string } {
   const areas = def.areas ?? [];
   const id = freeId(PREFIX.area, areas.map((a) => a.id));
-  const name = freeName('Area_', areas.map((a) => a.name));
+  const name = freeName('Area_', (n) => areas.some((a) => a.name === n));
   return {
     id,
     def: {
@@ -87,7 +91,7 @@ export function addView(
 ): { def: ModelDefinition; id: string } {
   const views = def.views ?? [];
   const id = freeId(PREFIX.view, views.map((v) => v.id));
-  const name = freeName('view_', views.map((v) => v.name));
+  const name = freeName('view_', (n) => viewNameTaken(def, schema, n));
   return {
     id,
     def: {
@@ -132,7 +136,7 @@ export function renameView(def: ModelDefinition, id: string, next: string): { de
   if (!IDENTIFIER.test(next) || next.length > MAX_IDENTIFIER) {
     return { def, error: `Invalid name: ${next}` };
   }
-  if (views.some((v) => v.name === next)) {
+  if (viewNameTaken(def, views.find((v) => v.id === id)?.schema ?? '', next)) {
     return { def, error: `${next} is already in this model` };
   }
   return { def: setView(def, id, { name: next }) };

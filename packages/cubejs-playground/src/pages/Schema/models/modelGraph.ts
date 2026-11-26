@@ -617,3 +617,20 @@ export function placeTables(def: ModelDefinition, places: Map<string, Place>): M
     }),
   };
 }
+
+export function removeShortcut(def: ModelDefinition, alias: string, id: string): ModelDefinition {
+  return {
+    ...def,
+    tables: def.tables.map((t) => {
+      if (t.alias !== alias || !t.shortcuts) {
+        return t;
+      }
+      const shortcuts = t.shortcuts.filter((s) => s.id !== id);
+      if (shortcuts.length) {
+        return { ...t, shortcuts };
+      }
+      const { shortcuts: _drop, ...rest } = t;
+      return rest;
+    }),
+  };
+}

@@ -1,7 +1,12 @@
 import {
-  Area, End, ModelDefinition, ModelJoin, ModelTable, ModelView, Note,
+  Area, End, ModelDefinition, ModelJoin, ModelTable, ModelView, Note, removeShortcut,
 } from './modelGraph';
-import { nodeIdOf, objectOf, removeObjects } from './objects';
+
+import {
+  nodeIdOf, objectOf, removeObjects, viewNameTaken,
+} from './objects';
+
+export { removeShortcut };
 
 // What Copy or Cut keeps: the objects and the links between the tables.
 export type Clip = {
@@ -111,7 +116,7 @@ export function paste(
     return { v, id };
   });
   for (const { v, id } of pastedViews) {
-    const name = free(v.name, (n) => views.some((x) => x.name === n));
+    const name = free(v.name, (n) => viewNameTaken({ ...def, tables, views }, v.schema, n));
     views.push(moved({
       ...v,
       id,
@@ -135,23 +140,6 @@ export function paste(
       ...areas.map((a) => nodeIdOf('area', a.id)),
       ...pastedViews.map((p) => nodeIdOf('view', p.id)),
     ],
-  };
-}
-
-export function removeShortcut(def: ModelDefinition, alias: string, id: string): ModelDefinition {
-  return {
-    ...def,
-    tables: def.tables.map((t) => {
-      if (t.alias !== alias || !t.shortcuts) {
-        return t;
-      }
-      const shortcuts = t.shortcuts.filter((s) => s.id !== id);
-      if (shortcuts.length) {
-        return { ...t, shortcuts };
-      }
-      const { shortcuts: _drop, ...rest } = t;
-      return rest;
-    }),
   };
 }
 
