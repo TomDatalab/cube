@@ -1638,3 +1638,36 @@ build_test!(create_tables_needs_execute, |store, url| {
     let (other, _, _) = owner_org(&env, &store, &admin, "paula", "Beta").await;
     assert_eq!(create_tables(&env, &other, &id, json!({ "version": 1 })).await.0, StatusCode::NOT_FOUND);
 });
+
+build_test!(create_tables_partial_failure_keeps_the_first, |store, url| {
+    shop_tables(&url).await;
+    let db = support::connect(&url).await;
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+    let (env, _, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let mut def = draft_def("items");
+    def["tables"].as_array_mut().unwrap().push(json!({
+        "alias": "ghosts", "schema": "nowhere", "table": "ghosts", "x": 0, "y": 80,
+        "draft": { "columns": [{ "name": "id", "type": "integer", "nullable": false, "primaryKey": true }] },
+    }));
+    def["joins"].as_array_mut().unwrap().push(json!({
+        "from": { "alias": "orders", "column": "id" },
+        "to": { "alias": "ghosts", "column": "id" },
+        "relationship": "many_to_one", "join": "left",
+    }));
+    let (status, body) = call(&env, Method::POST, &admin, &format!("/cube/v1/organizations/{on}/cube-models"),
+        Some(json!({ "name": "Parcial", "definition": def }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = create_tables(&env, &admin, &id, json!({ "version": 1 })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["created"], json!(["shop.items"]));
+    assert!(body["error"].as_str().unwrap().contains("nowhere.ghosts"), "{body}");
+    assert_eq!(body["model"]["version"], 2);
+    let tables = &body["model"]["definition"]["tables"];
+    assert!(tables[2].get("draft").is_none(), "{body}");
+    assert!(tables[3].get("draft").is_some(), "{body}");
+    assert!(table_exists(&url, "items").await);
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+});

@@ -401,6 +401,15 @@ pub async fn build(
     })))
 }
 
+/// Drops `draft` from the tables of `def` named in `created` (`schema.table`).
+fn clear_drafts(def: &mut Definition, created: &[String]) {
+    for table in def.tables.iter_mut() {
+        if created.contains(&format!("{}.{}", table.schema, table.table)) {
+            table.draft = None;
+        }
+    }
+}
+
 /// `{version, dryRun?}`: `admin` on the organization. `dryRun` answers
 /// `{statements}` and runs nothing. Otherwise, with the permission
 /// `/v1/execute` asks, runs one `CREATE TABLE` per draft table, stopping at
@@ -453,6 +462,16 @@ pub async fn create_tables(
 
     // Not while a data source is being deleted; see `generate_schema`.
     let _guard = crate::handlers::data_sources::WRITE.lock().await;
+    // The lock may have been waited for: a request already stale runs nothing.
+    let current = rbac
+        .store
+        .cube_model(model.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .ok_or_else(not_found)?;
+    if current.version != request.version {
+        return Err(ApiError::new(StatusCode::CONFLICT, STALE));
+    }
     let existing = crate::handlers::playground::data_source_schema(ds).await?;
     for table in def.tables.iter().filter(|t| t.draft.is_some()) {
         if existing
@@ -499,24 +518,75 @@ pub async fn create_tables(
         }
     }
 
-    let model = if created.is_empty() {
-        model
-    } else {
-        for table in def.tables.iter_mut() {
-            if created.contains(&format!("{}.{}", table.schema, table.table)) {
-                table.draft = None;
+    // The model may have been edited or deleted while the statements ran:
+    // clear the drafts on its current definition, and retry on a stale save.
+    let mut model = model;
+    if !created.is_empty() {
+        let mut saved = false;
+        for _ in 0..5 {
+            let Some(current) = rbac
+                .store
+                .cube_model(model.id)
+                .await
+                .map_err(|e| store_error(e, "Conflict"))?
+            else {
+                break;
+            };
+            let mut def: Definition = serde_json::from_value(current.definition.clone())
+                .map_err(|e| ApiError::bad_request(format!("Definição inválida: {e}")))?;
+            clear_drafts(&mut def, &created);
+            let definition =
+                serde_json::to_value(&def).map_err(|e| ApiError::bad_request(e.to_string()))?;
+            match rbac
+                .store
+                .update_cube_model(current.id, None, Some(&definition), current.version, &actor)
+                .await
+            {
+                Ok(updated) => {
+                    model = updated;
+                    saved = true;
+                    break;
+                }
+                Err(StoreError::Conflict(m)) if m == "stale model version" => continue,
+                Err(StoreError::NotFound) => break,
+                Err(e) => return Err(model_error(e)),
             }
         }
-        let definition = serde_json::to_value(&def).map_err(|e| ApiError::bad_request(e.to_string()))?;
-        rbac.store
-            .update_cube_model(model.id, None, Some(&definition), model.version, &actor)
-            .await
-            .map_err(model_error)?
-    };
+        if !saved {
+            let note = format!(
+                "Tabelas criadas ({}), mas o model não pôde ser atualizado (foi apagado ou mudou); abra de novo",
+                created.join(", ")
+            );
+            error = Some(match error {
+                Some(e) => format!("{e}; {note}"),
+                None => note,
+            });
+        }
+    }
     let detail = detail_of(&state, &scope).await?;
     let mut out = json!({ "model": view(&model), "created": created, "detail": detail });
     if let Some(error) = error {
         out["error"] = json!(error);
     }
     Ok(Json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_drafts_acts_on_the_current_definition() {
+        let table = |name: &str| json!({
+            "alias": name, "schema": "shop", "table": name, "x": 0, "y": 0,
+            "draft": { "columns": [{ "name": "id", "type": "integer", "nullable": false, "primaryKey": true }] },
+        });
+        // The model as edited meanwhile: `a` moved and `b` is new.
+        let mut def: Definition = serde_json::from_value(json!({
+            "dataSource": "d", "tables": [table("a"), table("b")], "joins": [],
+        })).unwrap();
+        clear_drafts(&mut def, &["shop.a".to_string(), "shop.gone".to_string()]);
+        assert!(def.tables[0].draft.is_none());
+        assert!(def.tables[1].draft.is_some());
+    }
 }
