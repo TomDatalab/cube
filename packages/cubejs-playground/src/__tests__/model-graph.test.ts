@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  addTable, canConnect, connect, emptyDefinition, joinLabel, removeJoin, removeTable, setPrimary, unlinked,
+  addDraftTable, addTable, canConnect, draftProblem, drafts, layout, setColor, updateDraftTable,
+  connect, emptyDefinition, joinLabel, removeJoin, removeTable, setPrimary, unlinked,
   updateJoin,
 } from '../pages/Schema/models/modelGraph';
 
@@ -113,5 +114,73 @@ describe('modelGraph', () => {
     const def = build(['a']);
     expect(canConnect(def, { alias: 'a', column: 'x' }, { alias: 'ghost', column: 'y' })).toBe('Unknown table: ghost');
     expect(canConnect(def, { alias: 'ghost', column: 'y' }, { alias: 'a', column: 'x' })).toBe('Unknown table: ghost');
+  });
+});
+
+describe('draft tables', () => {
+  const cols = [
+    { name: 'id', type: 'integer' as const, nullable: false, primaryKey: true },
+    { name: 'name', type: 'text' as const, nullable: true, primaryKey: false },
+  ];
+
+  it('adds a draft table and makes the first one the primary', () => {
+    const a = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
+    expect(a.error).toBeUndefined();
+    expect(a.def.primary).toBe('users');
+    expect(a.def.dataSource).toBe('ds');
+    expect(drafts(a.def)).toHaveLength(1);
+    const b = addDraftTable(a.def, 'ds', 'other', 'users', cols, 0, 0);
+    expect(b.def.tables.map((t) => t.alias)).toEqual(['users', 'users_2']);
+    expect(b.def.primary).toBe('users');
+    expect(addDraftTable(a.def, 'x', 'public', 't', cols, 0, 0).error).toMatch(/one connection/);
+  });
+
+  it('refuses a draft with a bad name or duplicate columns', () => {
+    const { def } = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
+    expect(draftProblem('public', '1bad', cols, def)).not.toBeNull();
+    expect(draftProblem('public', 'a'.repeat(64), cols, def)).not.toBeNull();
+    expect(draftProblem('public', 'ok', [], def)).not.toBeNull();
+    expect(draftProblem('public', 'ok', [cols[0], cols[0]], def)).toMatch(/Duplicate/);
+    expect(draftProblem('public', 'ok', [{ ...cols[0], type: 'blob' as never }], def)).not.toBeNull();
+    expect(draftProblem('public', 'users', cols, def)).toMatch(/already/);
+    expect(draftProblem('public', 'users', cols, def, 'users')).toBeNull();
+    expect(addDraftTable(def, 'ds', 'public', 'bad name', cols, 0, 0).error).toBeDefined();
+  });
+
+  it('editing a draft drops links to removed columns', () => {
+    let { def } = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
+    def = addTable(def, 'ds', 'public', 'orders', 0, 0).def;
+    def = connect(def, { alias: 'orders', column: 'user_id' }, { alias: 'users', column: 'name' }, 'many_to_one', 'left');
+    def = { ...def, primaryKey: 'name' };
+    const r = updateDraftTable(def, 'users', 'public', 'users', [cols[0]]);
+    expect(r.error).toBeUndefined();
+    expect(r.def.joins).toEqual([]);
+    expect(r.def.primaryKey).toBeNull();
+    expect(r.def.tables[0].alias).toBe('users');
+    expect(r.def.tables[0].draft?.columns).toHaveLength(1);
+  });
+
+  it('colors a table and clears its color', () => {
+    let def = build(['a']);
+    def = setColor(def, 'a', 'teal');
+    expect(def.tables[0].color).toBe('teal');
+    def = setColor(def, 'a', undefined);
+    expect('color' in def.tables[0]).toBe(false);
+  });
+
+  it('lays tables out in layers from the principal', () => {
+    let def = build(['a', 'b', 'c', 'd']);
+    def = connect(def, { alias: 'a', column: 'i' }, { alias: 'b', column: 'i' }, 'one_to_many', 'left');
+    def = connect(def, { alias: 'c', column: 'i' }, { alias: 'a', column: 'i' }, 'many_to_one', 'left');
+    const l = layout(def);
+    const pos = (a: string) => {
+      const t = l.tables.find((x) => x.alias === a)!;
+
+      return [t.x, t.y];
+    };
+    expect(pos('a')).toEqual([0, 0]);
+    expect(pos('b')).toEqual([320, 0]);
+    expect(pos('c')).toEqual([320, 44 + 24 * 6 + 40]);
+    expect(pos('d')).toEqual([640, 0]);
   });
 });

@@ -183,6 +183,20 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
       return call('POST', `/cube-models/${enc(id)}/build`, { force });
     },
 
+    createTables(
+      id: string,
+      version: number,
+      dryRun: boolean
+    ): Promise<{
+      statements?: string[];
+      model?: CubeModelView;
+      created?: string[];
+      error?: string;
+      detail?: OrgDetail;
+    }> {
+      return call('POST', `/cube-models/${enc(id)}/create-tables`, { version, dryRun });
+    },
+
     async workspaces(org: OrgNode): Promise<{ id: string; name: string }[]> {
       return (await call('GET', `/organizations/${enc(org.id!)}/workspaces`)).workspaces || [];
     },

@@ -1,12 +1,45 @@
 export type Relationship = 'one_to_one' | 'one_to_many' | 'many_to_one';
 export type JoinKind = 'left' | 'inner';
 
+export const COLUMN_TYPES = [
+  'text',
+  'integer',
+  'bigint',
+  'numeric',
+  'boolean',
+  'date',
+  'timestamp',
+] as const;
+export type ColumnType = (typeof COLUMN_TYPES)[number];
+
+export const TABLE_COLORS = [
+  'slate',
+  'blue',
+  'green',
+  'amber',
+  'red',
+  'violet',
+  'pink',
+  'teal',
+] as const;
+export type TableColor = (typeof TABLE_COLORS)[number];
+
+export type DraftColumn = {
+  name: string;
+  type: ColumnType;
+  nullable: boolean;
+  primaryKey: boolean;
+};
+export type DraftTable = { columns: DraftColumn[] };
+
 export type ModelTable = {
   alias: string;
   schema: string;
   table: string;
   x: number;
   y: number;
+  color?: TableColor;
+  draft?: DraftTable;
 };
 
 export type End = { alias: string; column: string };
@@ -189,4 +222,191 @@ export function unlinked(def: ModelDefinition): string[] {
     }
   }
   return def.tables.map((t) => t.alias).filter((a) => !seen.has(a));
+}
+
+export const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_IDENTIFIER = 63;
+
+function badIdentifier(name: string): boolean {
+  return !IDENTIFIER.test(name) || name.length > MAX_IDENTIFIER;
+}
+
+export function draftProblem(
+  schema: string,
+  table: string,
+  columns: DraftColumn[],
+  def: ModelDefinition,
+  editingAlias?: string
+): string | null {
+  if (badIdentifier(schema)) {
+    return `Invalid schema name: ${schema}`;
+  }
+  if (badIdentifier(table)) {
+    return `Invalid table name: ${table}`;
+  }
+  if (columns.length === 0) {
+    return 'Add at least one column';
+  }
+  const seen = new Set<string>();
+  for (const c of columns) {
+    if (badIdentifier(c.name)) {
+      return `Invalid column name: ${c.name}`;
+    }
+    if (!(COLUMN_TYPES as readonly string[]).includes(c.type)) {
+      return `Invalid type for ${c.name}: ${c.type}`;
+    }
+    if (seen.has(c.name)) {
+      return `Duplicate column: ${c.name}`;
+    }
+    seen.add(c.name);
+  }
+  const clash = def.tables.some(
+    (t) => t.alias !== editingAlias && t.schema === schema && t.table === table
+  );
+  if (clash) {
+    return `${schema}.${table} is already in this model`;
+  }
+  return null;
+}
+
+export function addDraftTable(
+  def: ModelDefinition,
+  ds: string,
+  schema: string,
+  table: string,
+  columns: DraftColumn[],
+  x: number,
+  y: number
+): { def: ModelDefinition; error?: string } {
+  if (def.tables.length > 0 && def.dataSource !== ds) {
+    return {
+      def,
+      error: `Tables of one connection only: this model reads ${def.dataSource}`,
+    };
+  }
+  const problem = draftProblem(schema, table, columns, def);
+  if (problem) {
+    return { def, error: problem };
+  }
+  const taken = new Set(def.tables.map((t) => t.alias));
+  let alias = table;
+  for (let n = 2; taken.has(alias); n++) {
+    alias = `${table}_${n}`;
+  }
+  const first = def.tables.length === 0;
+  return {
+    def: {
+      ...def,
+      dataSource: ds,
+      primary: first ? alias : def.primary,
+      tables: [...def.tables, { alias, schema, table, x, y, draft: { columns } }],
+    },
+  };
+}
+
+export function updateDraftTable(
+  def: ModelDefinition,
+  alias: string,
+  schema: string,
+  table: string,
+  columns: DraftColumn[]
+): { def: ModelDefinition; error?: string } {
+  if (!def.tables.some((t) => t.alias === alias)) {
+    return { def, error: `Unknown table: ${alias}` };
+  }
+  const problem = draftProblem(schema, table, columns, def, alias);
+  if (problem) {
+    return { def, error: problem };
+  }
+  const names = new Set(columns.map((c) => c.name));
+  const gone = (e: End) => e.alias === alias && !names.has(e.column);
+  const keepsPk = def.primary !== alias || !def.primaryKey || names.has(def.primaryKey);
+  return {
+    def: {
+      ...def,
+      primaryKey: keepsPk ? def.primaryKey : null,
+      tables: def.tables.map((t) => {
+        if (t.alias !== alias) {
+          return t;
+        }
+
+        return { ...t, schema, table, draft: { columns } };
+      }),
+      joins: def.joins.filter((j) => !gone(j.from) && !gone(j.to)),
+    },
+  };
+}
+
+export function setColor(
+  def: ModelDefinition,
+  alias: string,
+  color: TableColor | undefined
+): ModelDefinition {
+  return {
+    ...def,
+    tables: def.tables.map((t) => {
+      if (t.alias !== alias) {
+        return t;
+      }
+      if (color === undefined) {
+        const { color: _drop, ...rest } = t;
+
+        return rest;
+      }
+      return { ...t, color };
+    }),
+  };
+}
+
+export function drafts(def: ModelDefinition): ModelTable[] {
+  return def.tables.filter((t) => t.draft !== undefined);
+}
+
+const LAYER_WIDTH = 320;
+const GAP = 40;
+const UNKNOWN_COLUMNS = 6;
+
+function tableHeight(t: ModelTable): number {
+  return 44 + 24 * (t.draft ? t.draft.columns.length : UNKNOWN_COLUMNS);
+}
+
+export function layout(def: ModelDefinition): ModelDefinition {
+  if (def.tables.length === 0) {
+    return def;
+  }
+  const start = def.primary ?? def.tables[0].alias;
+  const depth = new Map<string, number>([[start, 0]]);
+  const queue = [start];
+  while (queue.length) {
+    const cur = queue.shift() as string;
+    for (const j of def.joins) {
+      let other: string | null = null;
+      if (j.from.alias === cur) {
+        other = j.to.alias;
+      } else if (j.to.alias === cur) {
+        other = j.from.alias;
+      }
+      if (other && !depth.has(other)) {
+        depth.set(other, (depth.get(cur) as number) + 1);
+        queue.push(other);
+      }
+    }
+  }
+  let last = 0;
+  for (const d of depth.values()) {
+    last = Math.max(last, d);
+  }
+  const loose = def.tables.some((t) => !depth.has(t.alias));
+  const looseLayer = loose ? last + 1 : last;
+  const nextY = new Map<number, number>();
+  return {
+    ...def,
+    tables: def.tables.map((t) => {
+      const layer = depth.get(t.alias) ?? looseLayer;
+      const y = nextY.get(layer) ?? 0;
+      nextY.set(layer, y + tableHeight(t) + GAP);
+
+      return { ...t, x: layer * LAYER_WIDTH, y };
+    }),
+  };
 }
