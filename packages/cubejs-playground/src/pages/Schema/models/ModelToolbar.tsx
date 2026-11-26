@@ -1,8 +1,8 @@
 import { ReactElement, ReactNode, useState } from 'react';
 import {
-  AlignCenterVertical, AlignVerticalDistributeCenter, Ban, BookOpen, Box, ClipboardPaste, Copy, DatabaseZap,
-  FileCode, FileText, Forward, Image, Layers, Maximize, Network, Palette, PanelLeft, PanelRight, PanelTop,
-  Pencil, Redo2, Save, Scaling, Scissors, Spline, Trash2, Undo2, ZoomIn, ZoomOut,
+  AlignCenterVertical, AlignVerticalDistributeCenter, BookOpen, Box, ClipboardPaste, Copy, DatabaseZap,
+  FileCode, FileText, Forward, Image, Layers, Maximize, Network, PanelLeft, PanelRight, PanelTop,
+  Redo2, Save, Scaling, Scissors, Spline, Trash2, Undo2, ZoomIn, ZoomOut,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,6 @@ import {
 } from '@/components/ui/tooltip';
 
 import type { AlignMode, DistributeMode } from './arrange';
-import { TABLE_COLORS, TableColor } from './modelGraph';
 
 export const ZOOM_CHOICES = [25, 50, 75, 100, 200, 400];
 const SOON = 'Coming soon';
@@ -70,12 +69,6 @@ export type ModelToolbarProps = {
     onToggleLeft(): void;
     onToggleRight(): void;
     onToggleTop(): void;
-  };
-  // The selected table: what Color and Edit act on.
-  table: {
-    selected: { alias: string; draft: boolean; color?: TableColor } | null;
-    onColor(color: TableColor | undefined): void;
-    onEdit(): void;
   };
   search: ReactNode;
 };
@@ -166,55 +159,10 @@ function Menu({
   );
 }
 
-// The 8 colors of the palette and "No color", for the selected table.
-function ColorTool({ selected, onColor }: Pick<ModelToolbarProps['table'], 'selected' | 'onColor'>) {
-  const [open, setOpen] = useState(false);
-  const pick = (color: TableColor | undefined) => {
-    onColor(color);
-    setOpen(false);
-  };
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <Hint text="Table color">
-        <PopoverTrigger asChild>
-          <Button type="button" variant="ghost" size="icon-sm" aria-label="Table color" disabled={!selected}>
-            <Palette />
-          </Button>
-        </PopoverTrigger>
-      </Hint>
-      <PopoverContent className="tw:w-auto tw:p-2" align="start">
-        <div className="tw:flex tw:items-center tw:gap-1" data-slot="model-color-palette">
-          {TABLE_COLORS.map((color) => (
-            <button
-              key={color}
-              type="button"
-              aria-label={color}
-              aria-pressed={selected?.color === color}
-              title={color}
-              className="tw:size-6 tw:cursor-pointer tw:rounded-full tw:border-2 tw:border-transparent tw:p-0 tw:aria-pressed:border-foreground"
-              style={{ background: `var(--model-${color})` }}
-              onClick={() => pick(color)}
-            />
-          ))}
-          <button
-            type="button"
-            aria-label="No color"
-            title="No color"
-            className="tw:flex tw:size-6 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded-full tw:border tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent"
-            onClick={() => pick(undefined)}
-          >
-            <Ban className="tw:size-3.5" />
-          </button>
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
 // Redgate's toolbar: history | file | clipboard | arrange | zoom | panes,
 // then the search on the right.
 export function ModelToolbar({
-  history, file, edit, arrange, references, zoom, panes, table, search,
+  history, file, edit, arrange, references, zoom, panes, search,
 }: ModelToolbarProps) {
   const zoomOptions = ZOOM_CHOICES.includes(zoom.percent)
     ? ZOOM_CHOICES
@@ -256,15 +204,6 @@ export function ModelToolbar({
         <Tool label="Paste as shortcut" disabled={!edit.canPaste} onClick={edit.onPasteShortcut}><Forward /></Tool>
         <Tool label="Cut" hint="Cut (Ctrl + X)" disabled={!edit.canCopy} onClick={edit.onCut}><Scissors /></Tool>
         <Tool label="Delete" hint="Delete (Del)" disabled={!edit.canDelete} onClick={edit.onDelete}><Trash2 /></Tool>
-        <ColorTool selected={table.selected} onColor={table.onColor} />
-        <Tool
-          label="Edit table"
-          hint={table.selected && !table.selected.draft ? 'Only new tables are edited here' : 'Edit table'}
-          disabled={!table.selected?.draft}
-          onClick={table.onEdit}
-        >
-          <Pencil />
-        </Tool>
         <Divider />
 
         <Menu

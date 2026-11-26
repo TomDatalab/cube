@@ -219,7 +219,8 @@ describe('ModelEditor', () => {
   };
   const fill = async (selector: string, value: string) => {
     const input = document.querySelector(selector) as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')!.set!;
     await act(async () => {
       setter.call(input, value);
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -248,7 +249,7 @@ describe('ModelEditor', () => {
 
   it('builds a saved model and hands back the cube name', async () => {
     await render();
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     expect(api.saveModel).not.toHaveBeenCalled();
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(api.buildModel.mock.calls[0][0]).toBe('m1');
@@ -259,7 +260,7 @@ describe('ModelEditor', () => {
   it('asks before overwriting a cube edited by hand, then builds with force', async () => {
     api.buildModel.mockRejectedValueOnce(new ApiError('O cubo foi editado desde o último build', 409));
     await render();
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     expect(onBuilt).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('The cube was edited by hand since the last build. Overwrite?');
     await act(async () => button('Overwrite').click());
@@ -273,10 +274,10 @@ describe('ModelEditor', () => {
     const error = vi.spyOn(notify, 'error');
     await render();
     await rename('Outro');
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     expect(error).toHaveBeenCalledWith('Já existe um model com este nome nesta organização');
     api.saveModel.mockRejectedValueOnce(new ApiError('O model mudou desde que você abriu; abra de novo', 409));
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     expect(error).toHaveBeenLastCalledWith('Changed elsewhere: reopen');
     error.mockRestore();
   });
@@ -286,11 +287,11 @@ describe('ModelEditor', () => {
       { file: 'model/sales.yml', cube: 'sales', message: 'coluna inexistente' },
     ]));
     await render();
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     const box = document.querySelector('[data-slot="model-problems"]')!;
     expect(box.textContent).toContain('model/sales.yml: coluna inexistente');
     expect(onBuilt).not.toHaveBeenCalled();
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     expect(document.querySelector('[data-slot="model-problems"]')).toBeNull();
   });
 
@@ -303,7 +304,7 @@ describe('ModelEditor', () => {
     }));
     const error = vi.spyOn(notify, 'error');
     await render();
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     expect(error).toHaveBeenCalledWith('Link every table to the principal before building: products');
     expect(api.buildModel).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain('Build anyway');
@@ -315,7 +316,7 @@ describe('ModelEditor', () => {
       new ApiError('O caminho model/sales.yml já é de outro arquivo; renomeie ou mova esse arquivo', 409)
     );
     await render();
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     expect(document.body.textContent).not.toContain('Overwrite?');
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(onBuilt).not.toHaveBeenCalled();
@@ -386,7 +387,7 @@ describe('ModelEditor', () => {
     expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent))
       .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
 
-    await act(async () => button('Build cube').click());
+    await act(async () => tool('Build cube').click());
     expect(api.saveModel).toHaveBeenCalledTimes(1);
     const [id, change] = api.saveModel.mock.calls[0];
     expect(id).toBe('m1');
@@ -496,16 +497,28 @@ describe('ModelEditor', () => {
     expect(document.body.textContent).not.toContain('INNER keeps only rows');
   });
 
-  it('changes and deletes a link from its edge', async () => {
+  it('edits a reference\'s relationship from its properties and deletes it', async () => {
     await render();
     await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
-    const inner = document.querySelector('[role="radio"][value="inner"]') as HTMLButtonElement;
-    await act(async () => inner.click());
-    await act(async () => button('Save link').click());
+    const pane = document.querySelector('[data-slot="model-properties"]')!;
+    expect(pane.textContent).toContain('Reference properties');
+    expect(pane.textContent).toContain('orders.customer_id');
+    expect(pane.textContent).toContain('customers.id');
+    const join = pane.querySelector('select[aria-label="Join"]') as HTMLSelectElement;
+    await act(async () => {
+      join.value = 'inner';
+      join.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     expect(document.querySelector('[data-edge]')!.textContent).toBe('N:1 · INNER');
-    await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
-    await act(async () => button('Delete').click());
+    const relationship = pane.querySelector('select[aria-label="Relationship"]') as HTMLSelectElement;
+    await act(async () => {
+      relationship.value = 'one_to_one';
+      relationship.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(document.querySelector('[data-edge]')!.textContent).toBe('1:1 · INNER');
+    await act(async () => button('Delete reference').click());
     expect(document.querySelectorAll('[data-edge]').length).toBe(0);
+    expect(document.querySelector('[data-slot="model-properties"]')!.textContent).toContain('Model properties');
   });
 
   it('opens a model whose tables are gone, naming them', async () => {
@@ -529,7 +542,7 @@ describe('ModelEditor', () => {
       setter.call(name, 'Sales 2');
       name.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     expect(api.saveModel).toHaveBeenCalledWith('m1', expect.objectContaining({ name: 'Sales 2', version: 3 }));
     expect(document.body.textContent).not.toContain('Unsaved changes');
   });
@@ -539,11 +552,11 @@ describe('ModelEditor', () => {
     api.saveModel.mockImplementationOnce(() => new Promise<CubeModelView>((resolve) => { finish = resolve; }));
     await render();
     await rename('Sales 2');
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     await rename('Sales 3');
     await act(async () => finish(view(saved(), 4)));
     expect(document.body.textContent).toContain('Unsaved changes');
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     expect(api.saveModel.mock.calls[1][1]).toEqual(expect.objectContaining({ name: 'Sales 3', version: 4 }));
     expect(document.body.textContent).not.toContain('Unsaved changes');
   });
@@ -551,9 +564,9 @@ describe('ModelEditor', () => {
   it('sends the version each save returned', async () => {
     await render();
     await rename('Sales 2');
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     await rename('Sales 3');
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     expect(api.saveModel.mock.calls.map(([, c]) => c.version)).toEqual([3, 4]);
   });
 
@@ -565,7 +578,7 @@ describe('ModelEditor', () => {
       [{ id: 'customers', position: { x: 410.4, y: 19.6 } }]
     ));
     expect(document.body.textContent).toContain('Unsaved changes');
-    await act(async () => button('Save').click());
+    await act(async () => tool('Save changes').click());
     const { tables: placed } = api.saveModel.mock.calls[0][1].definition;
     expect(placed.find((t: any) => t.alias === 'customers')).toEqual(expect.objectContaining({ x: 410, y: 20 }));
     expect(placed.find((t: any) => t.alias === 'orders')).toEqual(expect.objectContaining({ x: 0, y: 0 }));
@@ -647,7 +660,7 @@ describe('ModelEditor', () => {
       await render();
       await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 410, y: 20 } }]));
       await select('customers');
-      const input = document.querySelector('input[aria-label="Model name"]') as HTMLInputElement;
+      const input = document.querySelector('input[aria-label="Search the model"]') as HTMLInputElement;
       await key('z', { ctrlKey: true }, input);
       await key('Delete', {}, input);
       await key('a', { ctrlKey: true }, input);
@@ -712,6 +725,96 @@ describe('ModelEditor', () => {
       await key('s', { ctrlKey: true });
       expect(api.saveModel).toHaveBeenCalledTimes(1);
       expect(api.saveModel.mock.calls[0][1].definition.formatVersion).toBe(2);
+    });
+  });
+
+  describe('panes', () => {
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const commit = async (selector: string, value: string) => {
+      await fill(selector, value);
+      await act(async () => {
+        document.querySelector(selector)!.dispatchEvent(new FocusEvent('blur', { bubbles: false }));
+        document.querySelector(selector)!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
+    };
+
+    it('the properties pane edits the model\'s name, principal and primary key', async () => {
+      await render();
+      expect(pane().textContent).toContain('Model properties');
+      expect(pane().querySelector('#model-principal')).not.toBeNull();
+      expect(pane().querySelector('#model-primary-key')).not.toBeNull();
+      expect(pane().textContent).toContain('warehouse');
+      expect(pane().textContent).toContain('2 tables');
+      await rename('Sales 2');
+      expect(document.querySelector('[data-slot="model-top-bar"]')!.textContent).toContain('Sales 2');
+      await act(async () => tool('Save changes').click());
+      expect(api.saveModel.mock.calls[0][1].name).toBe('Sales 2');
+    });
+
+    it('describes the model', async () => {
+      await render();
+      await fill('textarea[aria-label="Model description"]', 'Orders and their customers');
+      await act(async () => tool('Save changes').click());
+      expect(api.saveModel.mock.calls[0][1].definition.description).toBe('Orders and their customers');
+    });
+
+    it('renames a table from its properties and keeps its links', async () => {
+      await render();
+      await select('orders');
+      expect(pane().textContent).toContain('Table properties');
+      await commit('input[aria-label="Selected table name"]', 'sales');
+      expect(node('sales')).not.toBeNull();
+      expect(flow.props.edges[0].source).toBe('sales');
+      await commit('input[aria-label="Selected table name"]', 'customers');
+      expect(pane().textContent).toContain('customers is already in this model');
+      expect(node('sales')).not.toBeNull();
+    });
+
+    it('comments a table and lists its columns', async () => {
+      await render();
+      await select('orders');
+      expect([...pane().querySelectorAll('[data-slot="model-property-column"]')].map((r) => r.textContent))
+        .toEqual(['idinteger', 'customer_idinteger', 'amountnumeric']);
+      await fill('textarea[aria-label="Table comment"]', 'every order');
+      await act(async () => tool('Save changes').click());
+      const def = api.saveModel.mock.calls[0][1].definition;
+      expect(def.tables.find((t: any) => t.alias === 'orders').comment).toBe('every order');
+    });
+
+    it('the structure tree lists tables and their columns and selects on click', async () => {
+      await render();
+      const tree = document.querySelector('[data-slot="model-structure"]') as HTMLElement;
+      expect(tree.textContent).toContain('Tables');
+      expect(tree.textContent).toContain('References');
+      expect(tree.textContent).toContain('Text notes');
+      expect(tree.textContent).toContain('Views');
+      expect(tree.textContent).toContain('Subject areas');
+      expect(tree.textContent).toContain('Cubes');
+      const item = tree.querySelector('[data-slot="model-structure-item"][data-id="orders"]') as HTMLButtonElement;
+      await act(async () => item.click());
+      expect(flow.props.nodes.find((n: any) => n.id === 'orders').selected).toBe(true);
+      expect(flow.setCenter).toHaveBeenCalledTimes(1);
+      await act(async () => (tree.querySelector('[aria-label="Show columns of orders"]') as HTMLButtonElement).click());
+      expect(tree.textContent).toContain('customer_id');
+      const ref = tree.querySelector('[data-slot="model-structure-item"][data-id="join-0"]') as HTMLButtonElement;
+      await act(async () => ref.click());
+      expect(pane().textContent).toContain('Reference properties');
+    });
+
+    it('lists the explorer and issues as coming soon', async () => {
+      await render();
+      const left = document.querySelector('[data-slot="model-left-pane"]') as HTMLElement;
+      expect(left.textContent).toContain('Model structure');
+      expect(left.textContent).toContain('Database tables');
+      expect((left.querySelector('button[aria-label="Model explorer"]') as HTMLButtonElement).disabled).toBe(true);
+      expect((left.querySelector('button[aria-label="Issues"]') as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it('hides the properties pane with its toggle', async () => {
+      await render();
+      expect(pane()).not.toBeNull();
+      await act(async () => tool('Toggle properties pane').click());
+      expect(pane()).toBeNull();
     });
   });
 
@@ -857,8 +960,7 @@ describe('ModelEditor', () => {
       await render();
       expect(tool('Create in database').disabled).toBe(false);
       await select('items');
-      expect(tool('Edit table').disabled).toBe(false);
-      await act(async () => tool('Edit table').click());
+      await act(async () => button('Edit columns').click());
       expect(document.body.textContent).toContain('Edit table items');
       expect((document.querySelector('input[aria-label="Column 2 name"]') as HTMLInputElement).value).toBe('label');
     });
@@ -875,11 +977,11 @@ describe('ModelEditor', () => {
     it('colors the selected table from the palette', async () => {
       await render();
       await select('orders');
-      await act(async () => tool('Table color').click());
-      await act(async () => (document.querySelector('button[aria-label="blue"]') as HTMLButtonElement).click());
+      const pane = document.querySelector('[data-slot="model-properties"]')!;
+      await act(async () => (pane.querySelector('button[aria-label="blue"]') as HTMLButtonElement).click());
       const band = node('orders').querySelector('[data-slot="model-table-band"]')!;
       expect(band.getAttribute('style')).toContain('var(--model-blue)');
-      await act(async () => button('Save').click());
+      await act(async () => tool('Save changes').click());
       const def = api.saveModel.mock.calls[0][1].definition;
       expect(def.tables.find((t: any) => t.alias === 'orders').color).toBe('blue');
     });
@@ -915,7 +1017,7 @@ describe('ModelEditor', () => {
       });
       expect(flow.fitView).toHaveBeenCalled();
       expect(seen).toEqual([[0, 0], [320, 0]]);
-      await act(async () => button('Save').click());
+      await act(async () => tool('Save changes').click());
       const placed = api.saveModel.mock.calls[0][1].definition.tables;
       expect(placed.map((t: any) => [t.alias, t.x, t.y])).toEqual([['orders', 0, 0], ['customers', 320, 0]]);
     });
@@ -930,7 +1032,7 @@ describe('ModelEditor', () => {
       await act(async () => button('Add table').click());
       expect(document.body.textContent).not.toContain('Add table');
       expect(node('items').textContent).toContain('new');
-      await act(async () => button('Save').click());
+      await act(async () => tool('Save changes').click());
       const def = api.saveModel.mock.calls[0][1].definition;
       expect(def.tables.find((t: any) => t.alias === 'items')).toEqual(expect.objectContaining({
         schema: 'public',

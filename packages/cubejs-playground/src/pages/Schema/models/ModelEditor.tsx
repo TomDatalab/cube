@@ -10,9 +10,7 @@ import type {
   Connection, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnConnectEnd, OnNodeDrag,
   OnSelectionChangeParams,
 } from '@xyflow/react';
-import {
-  ChevronDown, ChevronRight, CircleAlert, Map as MapIcon,
-} from 'lucide-react';
+import { CircleAlert, Map as MapIcon } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -20,21 +18,16 @@ import {
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import {
-  EmptyState, Field, SearchInput, SimpleSelect, Spinner, notify,
-} from '@/components/kit';
+import { Spinner, notify } from '@/components/kit';
 
 import { ApiError, CubeModelView, OrgNode, modelApi } from '../api';
 import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
-  End, ModelDefinition, Place, Point, TableColor, addDraftTable, addTable, canConnect, connect, drafts,
-  emptyDefinition, joinLabel, layout, placeTables, removeJoin, removeTable, setColor, setJoin, setPrimary,
-  showAllJoins, unlinked, withFormat,
-  updateDraftTable, updateJoin,
+  End, ModelDefinition, Place, Point, addDraftTable, addTable, canConnect, connect, drafts,
+  emptyDefinition, joinLabel, layout, placeTables, removeJoin, removeTable, setJoin, showAllJoins, unlinked,
+  updateDraftTable, updateJoin, withFormat,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
 import {
@@ -50,16 +43,13 @@ import { addPoint, endSides, orthogonalPath, reducePoint } from './referencePath
 import { Hit, searchModel } from './search';
 import { SearchBox } from './SearchBox';
 import { TOOLS, Tool, ToolPalette } from './ToolPalette';
+import { StructurePanel, TABLE_MIME } from './StructurePanel';
+import { PropertiesPanel, Selected } from './PropertiesPanel';
 import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
-import { PanelToggle } from '../PanelToggle';
-import { useCollapsed } from '../useCollapsed';
-import { useResizable } from '../useResizable';
-import { ResizeHandle } from '../ResizeHandle';
 
-// What a table of the panel carries while dragged to the canvas.
-export const TABLE_MIME = 'application/x-cube-table';
+export { TABLE_MIME };
 
 // The server's 409 when the cube's file changed since the last build: a
 // build with `force` overwrites it. Its other 409 (the path is another
@@ -150,157 +140,6 @@ function definitionOf(value: unknown): ModelDefinition {
     tables: Array.isArray(def.tables) ? def.tables : [],
     joins: Array.isArray(def.joins) ? def.joins : [],
   };
-}
-
-// The tables panel's width in px: where it starts and how far its edge drags.
-const PANEL_WIDTH = { initial: 256, min: 180, max: 520 };
-
-// A table of the panel: dragged to the canvas, its columns shown on demand.
-function TableItem({
-  ds, schema, table, columns, disabled, dataSource,
-}: {
-  ds: string;
-  schema: string;
-  table: string;
-  columns: { name: string; type: string }[];
-  disabled: boolean;
-  dataSource: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const Chevron = open ? ChevronDown : ChevronRight;
-  return (
-    <li>
-      <div className="tw:flex tw:items-center">
-        <button
-          type="button"
-          data-slot="model-table-expand"
-          aria-label={`${open ? 'Hide' : 'Show'} the columns of ${table}`}
-          aria-expanded={open}
-          disabled={columns.length === 0}
-          className="tw:flex tw:size-5 tw:shrink-0 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded tw:border-0 tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent tw:disabled:invisible"
-          onClick={() => setOpen((was) => !was)}
-        >
-          <Chevron className="tw:size-3.5" />
-        </button>
-        <div
-          data-slot="model-table-item"
-          draggable={!disabled}
-          aria-disabled={disabled || undefined}
-          title={disabled
-            ? `Tables of one connection only: this model reads ${dataSource}`
-            : `${ds}.${schema}.${table}`}
-          className={disabled
-            ? 'tw:min-w-0 tw:flex-1 tw:cursor-not-allowed tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:text-muted-foreground tw:opacity-50'
-            : 'tw:min-w-0 tw:flex-1 tw:cursor-grab tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:hover:bg-accent'}
-          onDragStart={(e) => {
-            if (disabled) {
-              e.preventDefault();
-              return;
-            }
-            e.dataTransfer.setData(TABLE_MIME, JSON.stringify({ ds, schema, table }));
-            e.dataTransfer.effectAllowed = 'move';
-          }}
-        >
-          {table}
-        </div>
-      </div>
-      {open ? (
-        <ul data-slot="model-table-columns" className="tw:m-0 tw:list-none tw:p-0 tw:pl-6 tw:text-xs">
-          {columns.map((c) => (
-            <li key={c.name} className="tw:flex tw:gap-2 tw:py-0.5">
-              <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
-              <span className="tw:shrink-0 tw:text-muted-foreground">{c.type}</span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  );
-}
-
-// The tables of the panel, ds › schema › table, matching the search.
-function TablePanel({
-  tables, dataSource, locked,
-}: {
-  tables: OrgDetail['tables'];
-  dataSource: string;
-  // The model has tables: only its connection's can join it.
-  locked: boolean;
-}) {
-  const [search, setSearch] = useState('');
-  const [collapsed, toggle] = useCollapsed('cubePlayground.modelTablesCollapsed');
-  const [width, setWidth] = useResizable('cubePlayground.modelTablesWidth', PANEL_WIDTH.initial, PANEL_WIDTH.min, PANEL_WIDTH.max);
-  const needle = search.trim().toLowerCase();
-  const tree = Object.entries(tables || {}).map(([ds, schemas]) => ({
-    ds,
-    schemas: Object.entries(schemas).map(([schema, list]) => ({
-      schema,
-      tables: Object.entries(list).filter(([t]) => (
-        !needle || [ds, schema, t].some((part) => part.toLowerCase().includes(needle))
-      )).map(([t, columns]) => ({ name: t, columns: columns || [] })),
-    })).filter((s) => s.tables.length > 0),
-  })).filter((d) => d.schemas.length > 0);
-
-  if (collapsed) {
-    return (
-      <aside
-        data-slot="model-table-panel"
-        className="tw:flex tw:w-12 tw:shrink-0 tw:flex-col tw:items-center tw:border-r tw:py-3"
-      >
-        <PanelToggle collapsed onToggle={toggle} label="tables" />
-      </aside>
-    );
-  }
-
-  return (
-    <aside
-      data-slot="model-table-panel"
-      style={{ width }}
-      className="tw:relative tw:flex tw:shrink-0 tw:flex-col tw:gap-2 tw:border-r tw:p-3"
-    >
-      <ResizeHandle width={width} min={PANEL_WIDTH.min} max={PANEL_WIDTH.max} label="tables" onResize={setWidth} />
-      <div className="tw:flex tw:items-center tw:gap-1">
-        <div className="tw:min-w-0 tw:flex-1">
-          <SearchInput value={search} onChange={setSearch} placeholder="Search tables" />
-        </div>
-        <PanelToggle collapsed={false} onToggle={toggle} label="tables" />
-      </div>
-      <p className="tw:m-0 tw:text-xs tw:text-muted-foreground">Drag a table onto the canvas</p>
-      <div className="tw:min-h-0 tw:flex-1 tw:overflow-y-auto">
-        {tree.length === 0 ? <EmptyState>No table matches</EmptyState> : null}
-        <ul className="tw:m-0 tw:list-none tw:p-0 tw:text-sm">
-          {tree.map(({ ds, schemas }) => {
-            const disabled = locked && ds !== dataSource;
-            return (
-              <li key={ds} className="tw:mb-2">
-                <div className="tw:font-medium">{ds}</div>
-                <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-3">
-                  {schemas.map(({ schema, tables: names }) => (
-                    <li key={schema}>
-                      <div className="tw:text-muted-foreground">{schema}</div>
-                      <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-3">
-                        {names.map(({ name: table, columns }) => (
-                          <TableItem
-                            key={table}
-                            ds={ds}
-                            schema={schema}
-                            table={table}
-                            columns={columns}
-                            disabled={disabled}
-                            dataSource={dataSource}
-                          />
-                        ))}
-                      </ul>
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-    </aside>
-  );
 }
 
 type Panes = { left: boolean; right: boolean; top: boolean };
@@ -705,8 +544,8 @@ function Editor({
   const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
     const index = Number((edge.data as { index?: number } | undefined)?.index);
     if (def.joins[index]) {
+      setSelection([]);
       setSelectedEdge(index);
-      setJoinEdit({ kind: 'edit', index });
     }
   };
 
@@ -1006,21 +845,31 @@ function Editor({
     : columnsOf(t.schema, t.table) ?? []);
   const hits = searchModel(def, columnsOfTable, query);
 
-  const pickHit = (hit: Hit) => {
-    if (hit.edgeIndex !== undefined) {
-      setSelection([]);
-      setSelectedEdge(hit.edgeIndex);
-    } else {
-      setSelection([hit.nodeId]);
-      setSelectedEdge(null);
-    }
-    const n = nodes.find((x) => x.id === hit.nodeId);
+  const centerOn = (nodeId: string) => {
+    const n = nodes.find((x) => x.id === nodeId);
     if (n) {
       const width = n.width ?? n.measured?.width ?? 0;
       const height = n.height ?? n.measured?.height ?? 0;
       setCenter(n.position.x + width / 2, n.position.y + height / 2, { zoom: getZoom(), duration: 300 });
     }
   };
+
+  const pickNode = (nodeId: string) => {
+    setSelection([nodeId]);
+    setSelectedEdge(null);
+    centerOn(nodeId);
+  };
+
+  const pickEdge = (index: number) => {
+    setSelection([]);
+    setSelectedEdge(index);
+    const j = def.joins[index];
+    if (j) {
+      centerOn(j.from.alias);
+    }
+  };
+
+  const pickHit = (hit: Hit) => (hit.edgeIndex !== undefined ? pickEdge(hit.edgeIndex) : pickNode(hit.nodeId));
 
   const chooseTool = (next: Tool) => {
     setRefFrom(null);
@@ -1108,73 +957,22 @@ function Editor({
     },
   }[asked];
 
-  const principal = def.tables.find((t) => t.alias === def.primary);
-  let principalColumns: Columns = [];
-  if (principal?.draft) {
-    principalColumns = principal.draft.columns;
-  } else if (principal) {
-    principalColumns = columnsOf(principal.schema, principal.table) ?? [];
+  let propertiesOf: Selected = { kind: 'model' };
+  if (selectedEdge !== null && def.joins[selectedEdge]) {
+    propertiesOf = { kind: 'reference', index: selectedEdge };
+  } else if (selected && def.tables.some((t) => t.alias === selected)) {
+    propertiesOf = { kind: 'table', alias: selected };
   }
   const editing = joinEdit?.kind === 'edit' ? def.joins[joinEdit.index] : undefined;
-  const selectedTable = def.tables.find((t) => t.alias === selected);
   const editedTable = tableEdit?.kind === 'edit' ? def.tables.find((t) => t.alias === tableEdit.alias) : undefined;
 
   return (
     <div className="tw:flex tw:h-full tw:min-h-[560px] tw:flex-col tw:gap-3">
       {panes.top ? (
-        <div data-slot="model-top-bar" className="tw:flex tw:flex-wrap tw:items-end tw:gap-3">
-          <Field label="Name" htmlFor="model-name" className="tw:w-56">
-            <Input
-              id="model-name"
-              aria-label="Model name"
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                edited();
-              }}
-            />
-          </Field>
-          <div className="tw:flex tw:flex-col tw:gap-2 tw:text-sm">
-            <span className="tw:font-medium">Connection</span>
-            <span className="tw:flex tw:h-9 tw:items-center tw:text-muted-foreground" data-slot="model-connection">
-              {def.dataSource || 'Drop a table to choose it'}
-            </span>
-          </div>
-          <Field label="Principal" htmlFor="model-principal" className="tw:w-44">
-            <SimpleSelect
-              id="model-principal"
-              value={def.primary ?? undefined}
-              placeholder="No table yet"
-              disabled={def.tables.length === 0}
-              options={def.tables.map((t) => ({ value: t.alias, label: t.alias }))}
-              onChange={(v) => v && change(setPrimary(def, v))}
-            />
-          </Field>
-          <Field label="Primary key" htmlFor="model-primary-key" className="tw:w-44">
-            <SimpleSelect
-              id="model-primary-key"
-              value={def.primaryKey ?? undefined}
-              placeholder="Choose a column"
-              disabled={principalColumns.length === 0}
-              options={principalColumns.map((c) => ({ value: c.name, label: c.name }))}
-              onChange={(v) => change({ ...def, primaryKey: v ?? null })}
-            />
-          </Field>
-          <div className="tw:ml-auto tw:flex tw:items-center tw:gap-2">
-            {dirty ? <Badge variant="secondary">Unsaved changes</Badge> : null}
-            <Button variant="outline" disabled={!dirty || busy !== null} onClick={() => save()}>
-              {busy === 'save' ? <Spinner className="tw:text-current" /> : null}
-              Save
-            </Button>
-            <Button disabled={busy !== null || def.tables.length === 0} onClick={build}>
-              {busy === 'build' ? <Spinner className="tw:text-current" /> : null}
-              Build cube
-            </Button>
-            <Button variant="destructive" disabled={busy !== null} onClick={() => setAsk('delete')}>
-              {busy === 'delete' ? <Spinner className="tw:text-current" /> : null}
-              Delete model
-            </Button>
-          </div>
+        <div data-slot="model-top-bar" className="tw:flex tw:items-center tw:gap-3">
+          <h2 className="tw:m-0 tw:truncate tw:text-base tw:font-semibold">{name || 'Untitled model'}</h2>
+          {dirty ? <Badge variant="secondary">Unsaved changes</Badge> : null}
+          {busy === 'save' || busy === 'build' ? <Spinner /> : null}
         </div>
       ) : null}
 
@@ -1256,15 +1054,6 @@ function Editor({
           onToggleRight: () => togglePane('right'),
           onToggleTop: () => togglePane('top'),
         }}
-        table={{
-          selected: selectedTable
-            ? { alias: selectedTable.alias, draft: Boolean(selectedTable.draft), color: selectedTable.color }
-            : null,
-          onColor: (color: TableColor | undefined) => (
-            selectedTable && change(setColor(def, selectedTable.alias, color))
-          ),
-          onEdit: () => selectedTable?.draft && setTableEdit({ kind: 'edit', alias: selectedTable.alias }),
-        }}
         search={(
           <SearchBox query={query} hits={hits} onQuery={setQuery} onPick={pickHit} inputRef={searchInput} />
         )}
@@ -1272,9 +1061,17 @@ function Editor({
 
       <div className="tw:flex tw:min-h-0 tw:flex-1 tw:overflow-hidden tw:rounded-md tw:border">
         {panes.left ? (
-          <div data-slot="model-left-pane" className="tw:flex tw:shrink-0">
-            <TablePanel tables={tables} dataSource={def.dataSource} locked={def.tables.length > 0} />
-          </div>
+          <StructurePanel
+            def={def}
+            columnsOf={columnsOfTable}
+            selection={selection}
+            selectedEdge={selectedEdge}
+            onPickNode={pickNode}
+            onPickEdge={pickEdge}
+            tables={tables}
+            dataSource={def.dataSource}
+            locked={def.tables.length > 0}
+          />
         ) : null}
         <div
           ref={canvas}
@@ -1344,6 +1141,31 @@ function Editor({
             </div>
           ) : null}
         </div>
+        {panes.right ? (
+          <PropertiesPanel
+            def={def}
+            name={name}
+            selected={propertiesOf}
+            columnsOf={columnsOfTable}
+            onChange={change}
+            onName={(next) => {
+              setName(next);
+              edited();
+            }}
+            onEditColumns={(alias) => setTableEdit({ kind: 'edit', alias })}
+            onRenamed={(from, to) => setSelection((was) => was.map((id) => {
+              const { alias, shortcut } = parseNodeId(id);
+              if (alias !== from) {
+                return id;
+              }
+              return shortcut ? shortcutNodeId(to, shortcut) : to;
+            }))}
+            onDeselect={() => setSelectedEdge(null)}
+            onDeleteModel={() => setAsk('delete')}
+            deleting={busy === 'delete'}
+            busy={busy !== null}
+          />
+        ) : null}
       </div>
 
       <JoinDialog
