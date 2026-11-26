@@ -92,7 +92,7 @@ fn validate_draft(table: &ModelTable, draft: &DraftTable) -> Result<(), String> 
         if !TYPES.contains(&column.kind.as_str()) {
             return Err(format!("Tipo inválido: {}", column.kind));
         }
-        if !seen.insert(column.name.as_str()) {
+        if !seen.insert(column.name.to_ascii_lowercase()) {
             return Err(format!("A coluna {} se repete em {name}", column.name));
         }
     }
@@ -114,6 +114,18 @@ pub fn create_statements(
     for table in &def.tables {
         let Some(draft) = &table.draft else { continue };
         validate_draft(table, draft)?;
+        if mysql {
+            if let Some(c) = draft
+                .columns
+                .iter()
+                .find(|c| c.primary_key && c.kind == "text")
+            {
+                return Err(format!(
+                    "No MySQL a chave primária {}.{}.{} não pode ser text: use integer, bigint ou outro tipo",
+                    table.schema, table.table, c.name
+                ));
+            }
+        }
         let mut parts = Vec::new();
         for c in &draft.columns {
             let ty = match (c.kind.as_str(), mysql) {
@@ -960,6 +972,33 @@ mod tests {
         assert_eq!(
             got[0].1,
             "CREATE TABLE `public`.`items` (`id` int NOT NULL, `order` text, `price` decimal(18,4) NOT NULL, `at` datetime, PRIMARY KEY (`id`))"
+        );
+    }
+
+    #[test]
+    fn mysql_refuses_a_text_primary_key() {
+        let def = with_draft(draft_table(
+            "i",
+            "items",
+            vec![dcol("code", "text", false, true)],
+        ));
+        assert_eq!(
+            create_statements(&def, "mysql").unwrap_err(),
+            "No MySQL a chave primária public.items.code não pode ser text: use integer, bigint ou outro tipo"
+        );
+        assert!(create_statements(&def, "postgres").is_ok());
+    }
+
+    #[test]
+    fn duplicate_column_names_ignore_case() {
+        let def = with_draft(draft_table(
+            "i",
+            "items",
+            vec![dcol("Id", "integer", false, true), dcol("id", "text", true, false)],
+        ));
+        assert_eq!(
+            create_statements(&def, "postgres").unwrap_err(),
+            "A coluna id se repete em public.items"
         );
     }
 

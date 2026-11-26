@@ -141,6 +141,7 @@ describe('draft tables', () => {
     expect(draftProblem('public', 'a'.repeat(64), cols, def)).not.toBeNull();
     expect(draftProblem('public', 'ok', [], def)).not.toBeNull();
     expect(draftProblem('public', 'ok', [cols[0], cols[0]], def)).toMatch(/Duplicate/);
+    expect(draftProblem('public', 'ok', [cols[0], { ...cols[0], name: 'ID' }], def)).toMatch(/Duplicate/);
     expect(draftProblem('public', 'ok', [{ ...cols[0], type: 'blob' as never }], def)).not.toBeNull();
     expect(draftProblem('public', 'users', cols, def)).toMatch(/already/);
     expect(draftProblem('public', 'users', cols, def, 'users')).toBeNull();
@@ -158,6 +159,15 @@ describe('draft tables', () => {
     expect(r.def.primaryKey).toBeNull();
     expect(r.def.tables[0].alias).toBe('users');
     expect(r.def.tables[0].draft?.columns).toHaveLength(1);
+  });
+
+  it('refuses to edit a table that is not a draft', () => {
+    let { def } = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
+    def = addTable(def, 'ds', 'public', 'orders', 0, 0).def;
+    const r = updateDraftTable(def, 'orders', 'public', 'orders', cols);
+    expect(r.error).toMatch(/Not a draft/);
+    expect(r.def).toBe(def);
+    expect(updateDraftTable(def, 'nope', 'public', 'x', cols).error).toBeDefined();
   });
 
   it('colors a table and clears its color', () => {

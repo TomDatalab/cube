@@ -102,7 +102,13 @@ export function TableDialog({
                 options={connections.map((c) => ({ value: c, label: c }))}
                 onChange={(v) => {
                   if (v) {
+                    // A new connection has its own schemas: start over, as
+                    // when the dialog opens.
+                    const known = schemasOf(v);
+                    const next = known.includes('public') ? 'public' : known[0] ?? 'public';
                     setDs(v);
+                    setSchema(next);
+                    setTyped(!known.includes(next));
                   }
                 }}
               />

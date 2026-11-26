@@ -1627,7 +1627,7 @@ build_test!(create_tables_needs_execute, |store, url| {
     let id = new_draft_model(&env, &token, on, "items").await;
     // Olga owns the organization but has no workspace with `execute`.
     let (status, body) = create_tables(&env, &token, &id, json!({ "version": 1 })).await;
-    assert!(status.is_client_error() && status != StatusCode::NOT_FOUND, "{status} {body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!table_exists(&url, "items").await);
     let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
     assert_eq!(one["version"], 1);

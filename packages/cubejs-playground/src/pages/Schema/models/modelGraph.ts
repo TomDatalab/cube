@@ -255,10 +255,10 @@ export function draftProblem(
     if (!(COLUMN_TYPES as readonly string[]).includes(c.type)) {
       return `Invalid type for ${c.name}: ${c.type}`;
     }
-    if (seen.has(c.name)) {
+    if (seen.has(c.name.toLowerCase())) {
       return `Duplicate column: ${c.name}`;
     }
-    seen.add(c.name);
+    seen.add(c.name.toLowerCase());
   }
   const clash = def.tables.some(
     (t) => t.alias !== editingAlias && t.schema === schema && t.table === table
@@ -311,8 +311,8 @@ export function updateDraftTable(
   table: string,
   columns: DraftColumn[]
 ): { def: ModelDefinition; error?: string } {
-  if (!def.tables.some((t) => t.alias === alias)) {
-    return { def, error: `Unknown table: ${alias}` };
+  if (!def.tables.some((t) => t.alias === alias && t.draft)) {
+    return { def, error: `Not a draft table: ${alias}` };
   }
   const problem = draftProblem(schema, table, columns, def, alias);
   if (problem) {

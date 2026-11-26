@@ -11,12 +11,14 @@ import { Spinner } from '@/components/kit';
 // The CREATE TABLE statements the server would run, asked before running
 // them. An error of the run stays on it.
 export function CreateTablesDialog({
-  open, dataSource, statements, error, running, onCreate, onClose,
+  open, dataSource, statements, error, created, running, onCreate, onClose,
 }: {
   open: boolean;
   dataSource: string;
   statements: string[];
   error?: string | null;
+  // Tables a run already created before it failed.
+  created?: string[];
   running: boolean;
   onCreate(): void;
   onClose(): void;
@@ -34,6 +36,11 @@ export function CreateTablesDialog({
         >
           {statements.map((s) => `${s};`).join('\n\n')}
         </pre>
+        {created?.length ? (
+          <p data-slot="model-create-created" className="tw:m-0 tw:text-sm">
+            {`Already created: ${created.join(', ')}`}
+          </p>
+        ) : null}
         {error ? (
           <Alert variant="destructive" data-slot="model-create-error">
             <CircleAlert />

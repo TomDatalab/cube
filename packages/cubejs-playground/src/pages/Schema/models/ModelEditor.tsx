@@ -4,7 +4,7 @@ import {
   CSSProperties, DragEvent, useCallback, useEffect, useMemo, useRef, useState,
 } from 'react';
 import {
-  Background, Controls, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
+  Background, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
 } from '@xyflow/react';
 import type {
   Connection, Edge, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnNodeDrag, OnSelectionChangeParams,
@@ -91,7 +91,12 @@ type JoinEdit = { kind: 'new'; from: End; to: End } | { kind: 'edit'; index: num
 type TableEdit = { kind: 'new' } | { kind: 'edit'; alias: string };
 // The statements of a dry run, the version they were read at and the
 // error of a run.
-type CreateAsk = { statements: string[]; version: number; error: string | null };
+type CreateAsk = {
+  statements: string[];
+  version: number;
+  error: string | null;
+  created?: string[];
+};
 type Ask = 'overwrite' | 'delete';
 
 const STALE = 'Changed elsewhere: reopen';
@@ -636,11 +641,29 @@ function Editor({
         notify.success(`Created: ${result.created.join(', ')}`);
       }
       if (result.error) {
-        setCreateAsk({
-          ...createAsk,
-          version: result.model?.version ?? createAsk.version,
-          error: result.error,
-        });
+        const next = result.model ? definitionOf(result.model.definition) : null;
+        if (next && drafts(next).length === 0) {
+          setCreateAsk(null);
+          notify.error(result.error);
+        } else {
+          // What is still to create, at the version the run saved.
+          const nextVersion = result.model?.version ?? createAsk.version;
+          let { statements } = createAsk;
+          if (result.model) {
+            try {
+              statements = (await api.createTables(modelId, nextVersion, true)).statements ?? [];
+            } catch (e: any) {
+              statements = [];
+              setCreateAsk({
+                statements, version: nextVersion, error: `${result.error}\n${conflict(e)}`, created: result.created,
+              });
+              return;
+            }
+          }
+          setCreateAsk({
+            statements, version: nextVersion, error: result.error, created: result.created,
+          });
+        }
       } else {
         setCreateAsk(null);
       }
@@ -832,7 +855,6 @@ function Editor({
             fitViewOptions={FIT_VIEW}
           >
             <Background />
-            <Controls showInteractive={false} />
           </ReactFlow>
         </div>
       </div>
@@ -874,6 +896,7 @@ function Editor({
         dataSource={def.dataSource}
         statements={createAsk?.statements ?? []}
         error={createAsk?.error}
+        created={createAsk?.created}
         running={busy === 'create'}
         onCreate={runCreate}
         onClose={() => setCreateAsk(null)}

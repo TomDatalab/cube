@@ -85,6 +85,7 @@ const tables = {
     },
   },
   other: { public: { events: [{ name: 'id', type: 'integer' }] } },
+  lake: { main: { logs: [{ name: 'id', type: 'integer' }] } },
 };
 
 const saved = (): ModelDefinition => ({
@@ -592,6 +593,26 @@ describe('ModelEditor', () => {
       }));
     });
 
+    it('resets the schema when the connection changes', async () => {
+      api.model.mockResolvedValueOnce(view({
+        dataSource: '', tables: [], primary: null, primaryKey: null, joins: [],
+      } as any));
+      await render();
+      await act(async () => tool('New table').click());
+      const schemaOf = () => document.querySelector('#table-schema')!.textContent;
+      expect(schemaOf()).toContain('public');
+      const trigger = document.querySelector('#table-connection') as HTMLElement;
+      await act(async () => {
+        trigger.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        trigger.click();
+      });
+      const lake = [...document.querySelectorAll('[role="option"]')]
+        .find((o) => o.textContent === 'lake') as HTMLElement;
+      await act(async () => lake.click());
+      expect(schemaOf()).toContain('main');
+      expect(schemaOf()).not.toContain('public');
+    });
+
     it('shows why a bad name is refused and adds nothing', async () => {
       await render();
       await act(async () => tool('New table').click());
@@ -655,6 +676,43 @@ describe('ModelEditor', () => {
       // A retry sends the version the run saved.
       await act(async () => button('Create').click());
       expect(api.createTables).toHaveBeenLastCalledWith('m1', 4, false);
+    });
+
+    it('asks again after a partial failure and shows what is still to create', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      const left = ['CREATE TABLE shop.rest (id integer)'];
+      api.createTables
+        .mockResolvedValueOnce({ statements: [...statements, ...left] })
+        .mockResolvedValueOnce({
+          model: view(withDraft(), 4), created: ['shop.items'], error: 'shop.rest: boom', detail,
+        })
+        .mockResolvedValueOnce({ statements: left });
+      await render();
+      await act(async () => tool('Create in database').click());
+      await act(async () => button('Create').click());
+      expect(api.createTables).toHaveBeenLastCalledWith('m1', 4, true);
+      const shown = document.querySelector('[data-slot="model-create-statements"]')!.textContent!;
+      expect(shown).toContain(left[0]);
+      expect(shown).not.toContain(statements[0]);
+      expect(document.querySelector('[data-slot="model-create-error"]')!.textContent).toContain('shop.rest: boom');
+      expect(document.querySelector('[data-slot="model-create-created"]')!.textContent).toContain('shop.items');
+    });
+
+    it('closes the dialog when a failed run left no drafts', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      api.createTables
+        .mockResolvedValueOnce({ statements })
+        .mockResolvedValueOnce({
+          model: view(created(), 4), created: ['shop.items'], error: 'late failure', detail,
+        });
+      const error = vi.spyOn(notify, 'error');
+      await render();
+      await act(async () => tool('Create in database').click());
+      await act(async () => button('Create').click());
+      expect(api.createTables).toHaveBeenCalledTimes(2);
+      expect(document.querySelector('[data-slot="model-create-statements"]')).toBeNull();
+      expect(error).toHaveBeenCalledWith('late failure');
+      error.mockRestore();
     });
 
     it('saves a dirty model first, then asks with the saved version', async () => {
