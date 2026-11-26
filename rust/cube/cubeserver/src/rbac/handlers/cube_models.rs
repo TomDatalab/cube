@@ -57,6 +57,16 @@ pub struct BuildBody {
     force: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateTablesBody {
+    version: i32,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+const STATEMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 fn not_found() -> ApiError {
     ApiError::not_found("Model não encontrado")
 }
@@ -389,4 +399,124 @@ pub async fn build(
         "cubeName": cube_name,
         "detail": detail,
     })))
+}
+
+/// `{version, dryRun?}`: `admin` on the organization. `dryRun` answers
+/// `{statements}` and runs nothing. Otherwise, with the permission
+/// `/v1/execute` asks, runs one `CREATE TABLE` per draft table, stopping at
+/// the first error, clears `draft` on the tables created and saves the model:
+/// `{model, created, error?, detail}`. 409 when the version is stale or a
+/// draft names a table the database already has (checked before any
+/// statement runs).
+pub async fn create_tables(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    request: Result<Json<CreateTablesBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let (model, scope, actor) = visible_model(&state, &ctx, &id).await?;
+    let request = body(request)?;
+    let rbac = super::rbac_of(&state)?;
+    let mut def: Definition = serde_json::from_value(model.definition.clone())
+        .map_err(|e| ApiError::bad_request(format!("Definição inválida: {e}")))?;
+    if request.version != model.version {
+        return Err(ApiError::new(StatusCode::CONFLICT, STALE));
+    }
+    let ds = def.data_source.clone();
+    let ds = ds.as_str();
+    let own = rbac
+        .store
+        .connections_of_organization(model.organization_id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    if !own.iter().any(|c| c.name == ds) {
+        return Err(ApiError::bad_request(format!(
+            "A conexão {ds} não é desta organização"
+        )));
+    }
+    let db_type = state
+        .config
+        .data_sources
+        .iter()
+        .find(|(n, _)| n == ds)
+        .map(|(_, t)| t.as_str())
+        .unwrap_or("");
+    let statements = cube_model::create_statements(&def, db_type).map_err(ApiError::bad_request)?;
+    if statements.is_empty() {
+        return Err(ApiError::bad_request("Não há tabelas novas para criar"));
+    }
+    if request.dry_run {
+        let sql: Vec<&str> = statements.iter().map(|(_, sql)| sql.as_str()).collect();
+        return Ok(Json(json!({ "statements": sql })));
+    }
+    crate::rbac::enforce::authorize_execute(&state, &ctx, Some(ds)).await?;
+
+    // Not while a data source is being deleted; see `generate_schema`.
+    let _guard = crate::handlers::data_sources::WRITE.lock().await;
+    let existing = crate::handlers::playground::data_source_schema(ds).await?;
+    for table in def.tables.iter().filter(|t| t.draft.is_some()) {
+        if existing
+            .get(&table.schema)
+            .is_some_and(|tables| tables.contains_key(&table.table))
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!("A tabela {}.{} já existe no banco", table.schema, table.table),
+            ));
+        }
+    }
+
+    let mut created: Vec<String> = Vec::new();
+    let mut error: Option<String> = None;
+    for (name, sql) in &statements {
+        let driver = match crate::orchestrator_adapter::driver_factory()(ds.to_string()).await {
+            Ok(driver) => driver,
+            Err(e) => {
+                error = Some(format!("{name}: {e}"));
+                break;
+            }
+        };
+        tracing::info!(data_source = %ds, table = %name, "creating a model's table");
+        let result = tokio::time::timeout(
+            STATEMENT_TIMEOUT,
+            driver.query(sql, &[], &cubedriver::QueryOptions::default()),
+        )
+        .await;
+        let _ = driver.release().await;
+        match result {
+            Ok(Ok(_)) => created.push(name.clone()),
+            Ok(Err(e)) => {
+                error = Some(format!("{name}: {e}"));
+                break;
+            }
+            Err(_) => {
+                error = Some(format!(
+                    "{name}: o comando não terminou em {}s",
+                    STATEMENT_TIMEOUT.as_secs()
+                ));
+                break;
+            }
+        }
+    }
+
+    let model = if created.is_empty() {
+        model
+    } else {
+        for table in def.tables.iter_mut() {
+            if created.contains(&format!("{}.{}", table.schema, table.table)) {
+                table.draft = None;
+            }
+        }
+        let definition = serde_json::to_value(&def).map_err(|e| ApiError::bad_request(e.to_string()))?;
+        rbac.store
+            .update_cube_model(model.id, None, Some(&definition), model.version, &actor)
+            .await
+            .map_err(model_error)?
+    };
+    let detail = detail_of(&state, &scope).await?;
+    let mut out = json!({ "model": view(&model), "created": created, "detail": detail });
+    if let Some(error) = error {
+        out["error"] = json!(error);
+    }
+    Ok(Json(out))
 }

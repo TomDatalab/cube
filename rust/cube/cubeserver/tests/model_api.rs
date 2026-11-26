@@ -1517,3 +1517,124 @@ build_test!(a_build_whose_record_was_lost_adopts_its_file, |store, url| {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "O caminho vendas.yml já é de outro arquivo; renomeie ou mova esse arquivo");
 });
+
+/// `model_def` with a draft table `shop.<table>` (id, name) added.
+fn draft_def(table: &str) -> Value {
+    let mut def = model_def("sofiadb");
+    def["tables"].as_array_mut().unwrap().push(json!({
+        "alias": "items", "schema": "shop", "table": table, "x": 480, "y": 0,
+        "draft": { "columns": [
+            { "name": "id", "type": "integer", "nullable": false, "primaryKey": true },
+            { "name": "order", "type": "text", "nullable": true, "primaryKey": false },
+        ] },
+    }));
+    def["joins"].as_array_mut().unwrap().push(json!({
+        "from": { "alias": "orders", "column": "id" },
+        "to": { "alias": "items", "column": "id" },
+        "relationship": "many_to_one",
+        "join": "left",
+    }));
+    def
+}
+
+async fn new_draft_model(env: &Env, token: &str, org: uuid::Uuid, table: &str) -> String {
+    let (status, body) = call(env, Method::POST, token, &format!("/cube/v1/organizations/{org}/cube-models"),
+        Some(json!({ "name": "Rascunho", "definition": draft_def(table) }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn create_tables(env: &Env, token: &str, id: &str, body: Value) -> (StatusCode, Value) {
+    call(env, Method::POST, token, &format!("/cube/v1/cube-models/{id}/create-tables"), Some(body)).await
+}
+
+async fn table_exists(url: &str, table: &str) -> bool {
+    !support::connect(url)
+        .await
+        .query("SELECT 1 FROM information_schema.tables WHERE table_schema = 'shop' AND table_name = $1", &[&table])
+        .await
+        .unwrap()
+        .is_empty()
+}
+
+build_test!(create_tables_dry_run_lists_statements, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_draft_model(&env, &token, on, "items").await;
+    let (status, body) = create_tables(&env, &token, &id, json!({ "version": 1, "dryRun": true })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["statements"], json!([
+        "CREATE TABLE \"shop\".\"items\" (\"id\" integer NOT NULL, \"order\" text, PRIMARY KEY (\"id\"))"
+    ]));
+    assert!(!table_exists(&url, "items").await);
+    let (status, body) = create_tables(&env, &token, &id, json!({ "version": 7, "dryRun": true })).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!(STALE_MODEL)), "{body}");
+    let plain = new_model(&env, &token, on, "Sem rascunho").await;
+    let (status, body) = create_tables(&env, &token, &plain, json!({ "version": 1 })).await;
+    assert_eq!((status, &body["error"]), (StatusCode::BAD_REQUEST, &json!("Não há tabelas novas para criar")), "{body}");
+});
+
+build_test!(create_tables_creates_and_clears_drafts, |store, url| {
+    shop_tables(&url).await;
+    let db = support::connect(&url).await;
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+    let (env, _, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let id = new_draft_model(&env, &admin, on, "items").await;
+
+    let (status, body) = build(&env, &admin, &id, json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "A tabela shop.items ainda não existe no banco: use Criar no banco");
+
+    let (status, body) = create_tables(&env, &admin, &id, json!({ "version": 1 })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["created"], json!(["shop.items"]));
+    assert_eq!(body["error"], Value::Null);
+    assert_eq!(body["model"]["version"], 2);
+    assert!(body["detail"].is_object(), "{body}");
+    assert!(body["model"]["definition"]["tables"][2].get("draft").is_none(), "{body}");
+    assert!(table_exists(&url, "items").await);
+    let (_, one) = call(&env, Method::GET, &admin, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert!(one["definition"]["tables"][2].get("draft").is_none(), "{one}");
+    assert_eq!(one["version"], 2);
+
+    let (status, body) = build(&env, &admin, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+});
+
+build_test!(create_tables_refuses_an_existing_table, |store, url| {
+    shop_tables(&url).await;
+    let (env, _, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let mut def = draft_def("items");
+    def["tables"][2]["table"] = json!("orders");
+    let (status, body) = call(&env, Method::POST, &admin, &format!("/cube/v1/organizations/{on}/cube-models"),
+        Some(json!({ "name": "Duplicado", "definition": def }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap();
+    let (status, body) = create_tables(&env, &admin, id, json!({ "version": 1 })).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!("A tabela shop.orders já existe no banco")), "{body}");
+    let (_, one) = call(&env, Method::GET, &admin, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["version"], 1);
+    assert!(one["definition"]["tables"][2].get("draft").is_some(), "{one}");
+});
+
+build_test!(create_tables_needs_execute, |store, url| {
+    shop_tables(&url).await;
+    support::connect(&url).await.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+    let (env, token, on) = models_env(&store).await;
+    let id = new_draft_model(&env, &token, on, "items").await;
+    // Olga owns the organization but has no workspace with `execute`.
+    let (status, body) = create_tables(&env, &token, &id, json!({ "version": 1 })).await;
+    assert!(status.is_client_error() && status != StatusCode::NOT_FOUND, "{status} {body}");
+    assert!(!table_exists(&url, "items").await);
+    let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["version"], 1);
+    // The dry run needs no execute.
+    assert_eq!(create_tables(&env, &token, &id, json!({ "version": 1, "dryRun": true })).await.0, StatusCode::OK);
+    // A user of no organization: as if the model did not exist.
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (other, _, _) = owner_org(&env, &store, &admin, "paula", "Beta").await;
+    assert_eq!(create_tables(&env, &other, &id, json!({ "version": 1 })).await.0, StatusCode::NOT_FOUND);
+});

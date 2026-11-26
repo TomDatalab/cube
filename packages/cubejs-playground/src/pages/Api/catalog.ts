@@ -113,6 +113,9 @@ export const SECTIONS: Section[] = [
       {
         method: 'POST', path: '/v1/cube-models/:id/build', summary: 'Build the model into its cube file (force: over a file edited by hand)', who: 'org owner', body: { force: false },
       },
+      {
+        method: 'POST', path: '/v1/cube-models/:id/create-tables', summary: 'Create the model\'s draft tables in its database (dryRun: only list the statements)', who: 'org owner with execute', body: { version: 1, dryRun: true },
+      },
       { method: 'GET', path: '/v1/platform/model', summary: 'The Platform\'s files, cubes and problems', who: 'platform admin' },
       { method: 'GET', path: '/v1/platform/model/files/:file', summary: 'One Platform file', who: 'platform admin' },
       {
