@@ -94,12 +94,25 @@ fn model_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
+/// The type of the configured data source `ds`, or "" when there is none.
+fn db_type_of<'a>(state: &'a AppState, ds: &str) -> &'a str {
+    state
+        .config
+        .data_sources
+        .iter()
+        .find(|(n, _)| n == ds)
+        .map(|(_, t)| t.as_str())
+        .unwrap_or("")
+}
+
 /// `value` as a [`Definition`] whose shape [`cube_model::validate`] accepts,
-/// as stored.
-fn definition(value: Value) -> Result<Value, ApiError> {
+/// its draft types those of its connection's dialect, as stored.
+fn definition(state: &AppState, value: Value) -> Result<Value, ApiError> {
     let def: Definition = serde_json::from_value(value)
         .map_err(|e| ApiError::bad_request(format!("Definição inválida: {e}")))?;
     cube_model::validate(&def).map_err(ApiError::bad_request)?;
+    cube_model::validate_types(&def, db_type_of(state, &def.data_source))
+        .map_err(ApiError::bad_request)?;
     serde_json::to_value(&def).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
@@ -176,7 +189,7 @@ pub async fn create(
     let org = scope.organization.ok_or_else(not_found)?;
     let request = body(request)?;
     let name = model_name(&request.name)?;
-    let definition = definition(request.definition)?;
+    let definition = definition(&state, request.definition)?;
     let model = rbac
         .store
         .create_cube_model(org, &name, &definition, &actor)
@@ -192,7 +205,16 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let (model, _, _) = visible_model(&state, &ctx, &id).await?;
-    Ok(Json(view(&model)))
+    let mut body = view(&model);
+    // The dialect each connection designs tables in, for the editor's types.
+    let dialects: serde_json::Map<String, Value> = state
+        .config
+        .data_sources
+        .iter()
+        .map(|(name, db_type)| (name.clone(), json!(cube_model::dialect(db_type))))
+        .collect();
+    body["dialects"] = Value::Object(dialects);
+    Ok(Json(body))
 }
 
 /// `{name?, definition?, version}`: `admin` on the organization; 409 when
@@ -207,7 +229,10 @@ pub async fn update(
     let rbac = super::rbac_of(&state)?;
     let request = body(request)?;
     let name = request.name.as_deref().map(model_name).transpose()?;
-    let definition = request.definition.map(definition).transpose()?;
+    let definition = request
+        .definition
+        .map(|value| definition(&state, value))
+        .transpose()?;
     let updated = rbac
         .store
         .update_cube_model(

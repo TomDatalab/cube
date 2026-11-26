@@ -24,6 +24,54 @@ pub struct Definition {
     pub primary: Option<String>,
     pub primary_key: Option<String>,
     pub joins: Vec<ModelJoin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Settings>,
+}
+
+/// The model's own options, as Redgate's model properties.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Settings {
+    /// Validation rules switched on or off, by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<std::collections::BTreeMap<String, bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<FormatSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_generation: Option<SqlGeneration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<ModelScripts>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormatSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_types: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_nullable: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SqlGeneration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelScripts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_after: Option<String>,
 }
 
 /// A table on the canvas. The same table dragged twice gets two aliases.
@@ -69,13 +117,57 @@ pub struct Point {
 }
 
 /// A table being designed: it becomes real with [`create_statements`].
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DraftTable {
     pub columns: Vec<DraftColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unique_keys: Vec<UniqueKey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<TableIndex>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<TableCheck>,
+    /// SQL run before and after the table's `CREATE TABLE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_after: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UniqueKey {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableIndex {
+    pub name: String,
+    pub columns: Vec<IndexColumn>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IndexColumn {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub desc: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableCheck {
+    pub name: String,
+    pub expression: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DraftColumn {
     pub name: String,
@@ -85,6 +177,20 @@ pub struct DraftColumn {
     pub nullable: bool,
     #[serde(default)]
     pub primary_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// SQL text, as Redgate takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_increment: bool,
+    /// MySQL only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsigned: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zerofill: bool,
 }
 
 pub const COLORS: [&str; 8] = [
@@ -126,11 +232,182 @@ fn validate_draft(table: &ModelTable, draft: &DraftTable) -> Result<(), String> 
         if !valid_ident(&column.name) {
             return Err(format!("Nome de coluna inválido: {}", column.name));
         }
-        if !TYPES.contains(&column.kind.as_str()) {
+        if !valid_type(Some("postgres"), &column.kind) && !valid_type(Some("mysql"), &column.kind) {
             return Err(format!("Tipo inválido: {}", column.kind));
         }
         if !seen.insert(column.name.to_ascii_lowercase()) {
             return Err(format!("A coluna {} se repete em {name}", column.name));
+        }
+    }
+    let has = |column: &str| draft.columns.iter().any(|c| c.name == column);
+    let mut names = HashSet::new();
+    let mut named = |object: &str| -> Result<(), String> {
+        if !valid_ident(object) {
+            return Err(format!("Nome inválido: {object}"));
+        }
+        if !names.insert(object.to_ascii_lowercase()) {
+            return Err(format!("O nome {object} se repete em {name}"));
+        }
+        Ok(())
+    };
+    if let Some(pk) = draft.primary_key_name.as_deref().filter(|n| !n.is_empty()) {
+        named(pk)?;
+    }
+    for key in &draft.unique_keys {
+        named(&key.name)?;
+        if key.columns.is_empty() {
+            return Err(format!("A chave única {} precisa de colunas", key.name));
+        }
+        if let Some(c) = key.columns.iter().find(|c| !has(c)) {
+            return Err(format!(
+                "A chave única {} usa a coluna {c}, que não existe",
+                key.name
+            ));
+        }
+    }
+    for index in &draft.indexes {
+        named(&index.name)?;
+        if let Some(c) = index.columns.iter().find(|c| !has(&c.name)) {
+            return Err(format!(
+                "O índice {} usa a coluna {}, que não existe",
+                index.name, c.name
+            ));
+        }
+    }
+    for check in &draft.checks {
+        named(&check.name)?;
+    }
+    Ok(())
+}
+
+/// `postgres` or `mysql` for a connection type the model designs for.
+pub fn dialect(db_type: &str) -> Option<&'static str> {
+    match db_type {
+        "postgres" => Some("postgres"),
+        "mysql" => Some("mysql"),
+        _ => None,
+    }
+}
+
+/// What a type takes in parentheses: nothing, a size, or a precision with
+/// an optional scale; `required` when it cannot go without.
+#[derive(Clone, Copy)]
+enum Param {
+    None,
+    Size { required: bool },
+    Precision,
+}
+
+const POSTGRES_TYPES: &[(&str, Param)] = &[
+    ("smallint", Param::None),
+    ("integer", Param::None),
+    ("bigint", Param::None),
+    ("serial", Param::None),
+    ("bigserial", Param::None),
+    ("numeric", Param::Precision),
+    ("decimal", Param::Precision),
+    ("real", Param::None),
+    ("double precision", Param::None),
+    ("boolean", Param::None),
+    ("char", Param::Size { required: false }),
+    ("varchar", Param::Size { required: false }),
+    ("text", Param::None),
+    ("date", Param::None),
+    ("time", Param::None),
+    ("timestamp", Param::None),
+    ("timestamptz", Param::None),
+    ("interval", Param::None),
+    ("uuid", Param::None),
+    ("json", Param::None),
+    ("jsonb", Param::None),
+    ("bytea", Param::None),
+];
+
+const MYSQL_TYPES: &[(&str, Param)] = &[
+    ("tinyint", Param::Size { required: false }),
+    ("smallint", Param::Size { required: false }),
+    ("mediumint", Param::Size { required: false }),
+    ("int", Param::Size { required: false }),
+    ("bigint", Param::Size { required: false }),
+    ("decimal", Param::Precision),
+    ("float", Param::None),
+    ("double", Param::None),
+    ("boolean", Param::None),
+    ("bit", Param::Size { required: false }),
+    ("char", Param::Size { required: false }),
+    ("varchar", Param::Size { required: true }),
+    ("tinytext", Param::None),
+    ("text", Param::None),
+    ("mediumtext", Param::None),
+    ("longtext", Param::None),
+    ("date", Param::None),
+    ("time", Param::None),
+    ("datetime", Param::None),
+    ("timestamp", Param::None),
+    ("year", Param::None),
+    ("json", Param::None),
+    ("blob", Param::None),
+    ("binary", Param::Size { required: false }),
+    ("varbinary", Param::Size { required: true }),
+];
+
+/// A type of the dialect's closed list, its size or precision checked; the
+/// 7 portable [`TYPES`] are valid everywhere (models before dialects).
+pub fn valid_type(dialect: Option<&str>, ty: &str) -> bool {
+    let t = ty.trim().to_ascii_lowercase();
+    if TYPES.contains(&t.as_str()) {
+        return true;
+    }
+    let list = match dialect {
+        Some("postgres") => POSTGRES_TYPES,
+        Some("mysql") => MYSQL_TYPES,
+        _ => return false,
+    };
+    let (base, params) = match t.find('(') {
+        Some(at) => {
+            let Some(inner) = t[at + 1..].strip_suffix(')') else {
+                return false;
+            };
+            (t[..at].trim(), Some(inner))
+        }
+        None => (t.as_str(), None),
+    };
+    let Some((_, param)) = list.iter().find(|(name, _)| *name == base) else {
+        return false;
+    };
+    // Each number of the parentheses; a part that is not one fails.
+    let numbers: Option<Option<Vec<u32>>> = params.map(|p| {
+        p.split(',')
+            .map(|n| n.trim().parse::<u32>().ok())
+            .collect()
+    });
+    match (param, numbers) {
+        (Param::None, None) => true,
+        (Param::Size { required }, None) => !required,
+        (Param::Precision, None) => true,
+        (_, Some(None)) | (Param::None, Some(_)) => false,
+        (Param::Size { .. }, Some(Some(n))) => n.len() == 1 && n[0] >= 1,
+        (Param::Precision, Some(Some(n))) => match n.as_slice() {
+            [p] => *p >= 1,
+            [p, s] => *p >= 1 && s <= p,
+            _ => false,
+        },
+    }
+}
+
+/// Every draft column's type in the connection's dialect, or among the
+/// portable types for a connection with none.
+pub fn validate_types(def: &Definition, db_type: &str) -> Result<(), String> {
+    let d = dialect(db_type);
+    for table in &def.tables {
+        let Some(draft) = &table.draft else { continue };
+        for column in &draft.columns {
+            if !valid_type(d, &column.kind) {
+                return Err(format!(
+                    "Tipo inválido para {}.{}.{}: {}",
+                    table.schema, table.table, column.name, column.kind
+                ));
+            }
         }
     }
     Ok(())
@@ -216,7 +493,40 @@ pub struct ModelJoin {
     /// Not drawn on the canvas; still a link.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// What the reference is as a foreign key, as Redgate shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Of the child side: `0..*`, `0..1`, `1..*` or `1..1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cardinality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandatory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_role: Option<String>,
+    /// More column pairs after `from.column` = `to.column`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<ColumnPair>,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColumnPair {
+    pub from: String,
+    pub to: String,
+}
+
+pub const CARDINALITIES: [&str; 4] = ["0..*", "0..1", "1..*", "1..1"];
+pub const ACTIONS: [&str; 5] = ["none", "restrict", "cascade", "set null", "set default"];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -291,7 +601,28 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         }
         a
     }
+    let mut ids = HashSet::new();
     for join in &def.joins {
+        if let Some(id) = &join.id {
+            if !ids.insert(id.as_str()) {
+                return Err(format!("A ligação {id} se repete"));
+            }
+        }
+        if let Some(name) = join.name.as_deref().filter(|n| !n.is_empty()) {
+            if !valid_ident(name) {
+                return Err(format!("Nome inválido: {name}"));
+            }
+        }
+        if let Some(c) = &join.cardinality {
+            if !CARDINALITIES.contains(&c.as_str()) {
+                return Err(format!("Cardinalidade inválida: {c}"));
+            }
+        }
+        for action in [&join.on_update, &join.on_delete].into_iter().flatten() {
+            if !ACTIONS.contains(&action.as_str()) {
+                return Err(format!("Ação inválida: {action}"));
+            }
+        }
         for end in [&join.from, &join.to] {
             if !aliases.contains(end.alias.as_str()) {
                 return Err(format!(
@@ -942,12 +1273,16 @@ mod tests {
             kind: kind.into(),
             nullable,
             primary_key: pk,
+            ..Default::default()
         }
     }
 
     fn draft_table(alias: &str, name: &str, columns: Vec<DraftColumn>) -> ModelTable {
         ModelTable {
-            draft: Some(DraftTable { columns }),
+            draft: Some(DraftTable {
+                columns,
+                ..Default::default()
+            }),
             ..table(alias, name)
         }
     }
@@ -997,7 +1332,7 @@ mod tests {
         assert!(bad(draft_table(
             "i",
             "items",
-            vec![dcol("id", "uuid", false, true)]
+            vec![dcol("id", "nope", false, true)]
         ))
         .is_err());
         assert!(bad(draft_table("i", "items", vec![])).is_err());
@@ -1185,5 +1520,118 @@ mod tests {
         );
         assert_eq!(value["tables"][0].as_object().unwrap().len(), 5);
         assert_eq!(value["joins"][0].as_object().unwrap().len(), 4);
+    }
+
+    fn physical_json() -> serde_json::Value {
+        serde_json::json!({
+            "formatVersion": 2,
+            "dataSource": "default",
+            "tables": [{
+                "alias": "items", "schema": "shop", "table": "items", "x": 0.0, "y": 0.0,
+                "draft": {
+                    "columns": [
+                        { "name": "id", "type": "integer", "nullable": false, "primaryKey": true, "autoIncrement": true },
+                        { "name": "sku", "type": "varchar(32)", "nullable": false, "primaryKey": false, "comment": "stock unit", "default": "'x'", "check": "sku <> ''" },
+                        { "name": "price", "type": "numeric(10,2)", "nullable": true, "primaryKey": false, "unsigned": true, "zerofill": true }
+                    ],
+                    "primaryKeyName": "pk_items",
+                    "uniqueKeys": [{ "name": "uk_sku", "columns": ["sku"] }],
+                    "indexes": [{ "name": "ix_price", "columns": [{ "name": "price", "desc": true }], "unique": false }],
+                    "checks": [{ "name": "ck_price", "expression": "price >= 0" }],
+                    "scriptBefore": "-- before",
+                    "scriptAfter": "-- after"
+                }
+            }, {
+                "alias": "orders", "schema": "shop", "table": "orders", "x": 300.0, "y": 0.0
+            }],
+            "primary": "orders",
+            "primaryKey": "id",
+            "joins": [{
+                "from": { "alias": "orders", "column": "item_id" },
+                "to": { "alias": "items", "column": "id" },
+                "relationship": "many_to_one", "join": "inner",
+                "id": "r1", "name": "fk_orders_items", "comment": "c",
+                "cardinality": "0..*", "mandatory": true,
+                "onUpdate": "cascade", "onDelete": "set null",
+                "fromRole": "buyer", "toRole": "item",
+                "pairs": [{ "from": "item_sku", "to": "sku" }]
+            }],
+            "settings": {
+                "validation": { "table.hasPk": false },
+                "format": { "showTypes": true, "showNullable": false },
+                "sqlGeneration": { "drop": true, "comments": true },
+                "scripts": { "createBefore": "a", "createAfter": "b", "dropBefore": "c", "dropAfter": "d" }
+            }
+        })
+    }
+
+    #[test]
+    fn accepts_physical_fields() {
+        let value = physical_json();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap(), value);
+    }
+
+    #[test]
+    fn refuses_bad_physical_fields() {
+        let bad = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = physical_json();
+            edit(&mut value);
+            let def: Definition = serde_json::from_value(value).unwrap();
+            validate(&def).unwrap_err()
+        };
+        let e = bad(&|v| v["tables"][0]["draft"]["uniqueKeys"][0]["columns"] = serde_json::json!([]));
+        assert!(e.contains("A chave única uk_sku precisa de colunas"), "{e}");
+        let e = bad(&|v| v["tables"][0]["draft"]["indexes"][0]["columns"][0]["name"] = "nope".into());
+        assert!(e.contains("O índice ix_price usa a coluna nope, que não existe"), "{e}");
+        let e = bad(&|v| v["joins"][0]["cardinality"] = "2..*".into());
+        assert!(e.contains("Cardinalidade inválida"), "{e}");
+        let e = bad(&|v| v["joins"][0]["onDelete"] = "drop".into());
+        assert!(e.contains("Ação inválida"), "{e}");
+        let e = bad(&|v| {
+            let j = v["joins"][0].clone();
+            let mut second = j.clone();
+            second["from"]["alias"] = "items".into();
+            second["to"]["alias"] = "items".into();
+            v["joins"] = serde_json::json!([j, second]);
+        });
+        assert!(e.contains("A ligação r1 se repete"), "{e}");
+        let e = bad(&|v| v["tables"][0]["draft"]["checks"][0]["name"] = "1ck".into());
+        assert!(e.contains("Nome inválido"), "{e}");
+        let e = bad(&|v| v["tables"][0]["draft"]["uniqueKeys"] = serde_json::json!([
+            { "name": "uk", "columns": ["sku"] }, { "name": "uk", "columns": ["price"] }
+        ]));
+        assert!(e.contains("O nome uk se repete em shop.items"), "{e}");
+    }
+
+    #[test]
+    fn dialect_types() {
+        assert_eq!(dialect("postgres"), Some("postgres"));
+        assert_eq!(dialect("mysql"), Some("mysql"));
+        assert_eq!(dialect("clickhouse"), None);
+        for ok in ["varchar(64)", "numeric(18,4)", "numeric", "double precision", "timestamptz", "integer"] {
+            assert!(valid_type(Some("postgres"), ok), "{ok}");
+        }
+        for bad in ["varchar(x)", "int", "varchar(0)", "numeric(1,2,3)", "jsonb(2)"] {
+            assert!(!valid_type(Some("postgres"), bad), "{bad}");
+        }
+        for ok in ["int", "varchar(255)", "decimal(10, 2)", "datetime", "integer", "numeric"] {
+            assert!(valid_type(Some("mysql"), ok), "{ok}");
+        }
+        assert!(!valid_type(Some("mysql"), "varchar"));
+        assert!(!valid_type(Some("mysql"), "jsonb"));
+        assert!(valid_type(None, "integer"));
+        assert!(!valid_type(None, "jsonb"));
+    }
+
+    #[test]
+    fn validate_types_names_the_column() {
+        let mut value = physical_json();
+        value["tables"][0]["draft"]["columns"][1]["type"] = "jsonb".into();
+        let def: Definition = serde_json::from_value(value).unwrap();
+        let e = validate_types(&def, "mysql").unwrap_err();
+        assert_eq!(e, "Tipo inválido para shop.items.sku: jsonb");
+        validate_types(&serde_json::from_value(physical_json()).unwrap(), "postgres").unwrap();
     }
 }
