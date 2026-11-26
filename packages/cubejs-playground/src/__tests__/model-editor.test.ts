@@ -1327,6 +1327,16 @@ describe('ModelEditor', () => {
       expect(node('orders').querySelector('[data-slot="model-table-name"]')!.textContent).toBe('orders');
     });
 
+    it('hides types and shows N by the model\'s format', async () => {
+      const format = { showTypes: false, showNullable: true };
+      api.model.mockResolvedValueOnce(view({ ...withDraft(), settings: { format } }));
+      await render();
+      const row = (column: string) => node('items').querySelector(`[data-column="${column}"]`)!;
+      expect(row('label').textContent).not.toContain('text');
+      expect(row('label').querySelector('[data-slot="model-column-marks"]')!.textContent).toBe('N');
+      expect(row('id').querySelector('[data-slot="model-column-marks"]')!.textContent).toBe('PK');
+    });
+
     it('shows a shortcut icon on a shortcut node', () => {
       const host = document.createElement('div');
       const own = createRoot(host);

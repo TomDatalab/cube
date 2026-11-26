@@ -27,6 +27,10 @@ export type TableNodeData = {
   linked: string[];
   // The columns that point at another table: shown FK.
   fks: string[];
+  // The model's format: the type column, and N on the columns allowing nulls.
+  showTypes?: boolean;
+  showNullable?: boolean;
+  nullable?: string[];
   // Removes the table, or only the shortcut when this node is one.
   onRemove: (nodeId: string) => void;
   // The shortcut's id when this node is a shortcut of the table.
@@ -70,13 +74,19 @@ type TableNodeProps = Pick<NodeProps<TableFlowNode>, 'data'> & { id?: string; se
 
 // What a table row shows after its type, as Redgate writes it.
 function marks(data: TableNodeData, column: string) {
-  const pk = data.keys.includes(column);
-  const fk = data.fks.includes(column);
+  const shown = [
+    data.keys.includes(column) ? { text: 'PK', label: 'primary key' } : null,
+    data.fks.includes(column) ? { text: 'FK', label: 'foreign key' } : null,
+    data.showNullable && data.nullable?.includes(column) ? { text: 'N', label: 'allows nulls' } : null,
+  ].filter((m): m is { text: string; label: string } => m !== null);
   return (
     <span data-slot="model-column-marks" className="tw:shrink-0 tw:text-right tw:whitespace-nowrap">
-      {pk ? <span aria-label="primary key">PK</span> : null}
-      {pk && fk ? ' ' : null}
-      {fk ? <span aria-label="foreign key">FK</span> : null}
+      {shown.map((m, i) => (
+        <span key={m.text}>
+          {i > 0 ? ' ' : null}
+          <span aria-label={m.label}>{m.text}</span>
+        </span>
+      ))}
     </span>
   );
 }
@@ -172,7 +182,7 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => (
             >
               {c.name}
             </button>
-            <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span>
+            {data.showTypes === false ? null : <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span>}
             <span className="tw:w-9 tw:shrink-0 tw:text-right">{marks(data, c.name)}</span>
             <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
           </li>

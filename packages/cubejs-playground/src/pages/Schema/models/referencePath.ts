@@ -1,4 +1,5 @@
 import type { ModelJoin, Point } from './modelGraph';
+import { referenceEnds } from './physical';
 
 // How a reference ends at one of its tables, in crow's-foot notation.
 export type EndMark = { many: boolean; optional: boolean };
@@ -17,6 +18,11 @@ export type ReferencePath = {
 export const STUB = 20;
 
 export function endMarks(j: ModelJoin): { from: EndMark; to: EndMark } {
+  if (j.cardinality) {
+    const child = { many: j.cardinality.endsWith('*'), optional: j.cardinality.startsWith('0') };
+    const parent = { many: false, optional: !(j.mandatory ?? j.join === 'inner') };
+    return referenceEnds(j).child === j.from ? { from: child, to: parent } : { from: parent, to: child };
+  }
   const oneOptional = j.join === 'left';
   if (j.relationship === 'many_to_one') {
     return { from: { many: true, optional: true }, to: { many: false, optional: oneOptional } };

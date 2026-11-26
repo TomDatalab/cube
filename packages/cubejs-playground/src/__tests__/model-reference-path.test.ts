@@ -93,4 +93,23 @@ describe('referencePath', () => {
     expect(endSides(right, left, false)).toEqual(['left', 'right']);
     expect(endSides(left, right, true)).toEqual(['left', 'right']);
   });
+
+  it('endMarks uses cardinality and mandatory', () => {
+    const j = { ...join('many_to_one', 'left'), cardinality: '1..*' as const, mandatory: true };
+    expect(endMarks(j)).toEqual({
+      from: { many: true, optional: false },
+      to: { many: false, optional: false },
+    });
+    const optional = { ...j, cardinality: '0..1' as const, mandatory: false, relationship: 'one_to_one' as const };
+    expect(endMarks(optional)).toEqual({
+      from: { many: false, optional: true },
+      to: { many: false, optional: true },
+    });
+    // The child on the `to` side.
+    const flipped = { ...join('one_to_many', 'inner'), cardinality: '1..*' as const, mandatory: true };
+    expect(endMarks(flipped)).toEqual({
+      from: { many: false, optional: false },
+      to: { many: true, optional: false },
+    });
+  });
 });
