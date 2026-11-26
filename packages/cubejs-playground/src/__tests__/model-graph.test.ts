@@ -123,6 +123,15 @@ describe('draft tables', () => {
     { name: 'name', type: 'text' as const, nullable: true, primaryKey: false },
   ];
 
+  it('a draft table may not take a view schema.name', () => {
+    const view = { id: 'v1', name: 'sales', schema: 'public', sql: '', columns: [], dependsOnTables: [], dependsOnViews: [], x: 0, y: 0 };
+    const def = { ...emptyDefinition(), views: [view] };
+    expect(addDraftTable(def, 'ds', 'public', 'sales', cols, 0, 0).error).toBe('public.sales is already in this model');
+    const ok = addDraftTable(def, 'ds', 'public', 'other', cols, 0, 0);
+    expect(ok.error).toBeUndefined();
+    expect(updateDraftTable(ok.def, 'other', 'public', 'sales', cols).error).toBe('public.sales is already in this model');
+  });
+
   it('adds a draft table and makes the first one the primary', () => {
     const a = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
     expect(a.error).toBeUndefined();

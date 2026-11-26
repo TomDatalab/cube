@@ -8,7 +8,9 @@ import { Field } from '@/components/kit';
 import { CodeEditor } from '../NumberedCode';
 import { Dialect, PORTABLE, TYPES } from './dialect';
 import type { ModelDefinition, ViewColumn } from './modelGraph';
-import { nodeIdOf, renameView, setView } from './objects';
+import {
+  nodeIdOf, renameView, setView, setViewColumnType, setViewSchema,
+} from './objects';
 import { Check, DraftText, Section } from './PanelParts';
 import { IssuesSection } from './TableProperties';
 import type { Issue } from './validate';
@@ -69,6 +71,34 @@ function ViewName({ def, id, onChange }: Pick<ViewPropertiesProps, 'def' | 'id' 
   );
 }
 
+// A text field whose commit may be refused: the refusal shows under it and
+// the model keeps its value.
+function CheckedText({
+  id, label, value, check, list,
+}: {
+  id?: string;
+  label: string;
+  value: string;
+  check(next: string): string | null;
+  list?: string;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setError(null), [value]);
+  return (
+    <>
+      <DraftText
+        id={id}
+        label={label}
+        multiline={false}
+        list={list}
+        value={value}
+        onCommit={(next) => setError(check(next.trim()))}
+      />
+      {error ? <p role="alert" className="tw:m-0 tw:text-xs tw:text-destructive">{error}</p> : null}
+    </>
+  );
+}
+
 // The query as typed, written to the model when the editor is left: one
 // step of undo.
 function QueryEditor({ value, onCommit }: { value: string; onCommit(next: string): void }) {
@@ -99,8 +129,13 @@ function freeColumn(columns: ViewColumn[]): string {
 // Redgate's view properties: General, SQL query, Columns, Dependencies,
 // Additional SQL scripts and Issues.
 export function ViewProperties({
-  def, id, dialect, issues, onChange, onSqlPreview,
+  def, id, dialect, issues, onChange, onSqlPreview, focusKey,
 }: ViewPropertiesProps) {
+  useEffect(() => {
+    if (focusKey) {
+      (document.getElementById('model-view-name') as HTMLInputElement | null)?.focus();
+    }
+  }, [focusKey, id]);
   const view = def.views?.find((v) => v.id === id);
   if (!view) {
     return null;
@@ -124,13 +159,18 @@ export function ViewProperties({
         ) : null}
         <ViewName def={def} id={id} onChange={onChange} />
         <Field label="Schema" htmlFor="model-view-schema">
-          <DraftText
+          <CheckedText
             key={`${id}:schema`}
             id="model-view-schema"
             label="View schema"
-            multiline={false}
             value={view.schema}
-            onCommit={(schema) => patch({ schema })}
+            check={(schema) => {
+              const result = setViewSchema(def, id, schema);
+              if (!result.error) {
+                onChange(result.def);
+              }
+              return result.error ?? null;
+            }}
           />
         </Field>
         <Field label="Comment" htmlFor="model-view-comment">
@@ -163,12 +203,17 @@ export function ViewProperties({
                 value={c.name}
                 onCommit={(name) => editColumn(k, { name })}
               />
-              <DraftText
+              <CheckedText
                 label={`View column ${k + 1} type`}
-                multiline={false}
                 list={`model-view-types-${dialect ?? 'portable'}`}
                 value={c.type}
-                onCommit={(type) => editColumn(k, { type })}
+                check={(type) => {
+                  const result = setViewColumnType(def, id, k, type, dialect);
+                  if (!result.error) {
+                    onChange(result.def);
+                  }
+                  return result.error ?? null;
+                }}
               />
               <button
                 type="button"
@@ -184,7 +229,7 @@ export function ViewProperties({
         <Button
           variant="outline"
           size="sm"
-          onClick={() => patch({ columns: [...view.columns, { name: freeColumn(view.columns), type: typeList[0] }] })}
+          onClick={() => patch({ columns: [...view.columns, { name: freeColumn(view.columns), type: 'text' }] })}
         >
           + Add
         </Button>

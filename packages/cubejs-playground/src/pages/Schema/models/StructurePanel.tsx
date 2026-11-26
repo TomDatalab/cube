@@ -215,8 +215,9 @@ function StructureTree({
                 </div>
                 {shown ? (
                   <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-8 tw:text-muted-foreground">
-                    {v.columns.map((c) => (
-                      <li key={c.name} className="tw:flex tw:gap-2 tw:py-0.5">
+                    {v.columns.map((c, k) => (
+                      // eslint-disable-next-line react/no-array-index-key
+                      <li key={k} className="tw:flex tw:gap-2 tw:py-0.5">
                         <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
                         <span className="tw:shrink-0">{c.type}</span>
                       </li>

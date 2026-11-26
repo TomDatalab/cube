@@ -35,7 +35,8 @@ import { AreaFlowNode, AreaNode } from './AreaNode';
 import { ViewFlowNode, ViewNode } from './ViewNode';
 import { DependencyEdge, DependencyFlowEdge } from './DependencyEdge';
 import {
-  addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, sendToBack,
+  addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, previewIdOf,
+  sendToBack,
 } from './objects';
 import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
@@ -1479,7 +1480,7 @@ function Editor({
             issues={problemsFound}
             focusKey={focusKey}
             // A table by its alias, a view by its id.
-            onSqlPreview={dialect ? (nodeId) => openSql({ only: [objectOf(nodeId).id] }) : undefined}
+            onSqlPreview={dialect ? (nodeId) => openSql({ only: [previewIdOf(nodeId)] }) : undefined}
             onRenamed={(from, to) => setSelection((was) => was.map((id) => {
               const { alias, shortcut } = parseNodeId(id);
               if (alias !== from) {

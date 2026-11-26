@@ -121,7 +121,9 @@ export function paste(
       ...v,
       id,
       name,
-      dependsOnTables: v.dependsOnTables.map((a) => renamed.get(a) ?? a),
+      dependsOnTables: v.dependsOnTables
+        .map((a) => renamed.get(a) ?? a)
+        .filter((a) => tables.some((t) => t.alias === a)),
       dependsOnViews: v.dependsOnViews.filter((d) => viewIds.has(d)).map((d) => viewIds.get(d) as string),
     }));
   }

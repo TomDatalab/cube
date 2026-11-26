@@ -51,7 +51,7 @@ export function SqlDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="tw:sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>{only?.length ? `SQL preview: ${only.join(', ')}` : 'Generate SQL script'}</DialogTitle>
+          <DialogTitle>{only?.length ? `SQL preview: ${only.map((o) => o.replace(/^view:/, '')).join(', ')}` : 'Generate SQL script'}</DialogTitle>
           <DialogDescription>The model as SQL in its connection&apos;s dialect. Nothing runs.</DialogDescription>
         </DialogHeader>
         <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-4 tw:text-sm">

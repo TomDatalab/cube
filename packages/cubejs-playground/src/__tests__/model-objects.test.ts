@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects,
-  removeObjects, renameView, sendToBack, setNote, setView,
+  addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, previewIdOf,
+  removeObjects, renameView, sendToBack, setNote, setView, setViewColumnType, setViewSchema,
 } from '../pages/Schema/models/objects';
 import { addShortcut } from '../pages/Schema/models/clipboard';
 import {
@@ -143,5 +143,31 @@ describe('model objects', () => {
     expect(addView(def, 0, 0, 'other').def.views![0].name).toBe('view_1');
     def = addView(def, 0, 0, 'public').def;
     expect(renameView(def, 'v1', 'view_1').error).toBe('view_1 is already in this model');
+  });
+
+  it('previewIdOf sends views as node ids and tables as aliases', () => {
+    expect(previewIdOf('view:v1')).toBe('view:v1');
+    expect(previewIdOf('v1')).toBe('v1');
+    expect(previewIdOf('orders')).toBe('orders');
+  });
+
+  it('setViewSchema validates like renameView', () => {
+    let { def } = addView(addView(base(), 0, 0, 'public').def, 0, 0, 'public');
+    expect(setViewSchema(def, 'v1', '1x').error).toBe('Invalid name: 1x');
+    expect(setViewSchema(def, 'v1', 'a'.repeat(64)).error).toMatch(/^Invalid name/);
+    def = addDraftTable(def, 'ds', 'sales', 'view_2', [{ name: 'id', type: 'integer', nullable: false, primaryKey: true }], 0, 0).def;
+    expect(setViewSchema(def, 'v2', 'sales').error).toBe('view_2 is already in this model');
+    def = setView(def, 'v2', { schema: 'other' });
+    expect(setViewSchema(def, 'v2', 'fine').def.views![1].schema).toBe('fine');
+    expect(setViewSchema(def, 'v2', 'other').def).toBe(def);
+  });
+
+  it('setViewColumnType refuses a type the dialect does not know', () => {
+    let { def } = addView(base(), 0, 0, 'public');
+    def = setView(def, 'v1', { columns: [{ name: 'a', type: 'text' }] });
+    expect(setViewColumnType(def, 'v1', 0, 'jsonb', null).error).toBe('Invalid type: jsonb');
+    expect(setViewColumnType(def, 'v1', 0, 'jsonb', 'postgres').def.views![0].columns[0].type).toBe('jsonb');
+    expect(setViewColumnType(def, 'v1', 0, 'jsonb', 'mysql').error).toBe('Invalid type: jsonb');
+    expect(setViewColumnType(def, 'v1', 0, 'bigint', null).def.views![0].columns[0].type).toBe('bigint');
   });
 });

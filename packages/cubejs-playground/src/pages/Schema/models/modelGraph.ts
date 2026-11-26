@@ -400,7 +400,8 @@ export function draftProblem(
   const clash = def.tables.some(
     (t) => t.alias !== editingAlias && t.schema === schema && t.table === table
   );
-  if (clash) {
+  const viewClash = (def.views ?? []).some((v) => v.schema === schema && v.name === table);
+  if (clash || viewClash) {
     return `${schema}.${table} is already in this model`;
   }
   return null;

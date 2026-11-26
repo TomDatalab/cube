@@ -136,6 +136,14 @@ describe('clipboard', () => {
     expect([pasted.x, pasted.y]).toEqual([120, 220]);
   });
 
+  it('pasting a view whose table was deleted keeps no dependency on it', () => {
+    let { def } = addView(model(), 0, 0, 'public');
+    def = setView(def, 'v1', { dependsOnTables: ['orders'] });
+    const clip = copy(def, [nodeIdOf('view', 'v1')]);
+    const { def: next } = paste(removeTable(def, 'orders'), clip);
+    expect(next.views!.find((v) => v.id === 'v2')!.dependsOnTables).toEqual([]);
+  });
+
   it('pasting a view alone drops view dependencies on views not pasted', () => {
     let { def } = addView(model(), 0, 0, 'public');
     def = addView(def, 50, 50, 'public').def;

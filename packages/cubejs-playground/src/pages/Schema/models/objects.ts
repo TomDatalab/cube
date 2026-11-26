@@ -1,4 +1,5 @@
 import { Box } from './arrange';
+import { Dialect, validType } from './dialect';
 import {
   Area, IDENTIFIER, ModelDefinition, ModelView, Note, Place, placeTables, removeShortcut, removeTable,
 } from './modelGraph';
@@ -140,6 +141,46 @@ export function renameView(def: ModelDefinition, id: string, next: string): { de
     return { def, error: `${next} is already in this model` };
   }
   return { def: setView(def, id, { name: next }) };
+}
+
+export function setViewSchema(
+  def: ModelDefinition, id: string, next: string
+): { def: ModelDefinition; error?: string } {
+  const views = def.views ?? [];
+  const view = views.find((v) => v.id === id);
+  if (!view || view.schema === next) {
+    return { def };
+  }
+  if (!IDENTIFIER.test(next) || next.length > MAX_IDENTIFIER) {
+    return { def, error: `Invalid name: ${next}` };
+  }
+  const others = { ...def, views: views.filter((v) => v.id !== id) };
+  if (viewNameTaken(others, next, view.name)) {
+    return { def, error: `${view.name} is already in this model` };
+  }
+  return { def: setView(def, id, { schema: next }) };
+}
+
+// A view column's type must be one the server accepts: portable, or valid for
+// the connection's dialect.
+export function setViewColumnType(
+  def: ModelDefinition, id: string, k: number, type: string, dialect: Dialect
+): { def: ModelDefinition; error?: string } {
+  const view = (def.views ?? []).find((v) => v.id === id);
+  if (!view) {
+    return { def };
+  }
+  if (!validType(dialect, type)) {
+    return { def, error: `Invalid type: ${type}` };
+  }
+  return { def: setView(def, id, { columns: view.columns.map((c, j) => (j === k ? { ...c, type } : c)) }) };
+}
+
+// What the SQL preview's `only` carries: a table's alias, a view's node id
+// (`view:<id>`), so a table aliased like a view id never collides with it.
+export function previewIdOf(nodeId: string): string {
+  const { kind, id } = objectOf(nodeId);
+  return kind === 'view' ? nodeIdOf('view', id) : id;
 }
 
 export function removeObjects(def: ModelDefinition, nodeIds: string[]): ModelDefinition {
