@@ -512,6 +512,7 @@ pub async fn create_tables(
 
     let mut created: Vec<String> = Vec::new();
     let mut error: Option<String> = None;
+    let mut ran = 0;
     for statement in &statements {
         let sql = &statement.sql;
         // A draft's CREATE TABLE names its table; anything else, its first line.
@@ -535,8 +536,11 @@ pub async fn create_tables(
         let _ = driver.release().await;
         match result {
             Ok(Ok(_)) => {
-                if let Some(table) = &statement.table {
-                    created.push(table.clone());
+                ran += 1;
+                if statement.creates {
+                    if let Some(table) = &statement.table {
+                        created.push(table.clone());
+                    }
                 }
             }
             Ok(Err(e)) => {
@@ -550,6 +554,24 @@ pub async fn create_tables(
                 ));
                 break;
             }
+        }
+    }
+
+    // A created table's draft is cleared even when one of its indexes, a
+    // script or a foreign key then failed: the table exists. What did not
+    // run is listed, to run by hand.
+    if let Some(message) = error.as_mut() {
+        let rest: Vec<&str> = statements
+            .iter()
+            .skip(ran + 1)
+            .map(|s| s.sql.as_str())
+            .collect();
+        if !rest.is_empty() {
+            message.push_str(&format!(
+                "\nNão rodaram ({}):\n{};",
+                rest.len(),
+                rest.join(";\n")
+            ));
         }
     }
 

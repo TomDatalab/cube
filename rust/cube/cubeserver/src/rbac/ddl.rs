@@ -26,12 +26,14 @@ pub struct ScriptOptions {
     pub comments: bool,
 }
 
-/// A statement to run; `table` is `schema.table` for the CREATE TABLE of a
-/// draft, so a run knows which drafts it created.
+/// A statement to run. The statements of one draft (its scripts, CREATE
+/// TABLE, indexes and comments) come together and carry its `schema.table`;
+/// the CREATE TABLE `creates` it, so a run knows which tables now exist.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Statement {
     pub table: Option<String>,
     pub sql: String,
+    pub creates: bool,
 }
 
 fn supported(db_type: &str) -> Result<bool, String> {
@@ -331,33 +333,32 @@ fn comments_on(def: &Definition) -> bool {
 pub fn create_statements(def: &Definition, db_type: &str) -> Result<Vec<Statement>, String> {
     let mysql = supported(db_type)?;
     let comments = comments_on(def);
-    let mut tables = Vec::new();
-    let mut after = Vec::new();
+    let mut out = Vec::new();
     for table in &def.tables {
         let Some(draft) = &table.draft else { continue };
         validate_draft_for_ddl(table, draft)?;
         if mysql {
             mysql_text_key(table, draft)?;
         }
-        let name = format!("{}.{}", table.schema, table.table);
+        let mut group: Vec<String> = Vec::new();
         if let Some(s) = draft.script_before.as_deref().filter(|s| !s.trim().is_empty()) {
-            tables.push(Statement { table: None, sql: s.to_string() });
+            group.push(s.to_string());
         }
-        tables.push(Statement {
-            table: Some(name),
-            sql: draft_create(db_type, table, draft, comments),
-        });
+        let create_at = group.len();
+        group.push(draft_create(db_type, table, draft, comments));
         if let Some(s) = draft.script_after.as_deref().filter(|s| !s.trim().is_empty()) {
-            tables.push(Statement { table: None, sql: s.to_string() });
+            group.push(s.to_string());
         }
-        for sql in index_statements(db_type, table, draft) {
-            after.push(Statement { table: None, sql });
-        }
+        group.extend(index_statements(db_type, table, draft));
         if comments {
-            for sql in comment_statements(db_type, table) {
-                after.push(Statement { table: None, sql });
-            }
+            group.extend(comment_statements(db_type, table));
         }
+        let name = format!("{}.{}", table.schema, table.table);
+        out.extend(group.into_iter().enumerate().map(|(i, sql)| Statement {
+            table: Some(name.clone()),
+            sql,
+            creates: i == create_at,
+        }));
     }
     let drafts: HashSet<&str> = def
         .tables
@@ -368,12 +369,15 @@ pub fn create_statements(def: &Definition, db_type: &str) -> Result<Vec<Statemen
     for j in &def.joins {
         if let Some((child, sql)) = fk_statement(db_type, def, j) {
             if drafts.contains(child.as_str()) {
-                after.push(Statement { table: None, sql });
+                out.push(Statement {
+                    table: None,
+                    sql,
+                    creates: false,
+                });
             }
         }
     }
-    tables.extend(after);
-    Ok(tables)
+    Ok(out)
 }
 
 fn optional(text: Option<&String>) -> Option<&str> {
@@ -737,7 +741,33 @@ mod tests {
     fn create_statements_tags_tables() {
         let statements = create_statements(&orders_customers(), "postgres").unwrap();
         assert_eq!(statements[0].table.as_deref(), Some("shop.orders"));
+        assert!(statements[0].creates);
         assert!(statements[1..].iter().all(|s| s.table.is_none()));
+    }
+
+    #[test]
+    fn each_draft_runs_as_a_group_created_by_its_create_table() {
+        let mut def = orders_customers();
+        let mut t = items();
+        t.comment = Some("the items".into());
+        t.draft.as_mut().unwrap().script_after = Some("-- after items".into());
+        def.tables.push(t);
+        let statements = create_statements(&def, "postgres").unwrap();
+        let items: Vec<&Statement> = statements
+            .iter()
+            .filter(|s| s.table.as_deref() == Some("shop.items"))
+            .collect();
+        // CREATE, its script, its index and its comment, in that order.
+        assert!(items[0].sql.starts_with("CREATE TABLE"), "{items:?}");
+        assert_eq!(items[1].sql, "-- after items");
+        assert!(items[2].sql.starts_with("CREATE INDEX"), "{items:?}");
+        assert!(items[3].sql.starts_with("COMMENT ON TABLE"), "{items:?}");
+        assert_eq!(items.iter().filter(|s| s.creates).count(), 1);
+        assert!(items[0].creates);
+        // The group comes whole, before any foreign key.
+        let first_fk = statements.iter().position(|s| s.sql.contains("FOREIGN KEY")).unwrap();
+        let last_item = statements.iter().rposition(|s| s.table.as_deref() == Some("shop.items")).unwrap();
+        assert!(last_item < first_fk);
     }
 
     #[test]
