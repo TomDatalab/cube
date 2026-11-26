@@ -12,6 +12,7 @@ import type { OrgDetail } from '../tree';
 import { useResizable } from '../useResizable';
 import { ResizeHandle } from '../ResizeHandle';
 import type { ModelDefinition, ModelTable } from './modelGraph';
+import { nodeIdOf } from './objects';
 import type { Issue } from './validate';
 
 // What a table of the database tables section carries while dragged to the
@@ -174,9 +175,71 @@ function StructureTree({
             </li>
           ))}
         </Group>
-        <Group icon={StickyNote} label="Text notes" open={Boolean(open.notes)} onToggle={() => toggle('notes')} />
-        <Group icon={TableProperties} label="Views" open={Boolean(open.views)} onToggle={() => toggle('views')} />
-        <Group icon={Square} label="Subject areas" open={Boolean(open.areas)} onToggle={() => toggle('areas')} />
+        <Group icon={StickyNote} label="Text notes" open={Boolean(open.notes)} onToggle={() => toggle('notes')}>
+          {(def.notes ?? []).map((n) => (
+            <li key={n.id}>
+              <Item
+                id={nodeIdOf('note', n.id)}
+                icon={StickyNote}
+                label={n.text.trim().slice(0, 40) || `Note ${n.id}`}
+                selected={selection.includes(nodeIdOf('note', n.id))}
+                onPick={() => onPickNode(nodeIdOf('note', n.id))}
+              />
+            </li>
+          ))}
+        </Group>
+        <Group icon={TableProperties} label="Views" open={Boolean(open.views)} onToggle={() => toggle('views')}>
+          {(def.views ?? []).map((v) => {
+            const shown = columnsOpen.includes(nodeIdOf('view', v.id));
+            return (
+              <li key={v.id}>
+                <div className="tw:flex tw:items-center">
+                  <button
+                    type="button"
+                    aria-label={`${shown ? 'Hide' : 'Show'} columns of ${v.name}`}
+                    aria-expanded={shown}
+                    className="tw:flex tw:size-4 tw:shrink-0 tw:cursor-pointer tw:items-center tw:justify-center tw:border-0 tw:bg-transparent tw:p-0 tw:text-muted-foreground"
+                    onClick={() => setColumnsOpen((was) => (
+                      shown ? was.filter((a) => a !== nodeIdOf('view', v.id)) : [...was, nodeIdOf('view', v.id)]
+                    ))}
+                  >
+                    {shown ? <ChevronDown className="tw:size-3" /> : <ChevronRight className="tw:size-3" />}
+                  </button>
+                  <Item
+                    id={nodeIdOf('view', v.id)}
+                    icon={TableProperties}
+                    label={v.name}
+                    selected={selection.includes(nodeIdOf('view', v.id))}
+                    onPick={() => onPickNode(nodeIdOf('view', v.id))}
+                  />
+                </div>
+                {shown ? (
+                  <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-8 tw:text-muted-foreground">
+                    {v.columns.map((c) => (
+                      <li key={c.name} className="tw:flex tw:gap-2 tw:py-0.5">
+                        <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
+                        <span className="tw:shrink-0">{c.type}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            );
+          })}
+        </Group>
+        <Group icon={Square} label="Subject areas" open={Boolean(open.areas)} onToggle={() => toggle('areas')}>
+          {(def.areas ?? []).map((a) => (
+            <li key={a.id}>
+              <Item
+                id={nodeIdOf('area', a.id)}
+                icon={Square}
+                label={a.name || `Area ${a.id}`}
+                selected={selection.includes(nodeIdOf('area', a.id))}
+                onPick={() => onPickNode(nodeIdOf('area', a.id))}
+              />
+            </li>
+          ))}
+        </Group>
         <Group icon={Box} label="Cubes" open={Boolean(open.cubes)} onToggle={() => toggle('cubes')} />
       </ul>
     </div>

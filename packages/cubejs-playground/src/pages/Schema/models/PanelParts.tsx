@@ -1,11 +1,13 @@
 import {
   KeyboardEvent, ReactNode, useEffect, useState,
 } from 'react';
-import { Minus, Plus } from 'lucide-react';
+import { Ban, Minus, Plus } from 'lucide-react';
 
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+
+import { TABLE_COLORS, TableColor } from './modelGraph';
 
 // A section of the properties pane that opens and closes with + and −, as
 // Redgate's.
@@ -101,5 +103,40 @@ export function Check({
       <input type="checkbox" aria-label={label} checked={checked} onChange={(e) => onChange(e.target.checked)} />
       {children}
     </span>
+  );
+}
+
+// The palette swatches of the table's Format, for one color of an object;
+// `none` adds a button that clears it.
+export function Palette({
+  slot, value, onPick, none,
+}: { slot: string; value: TableColor | undefined; onPick(color: TableColor | undefined): void; none?: boolean }) {
+  return (
+    <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-1" data-slot={slot}>
+      {TABLE_COLORS.map((color) => (
+        <button
+          key={color}
+          type="button"
+          aria-label={color}
+          aria-pressed={value === color}
+          title={color}
+          className="tw:size-6 tw:cursor-pointer tw:rounded-full tw:border-2 tw:border-transparent tw:p-0 tw:aria-pressed:border-foreground"
+          style={{ background: `var(--model-${color})` }}
+          onClick={() => onPick(color)}
+        />
+      ))}
+      {none ? (
+        <button
+          type="button"
+          aria-label="none"
+          aria-pressed={value === undefined}
+          title="none"
+          className="tw:flex tw:size-6 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded-full tw:border tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent"
+          onClick={() => onPick(undefined)}
+        >
+          <Ban className="tw:size-3.5" />
+        </button>
+      ) : null}
+    </div>
   );
 }

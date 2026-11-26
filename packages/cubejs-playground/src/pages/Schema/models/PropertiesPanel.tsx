@@ -11,6 +11,9 @@ import { RULES } from './validate';
 import { setAllRules, setSetting } from './physical';
 import { TableProperties } from './TableProperties';
 import { ReferenceProperties } from './ReferenceProperties';
+import { NoteProperties } from './NoteProperties';
+import { AreaProperties } from './AreaProperties';
+import { ViewProperties } from './ViewProperties';
 
 import {
   ModelDefinition, ModelTable, setPrimary,
@@ -35,7 +38,8 @@ export type PropertiesPanelProps = {
   issues: Issue[];
   // Bumped to focus the selected table's first column.
   focusKey?: number;
-  onSqlPreview?(alias: string): void;
+  // A table alias, or a node id such as view:v1.
+  onSqlPreview?(id: string): void;
   // A table took a new name: what is selected follows it.
   onRenamed(from: string, to: string): void;
   // The reference was deleted: nothing is selected any more.
@@ -53,6 +57,19 @@ const TITLE: Record<Selected['kind'], string> = {
   area: 'Subject area properties',
   view: 'View properties',
 };
+
+// `1 table, 2 views, 1 note`: zero counts are left out, except tables.
+function sizeOf(def: ModelDefinition): string {
+  const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  return [
+    count(def.tables.length, 'table', 'tables'),
+    ...[
+      [def.views?.length ?? 0, 'view', 'views'],
+      [def.notes?.length ?? 0, 'note', 'notes'],
+      [def.areas?.length ?? 0, 'area', 'areas'],
+    ].filter(([n]) => n).map(([n, one, many]) => count(n as number, one as string, many as string)),
+  ].join(', ');
+}
 
 function ModelProperties({
   def, name, columnsOf, onChange, onName, onDeleteModel, deleting, busy,
@@ -98,7 +115,7 @@ function ModelProperties({
           onChange={(v) => onChange({ ...def, primaryKey: v ?? null })}
         />
       </Field>
-      <Value label="Size">{`${def.tables.length} ${def.tables.length === 1 ? 'table' : 'tables'}`}</Value>
+      <Value label="Size">{sizeOf(def)}</Value>
       <Button variant="destructive" size="sm" disabled={busy} onClick={onDeleteModel}>
         {deleting ? <Spinner className="tw:text-current" /> : null}
         Delete model
@@ -233,6 +250,24 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           issues={props.issues.filter((i) => i.target.kind === 'reference' && i.target.id === props.def.joins[selected.index]?.id)}
           onChange={props.onChange}
           onDeselect={props.onDeselect}
+        />
+      ) : null}
+      {selected.kind === 'note' ? (
+        <NoteProperties def={props.def} id={selected.id} onChange={props.onChange} focusKey={props.focusKey} />
+      ) : null}
+      {selected.kind === 'area' ? (
+        <AreaProperties def={props.def} id={selected.id} onChange={props.onChange} focusKey={props.focusKey} />
+      ) : null}
+      {selected.kind === 'view' ? (
+        <ViewProperties
+          def={props.def}
+          id={selected.id}
+          dialect={props.dialect}
+          columnsOf={props.columnsOf}
+          issues={props.issues.filter((i) => i.target.kind === 'view' && i.target.id === selected.id)}
+          onChange={props.onChange}
+          focusKey={props.focusKey}
+          onSqlPreview={props.onSqlPreview}
         />
       ) : null}
     </aside>

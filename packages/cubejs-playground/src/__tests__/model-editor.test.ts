@@ -1879,6 +1879,167 @@ describe('ModelEditor', () => {
     });
   });
 
+  describe('note, area and view properties', () => {
+    const flowNode = (id: string) => flow.props.nodes.find((n: any) => n.id === id);
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const blur = async (selector: string) => act(async () => {
+      document.querySelector(selector)!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    const savedDef = async () => {
+      await act(async () => tool('Save changes').click());
+      return api.saveModel.mock.calls[api.saveModel.mock.calls.length - 1][1].definition;
+    };
+    const withObjects = (): ModelDefinition => ({
+      ...threeTables(),
+      notes: [
+        {
+          id: 'n1', x: 0, y: 400, width: 200, height: 100, text: 'first', color: 'teal',
+        },
+        {
+          id: 'n2', x: 50, y: 420, width: 200, height: 100, text: '',
+        },
+      ],
+      areas: [{
+        id: 'a1', name: 'Sales', x: -50, y: -50, width: 500, height: 300,
+      }],
+      views: [{
+        id: 'v1',
+        name: 'sales_v',
+        schema: 'public',
+        sql: 'select 1',
+        columns: [{ name: 'id', type: 'integer' }],
+        dependsOnTables: ['orders'],
+        dependsOnViews: [],
+        x: 600,
+        y: 400,
+      }],
+    });
+
+    it('edits a note\'s text and color from its properties', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('note:n1');
+      expect(pane().textContent).toContain('Text note properties');
+      await fill('textarea[aria-label="Note text"]', 'changed');
+      await blur('textarea[aria-label="Note text"]');
+      await act(async () => (pane().querySelector('[data-slot="model-color-palette"] button[aria-label="blue"]') as HTMLButtonElement).click());
+      let def = await savedDef();
+      expect(def.notes[0]).toEqual(expect.objectContaining({ text: 'changed', color: 'blue' }));
+      await act(async () => (pane().querySelector('button[aria-label="none"]') as HTMLButtonElement).click());
+      def = await savedDef();
+      expect('color' in def.notes[0]).toBe(false);
+    });
+
+    it('edits an area\'s name, comment, fill and border', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('area:a1');
+      expect(pane().textContent).toContain('Subject area properties');
+      expect(pane().querySelector('[data-slot="model-area-fill"] button[aria-label="slate"]')!.getAttribute('aria-pressed')).toBe('true');
+      await fill('input[aria-label="Area name"]', 'Revenue');
+      await blur('input[aria-label="Area name"]');
+      await fill('textarea[aria-label="Area comment"]', 'money');
+      await blur('textarea[aria-label="Area comment"]');
+      await act(async () => (pane().querySelector('[data-slot="model-area-fill"] button[aria-label="green"]') as HTMLButtonElement).click());
+      await act(async () => (pane().querySelector('[data-slot="model-area-border"] button[aria-label="red"]') as HTMLButtonElement).click());
+      const def = await savedDef();
+      expect(def.areas[0]).toEqual(expect.objectContaining({
+        name: 'Revenue', comment: 'money', fill: 'green', border: 'red',
+      }));
+    });
+
+    it('renames a view and the selection follows', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('view:v1');
+      expect(pane().textContent).toContain('View properties');
+      await fill('input[aria-label="View name"]', 'bad name');
+      await blur('input[aria-label="View name"]');
+      expect(pane().querySelector('[role="alert"]')).not.toBeNull();
+      await fill('input[aria-label="View name"]', 'orders_v');
+      await blur('input[aria-label="View name"]');
+      expect(flowNode('view:v1').data.name).toBe('orders_v');
+      expect(flowNode('view:v1').selected).toBe(true);
+      expect(pane().textContent).toContain('View properties');
+      await act(async () => ([...document.querySelectorAll('[data-slot="model-structure"] button[aria-expanded]')].find((b) => b.textContent === 'Views') as HTMLButtonElement).click());
+      expect(document.querySelector('[data-slot="model-structure-item"][data-id="view:v1"]')!.textContent).toBe('orders_v');
+    });
+
+    it('sets a view\'s query, a column and a dependency, and the dashed line appears', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('view:v1');
+      await fill('[data-slot="code-editor"] textarea', 'select 2');
+      await blur('[data-slot="code-editor"] textarea');
+      await act(async () => (button('+ Add') as HTMLButtonElement).click());
+      await fill('input[aria-label="View column 2 name"]', 'total');
+      await blur('input[aria-label="View column 2 name"]');
+      await fill('input[aria-label="View column 2 type"]', 'numeric');
+      await blur('input[aria-label="View column 2 type"]');
+      expect(flow.props.edges.some((e: any) => e.id === 'dep-v1-customers')).toBe(false);
+      await act(async () => (pane().querySelector('input[aria-label="Depends on customers"]') as HTMLInputElement).click());
+      expect(flow.props.edges.some((e: any) => e.id === 'dep-v1-customers')).toBe(true);
+      expect(pane().querySelector('input[aria-label="Depends on sales_v"]')).toBeNull();
+      const def = await savedDef();
+      expect(def.views[0]).toEqual(expect.objectContaining({
+        sql: 'select 2',
+        columns: [{ name: 'id', type: 'integer' }, { name: 'total', type: 'numeric' }],
+        dependsOnTables: ['orders', 'customers'],
+      }));
+    });
+
+    it('typing Delete in the view query does not delete the view', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('view:v1');
+      const query = document.querySelector('[data-slot="code-editor"] textarea') as HTMLTextAreaElement;
+      await act(async () => {
+        query.focus();
+        query.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      });
+      expect(flowNode('view:v1')).toBeDefined();
+      expect(flow.props.edges.some((e: any) => e.id === 'dep-v1-orders')).toBe(true);
+    });
+
+    it('sizes the model by what it holds', async () => {
+      api.model.mockResolvedValueOnce(view({ ...withObjects(), views: [...withObjects().views!, { ...withObjects().views![0], id: 'v2', name: 'two' }], notes: [withObjects().notes![0]], areas: [] }));
+      await render();
+      await select(null);
+      expect(pane().textContent).toContain('3 tables, 2 views, 1 note');
+      expect(pane().textContent).not.toContain('area');
+    });
+
+    it('the structure tree lists notes, views and areas and selects on click', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      const tree = document.querySelector('[data-slot="model-structure"]') as HTMLElement;
+      const open = async (label: string) => {
+        const group = [...tree.querySelectorAll('button[aria-expanded]')].find((b) => b.textContent === label) as HTMLButtonElement;
+        if (group.getAttribute('aria-expanded') === 'false') {
+          await act(async () => group.click());
+        }
+      };
+      await open('Text notes');
+      await open('Views');
+      await open('Subject areas');
+      const item = (id: string) => tree.querySelector(`[data-slot="model-structure-item"][data-id="${id}"]`) as HTMLButtonElement;
+      expect(item('note:n1').textContent).toBe('first');
+      expect(item('note:n2').textContent).toBe('Note n2');
+      expect(item('area:a1').textContent).toBe('Sales');
+      expect(item('view:v1').textContent).toBe('sales_v');
+      await act(async () => (tree.querySelector('[aria-label="Show columns of sales_v"]') as HTMLButtonElement).click());
+      expect(tree.textContent).toContain('integer');
+      await act(async () => item('note:n1').click());
+      expect(flowNode('note:n1').selected).toBe(true);
+      expect(pane().textContent).toContain('Text note properties');
+      await act(async () => item('area:a1').click());
+      expect(pane().textContent).toContain('Subject area properties');
+      await act(async () => item('view:v1').click());
+      expect(flowNode('view:v1').selected).toBe(true);
+      expect(pane().textContent).toContain('View properties');
+    });
+  });
+
   describe('note node', () => {
     it('note node shows its text', () => {
       const host = document.createElement('div');

@@ -206,11 +206,11 @@ function ColumnRow({
   );
 }
 
-function IssuesSection({ issues }: { issues: Issue[] }) {
+export function IssuesSection({ issues, heading = 'Table issues' }: { issues: Issue[]; heading?: string }) {
   const errors = issues.filter((i) => i.severity === 'error');
   const warnings = issues.filter((i) => i.severity === 'warning');
   return (
-    <Section title="Table issues" slot="model-table-issues">
+    <Section title={heading} slot="model-table-issues">
       {[{ title: 'Errors', list: errors, Icon: CircleAlert, tone: 'tw:text-destructive' },
         { title: 'Warnings', list: warnings, Icon: TriangleAlert, tone: 'tw:text-amber-500' }].map(({
         title, list, Icon, tone,
