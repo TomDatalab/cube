@@ -677,7 +677,8 @@ function Editor({
     setSqlScript((was) => ({ ...was, loading: true, error: null }));
     api.modelSql(modelId, withFormat(sqlDef.current), {
       ...sqlOptions,
-      ...(sqlAsk.only ? { only: sqlAsk.only } : {}),
+      // A table's preview shows that table, new or not.
+      ...(sqlAsk.only ? { onlyNew: false, only: sqlAsk.only } : {}),
     }).then(
       (r) => !cancelled && setSqlScript({ script: r.script, error: null, loading: false }),
       (e: Error) => !cancelled && setSqlScript({ script: null, error: e.message, loading: false })
@@ -686,6 +687,12 @@ function Editor({
       cancelled = true;
     };
   }, [api, modelId, sqlAsk, sqlOptions]);
+
+  // Each opening starts from the model's SQL generation settings.
+  const openSql = (limits: { only?: string[] }) => {
+    setSqlOptions({ drop: def.settings?.sqlGeneration?.drop ?? false, onlyNew: false });
+    setSqlAsk(limits);
+  };
 
   const latest = useRef({ dirty, busy, save });
   latest.current = { dirty, busy, save };
@@ -988,7 +995,7 @@ function Editor({
       setRefFrom(alias);
       return;
     }
-    const result = addReference(def, refFrom, alias, columnsOfTable);
+    const result = addReference(def, refFrom, alias, columnsOfTable, dialect);
     setRefFrom(null);
     setTool('select');
     if (result.id) {
@@ -1005,7 +1012,7 @@ function Editor({
   useEditorShortcuts({
     ...toolKeys,
     'mod+f': () => searchInput.current?.focus(),
-    'mod+g': () => dialect && setSqlAsk({}),
+    'mod+g': () => dialect && openSql({}),
     'mod+alt+n': () => togglePane('left'),
     'mod+alt+p': () => togglePane('right'),
     'mod+alt+b': () => togglePane('top'),
@@ -1115,7 +1122,7 @@ function Editor({
           onCreate: openCreate,
           onBuild: build,
           canSql: dialect !== null,
-          onSql: () => setSqlAsk({}),
+          onSql: () => openSql({}),
         }}
         edit={{
           canCopy: selection.length > 0,
@@ -1277,7 +1284,7 @@ function Editor({
             dialect={dialect}
             issues={problemsFound}
             focusKey={focusKey}
-            onSqlPreview={dialect ? (alias) => setSqlAsk({ only: [alias] }) : undefined}
+            onSqlPreview={dialect ? (alias) => openSql({ only: [alias] }) : undefined}
             onRenamed={(from, to) => setSelection((was) => was.map((id) => {
               const { alias, shortcut } = parseNodeId(id);
               if (alias !== from) {

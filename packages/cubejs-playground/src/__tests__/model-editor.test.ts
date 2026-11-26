@@ -1508,6 +1508,21 @@ describe('ModelEditor', () => {
       expect(api.modelSql).toHaveBeenLastCalledWith('m1', expect.anything(), { drop: true, onlyNew: false });
     });
 
+    it('starts with the model\'s DROP setting, and a table preview ignores Only new tables', async () => {
+      api.model.mockResolvedValueOnce(withDialects({ ...saved(), settings: { sqlGeneration: { drop: true } } }, 'postgres'));
+      await render();
+      await act(async () => tool('Generate SQL script').click());
+      expect(api.modelSql).toHaveBeenLastCalledWith('m1', expect.anything(), { drop: true, onlyNew: false });
+      await act(async () => (document.querySelector('[aria-label="Only new tables"]') as HTMLInputElement).click());
+      await act(async () => (document.querySelector('[role="dialog"] button[aria-label="Close"], [data-slot="dialog-close"]') as HTMLElement)?.click());
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+      await select('orders');
+      await act(async () => button('SQL preview').click());
+      expect(api.modelSql).toHaveBeenLastCalledWith('m1', expect.anything(), { drop: true, onlyNew: false, only: ['orders'] });
+    });
+
     it('downloads the script as <name>.sql', async () => {
       api.model.mockResolvedValueOnce(withDialects(saved(), 'postgres'));
       (URL as any).createObjectURL = vi.fn(() => 'blob:x');

@@ -112,4 +112,13 @@ describe('clipboard', () => {
     expect(parseNodeId('orders')).toEqual({ alias: 'orders' });
     expect(parseNodeId(shortcutNodeId('orders', 's2'))).toEqual({ alias: 'orders', shortcut: 's2' });
   });
+
+  it('pasted references get fresh ids and no name', () => {
+    let def = model();
+    def = { ...def, joins: def.joins.map((j, i) => ({ ...j, id: `r${i + 1}`, name: `fk_${i}` })) };
+    const { def: next } = paste(def, copy(def, ['orders', 'customers']));
+    const ids = next.joins.map((j) => j.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(next.joins[next.joins.length - 1].name).toBeUndefined();
+  });
 });

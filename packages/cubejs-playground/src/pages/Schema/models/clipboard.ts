@@ -57,7 +57,19 @@ export function paste(
     });
   }
   const end = (e: End): End => ({ ...e, alias: renamed.get(e.alias) as string });
-  const joins = clip.joins.map((j) => ({ ...j, from: end(j.from), to: end(j.to) }));
+  // A pasted reference is a new one: its own id, and no name to repeat.
+  const taken = new Set(def.joins.map((j) => j.id).filter(Boolean));
+  const joins = clip.joins.map((j) => {
+    const { name: _name, id: _id, ...rest } = j;
+    let n = 1;
+    while (taken.has(`r${n}`)) {
+      n += 1;
+    }
+    taken.add(`r${n}`);
+    return {
+      ...rest, id: `r${n}`, from: end(j.from), to: end(j.to),
+    };
+  });
   return {
     def: { ...def, tables, joins: [...def.joins, ...joins] },
     aliases: [...renamed.values()],

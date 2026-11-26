@@ -177,10 +177,15 @@ export function setReference(def: ModelDefinition, id: string, patch: ReferenceP
       if (j.id !== id) {
         return j;
       }
-      const next: ModelJoin = tidy({ ...j, ...patch });
+      let next: ModelJoin = tidy({ ...j, ...patch });
       if (patch.cardinality) {
         const childIsFrom = referenceEnds(j).child === j.from;
         if (patch.cardinality.endsWith('1')) {
+          // A one_to_one reads `from` as the child: a child on the `to`
+          // side moves over, so the same table stays the parent.
+          if (!childIsFrom) {
+            next = mirrored(next);
+          }
           next.relationship = 'one_to_one';
         } else {
           next.relationship = childIsFrom ? 'many_to_one' : 'one_to_many';
@@ -192,6 +197,19 @@ export function setReference(def: ModelDefinition, id: string, patch: ReferenceP
       return next;
     }),
   };
+}
+
+// The reference read from the other end: `from` and `to`, their roles and
+// their pairs swapped.
+function mirrored(j: ModelJoin): ModelJoin {
+  return tidy({
+    ...j,
+    from: j.to,
+    to: j.from,
+    fromRole: j.toRole,
+    toRole: j.fromRole,
+    pairs: j.pairs?.map((p) => ({ from: p.to, to: p.from })),
+  });
 }
 
 // Redgate's "Swap reference": the parent becomes the child.
@@ -208,14 +226,7 @@ export function swapReference(def: ModelDefinition, id: string): ModelDefinition
       if (j.relationship === 'one_to_many') {
         return { ...j, relationship: 'many_to_one' };
       }
-      return tidy({
-        ...j,
-        from: j.to,
-        to: j.from,
-        fromRole: j.toRole,
-        toRole: j.fromRole,
-        pairs: j.pairs?.map((p) => ({ from: p.to, to: p.from })),
-      });
+      return mirrored(j);
     }),
   };
 }
@@ -253,13 +264,52 @@ function keyOf(def: ModelDefinition, t: ModelTable, columns: Columns): string | 
   return columns.find((c) => c.name === 'id')?.name ?? columns[0]?.name;
 }
 
+// A key's type as a column of the dialect can hold it: the database's own
+// names (information_schema) written as the dialect does, and a serial
+// becoming the integer it is.
+const RAW_TYPES: Record<string, string> = {
+  'character varying': 'varchar(255)',
+  varchar: 'varchar(255)',
+  character: 'char(1)',
+  'timestamp without time zone': 'timestamp',
+  'timestamp with time zone': 'timestamptz',
+  'time without time zone': 'time',
+  serial: 'integer',
+  bigserial: 'bigint',
+  int4: 'integer',
+  int8: 'bigint',
+};
+
+export function keyType(raw: string, dialect: Dialect): string {
+  const t = raw.trim().toLowerCase();
+  if (dialect === 'mysql') {
+    if (t === 'integer') {
+      return 'int';
+    }
+    if (t === 'timestamp without time zone') {
+      return 'datetime';
+    }
+  }
+  return RAW_TYPES[t] ?? t;
+}
+
+// `customers` → `customer`, `categories` → `category`.
+function singular(name: string): string {
+  if (name.endsWith('ies')) {
+    return `${name.slice(0, -3)}y`;
+  }
+  return name.endsWith('s') ? name.slice(0, -1) : name;
+}
+
 // Redgate's new reference, drawn from the parent to the child: mandatory,
-// 0..*; a new child table gets the foreign key column.
+// 0..*; a new child table gets the foreign key column, typed as the
+// parent's key, an existing one uses `<parent>_<key>` when it has it.
 export function addReference(
   def: ModelDefinition,
   parentAlias: string,
   childAlias: string,
-  columnsOf: (t: ModelTable) => Columns
+  columnsOf: (t: ModelTable) => Columns,
+  dialect: Dialect = null
 ): { def: ModelDefinition; id: string } {
   const parent = def.tables.find((t) => t.alias === parentAlias);
   const child = def.tables.find((t) => t.alias === childAlias);
@@ -271,10 +321,12 @@ export function addReference(
   if (!key) {
     return { def, id: '' };
   }
-  const keyType = parentColumns.find((c) => c.name === key)?.type ?? 'integer';
+  const keyColumn = parent.draft?.columns.find((c) => c.name === key);
+  const type = keyType(parentColumns.find((c) => c.name === key)?.type ?? 'integer', dialect);
   let next = def;
   let column: string;
-  const childNames = columnsOf(child).map((c) => c.name);
+  const childColumns = columnsOf(child);
+  const childNames = childColumns.map((c) => c.name);
   if (child.draft) {
     const base = `${parentAlias}_${key}`;
     column = childNames.includes(base)
@@ -282,12 +334,16 @@ export function addReference(
       : base;
     next = withDraft(def, childAlias, (d) => ({
       ...d,
-      columns: [...d.columns, {
-        name: column, type: keyType, nullable: false, primaryKey: false,
-      }],
+      columns: [...d.columns, tidy({
+        name: column, type, nullable: false, primaryKey: false, unsigned: keyColumn?.unsigned,
+      })],
     }));
   } else {
-    column = [key, `${parentAlias}_${key}`].find((c) => childNames.includes(c)) ?? childNames[0] ?? key;
+    const own = keyOf(def, child, childColumns);
+    column = [`${parentAlias}_${key}`, `${singular(parentAlias)}_${key}`].find((c) => childNames.includes(c))
+      ?? childNames.find((c) => c !== own)
+      ?? childNames[0]
+      ?? key;
   }
   const id = nextId(next);
   return {
