@@ -10,7 +10,7 @@ use cubedriver::DatabaseStructure;
 use crate::handlers::scaffold::quote;
 
 use super::cube_model::{
-    validate, validate_draft_for_ddl, DraftColumn, DraftTable, Definition, ModelJoin, ModelTable,
+    validate, validate_draft_for_ddl, DraftColumn, DraftTable, Definition, ModelJoin, ModelTable, ModelView,
 };
 
 /// What [`script`] writes.
@@ -50,10 +50,52 @@ fn literal(text: &str) -> String {
 }
 
 fn qualified(db_type: &str, table: &ModelTable) -> String {
+    qualified_name(db_type, &table.schema, &table.table)
+}
+
+fn qualified_name(db_type: &str, schema: &str, name: &str) -> String {
+    format!("{}.{}", quote(db_type, schema), quote(db_type, name))
+}
+
+/// The views in dependency order (what a view reads comes first), keeping
+/// the definition order among independent ones. Dependencies outside
+/// `views` are ignored. A cycle is an error naming the views left.
+fn view_order<'a>(views: &[&'a ModelView]) -> Result<Vec<&'a ModelView>, String> {
+    let ids: HashSet<&str> = views.iter().map(|v| v.id.as_str()).collect();
+    let mut done: HashSet<&str> = HashSet::new();
+    let mut left: Vec<&ModelView> = views.to_vec();
+    let mut out = Vec::with_capacity(views.len());
+    while !left.is_empty() {
+        let ready = left.iter().position(|v| {
+            v.depends_on_views
+                .iter()
+                .all(|d| !ids.contains(d.as_str()) || done.contains(d.as_str()))
+        });
+        match ready {
+            Some(i) => {
+                let v = left.remove(i);
+                done.insert(v.id.as_str());
+                out.push(v);
+            }
+            None => {
+                let mut names: Vec<&str> = left.iter().map(|v| v.name.as_str()).collect();
+                names.sort();
+                return Err(format!(
+                    "As views {} dependem umas das outras",
+                    names.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `CREATE VIEW` of a view; its query is written as typed, trimmed.
+fn view_create(db_type: &str, view: &ModelView) -> String {
     format!(
-        "{}.{}",
-        quote(db_type, &table.schema),
-        quote(db_type, &table.table)
+        "CREATE VIEW {} AS {}",
+        qualified_name(db_type, &view.schema, &view.name),
+        view.sql.trim()
     )
 }
 
@@ -409,6 +451,12 @@ pub fn script(
             aliases.contains(parent) && aliases.contains(child)
         })
         .collect();
+    let views: Vec<&ModelView> = def
+        .views
+        .iter()
+        .filter(|v| opts.only.as_ref().is_none_or(|only| only.contains(&v.id)))
+        .collect();
+    let views = view_order(&views)?;
     let scripts = def.settings.as_ref().and_then(|s| s.scripts.as_ref());
     let mut out: Vec<String> = Vec::new();
     let mut push = |sql: &str| out.push(format!("{};\n", sql.trim_end().trim_end_matches(';')));
@@ -416,6 +464,12 @@ pub fn script(
     if opts.drop {
         if let Some(s) = optional(scripts.and_then(|s| s.drop_before.as_ref())) {
             push(s);
+        }
+        for v in views.iter().rev() {
+            push(&format!(
+                "DROP VIEW IF EXISTS {}",
+                qualified_name(db_type, &v.schema, &v.name)
+            ));
         }
         for j in &joins {
             if let Some(sql) = drop_fk(db_type, def, j) {
@@ -471,6 +525,24 @@ pub fn script(
     for j in &joins {
         if let Some((_, sql)) = fk_statement(db_type, def, j) {
             push(&sql);
+        }
+    }
+    for v in &views {
+        if let Some(s) = optional(v.script_before.as_ref()) {
+            push(s);
+        }
+        push(&view_create(db_type, v));
+        if let Some(s) = optional(v.script_after.as_ref()) {
+            push(s);
+        }
+        if opts.comments && !mysql {
+            if let Some(c) = v.comment.as_deref().filter(|c| !c.is_empty()) {
+                push(&format!(
+                    "COMMENT ON VIEW {} IS {}",
+                    qualified_name(db_type, &v.schema, &v.name),
+                    literal(c)
+                ));
+            }
         }
     }
     if let Some(s) = optional(scripts.and_then(|s| s.create_after.as_ref())) {
@@ -790,5 +862,104 @@ mod tests {
                 .unwrap_err(),
             "Criar tabelas não é suportado para bigquery"
         );
+    }
+
+    fn view(id: &str, sql: &str) -> ModelView {
+        ModelView {
+            id: id.into(),
+            name: id.into(),
+            schema: "shop".into(),
+            sql: sql.into(),
+            ..Default::default()
+        }
+    }
+
+    fn gen(def: &Definition, opts: &ScriptOptions) -> Result<String, String> {
+        script(def, &structure(), "postgres", opts)
+    }
+
+    #[test]
+    fn views_after_foreign_keys() {
+        let mut def = orders_customers();
+        def.settings = Some(Settings {
+            scripts: Some(ModelScripts {
+                create_after: Some("-- end".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut v = view("v_orders", "select 1;  \n");
+        v.script_before = Some("-- before".into());
+        v.script_after = Some("-- after".into());
+        def.views = vec![v];
+        let sql = gen(&def, &ScriptOptions::default()).unwrap();
+        let fk = sql.find("FOREIGN KEY").unwrap();
+        let before = sql.find("-- before;\n").unwrap();
+        let create = sql.find("CREATE VIEW \"shop\".\"v_orders\" AS select 1;\n").unwrap();
+        let after = sql.find("-- after;\n").unwrap();
+        let end = sql.find("-- end;").unwrap();
+        assert!(fk < before && before < create && create < after && after < end, "{sql}");
+    }
+
+    #[test]
+    fn views_in_dependency_order() {
+        let mut def = with(vec![]);
+        let mut v2 = view("v2", "select 2");
+        v2.depends_on_views = vec!["v1".into()];
+        def.views = vec![v2, view("v1", "select 1")];
+        let sql = gen(&def, &ScriptOptions::default()).unwrap();
+        assert!(sql.find("\"v1\"").unwrap() < sql.find("\"v2\"").unwrap(), "{sql}");
+    }
+
+    #[test]
+    fn view_cycle_is_refused() {
+        let mut def = with(vec![]);
+        let mut v1 = view("v1", "select 1");
+        v1.depends_on_views = vec!["v2".into()];
+        let mut v2 = view("v2", "select 2");
+        v2.depends_on_views = vec!["v1".into()];
+        def.views = vec![v1, v2];
+        assert_eq!(
+            gen(&def, &ScriptOptions::default()),
+            Err("As views v1, v2 dependem umas das outras".to_string())
+        );
+    }
+
+    #[test]
+    fn drop_views_first() {
+        let mut def = orders_customers();
+        let mut v2 = view("v2", "select 2");
+        v2.depends_on_views = vec!["v1".into()];
+        def.views = vec![view("v1", "select 1"), v2];
+        let sql = gen(&def, &ScriptOptions { drop: true, ..Default::default() }).unwrap();
+        let d2 = sql.find("DROP VIEW IF EXISTS \"shop\".\"v2\"").unwrap();
+        let d1 = sql.find("DROP VIEW IF EXISTS \"shop\".\"v1\"").unwrap();
+        let fk = sql.find("DROP CONSTRAINT").unwrap();
+        assert!(d2 < d1 && d1 < fk, "{sql}");
+    }
+
+    #[test]
+    fn view_comment() {
+        let mut def = with(vec![]);
+        let mut v = view("v1", "select 1");
+        v.comment = Some("it's a view".into());
+        def.views = vec![v];
+        let opts = ScriptOptions { comments: true, ..Default::default() };
+        let pg = gen(&def, &opts).unwrap();
+        assert!(pg.contains("COMMENT ON VIEW \"shop\".\"v1\" IS 'it''s a view';"), "{pg}");
+        assert!(pg.find("CREATE VIEW").unwrap() < pg.find("COMMENT ON VIEW").unwrap(), "{pg}");
+        let my = script(&def, &structure(), "mysql", &opts).unwrap();
+        assert!(!my.contains("COMMENT"), "{my}");
+        assert!(my.contains("CREATE VIEW `shop`.`v1` AS select 1;"), "{my}");
+    }
+
+    #[test]
+    fn only_selects_views() {
+        let mut def = orders_customers();
+        def.views = vec![view("v1", "select 1"), view("v2", "select 2")];
+        let sql = gen(&def, &ScriptOptions { only: Some(vec!["v1".into()]), ..Default::default() }).unwrap();
+        assert!(sql.contains("\"v1\"") && !sql.contains("\"v2\"") && !sql.contains("CREATE TABLE"), "{sql}");
+        let new = gen(&def, &ScriptOptions { only_new: true, ..Default::default() }).unwrap();
+        assert!(new.contains("\"v1\"") && new.contains("\"v2\""), "{new}");
     }
 }
