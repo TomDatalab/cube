@@ -79,6 +79,91 @@ const GlobalStyles = createGlobalStyle`
     white-space: nowrap;
   }
 
+  /* Files with line numbers: gutter and code share font and line height. */
+  .numbered-code {
+    display: flex;
+    margin-top: 16px;
+    overflow: auto;
+    border: 1px solid var(--pg-line, #eee);
+    border-radius: 6px;
+    background: var(--pg-surface, #fff);
+  }
+
+  .numbered-code pre,
+  .numbered-code pre[class*="language-"],
+  .numbered-code code[class*="language-"],
+  .numbered-code textarea {
+    font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+    font-size: 13px;
+    line-height: 20px;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  /* A block, so the code's own lines set the height, not the pre's font. */
+  .numbered-code code[class*="language-"] {
+    display: block;
+  }
+
+  .numbered-code pre[class*="language-"],
+  .numbered-code > pre {
+    padding: 8px 12px;
+  }
+
+  .numbered-code-gutter {
+    flex: none;
+    margin: 0;
+    padding: 8px 8px 8px 12px !important;
+    text-align: right;
+    user-select: none;
+    opacity: 0.45;
+    border-right: 1px solid var(--pg-line, #eee);
+  }
+
+  .numbered-code-sticky {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--pg-surface, #fff);
+  }
+
+  .numbered-code-editor {
+    overflow: hidden;
+  }
+
+  .numbered-code-gutter-scroll {
+    flex: none;
+    overflow: hidden;
+  }
+
+  /* Room for the textarea's own horizontal scrollbar, so the last numbers
+     still line up when it is scrolled to the end. */
+  .numbered-code-gutter-scroll .numbered-code-gutter {
+    min-height: 100%;
+    padding-bottom: 32px !important;
+  }
+
+  .numbered-code-editor textarea {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 8px 12px;
+    border: 0;
+    outline: none;
+    resize: none;
+    overflow: auto;
+    color: inherit;
+    background: transparent;
+  }
+
+  .numbered-code-editor:focus-within {
+    border-color: var(--pg-accent, #2f5597);
+  }
+
+  .numbered-code-editor textarea:disabled {
+    opacity: 0.6;
+  }
+
   .schema-tree-column-type {
     flex: none;
     margin-left: auto;

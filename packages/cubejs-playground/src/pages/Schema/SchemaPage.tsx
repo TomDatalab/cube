@@ -1007,7 +1007,7 @@ export function SchemaPage({ history }: RouterProps) {
             >
               <Input
                 allowClear
-                style={{ flex: '1 1 140px', minWidth: 0 }}
+                style={{ flex: '1 1 80px', minWidth: 0 }}
                 placeholder="Search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
