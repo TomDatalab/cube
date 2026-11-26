@@ -34,6 +34,8 @@ import {
 import { TableFlowNode, TableNode } from './TableNode';
 import { PanelToggle } from '../PanelToggle';
 import { useCollapsed } from '../useCollapsed';
+import { useResizable } from '../useResizable';
+import { ResizeHandle } from '../ResizeHandle';
 
 // What a table of the panel carries while dragged to the canvas.
 export const TABLE_MIME = 'application/x-cube-table';
@@ -109,6 +111,9 @@ function definitionOf(value: unknown): ModelDefinition {
   };
 }
 
+// The tables panel's width in px: where it starts and how far its edge drags.
+const PANEL_WIDTH = { initial: 256, min: 180, max: 520 };
+
 // A table of the panel: dragged to the canvas, its columns shown on demand.
 function TableItem({
   ds, schema, table, columns, disabled, dataSource,
@@ -183,6 +188,7 @@ function TablePanel({
 }) {
   const [search, setSearch] = useState('');
   const [collapsed, toggle] = useCollapsed('cubePlayground.modelTablesCollapsed');
+  const [width, setWidth] = useResizable('cubePlayground.modelTablesWidth', PANEL_WIDTH.initial, PANEL_WIDTH.min, PANEL_WIDTH.max);
   const needle = search.trim().toLowerCase();
   const tree = Object.entries(tables || {}).map(([ds, schemas]) => ({
     ds,
@@ -208,8 +214,10 @@ function TablePanel({
   return (
     <aside
       data-slot="model-table-panel"
-      className="tw:flex tw:w-64 tw:shrink-0 tw:flex-col tw:gap-2 tw:overflow-hidden tw:border-r tw:p-3"
+      style={{ width }}
+      className="tw:relative tw:flex tw:shrink-0 tw:flex-col tw:gap-2 tw:border-r tw:p-3"
     >
+      <ResizeHandle width={width} min={PANEL_WIDTH.min} max={PANEL_WIDTH.max} label="tables" onResize={setWidth} />
       <div className="tw:flex tw:items-center tw:gap-1">
         <div className="tw:min-w-0 tw:flex-1">
           <SearchInput value={search} onChange={setSearch} placeholder="Search tables" />

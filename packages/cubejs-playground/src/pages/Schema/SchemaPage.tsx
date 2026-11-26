@@ -33,6 +33,8 @@ import {
 import { useOpenBlock } from './useOpenBlock';
 import { useCollapsed } from './useCollapsed';
 import { PanelToggle } from './PanelToggle';
+import { useResizable } from './useResizable';
+import { ResizeHandle } from './ResizeHandle';
 import { ModelEditor } from './models/ModelEditor';
 import { emptyDefinition } from './models/modelGraph';
 import { NameDialog } from '../Admin/NameDialog';
@@ -52,6 +54,9 @@ import {
 } from './tree';
 
 const { Content, Sider } = Layout;
+
+// The tree's width in px: where it starts and how far its edge drags.
+const TREE_WIDTH = { initial: 340, min: 220, max: 640 };
 
 const PAGE_SIZE = 50;
 const MORE_KEY = 'more:';
@@ -246,6 +251,7 @@ export function SchemaPage({ history }: RouterProps) {
   const rbac = useRbac();
   const token = rbac.session?.token;
   const [treeCollapsed, toggleTree] = useCollapsed('cubePlayground.schemaTreeCollapsed');
+  const [treeWidth, setTreeWidth] = useResizable('cubePlayground.schemaTreeWidth', TREE_WIDTH.initial, TREE_WIDTH.min, TREE_WIDTH.max);
   const api = useMemo(
     () => modelApi(rbac, playgroundContext.basePath),
     [rbac.isAdmin, token, playgroundContext.basePath]
@@ -979,7 +985,9 @@ export function SchemaPage({ history }: RouterProps) {
   return (
     <Layout style={{ height: '100%' }}>
       <Sider
-        width={340}
+        width={treeWidth}
+        // No width transition: the edge follows the pointer while dragged.
+        style={{ position: 'relative', transition: 'none' }}
         collapsible
         collapsed={treeCollapsed}
         collapsedWidth={48}
@@ -992,9 +1000,14 @@ export function SchemaPage({ history }: RouterProps) {
           </div>
         ) : (
           <>
-            <div style={{ display: 'flex', gap: 8, padding: 8, alignItems: 'center' }}>
+            {/* A narrow tree wraps the button and the toggle under the search. */}
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: 8, padding: 8, alignItems: 'center',
+            }}
+            >
               <Input
                 allowClear
+                style={{ flex: '1 1 140px', minWidth: 0 }}
                 placeholder="Search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -1036,9 +1049,16 @@ export function SchemaPage({ history }: RouterProps) {
                   </ButtonDropdown>
                 </span>
               </Tooltip>
-              <PanelToggle collapsed={false} onToggle={toggleTree} label="the data model tree" />
+              <PanelToggle collapsed={false} onToggle={toggleTree} label="the data model tree" className="tw:ml-auto" />
             </div>
             {renderTree()}
+            <ResizeHandle
+              width={treeWidth}
+              min={TREE_WIDTH.min}
+              max={TREE_WIDTH.max}
+              label="the data model tree"
+              onResize={setTreeWidth}
+            />
           </>
         )}
       </Sider>
