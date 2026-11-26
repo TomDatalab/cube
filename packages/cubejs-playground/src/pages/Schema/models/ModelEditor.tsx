@@ -26,10 +26,17 @@ import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
   End, ModelDefinition, Place, Point, addDraftTable, addTable, canConnect, connect, drafts,
-  emptyDefinition, joinLabel, layout, placeTables, removeJoin, removeTable, setJoin, showAllJoins, unlinked,
+  emptyDefinition, joinLabel, layout, removeJoin, removeTable, setJoin, showAllJoins, unlinked,
   updateDraftTable, updateJoin, withFormat,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
+import { NoteFlowNode, NoteNode } from './NoteNode';
+import { AreaFlowNode, AreaNode } from './AreaNode';
+import { ViewFlowNode, ViewNode } from './ViewNode';
+import { DependencyEdge, DependencyFlowEdge } from './DependencyEdge';
+import {
+  addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, sendToBack,
+} from './objects';
 import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from './clipboard';
@@ -60,8 +67,12 @@ export { TABLE_MIME };
 // file's) is not retried.
 const EDITED = 'O cubo foi editado desde o último build';
 
-const NODE_TYPES = { table: TableNode };
-const EDGE_TYPES = { reference: ReferenceEdge };
+const NODE_TYPES = {
+  table: TableNode, note: NoteNode, area: AreaNode, view: ViewNode,
+};
+const EDGE_TYPES = { reference: ReferenceEdge, dependency: DependencyEdge };
+// Areas are always behind everything else.
+const AREA_Z = -1000;
 // Where a paste lands from what was copied.
 const PASTE_OFFSET = 20;
 const sameIds = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -82,6 +93,9 @@ const FLOW_STYLE = {
 } as CSSProperties;
 
 type ModelApi = ReturnType<typeof modelApi>;
+type CanvasNode = TableFlowNode | NoteFlowNode | AreaFlowNode | ViewFlowNode;
+// A dragged area and what lies entirely within it, where each started.
+type AreaDrag = { area: string; from: Point; members: { id: string; from: Point }[] };
 type Columns = { name: string; type: string }[];
 
 export type ModelEditorProps = {
@@ -251,7 +265,9 @@ function Editor({
   joinsRef.current = def.joins;
   const foundEdge = selectedEdge === null ? -1 : def.joins.findIndex((j) => j.id === selectedEdge);
   const edgeAt: number | null = foundEdge < 0 ? null : foundEdge;
-  const selected = selection.length ? parseNodeId(selection[0]).alias : null;
+  const first = selection.length ? objectOf(selection[0]) : null;
+  // The selected table, for what only tables have.
+  const selected = first?.kind === 'table' ? first.id : null;
   const [clip, setClip] = useState<Clip | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
   // The reasons the ModelWriter gave for a change that does not compile.
@@ -260,7 +276,7 @@ function Editor({
   if (ask) {
     lastAsk.current = ask;
   }
-  const [nodes, setNodes] = useState<TableFlowNode[]>([]);
+  const [nodes, setNodes] = useState<CanvasNode[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -355,9 +371,9 @@ function Editor({
   }, []);
 
   const onResize = useCallback((nodeId: string, box: { x: number; y: number; width: number; height: number }) => {
-    const { alias, shortcut } = parseNodeId(nodeId);
+    const { shortcut } = objectOf(nodeId);
     const place: Place = shortcut ? { x: box.x, y: box.y } : box;
-    setDef((d) => placeTables(d, new Map([[shortcut ? nodeId : alias, place]])));
+    setDef((d) => placeObjects(d, new Map([[nodeId, place]])));
     revision.current += 1;
     setDirty(true);
   }, []);
@@ -365,63 +381,122 @@ function Editor({
   // The canvas' nodes follow the definition, keeping what React Flow
   // measured and selected on them.
   useEffect(() => {
-    setNodes((previous) => def.tables.flatMap((t) => {
-      const columns = t.draft
-        ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
-        : columnsOf(t.schema, t.table);
-      const principal = def.primary === t.alias;
-      const keys = [
-        ...(principal && def.primaryKey ? [def.primaryKey] : []),
-        ...(t.draft?.columns.filter((c) => c.primaryKey).map((c) => c.name) ?? []),
-      ];
-      const linked = def.joins.flatMap((j) => [j.from, j.to])
-        .filter((e) => e.alias === t.alias)
-        .map((e) => e.column);
-      const fks = def.joins.flatMap((j) => {
-        if (j.relationship === 'many_to_one') {
-          return [j.from];
-        }
-        return j.relationship === 'one_to_many' ? [j.to] : [];
-      }).filter((e) => e.alias === t.alias).map((e) => e.column);
-      const data = {
-        alias: t.alias,
-        schema: t.schema,
-        table: t.table,
-        columns: columns ?? [],
-        principal,
-        missing: !columns,
-        draft: Boolean(t.draft),
-        color: t.color,
-        keys,
-        linked,
-        fks,
-        showTypes: def.settings?.format?.showTypes ?? true,
-        showNullable: def.settings?.format?.showNullable ?? false,
-        nullable: t.draft?.columns.filter((c) => c.nullable && !c.primaryKey).map((c) => c.name) ?? [],
-        fixedSize: t.width !== undefined || t.height !== undefined,
-        onResize,
-        onRemove,
-        collapsed: collapsedTables.includes(t.alias),
-        onToggle: toggleTable,
-        picked: picked?.alias === t.alias ? picked.column : null,
-        onPick,
-      };
-      // Undefined, not absent: the old node may still carry a size.
-      const size = { width: t.width, height: t.height };
-      const at = (id: string, x: number, y: number, shortcut?: string): TableFlowNode => ({
-        ...previous.find((n) => n.id === id),
-        id,
-        type: 'table' as const,
-        position: { x, y },
-        ...size,
-        selected: selection.includes(id),
-        data: shortcut ? { ...data, shortcut } : data,
+    setNodes((previous) => {
+      const kept = (id: string) => previous.find((n) => n.id === id);
+      const showTypes = def.settings?.format?.showTypes ?? true;
+      const areas = (def.areas ?? []).map((a): AreaFlowNode => {
+        const id = nodeIdOf('area', a.id);
+        return {
+          ...(kept(id) as AreaFlowNode | undefined),
+          id,
+          type: 'area',
+          position: { x: a.x, y: a.y },
+          width: a.width,
+          height: a.height,
+          zIndex: AREA_Z + (a.z ?? 0),
+          selected: selection.includes(id),
+          data: {
+            id: a.id, name: a.name, fill: a.fill, border: a.border, onResize,
+          },
+        };
       });
-      return [
-        at(t.alias, t.x, t.y),
-        ...(t.shortcuts ?? []).map((sc) => at(shortcutNodeId(t.alias, sc.id), sc.x, sc.y, sc.id)),
-      ];
-    }));
+      const views = (def.views ?? []).map((v): ViewFlowNode => {
+        const id = nodeIdOf('view', v.id);
+        return {
+          ...(kept(id) as ViewFlowNode | undefined),
+          id,
+          type: 'view',
+          position: { x: v.x, y: v.y },
+          width: v.width,
+          height: v.height,
+          zIndex: v.z ?? 0,
+          selected: selection.includes(id),
+          data: {
+            id: v.id,
+            name: v.name,
+            columns: v.columns,
+            showTypes,
+            fixedSize: v.width !== undefined || v.height !== undefined,
+            onResize,
+          },
+        };
+      });
+      const notes = (def.notes ?? []).map((n): NoteFlowNode => {
+        const id = nodeIdOf('note', n.id);
+        return {
+          ...(kept(id) as NoteFlowNode | undefined),
+          id,
+          type: 'note',
+          position: { x: n.x, y: n.y },
+          width: n.width,
+          height: n.height,
+          zIndex: n.z ?? 0,
+          selected: selection.includes(id),
+          data: {
+            id: n.id, text: n.text, color: n.color, onResize,
+          },
+        };
+      });
+      const tableNodes = def.tables.flatMap((t) => {
+        const columns = t.draft
+          ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
+          : columnsOf(t.schema, t.table);
+        const principal = def.primary === t.alias;
+        const keys = [
+          ...(principal && def.primaryKey ? [def.primaryKey] : []),
+          ...(t.draft?.columns.filter((c) => c.primaryKey).map((c) => c.name) ?? []),
+        ];
+        const linked = def.joins.flatMap((j) => [j.from, j.to])
+          .filter((e) => e.alias === t.alias)
+          .map((e) => e.column);
+        const fks = def.joins.flatMap((j) => {
+          if (j.relationship === 'many_to_one') {
+            return [j.from];
+          }
+          return j.relationship === 'one_to_many' ? [j.to] : [];
+        }).filter((e) => e.alias === t.alias).map((e) => e.column);
+        const data = {
+          alias: t.alias,
+          schema: t.schema,
+          table: t.table,
+          columns: columns ?? [],
+          principal,
+          missing: !columns,
+          draft: Boolean(t.draft),
+          color: t.color,
+          keys,
+          linked,
+          fks,
+          showTypes,
+          showNullable: def.settings?.format?.showNullable ?? false,
+          nullable: t.draft?.columns.filter((c) => c.nullable && !c.primaryKey).map((c) => c.name) ?? [],
+          fixedSize: t.width !== undefined || t.height !== undefined,
+          onResize,
+          onRemove,
+          collapsed: collapsedTables.includes(t.alias),
+          onToggle: toggleTable,
+          picked: picked?.alias === t.alias ? picked.column : null,
+          onPick,
+        };
+        // Undefined, not absent: the old node may still carry a size.
+        const size = { width: t.width, height: t.height };
+        const at = (id: string, x: number, y: number, shortcut?: string): TableFlowNode => ({
+          ...(kept(id) as TableFlowNode | undefined),
+          id,
+          type: 'table' as const,
+          position: { x, y },
+          ...size,
+          zIndex: 0,
+          selected: selection.includes(id),
+          data: shortcut ? { ...data, shortcut } : data,
+        });
+        return [
+          at(t.alias, t.x, t.y),
+          ...(t.shortcuts ?? []).map((sc) => at(shortcutNodeId(t.alias, sc.id), sc.x, sc.y, sc.id)),
+        ];
+      });
+      return [...areas, ...tableNodes, ...views, ...notes];
+    });
   }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection]);
 
   const onMovePoint = useCallback((index: number, pointIndex: number, to: Point) => {
@@ -434,7 +509,7 @@ function Editor({
     setDirty(true);
   }, [setDef]);
 
-  const edges: ReferenceFlowEdge[] = useMemo(() => def.joins.flatMap((j, index) => (j.hidden ? [] : [{
+  const references: ReferenceFlowEdge[] = useMemo(() => def.joins.flatMap((j, index) => (j.hidden ? [] : [{
     id: `join-${index}`,
     source: j.from.alias,
     sourceHandle: j.from.column,
@@ -448,10 +523,33 @@ function Editor({
     },
   }])), [def.joins, selectedEdge, onMovePoint]);
 
+  // A line from each view to every table or view it depends on that exists.
+  const dependencies: DependencyFlowEdge[] = useMemo(() => {
+    const views = def.views ?? [];
+    return views.flatMap((v) => [
+      ...v.dependsOnTables.filter((alias) => def.tables.some((t) => t.alias === alias)),
+      ...v.dependsOnViews.filter((id) => views.some((x) => x.id === id)).map((id) => nodeIdOf('view', id)),
+    ].map((target) => ({
+      id: `dep-${v.id}-${target}`,
+      source: nodeIdOf('view', v.id),
+      sourceHandle: 'node',
+      target,
+      targetHandle: 'node',
+      type: 'dependency' as const,
+      selectable: false,
+      focusable: false,
+      data: {},
+    })));
+  }, [def.views, def.tables]);
+  const edges = useMemo(
+    () => [...references, ...dependencies] as (ReferenceFlowEdge | DependencyFlowEdge)[],
+    [references, dependencies]
+  );
+
   // The selection follows only what the user does (React Flow's `select`
   // changes): listening to onSelectionChange too would echo the selection
   // the editor itself hands React Flow, and the two chase each other.
-  const onNodesChange = useCallback((changes: NodeChange<TableFlowNode>[]) => {
+  const onNodesChange = useCallback((changes: NodeChange<CanvasNode>[]) => {
     const picks = changes.filter((c): c is NodeSelectionChange => c.type === 'select');
     if (picks.length) {
       setSelection((was) => {
@@ -477,7 +575,8 @@ function Editor({
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     changes.forEach((c) => {
-      if (c.type !== 'select') {
+      // Dependency lines are not selectable: only references are.
+      if (c.type !== 'select' || !c.id.startsWith('join-')) {
         return;
       }
       const index = Number(c.id.replace('join-', ''));
@@ -491,17 +590,79 @@ function Editor({
     });
   }, []);
 
-  const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
-    if (def.tables.some((t) => t.alias === node.id && t.draft)) {
+  const onNodeDoubleClick: NodeMouseHandler<CanvasNode> = (_event, node) => {
+    const { kind } = objectOf(node.id);
+    if (kind === 'note' || kind === 'view' || def.tables.some((t) => t.alias === node.id && t.draft)) {
       setSelection([node.id]);
       setSelectedEdge(null);
       setFocusKey((k) => k + 1);
     }
   };
 
-  // One step of history per drag, whatever it moved: tables and shortcuts.
-  const onNodeDragStop: OnNodeDrag<TableFlowNode> = (_event, _node, dragged) => {
-    change(placeTables(def, new Map(dragged.map((n) => [n.id, { x: n.position.x, y: n.position.y }]))));
+  // The box of every node on the canvas, as React Flow sized it.
+  const boxOf = (n: CanvasNode): Bounds => ({
+    id: n.id,
+    x: n.position.x,
+    y: n.position.y,
+    width: n.width ?? n.measured?.width ?? 0,
+    height: n.height ?? n.measured?.height ?? 0,
+  });
+
+  // A dragged area takes along what lies entirely within it; what is dragged
+  // itself already moves, and moves once.
+  const areaDrags = useRef<AreaDrag[]>([]);
+  const onNodeDragStart: OnNodeDrag<CanvasNode> = (_event, _node, dragged) => {
+    const all = nodes.map(boxOf);
+    const taken = new Set(dragged.map((n) => n.id));
+    areaDrags.current = dragged.filter((n) => objectOf(n.id).kind === 'area').flatMap((n) => {
+      const area = all.find((b) => b.id === n.id);
+      if (!area) {
+        return [];
+      }
+      const members = insideArea(area, all).filter((id) => !taken.has(id));
+      members.forEach((id) => taken.add(id));
+      return [{
+        area: n.id,
+        from: { x: area.x, y: area.y },
+        members: members.map((id) => {
+          const b = all.find((x) => x.id === id) as Bounds;
+          return { id, from: { x: b.x, y: b.y } };
+        }),
+      }];
+    });
+  };
+
+  // Where the members of the dragged areas are now.
+  const membersAt = (dragged: CanvasNode[]): Map<string, Point> => {
+    const places = new Map<string, Point>();
+    areaDrags.current.forEach((d) => {
+      const now = dragged.find((n) => n.id === d.area)?.position;
+      if (!now) {
+        return;
+      }
+      d.members.forEach((m) => places.set(m.id, {
+        x: m.from.x + now.x - d.from.x, y: m.from.y + now.y - d.from.y,
+      }));
+    });
+    return places;
+  };
+
+  const onNodeDrag: OnNodeDrag<CanvasNode> = (_event, _node, dragged) => {
+    const places = membersAt(dragged);
+    if (places.size) {
+      setNodes((ns) => ns.map((n) => {
+        const at = places.get(n.id);
+        return at ? { ...n, position: at } : n;
+      }));
+    }
+  };
+
+  // One step of history per drag, whatever it moved, an area's contents too.
+  const onNodeDragStop: OnNodeDrag<CanvasNode> = (_event, _node, dragged) => {
+    const places = new Map<string, Place>(dragged.map((n) => [n.id, { x: n.position.x, y: n.position.y }]));
+    membersAt(dragged).forEach((at, id) => places.set(id, at));
+    areaDrags.current = [];
+    change(placeObjects(def, places));
   };
 
   const copySelection = () => {
@@ -510,8 +671,9 @@ function Editor({
     }
   };
 
+  const canPaste = Boolean(clip && (clip.tables.length || clip.notes.length || clip.areas.length || clip.views.length));
   const pasteClip = () => {
-    if (!clip?.tables.length) {
+    if (!clip || !canPaste) {
       return;
     }
     const result = paste(def, clip, PASTE_OFFSET);
@@ -609,6 +771,9 @@ function Editor({
   };
 
   const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
+    if (!edge.id.startsWith('join-')) {
+      return;
+    }
     const index = Number((edge.data as { index?: number } | undefined)?.index);
     if (def.joins[index]) {
       setSelection([]);
@@ -871,35 +1036,30 @@ function Editor({
   // The selected nodes as boxes on the canvas, in selection order.
   const boxes = (): Bounds[] => selection.flatMap((id) => {
     const n = nodes.find((x) => x.id === id);
-    if (!n) {
-      return [];
-    }
-    return [{
-      id,
-      x: n.position.x,
-      y: n.position.y,
-      width: n.width ?? n.measured?.width ?? 0,
-      height: n.height ?? n.measured?.height ?? 0,
-    }];
+    return n ? [boxOf(n)] : [];
   });
 
   const moveTo = (places: Map<string, { x: number; y: number }>) => {
     if (places.size) {
-      change(placeTables(def, places));
+      change(placeObjects(def, places));
     }
   };
 
+  // A shortcut is sized as its table.
+  const sizeKey = (nodeId: string) => (objectOf(nodeId).kind === 'table' ? parseNodeId(nodeId).alias : nodeId);
   const onSize = (kind: 'fit' | 'width' | 'height') => {
     const sizes = new Map<string, Place>();
     if (kind === 'fit') {
-      selection.forEach((id) => sizes.set(parseNodeId(id).alias, { width: null, height: null }));
+      selection.forEach((id) => sizes.set(sizeKey(id), { width: null, height: null }));
     } else {
-      sameSize(boxes(), kind).forEach((size, id) => sizes.set(parseNodeId(id).alias, size));
+      sameSize(boxes(), kind).forEach((size, id) => sizes.set(sizeKey(id), size));
     }
     if (sizes.size) {
-      change(placeTables(def, sizes));
+      change(placeObjects(def, sizes));
     }
   };
+
+  const canOrder = selection.some((id) => ['note', 'area'].includes(objectOf(id).kind));
 
   // Where a reference is drawn now, as its edge draws it.
   const referencePath = (index: number) => {
@@ -986,8 +1146,8 @@ function Editor({
 
   // The reference tool, as Redgate's: a click on the parent, then on the
   // child; the reference is made at once, a new child getting the column.
-  const onNodeClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
-    if (tool !== 'reference') {
+  const onNodeClick: NodeMouseHandler<CanvasNode> = (_event, node) => {
+    if (tool !== 'reference' || objectOf(node.id).kind !== 'table') {
       return;
     }
     const { alias } = parseNodeId(node.id);
@@ -1005,9 +1165,32 @@ function Editor({
     }
   };
 
-  const toolKeys = Object.fromEntries(TOOLS.filter((t) => !t.soon).map((t, i) => [
-    String(i + 1), () => chooseTool(t.tool),
+  // Each tool keeps its own number, whatever is not ready yet.
+  const toolKeys = Object.fromEntries(TOOLS.filter((t) => !t.soon).map((t) => [
+    String(TOOLS.indexOf(t) + 1), () => chooseTool(t.tool),
   ]));
+
+  // The view, note and area tools place theirs where the canvas is clicked,
+  // select it and go back to Select.
+  const onPaneClick = (e: { clientX: number; clientY: number }) => {
+    setPicked(null);
+    setSelectedEdge(null);
+    if (tool !== 'note' && tool !== 'area' && tool !== 'view') {
+      return;
+    }
+    const p = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    let result: { def: ModelDefinition; id: string };
+    if (tool === 'note') {
+      result = addNote(def, p.x, p.y);
+    } else if (tool === 'area') {
+      result = addArea(def, p.x, p.y);
+    } else {
+      result = addView(def, p.x, p.y, def.tables[0]?.schema ?? 'public');
+    }
+    change(result.def);
+    setSelection([nodeIdOf(tool, result.id)]);
+    setTool('select');
+  };
 
   useEditorShortcuts({
     ...toolKeys,
@@ -1032,7 +1215,7 @@ function Editor({
     'mod+c': copySelection,
     'mod+v': pasteClip,
     'mod+x': cutSelection,
-    'mod+a': () => setSelection(nodes.map((n) => n.id)),
+    'mod+a': () => setSelection(nodeIdsOf(def)),
     delete: deleteSelection,
   }, loaded && !loadError && !joinEdit && !tableEdit && !createAsk && !ask && !sqlAsk);
 
@@ -1069,6 +1252,8 @@ function Editor({
     propertiesOf = { kind: 'reference', index: edgeAt };
   } else if (selected && def.tables.some((t) => t.alias === selected)) {
     propertiesOf = { kind: 'table', alias: selected };
+  } else if (first && first.kind !== 'table' && nodeIdsOf(def).includes(selection[0])) {
+    propertiesOf = { kind: first.kind, id: first.id };
   }
   const editing = joinEdit?.kind === 'edit' ? def.joins[joinEdit.index] : undefined;
   const editedTable = tableEdit?.kind === 'edit' ? def.tables.find((t) => t.alias === tableEdit.alias) : undefined;
@@ -1126,7 +1311,7 @@ function Editor({
         }}
         edit={{
           canCopy: selection.length > 0,
-          canPaste: Boolean(clip?.tables.length),
+          canPaste,
           canDelete: selection.length > 0 || selectedEdge !== null,
           onCopy: copySelection,
           onPaste: pasteClip,
@@ -1140,6 +1325,11 @@ function Editor({
           onAlign: (mode: AlignMode) => moveTo(align(boxes(), mode)),
           onDistribute: (mode: DistributeMode) => moveTo(distribute(boxes(), mode)),
           onArrange: arrange,
+          order: {
+            canOrder,
+            onFront: () => change(bringToFront(def, selection)),
+            onBack: () => change(sendToBack(def, selection)),
+          },
         }}
         references={{
           edgeSelected: edgeAt !== null,
@@ -1181,6 +1371,8 @@ function Editor({
             onPickIssue={(issue) => {
               if (issue.target.kind === 'table') {
                 pickNode(issue.target.alias);
+              } else if (issue.target.kind === 'view') {
+                pickNode(nodeIdOf('view', issue.target.id));
               } else {
                 const { id } = issue.target;
                 const at = def.joins.findIndex((j) => j.id === id);
@@ -1210,13 +1402,12 @@ function Editor({
             colorMode={theme}
             style={FLOW_STYLE}
             onNodesChange={onNodesChange}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
-            onPaneClick={() => {
-              setPicked(null);
-              setSelectedEdge(null);
-            }}
+            onPaneClick={onPaneClick}
             minZoom={0.25}
             maxZoom={4}
             connectionMode={ConnectionMode.Loose}
@@ -1284,7 +1475,8 @@ function Editor({
             dialect={dialect}
             issues={problemsFound}
             focusKey={focusKey}
-            onSqlPreview={dialect ? (alias) => openSql({ only: [alias] }) : undefined}
+            // A table by its alias, a view by its id.
+            onSqlPreview={dialect ? (nodeId) => openSql({ only: [objectOf(nodeId).id] }) : undefined}
             onRenamed={(from, to) => setSelection((was) => was.map((id) => {
               const { alias, shortcut } = parseNodeId(id);
               if (alias !== from) {

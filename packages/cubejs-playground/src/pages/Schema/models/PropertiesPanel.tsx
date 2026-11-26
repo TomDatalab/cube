@@ -21,7 +21,8 @@ type Columns = { name: string; type: string }[];
 type ModelSelected = { kind: 'model' };
 type TableSelected = { kind: 'table'; alias: string };
 type ReferenceSelected = { kind: 'reference'; index: number };
-export type Selected = ModelSelected | TableSelected | ReferenceSelected;
+type ObjectSelected = { kind: 'note' | 'area' | 'view'; id: string };
+export type Selected = ModelSelected | TableSelected | ReferenceSelected | ObjectSelected;
 
 export type PropertiesPanelProps = {
   def: ModelDefinition;
@@ -48,6 +49,9 @@ const TITLE: Record<Selected['kind'], string> = {
   model: 'Model properties',
   table: 'Table properties',
   reference: 'Reference properties',
+  note: 'Text note properties',
+  area: 'Subject area properties',
+  view: 'View properties',
 };
 
 function ModelProperties({

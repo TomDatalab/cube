@@ -10,7 +10,7 @@ import {
 import { cn } from '@/lib/utils';
 
 import type { TableColor } from './modelGraph';
-import { NODE_HANDLE_STYLE } from './ViewNode';
+import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type TableNodeData = {
   alias: string;

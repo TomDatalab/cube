@@ -27,13 +27,13 @@ export const TOOLS: {
     tool: 'reference', label: 'New reference', hint: '(4) Add new reference', icon: Cable,
   },
   {
-    tool: 'view', label: 'New view', hint: '(5) Add new view', icon: TableProperties, soon: true,
+    tool: 'view', label: 'New view', hint: '(5) Add new view', icon: TableProperties,
   },
   {
-    tool: 'note', label: 'New note', hint: '(6) Add new note', icon: StickyNote, soon: true,
+    tool: 'note', label: 'New note', hint: '(6) Add new note', icon: StickyNote,
   },
   {
-    tool: 'area', label: 'New area', hint: '(7) Add new area', icon: Square, soon: true,
+    tool: 'area', label: 'New area', hint: '(7) Add new area', icon: Square,
   },
   {
     tool: 'cube', label: 'New cube', hint: '(8) Add new cube', icon: Box, soon: true,

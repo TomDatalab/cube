@@ -5,6 +5,7 @@ import type { Node, NodeProps } from '@xyflow/react';
 import { cn } from '@/lib/utils';
 
 import type { ViewColumn } from './modelGraph';
+import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type ViewNodeData = {
   id: string;
@@ -17,15 +18,6 @@ export type ViewNodeData = {
 };
 
 export type ViewFlowNode = Node<ViewNodeData, 'view'>;
-
-// The node-level handle a dependency line ends on: invisible, top centre.
-// Inline style: React Flow's stylesheet is unlayered (see TableNode).
-export const NODE_HANDLE_STYLE = {
-  opacity: 0,
-  pointerEvents: 'none' as const,
-  top: 0,
-  left: '50%',
-};
 
 type ViewNodeProps = Pick<NodeProps<ViewFlowNode>, 'data'> & { id?: string; selected?: boolean };
 
@@ -59,8 +51,10 @@ export const ViewNode = memo(({ id, data, selected }: ViewNodeProps) => (
       <div data-slot="model-view-name" className="tw:truncate tw:font-bold">{data.name}</div>
     </div>
     <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
-      {data.columns.map((c) => (
-        <li key={c.name} data-column={c.name} className="tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4">
+      {data.columns.map((c, i) => (
+        // Names may repeat until validation has them fixed.
+        // eslint-disable-next-line react/no-array-index-key
+        <li key={i} data-column={c.name} className="tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4">
           <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
           {data.showTypes ? <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span> : null}
         </li>

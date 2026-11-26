@@ -48,6 +48,8 @@ export type ModelToolbarProps = {
     onAlign(mode: AlignMode): void;
     onDistribute(mode: DistributeMode): void;
     onArrange(): void;
+    // Order applies to notes and areas only.
+    order: { canOrder: boolean; onFront(): void; onBack(): void };
   };
   references: {
     edgeSelected: boolean;
@@ -266,7 +268,16 @@ export function ModelToolbar({
         >
           <AlignVerticalDistributeCenter />
         </Menu>
-        <Menu label="Order" disabled items={[]}><Layers /></Menu>
+        <Menu
+          label="Order"
+          disabled={!arrange.order.canOrder}
+          items={[
+            { label: 'Bring to front', onClick: arrange.order.onFront },
+            { label: 'Send to back', onClick: arrange.order.onBack },
+          ]}
+        >
+          <Layers />
+        </Menu>
         <Menu
           label="References"
           disabled={!references.edgeSelected && !references.anyHidden}

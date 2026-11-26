@@ -1042,12 +1042,13 @@ describe('ModelEditor', () => {
       expect(flow.props.nodes.find((n: any) => n.id === 'orders').selected).toBe(true);
     });
 
-    it('the palette\'s table tool opens the new-table dialog; tools 5-8 are disabled', async () => {
+    it('the palette\'s table tool opens the new-table dialog; only the cube tool is disabled', async () => {
       await render();
       const palette = document.querySelector('[data-slot="model-tool-palette"]')!;
       const labels = [...palette.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'));
       expect(labels).toEqual(['Select', 'Select area', 'New table', 'New reference', 'New view', 'New note', 'New area', 'New cube']);
-      ['New view', 'New note', 'New area', 'New cube'].forEach((l) => expect(tool(l).disabled, l).toBe(true));
+      expect(tool('New cube').disabled).toBe(true);
+      ['New view', 'New note', 'New area'].forEach((l) => expect(tool(l).disabled, l).toBe(false));
       await act(async () => tool('New table').click());
       expect(document.body.textContent).toContain('New table');
       expect(document.querySelector('input[aria-label="Table name"]')).not.toBeNull();
@@ -1665,6 +1666,210 @@ describe('ModelEditor', () => {
       expect(api.saveModel).toHaveBeenCalledTimes(1);
       expect(api.saveModel.mock.invocationCallOrder[0]).toBeLessThan(api.createTables.mock.invocationCallOrder[0]);
       expect(api.createTables).toHaveBeenCalledWith('m1', 4, true);
+    });
+  });
+
+  describe('notes, areas and views', () => {
+    const key = async (k: string, opts: KeyboardEventInit = {}, target: EventTarget = document.body) => {
+      await act(async () => {
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...opts }));
+      });
+    };
+    const flowNode = (id: string) => flow.props.nodes.find((n: any) => n.id === id);
+    const selectedIds = () => flow.props.nodes.filter((n: any) => n.selected).map((n: any) => n.id);
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const savedDef = async () => {
+      await act(async () => tool('Save changes').click());
+      return api.saveModel.mock.calls[api.saveModel.mock.calls.length - 1][1].definition;
+    };
+    const withObjects = (): ModelDefinition => ({
+      ...threeTables(),
+      notes: [
+        {
+          id: 'n1', x: 0, y: 400, width: 200, height: 100, text: 'first',
+        },
+        {
+          id: 'n2', x: 50, y: 420, width: 200, height: 100, text: 'second', z: 1,
+        },
+      ],
+      areas: [{
+        id: 'a1', name: 'Sales', x: -50, y: -50, width: 500, height: 300,
+      }],
+      views: [{
+        id: 'v1',
+        name: 'sales_v',
+        schema: 'public',
+        sql: 'select 1',
+        columns: [{ name: 'id', type: 'integer' }],
+        dependsOnTables: ['orders'],
+        dependsOnViews: [],
+        x: 600,
+        y: 400,
+      }],
+    });
+
+    it('the note tool places a note where the canvas is clicked', async () => {
+      await render();
+      await act(async () => tool('New note').click());
+      expect(tool('New note').getAttribute('aria-pressed')).toBe('true');
+      await act(async () => flow.props.onPaneClick({ clientX: 120.4, clientY: 80.6 }));
+      expect(flowNode('note:n1').position).toEqual({ x: 120, y: 81 });
+      expect(selectedIds()).toEqual(['note:n1']);
+      expect(tool('Select').getAttribute('aria-pressed')).toBe('true');
+      expect(pane().textContent).toContain('Text note properties');
+      const def = await savedDef();
+      expect(def.notes).toEqual([{
+        id: 'n1', x: 120, y: 81, width: 200, height: 100, text: '',
+      }]);
+    });
+
+    it('the area and view tools place theirs and select them', async () => {
+      await render();
+      await act(async () => tool('New area').click());
+      await act(async () => flow.props.onPaneClick({ clientX: 10, clientY: 20 }));
+      expect(selectedIds()).toEqual(['area:a1']);
+      expect(flowNode('area:a1').zIndex).toBe(-1000);
+      expect(flowNode('area:a1')).toEqual(expect.objectContaining({ width: 400, height: 300 }));
+      expect(pane().textContent).toContain('Subject area properties');
+      await act(async () => tool('New view').click());
+      await act(async () => flow.props.onPaneClick({ clientX: 500, clientY: 30 }));
+      expect(selectedIds()).toEqual(['view:v1']);
+      expect(flowNode('view:v1').position).toEqual({ x: 500, y: 30 });
+      expect(pane().textContent).toContain('View properties');
+      const def = await savedDef();
+      expect(def.areas.map((a: any) => [a.id, a.x, a.y])).toEqual([['a1', 10, 20]]);
+      expect(def.views.map((v: any) => [v.id, v.name, v.schema])).toEqual([['v1', 'view_1', 'public']]);
+    });
+
+    it('dragging an area moves what is inside it in one undo step', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      const area = { id: 'area:a1', position: { x: -50, y: -50 } };
+      await act(async () => flow.props.onNodeDragStart({}, area, [area]));
+      const moved = { id: 'area:a1', position: { x: -30, y: -40 } };
+      await act(async () => flow.props.onNodeDrag({}, moved, [moved]));
+      expect(flowNode('orders').position).toEqual({ x: 20, y: 10 });
+      expect(flowNode('customers').position).toEqual({ x: 320, y: 10 });
+      // products (x 900) and the notes are outside the area.
+      expect(flowNode('products').position).toEqual({ x: 900, y: 0 });
+      expect(flowNode('note:n1').position).toEqual({ x: 0, y: 400 });
+      await act(async () => flow.props.onNodeDragStop({}, moved, [moved]));
+      const def = await savedDef();
+      expect(def.areas[0]).toEqual(expect.objectContaining({ x: -30, y: -40 }));
+      expect(def.tables.map((t: any) => [t.alias, t.x, t.y])).toEqual([
+        ['orders', 20, 10], ['customers', 320, 10], ['products', 900, 0],
+      ]);
+      await key('z', { ctrlKey: true });
+      expect(flowNode('area:a1').position).toEqual({ x: -50, y: -50 });
+      expect(flowNode('orders').position).toEqual({ x: 0, y: 0 });
+      expect(flowNode('customers').position).toEqual({ x: 300, y: 0 });
+      expect(tool('Undo').disabled).toBe(true);
+    });
+
+    it('an area dragged with a table inside it moves that table once', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      const start = [{ id: 'area:a1', position: { x: -50, y: -50 } }, { id: 'orders', position: { x: 0, y: 0 } }];
+      await act(async () => flow.props.onNodeDragStart({}, start[0], start));
+      const moved = [{ id: 'area:a1', position: { x: -40, y: -50 } }, { id: 'orders', position: { x: 10, y: 0 } }];
+      await act(async () => flow.props.onNodeDrag({}, moved[0], moved));
+      await act(async () => flow.props.onNodeDragStop({}, moved[0], moved));
+      const def = await savedDef();
+      expect(def.tables.map((t: any) => [t.alias, t.x])).toEqual([['orders', 10], ['customers', 310], ['products', 900]]);
+    });
+
+    it('bring to front raises a note above another', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      expect(flowNode('note:n2').zIndex).toBe(1);
+      expect(flowNode('orders').zIndex).toBe(0);
+      await select('orders');
+      expect(tool('Order').disabled).toBe(true);
+      await select('note:n1');
+      expect(tool('Order').disabled).toBe(false);
+      await choose('Order', 'Bring to front');
+      expect(flowNode('note:n1').zIndex).toBeGreaterThan(flowNode('note:n2').zIndex);
+      await choose('Order', 'Send to back');
+      expect(flowNode('note:n1').zIndex).toBeLessThan(flowNode('note:n2').zIndex);
+      await select('area:a1');
+      await choose('Order', 'Bring to front');
+      expect(flowNode('area:a1').zIndex).toBe(-999);
+    });
+
+    it('delete removes a selected view and its dependency line', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      const dep = flow.props.edges.find((e: any) => e.id === 'dep-v1-orders');
+      expect(dep).toEqual(expect.objectContaining({
+        source: 'view:v1', target: 'orders', sourceHandle: 'node', targetHandle: 'node', selectable: false,
+      }));
+      await select('view:v1');
+      await key('Delete');
+      expect(flowNode('view:v1')).toBeUndefined();
+      expect(flow.props.edges.some((e: any) => e.id.startsWith('dep-'))).toBe(false);
+      expect((await savedDef()).views).toEqual([]);
+    });
+
+    it('copy and paste a note', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('note:n1');
+      await key('c', { ctrlKey: true });
+      expect(tool('Paste').disabled).toBe(false);
+      await key('v', { ctrlKey: true });
+      expect(flowNode('note:n3').position).toEqual({ x: 20, y: 420 });
+      expect(selectedIds()).toEqual(['note:n3']);
+      expect(flowNode('note:n3').data.text).toBe('first');
+    });
+
+    it('Ctrl+A selects the notes, areas and views too', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await key('a', { ctrlKey: true });
+      expect(selectedIds()).toEqual(expect.arrayContaining(['note:n1', 'note:n2', 'area:a1', 'view:v1', 'orders']));
+      expect(flow.props.nodes.every((n: any) => n.selected)).toBe(true);
+    });
+
+    it('a dependency line is not a reference', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await act(async () => flow.props.onEdgesChange([{ type: 'select', id: 'dep-v1-orders', selected: true }]));
+      await act(async () => (document.querySelector('[data-edge="dep-v1-orders"]') as HTMLButtonElement).click());
+      expect(pane().textContent).toContain('Model properties');
+    });
+
+    it('keys 5, 6, 7 choose the view, note and area tools, and 8 does nothing', async () => {
+      await render();
+      const press = async (d: string) => act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: d, code: `Digit${d}`, bubbles: true }));
+      });
+      const pressed = () => [...document.querySelectorAll('[data-slot="model-tool-palette"] button[aria-pressed="true"]')]
+        .map((b) => b.getAttribute('aria-label'));
+      await press('5');
+      expect(pressed()).toEqual(['New view']);
+      await press('6');
+      expect(pressed()).toEqual(['New note']);
+      await press('7');
+      expect(pressed()).toEqual(['New area']);
+      await press('8');
+      expect(pressed()).toEqual(['New area']);
+    });
+
+    it('a double click on a note selects it', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await act(async () => flow.props.onNodeDoubleClick({}, { id: 'note:n1' }));
+      expect(selectedIds()).toEqual(['note:n1']);
+    });
+
+    it('resizing a note writes its size', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await act(async () => flowNode('note:n1').data.onResize('note:n1', {
+        x: 5, y: 400, width: 250.4, height: 120,
+      }));
+      const def = await savedDef();
+      expect(def.notes[0]).toEqual(expect.objectContaining({ x: 5, width: 250, height: 120 }));
     });
   });
 
