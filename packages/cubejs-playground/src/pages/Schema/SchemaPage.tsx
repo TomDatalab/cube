@@ -784,6 +784,7 @@ export function SchemaPage({ history }: RouterProps) {
           modelId={selected.rest}
           tables={detail.tables || {}}
           onBuilt={(cubeName, built) => afterBuild(selected.slug, cubeName, built)}
+          onTablesCreated={(created) => setDetails((current) => ({ ...current, [selected.slug]: created }))}
           onSaved={(saved) => afterModelSave(selected.slug, saved)}
           onDeleted={() => afterModelDelete(selected.slug)}
           onDirtyChange={setModelDirty}

@@ -7,7 +7,7 @@ import {
   Background, Controls, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
 } from '@xyflow/react';
 import type {
-  Connection, Edge, EdgeMouseHandler, NodeChange, OnNodeDrag,
+  Connection, Edge, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnNodeDrag, OnSelectionChangeParams,
 } from '@xyflow/react';
 import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
 
@@ -28,10 +28,14 @@ import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
-  End, ModelDefinition, addTable, canConnect, connect, emptyDefinition, joinLabel, removeJoin,
-  removeTable, setPrimary, unlinked, updateJoin,
+  End, ModelDefinition, TableColor, addDraftTable, addTable, canConnect, connect, drafts,
+  emptyDefinition, joinLabel, layout, removeJoin, removeTable, setColor, setPrimary, unlinked,
+  updateDraftTable, updateJoin,
 } from './modelGraph';
 import { TableFlowNode, TableNode } from './TableNode';
+import { ModelToolbar } from './ModelToolbar';
+import { TableDialog, TableDraft } from './TableDialog';
+import { CreateTablesDialog } from './CreateTablesDialog';
 import { PanelToggle } from '../PanelToggle';
 import { useCollapsed } from '../useCollapsed';
 import { useResizable } from '../useResizable';
@@ -47,6 +51,10 @@ const EDITED = 'O cubo foi editado desde o último build';
 
 const NODE_TYPES = { table: TableNode };
 const NEW_JOIN: JoinChoice = { relationship: 'many_to_one', join: 'left' };
+// A model of one or two tables would otherwise open at 2x.
+const FIT_VIEW = { maxZoom: 1 };
+// Where a new table goes when the canvas has no size to centre it in.
+const NEW_TABLE_AT = { x: 40, y: 40 };
 
 // React Flow's own colors, from the theme's tokens.
 const FLOW_STYLE = {
@@ -68,6 +76,9 @@ export type ModelEditorProps = {
   tables: OrgDetail['tables'];
   // After a build: the cube's name and the organization's refreshed detail.
   onBuilt(cubeName: string, detail: OrgDetail): void;
+  // After new tables were created in the database: the organization's
+  // refreshed detail.
+  onTablesCreated?(detail: OrgDetail): void;
   // After a save: the tree shows the model's name.
   onSaved?(saved: CubeModelView): void;
   // After the model is deleted.
@@ -77,6 +88,10 @@ export type ModelEditorProps = {
 };
 
 type JoinEdit = { kind: 'new'; from: End; to: End } | { kind: 'edit'; index: number };
+type TableEdit = { kind: 'new' } | { kind: 'edit'; alias: string };
+// The statements of a dry run, the version they were read at and the
+// error of a run.
+type CreateAsk = { statements: string[]; version: number; error: string | null };
 type Ask = 'overwrite' | 'delete';
 
 const STALE = 'Changed elsewhere: reopen';
@@ -263,13 +278,16 @@ function TablePanel({
 }
 
 function Editor({
-  api, modelId, tables, onBuilt, onSaved, onDeleted, onDirtyChange,
+  api, modelId, tables, onBuilt, onTablesCreated, onSaved, onDeleted, onDirtyChange,
 }: ModelEditorProps) {
   const theme = useDocumentTheme();
   // Bumped on every edit: a save clears `dirty` only when nothing changed
   // while it was on its way.
   const revision = useRef(0);
-  const { screenToFlowPosition } = useReactFlow();
+  const {
+    screenToFlowPosition, zoomIn, zoomOut, fitView,
+  } = useReactFlow();
+  const canvas = useRef<HTMLDivElement>(null);
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -277,8 +295,12 @@ function Editor({
   const [version, setVersion] = useState(0);
   const [def, setDef] = useState<ModelDefinition>(emptyDefinition);
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<'save' | 'build' | 'delete' | null>(null);
+  const [busy, setBusy] = useState<'save' | 'build' | 'delete' | 'create' | null>(null);
   const [joinEdit, setJoinEdit] = useState<JoinEdit | null>(null);
+  const [tableEdit, setTableEdit] = useState<TableEdit | null>(null);
+  const [createAsk, setCreateAsk] = useState<CreateAsk | null>(null);
+  // The table selected on the canvas, by alias.
+  const [selected, setSelected] = useState<string | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
   // The reasons the ModelWriter gave for a change that does not compile.
   const [problems, setProblems] = useState<string[]>([]);
@@ -341,7 +363,9 @@ function Editor({
     (schema: string, table: string): Columns | undefined => tables?.[def.dataSource]?.[schema]?.[table],
     [tables, def.dataSource]
   );
-  const missing = def.tables.filter((t) => !columnsOf(t.schema, t.table)).map((t) => `${t.schema}.${t.table}`);
+  const missing = def.tables
+    .filter((t) => !t.draft && !columnsOf(t.schema, t.table))
+    .map((t) => `${t.schema}.${t.table}`);
 
   const onRemove = useCallback((alias: string) => {
     setDef((d) => removeTable(d, alias));
@@ -354,7 +378,17 @@ function Editor({
   useEffect(() => {
     setNodes((previous) => def.tables.map((t) => {
       const old = previous.find((n) => n.id === t.alias);
-      const columns = columnsOf(t.schema, t.table);
+      const columns = t.draft
+        ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
+        : columnsOf(t.schema, t.table);
+      const principal = def.primary === t.alias;
+      const keys = [
+        ...(principal && def.primaryKey ? [def.primaryKey] : []),
+        ...(t.draft?.columns.filter((c) => c.primaryKey).map((c) => c.name) ?? []),
+      ];
+      const linked = def.joins.flatMap((j) => [j.from, j.to])
+        .filter((e) => e.alias === t.alias)
+        .map((e) => e.column);
       return {
         ...old,
         id: t.alias,
@@ -365,8 +399,12 @@ function Editor({
           schema: t.schema,
           table: t.table,
           columns: columns ?? [],
-          principal: def.primary === t.alias,
+          principal,
           missing: !columns,
+          draft: Boolean(t.draft),
+          color: t.color,
+          keys,
+          linked,
           onRemove,
         },
       };
@@ -388,6 +426,17 @@ function Editor({
     const kept = changes.filter((c) => c.type !== 'remove');
     setNodes((ns) => applyNodeChanges(kept, ns));
   }, []);
+
+  // React Flow asks for a stable handler.
+  const onSelectionChange = useCallback(({ nodes: picked }: OnSelectionChangeParams) => {
+    setSelected(picked[0]?.id ?? null);
+  }, []);
+
+  const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
+    if (def.tables.some((t) => t.alias === node.id && t.draft)) {
+      setTableEdit({ kind: 'edit', alias: node.id });
+    }
+  };
 
   const onNodeDragStop: OnNodeDrag<TableFlowNode> = (_event, _node, dragged) => {
     const moved = new Map(dragged.map((n) => [n.id, n.position]));
@@ -449,7 +498,8 @@ function Editor({
     change(result.def);
   };
 
-  const save = async (): Promise<boolean> => {
+  // The saved model, or null when the save failed.
+  const save = async (): Promise<CubeModelView | null> => {
     setBusy('save');
     setProblems([]);
     const sent = revision.current;
@@ -460,10 +510,10 @@ function Editor({
         setDirty(false);
       }
       onSaved?.(saved);
-      return true;
+      return saved;
     } catch (e: any) {
       notify.error(conflict(e));
-      return false;
+      return null;
     } finally {
       setBusy(null);
     }
@@ -508,6 +558,99 @@ function Editor({
     onDeleted?.();
   };
 
+  // A new table goes to the middle of what the canvas shows.
+  const newTablePosition = () => {
+    const box = canvas.current?.getBoundingClientRect();
+    if (!box || box.width === 0 || box.height === 0) {
+      return NEW_TABLE_AT;
+    }
+    return screenToFlowPosition({ x: box.left + box.width / 2, y: box.top + box.height / 2 });
+  };
+
+  const saveTable = (value: TableDraft): string | null => {
+    if (tableEdit?.kind === 'edit') {
+      const result = updateDraftTable(def, tableEdit.alias, value.schema, value.table, value.columns);
+      if (result.error) {
+        return result.error;
+      }
+      change(result.def);
+    } else {
+      const p = newTablePosition();
+      const result = addDraftTable(
+        def, value.ds, value.schema, value.table, value.columns, Math.round(p.x), Math.round(p.y)
+      );
+      if (result.error) {
+        return result.error;
+      }
+      change(result.def);
+    }
+    setTableEdit(null);
+    return null;
+  };
+
+  const arrange = () => {
+    change(layout(def));
+    // Once React Flow has the new positions.
+    window.requestAnimationFrame(() => fitView(FIT_VIEW));
+  };
+
+  // Saves what is not saved, then asks the server what it would run.
+  const openCreate = async () => {
+    let current = version;
+    if (dirty) {
+      const saved = await save();
+      if (!saved) {
+        return;
+      }
+      current = saved.version;
+    }
+    setBusy('create');
+    try {
+      const result = await api.createTables(modelId, current, true);
+      setCreateAsk({ statements: result.statements ?? [], version: current, error: null });
+    } catch (e: any) {
+      notify.error(conflict(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Runs the statements; the server saves the model without the drafts it
+  // created, even when a later one failed.
+  const runCreate = async () => {
+    if (!createAsk) {
+      return;
+    }
+    setBusy('create');
+    try {
+      const result = await api.createTables(modelId, createAsk.version, false);
+      if (result.model) {
+        setDef(definitionOf(result.model.definition));
+        setVersion(result.model.version);
+        setDirty(false);
+      }
+      if (result.detail) {
+        onTablesCreated?.(result.detail);
+      }
+      if (result.created?.length) {
+        notify.success(`Created: ${result.created.join(', ')}`);
+      }
+      if (result.error) {
+        setCreateAsk({
+          ...createAsk,
+          version: result.model?.version ?? createAsk.version,
+          error: result.error,
+        });
+      } else {
+        setCreateAsk(null);
+      }
+    } catch (e: any) {
+      setCreateAsk({ ...createAsk, error: conflict(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const loose = unlinked(def);
   const build = () => {
     if (loose.length) {
@@ -547,8 +690,15 @@ function Editor({
   }[asked];
 
   const principal = def.tables.find((t) => t.alias === def.primary);
-  const principalColumns = principal ? columnsOf(principal.schema, principal.table) ?? [] : [];
+  let principalColumns: Columns = [];
+  if (principal?.draft) {
+    principalColumns = principal.draft.columns;
+  } else if (principal) {
+    principalColumns = columnsOf(principal.schema, principal.table) ?? [];
+  }
   const editing = joinEdit?.kind === 'edit' ? def.joins[joinEdit.index] : undefined;
+  const selectedTable = def.tables.find((t) => t.alias === selected);
+  const editedTable = tableEdit?.kind === 'edit' ? def.tables.find((t) => t.alias === tableEdit.alias) : undefined;
 
   return (
     <div className="tw:flex tw:h-full tw:min-h-[560px] tw:flex-col tw:gap-3">
@@ -633,9 +783,32 @@ function Editor({
         </p>
       ) : null}
 
+      <ModelToolbar
+        selected={selectedTable
+          ? { alias: selectedTable.alias, draft: Boolean(selectedTable.draft), color: selectedTable.color }
+          : null}
+        hasDrafts={drafts(def).length > 0}
+        busy={busy !== null}
+        onNewTable={() => setTableEdit({ kind: 'new' })}
+        onColor={(color: TableColor | undefined) => selectedTable && change(setColor(def, selectedTable.alias, color))}
+        onEdit={() => selectedTable?.draft && setTableEdit({ kind: 'edit', alias: selectedTable.alias })}
+        onRemove={() => {
+          if (selectedTable) {
+            onRemove(selectedTable.alias);
+            setSelected(null);
+          }
+        }}
+        onArrange={arrange}
+        onZoomIn={() => zoomIn()}
+        onZoomOut={() => zoomOut()}
+        onFitView={() => fitView(FIT_VIEW)}
+        onCreate={openCreate}
+      />
+
       <div className="tw:flex tw:min-h-0 tw:flex-1 tw:overflow-hidden tw:rounded-md tw:border">
         <TablePanel tables={tables} dataSource={def.dataSource} locked={def.tables.length > 0} />
         <div
+          ref={canvas}
           className="tw:min-w-0 tw:flex-1"
           data-slot="model-canvas"
           onDragOver={onDragOver}
@@ -651,10 +824,12 @@ function Editor({
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             onEdgeClick={onEdgeClick}
+            onSelectionChange={onSelectionChange}
+            onNodeDoubleClick={onNodeDoubleClick}
+            zoomOnDoubleClick={false}
             deleteKeyCode={null}
             fitView
-            // A model of one or two tables would otherwise open at 2x.
-            fitViewOptions={{ maxZoom: 1 }}
+            fitViewOptions={FIT_VIEW}
           >
             <Background />
             <Controls showInteractive={false} />
@@ -680,6 +855,28 @@ function Editor({
           change(removeJoin(def, joinEdit.index));
           setJoinEdit(null);
         } : undefined}
+      />
+
+      <TableDialog
+        open={tableEdit !== null}
+        initial={editedTable?.draft
+          ? { schema: editedTable.schema, table: editedTable.table, columns: editedTable.draft.columns }
+          : undefined}
+        dataSource={def.dataSource}
+        connections={Object.keys(tables || {})}
+        schemasOf={(ds) => Object.keys(tables?.[ds] ?? {})}
+        onSave={saveTable}
+        onClose={() => setTableEdit(null)}
+      />
+
+      <CreateTablesDialog
+        open={createAsk !== null}
+        dataSource={def.dataSource}
+        statements={createAsk?.statements ?? []}
+        error={createAsk?.error}
+        running={busy === 'create'}
+        onCreate={runCreate}
+        onClose={() => setCreateAsk(null)}
       />
 
       <AlertDialog open={ask !== null} onOpenChange={(open) => !open && setAsk(null)}>

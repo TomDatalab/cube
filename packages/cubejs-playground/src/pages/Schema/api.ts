@@ -1,5 +1,7 @@
 import type { Rbac } from '../../hooks/rbac';
-import { authHeaders, onUnauthorized } from '../../shared/auth';
+import {
+  WORKSPACE_HEADER, authHeaders, getWorkspace, onUnauthorized,
+} from '../../shared/auth';
 import { playgroundFetch } from '../../shared/helpers';
 import type { OrgDetail, OrgSummary } from './tree';
 
@@ -71,12 +73,19 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
   const enc = encodeURIComponent;
   const owned = rbac.session?.user.ownedOrganizations ?? [];
 
-  // The `/v1` routes: the login token and no workspace.
-  async function call(method: string, path: string, body?: unknown): Promise<any> {
+  // The `/v1` routes: the login token and, unless `extra` names it, no
+  // workspace.
+  async function call(
+    method: string,
+    path: string,
+    body?: unknown,
+    extra: Record<string, string> = {}
+  ): Promise<any> {
     const response = await fetch(`${base}/v1${path}`, {
       method,
       headers: {
         ...authHeaders(),
+        ...extra,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -194,7 +203,15 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
       error?: string;
       detail?: OrgDetail;
     }> {
-      return call('POST', `/cube-models/${enc(id)}/create-tables`, { version, dryRun });
+      // Running the statements asks `execute` on the chosen workspace, as
+      // `/v1/execute` does.
+      const workspace = getWorkspace();
+      return call(
+        'POST',
+        `/cube-models/${enc(id)}/create-tables`,
+        { version, dryRun },
+        workspace ? { [WORKSPACE_HEADER]: workspace } : {}
+      );
     },
 
     async workspaces(org: OrgNode): Promise<{ id: string; name: string }[]> {

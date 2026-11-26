@@ -75,6 +75,15 @@
   --border: var(--pg-line, #e3e4ee);
   --input: var(--pg-line, #e3e4ee);
   --ring: var(--pg-accent, #2f5597);
+  /* The Models canvas' table colors (TABLE_COLORS in models/modelGraph.ts). */
+  --model-slate: var(--pg-model-slate, #64748b);
+  --model-blue: var(--pg-model-blue, #3b82f6);
+  --model-green: var(--pg-model-green, #22c55e);
+  --model-amber: var(--pg-model-amber, #f59e0b);
+  --model-red: var(--pg-model-red, #ef4444);
+  --model-violet: var(--pg-model-violet, #8b5cf6);
+  --model-pink: var(--pg-model-pink, #ec4899);
+  --model-teal: var(--pg-model-teal, #14b8a6);
 }
 
 /* The dark accent is light: text on it is the dark page color. */
