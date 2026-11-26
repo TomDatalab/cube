@@ -37,6 +37,7 @@ import { useHistory } from './history';
 import { Dialect, convertDrafts } from './dialect';
 import { addReference, ensureIds } from './physical';
 import { issues } from './validate';
+import { SqlDialog, SqlOptions } from './SqlDialog';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
 import {
@@ -226,6 +227,12 @@ function Editor({
   const [dialects, setDialects] = useState<Record<string, Dialect>>({});
   // Bumped by a double click on a draft: its first column takes the focus.
   const [focusKey, setFocusKey] = useState(0);
+  // The Generate SQL dialog: open with its limits, options and answer.
+  const [sqlAsk, setSqlAsk] = useState<{ only?: string[] } | null>(null);
+  const [sqlOptions, setSqlOptions] = useState<SqlOptions>({ drop: false, onlyNew: false });
+  const [sqlScript, setSqlScript] = useState<{ script: string | null; error: string | null; loading: boolean }>(
+    { script: null, error: null, loading: false }
+  );
   const [version, setVersion] = useState(0);
   const history = useHistory<ModelDefinition>(emptyDefinition);
   const def = history.value;
@@ -632,6 +639,28 @@ function Editor({
     }
   };
 
+  // The script of what is on the canvas, saved or not, asked again when the
+  // options change.
+  const sqlDef = useRef(def);
+  sqlDef.current = def;
+  useEffect(() => {
+    if (!sqlAsk) {
+      return undefined;
+    }
+    let cancelled = false;
+    setSqlScript((was) => ({ ...was, loading: true, error: null }));
+    api.modelSql(modelId, withFormat(sqlDef.current), {
+      ...sqlOptions,
+      ...(sqlAsk.only ? { only: sqlAsk.only } : {}),
+    }).then(
+      (r) => !cancelled && setSqlScript({ script: r.script, error: null, loading: false }),
+      (e: Error) => !cancelled && setSqlScript({ script: null, error: e.message, loading: false })
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api, modelId, sqlAsk, sqlOptions]);
+
   const latest = useRef({ dirty, busy, save });
   latest.current = { dirty, busy, save };
 
@@ -950,6 +979,7 @@ function Editor({
   useEditorShortcuts({
     ...toolKeys,
     'mod+f': () => searchInput.current?.focus(),
+    'mod+g': () => dialect && setSqlAsk({}),
     'mod+alt+n': () => togglePane('left'),
     'mod+alt+p': () => togglePane('right'),
     'mod+alt+b': () => togglePane('top'),
@@ -971,7 +1001,7 @@ function Editor({
     'mod+x': cutSelection,
     'mod+a': () => setSelection(nodes.map((n) => n.id)),
     delete: deleteSelection,
-  }, loaded && !loadError && !joinEdit && !tableEdit && !createAsk && !ask);
+  }, loaded && !loadError && !joinEdit && !tableEdit && !createAsk && !ask && !sqlAsk);
 
   if (loadError) {
     return (
@@ -1058,6 +1088,8 @@ function Editor({
           onSave: () => save(),
           onCreate: openCreate,
           onBuild: build,
+          canSql: dialect !== null,
+          onSql: () => setSqlAsk({}),
         }}
         edit={{
           canCopy: selection.length > 0,
@@ -1216,6 +1248,7 @@ function Editor({
             dialect={dialect}
             issues={problemsFound}
             focusKey={focusKey}
+            onSqlPreview={dialect ? (alias) => setSqlAsk({ only: [alias] }) : undefined}
             onRenamed={(from, to) => setSelection((was) => was.map((id) => {
               const { alias, shortcut } = parseNodeId(id);
               if (alias !== from) {
@@ -1261,6 +1294,18 @@ function Editor({
         schemasOf={(ds) => Object.keys(tables?.[ds] ?? {})}
         onSave={saveTable}
         onClose={() => setTableEdit(null)}
+      />
+
+      <SqlDialog
+        open={sqlAsk !== null}
+        name={name}
+        only={sqlAsk?.only}
+        script={sqlScript.script}
+        error={sqlScript.error}
+        loading={sqlScript.loading}
+        options={sqlOptions}
+        onOptions={setSqlOptions}
+        onClose={() => setSqlAsk(null)}
       />
 
       <CreateTablesDialog

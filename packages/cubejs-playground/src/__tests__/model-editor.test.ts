@@ -137,6 +137,8 @@ const view = (definition: ModelDefinition, version = 3): CubeModelView => ({
   version,
   updatedAt: '2026-11-25T00:00:00Z',
   updatedBy: null,
+  // The fixture's connection designs Postgres tables.
+  dialects: { warehouse: 'postgres' },
 });
 
 const built = { fileName: 'model/sales.yml', content: '', cubeName: 'sales', detail: {} as any };
@@ -163,6 +165,7 @@ describe('ModelEditor', () => {
       buildModel: vi.fn(async () => built),
       deleteModel: vi.fn(async () => undefined),
       createTables: vi.fn(async () => ({})),
+      modelSql: vi.fn(async () => ({ script: 'CREATE TABLE "public"."orders" ();\n' })),
     };
     onBuilt = vi.fn<(cubeName: string, detail: any) => void>();
     onDeleted = vi.fn<() => void>();
@@ -939,7 +942,7 @@ describe('ModelEditor', () => {
         'Size', 'Align', 'Distribution', 'Order', 'References', 'Arrange', 'Zoom out', '1:1', 'Zoom in', 'Fit view',
         'Toggle navigation pane', 'Toggle properties pane', 'Toggle top bar', 'Create in database', 'Build cube'];
       labels.forEach((l) => expect(tool(l), l).toBeTruthy());
-      ['Export model to image', 'Export model to PDF file', 'Generate SQL script', 'Generate model documentation', 'Order']
+      ['Export model to image', 'Export model to PDF file', 'Generate model documentation', 'Order']
         .forEach((l) => expect(tool(l).disabled, l).toBe(true));
       expect(tool('Size').disabled).toBe(true);
       expect(tool('Delete').disabled).toBe(true);
@@ -1455,6 +1458,77 @@ describe('ModelEditor', () => {
         sqlGeneration: { drop: true },
         format: { showNullable: true },
       });
+    });
+  });
+
+  describe('generate sql', () => {
+    const withDialects = (def: ModelDefinition, dialect: 'postgres' | 'mysql' | null) => ({
+      ...view(def), dialects: { warehouse: dialect },
+    });
+    const dialogText = () => document.querySelector('[data-slot="model-sql-script"]')?.textContent ?? '';
+
+    it('Ctrl+G opens the script and the options re-ask the server', async () => {
+      api.model.mockResolvedValueOnce(withDialects(saved(), 'postgres'));
+      await render();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', ctrlKey: true, bubbles: true }));
+      });
+      expect(api.modelSql).toHaveBeenCalledWith('m1', expect.objectContaining({ dataSource: 'warehouse' }), {
+        drop: false, onlyNew: false,
+      });
+      expect(dialogText()).toContain('CREATE TABLE "public"."orders"');
+      await act(async () => (document.querySelector('[aria-label="Include DROP statements"]') as HTMLInputElement).click());
+      expect(api.modelSql).toHaveBeenLastCalledWith('m1', expect.anything(), { drop: true, onlyNew: false });
+    });
+
+    it('downloads the script as <name>.sql', async () => {
+      api.model.mockResolvedValueOnce(withDialects(saved(), 'postgres'));
+      (URL as any).createObjectURL = vi.fn(() => 'blob:x');
+      (URL as any).revokeObjectURL = vi.fn();
+      const clicked: string[] = [];
+      const spy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function recordClick(this: HTMLAnchorElement) {
+        clicked.push(this.download);
+      });
+      await render();
+      await act(async () => tool('Generate SQL script').click());
+      await act(async () => button('Download').click());
+      expect(clicked).toEqual(['Sales.sql']);
+      spy.mockRestore();
+    });
+
+    it('opens the SQL preview of one table from its properties', async () => {
+      api.model.mockResolvedValueOnce(withDialects(withDraft(), 'postgres'));
+      await render();
+      await select('items');
+      await act(async () => button('SQL preview').click());
+      expect(api.modelSql).toHaveBeenCalledWith('m1', expect.anything(), { drop: false, onlyNew: false, only: ['items'] });
+    });
+
+    it('Generate SQL and Create are disabled for a non-Postgres/MySQL connection', async () => {
+      api.model.mockResolvedValueOnce(withDialects(withDraft(), null));
+      await render();
+      expect(tool('Generate SQL script').disabled).toBe(true);
+      expect(tool('Create in database').disabled).toBe(true);
+    });
+
+    it('converts portable draft types for a mysql connection on open', async () => {
+      api.model.mockResolvedValueOnce(withDialects(withDraft(), 'mysql'));
+      await render();
+      expect(node('items').querySelector('[data-column="id"]')!.textContent).toContain('int');
+      expect(node('items').querySelector('[data-column="id"]')!.textContent).not.toContain('integer');
+      expect(document.body.textContent).not.toContain('Unsaved changes');
+    });
+
+    it('ignores canvas shortcuts while typing in the SQL dialog', async () => {
+      api.model.mockResolvedValueOnce(withDialects(saved(), 'postgres'));
+      await render();
+      await select('orders');
+      await act(async () => tool('Generate SQL script').click());
+      const drop = document.querySelector('[aria-label="Include DROP statements"]')!;
+      await act(async () => {
+        drop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      });
+      expect(node('orders')).not.toBeNull();
     });
   });
 

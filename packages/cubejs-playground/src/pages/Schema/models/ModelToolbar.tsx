@@ -24,6 +24,9 @@ export type ModelToolbarProps = {
     busy: boolean;
     hasDrafts: boolean;
     canBuild: boolean;
+    // A Postgres or MySQL connection: Generate SQL and Create in database.
+    canSql: boolean;
+    onSql(): void;
     onSave(): void;
     onCreate(): void;
     onBuild(): void;
@@ -159,6 +162,13 @@ function Menu({
   );
 }
 
+function createHint(file: ModelToolbarProps['file']): string {
+  if (!file.canSql) {
+    return 'Only for Postgres and MySQL connections';
+  }
+  return file.hasDrafts ? 'Create the new tables in the database' : 'No new table to create';
+}
+
 // Redgate's toolbar: history | file | clipboard | arrange | zoom | panes,
 // then the search on the right.
 export function ModelToolbar({
@@ -184,12 +194,19 @@ export function ModelToolbar({
         </Tool>
         <Tool label="Export model to image" hint={SOON} disabled><Image /></Tool>
         <Tool label="Export model to PDF file" hint={SOON} disabled><FileText /></Tool>
-        <Tool label="Generate SQL script" hint={SOON} disabled><FileCode /></Tool>
+        <Tool
+          label="Generate SQL script"
+          hint={file.canSql ? 'Generate SQL script (Ctrl + G)' : 'Only for Postgres and MySQL connections'}
+          disabled={!file.canSql}
+          onClick={file.onSql}
+        >
+          <FileCode />
+        </Tool>
         <Tool label="Generate model documentation" hint={SOON} disabled><BookOpen /></Tool>
         <Tool
           label="Create in database"
-          hint={file.hasDrafts ? 'Create the new tables in the database' : 'No new table to create'}
-          disabled={!file.hasDrafts || file.busy}
+          hint={createHint(file)}
+          disabled={!file.canSql || !file.hasDrafts || file.busy}
           onClick={file.onCreate}
         >
           <DatabaseZap />
