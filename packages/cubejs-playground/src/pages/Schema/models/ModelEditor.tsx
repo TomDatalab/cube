@@ -593,10 +593,19 @@ function Editor({
     return null;
   };
 
+  // Arrange fits the view once the nodes carry the new positions: a fit
+  // asked for at once would measure the old ones and leave tables outside.
+  const fitPending = useRef(false);
+  useEffect(() => {
+    if (fitPending.current) {
+      fitPending.current = false;
+      window.requestAnimationFrame(() => fitView(FIT_VIEW));
+    }
+  }, [nodes, fitView]);
+
   const arrange = () => {
+    fitPending.current = true;
     change(layout(def));
-    // Once React Flow has the new positions.
-    window.requestAnimationFrame(() => fitView(FIT_VIEW));
   };
 
   // Saves what is not saved, then asks the server what it would run.

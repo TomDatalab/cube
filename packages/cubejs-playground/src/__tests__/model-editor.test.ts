@@ -558,11 +558,21 @@ describe('ModelEditor', () => {
         tables: saved().tables.map((t) => ({ ...t, x: 999, y: 999 })),
       }));
       await render();
+      // The fit must see the canvas with the new positions, not the old ones.
+      let seen: number[][] = [];
+      flow.fitView.mockImplementation(() => {
+        seen = flow.props.nodes.map((n: any) => [n.position.x, n.position.y]);
+      });
       await act(async () => {
         tool('Arrange').click();
-        await new Promise((r) => window.requestAnimationFrame(() => r(null)));
+      });
+      // The fit waits for the nodes to render, then for a frame.
+      const frame = () => new Promise((r) => window.requestAnimationFrame(() => r(null)));
+      await act(async () => {
+        await frame().then(frame).then(frame);
       });
       expect(flow.fitView).toHaveBeenCalled();
+      expect(seen).toEqual([[0, 0], [320, 0]]);
       await act(async () => button('Save').click());
       const placed = api.saveModel.mock.calls[0][1].definition.tables;
       expect(placed.map((t: any) => [t.alias, t.x, t.y])).toEqual([['orders', 0, 0], ['customers', 320, 0]]);
