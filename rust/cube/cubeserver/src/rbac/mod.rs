@@ -5,6 +5,7 @@ pub mod authz;
 pub mod bootstrap;
 pub mod config;
 pub mod cube_model;
+pub mod ddl;
 pub mod dependencies;
 pub mod enforce;
 pub mod fake;

@@ -413,66 +413,18 @@ pub fn validate_types(def: &Definition, db_type: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One `CREATE TABLE` per draft table, in table order, as `(schema.table,
-/// sql)`. Only postgres and mysql; identifiers are quoted, types come from
-/// the closed [`TYPES`] list.
-pub fn create_statements(def: &Definition, db_type: &str) -> Result<Vec<(String, String)>, String> {
-    if db_type != "postgres" && db_type != "mysql" {
-        return Err(format!("Criar tabelas não é suportado para {db_type}"));
-    }
-    let mysql = db_type == "mysql";
-    let mut out = Vec::new();
-    for table in &def.tables {
-        let Some(draft) = &table.draft else { continue };
-        validate_draft(table, draft)?;
-        if mysql {
-            if let Some(c) = draft
-                .columns
-                .iter()
-                .find(|c| c.primary_key && c.kind == "text")
-            {
-                return Err(format!(
-                    "No MySQL a chave primária {}.{}.{} não pode ser text: use integer, bigint ou outro tipo",
-                    table.schema, table.table, c.name
-                ));
-            }
-        }
-        let mut parts = Vec::new();
-        for c in &draft.columns {
-            let ty = match (c.kind.as_str(), mysql) {
-                ("integer", true) => "int",
-                ("numeric", true) => "decimal(18,4)",
-                ("numeric", false) => "numeric(18,4)",
-                ("timestamp", true) => "datetime",
-                (other, _) => other,
-            };
-            let null = if c.nullable && !c.primary_key {
-                ""
-            } else {
-                " NOT NULL"
-            };
-            parts.push(format!("{} {ty}{null}", quote(db_type, &c.name)));
-        }
-        let keys: Vec<String> = draft
-            .columns
-            .iter()
-            .filter(|c| c.primary_key)
-            .map(|c| quote(db_type, &c.name))
-            .collect();
-        if !keys.is_empty() {
-            parts.push(format!("PRIMARY KEY ({})", keys.join(", ")));
-        }
-        out.push((
-            format!("{}.{}", table.schema, table.table),
-            format!(
-                "CREATE TABLE {}.{} ({})",
-                quote(db_type, &table.schema),
-                quote(db_type, &table.table),
-                parts.join(", ")
-            ),
-        ));
-    }
-    Ok(out)
+/// What "Create in database" runs for the draft tables: see
+/// [`super::ddl::create_statements`].
+pub fn create_statements(
+    def: &Definition,
+    db_type: &str,
+) -> Result<Vec<super::ddl::Statement>, String> {
+    super::ddl::create_statements(def, db_type)
+}
+
+/// A draft's shape checked before its DDL is written.
+pub(crate) fn validate_draft_for_ddl(table: &ModelTable, draft: &DraftTable) -> Result<(), String> {
+    validate_draft(table, draft)
 }
 
 /// A link between two columns: `relationship` is one_to_one, one_to_many or
@@ -1372,9 +1324,9 @@ mod tests {
     #[test]
     fn postgres_create_statement() {
         let got = create_statements(&items_def(), "postgres").unwrap();
-        assert_eq!(got[0].0, "public.items");
+        assert_eq!(got[0].table.as_deref(), Some("public.items"));
         assert_eq!(
-            got[0].1,
+            got[0].sql,
             r#"CREATE TABLE "public"."items" ("id" integer NOT NULL, "order" text, "price" numeric(18,4) NOT NULL, PRIMARY KEY ("id"))"#
         );
     }
@@ -1390,7 +1342,7 @@ mod tests {
             .push(dcol("at", "timestamp", true, false));
         let got = create_statements(&def, "mysql").unwrap();
         assert_eq!(
-            got[0].1,
+            got[0].sql,
             "CREATE TABLE `public`.`items` (`id` int NOT NULL, `order` text, `price` decimal(18,4) NOT NULL, `at` datetime, PRIMARY KEY (`id`))"
         );
     }
@@ -1443,14 +1395,14 @@ mod tests {
                 dcol("n", "text", true, false),
             ],
         ));
-        let sql = &create_statements(&def, "postgres").unwrap()[0].1;
+        let sql = &create_statements(&def, "postgres").unwrap()[0].sql;
         assert!(sql.contains(r#""id" integer NOT NULL"#), "{sql}");
         let def = with_draft(draft_table(
             "i",
             "items",
             vec![dcol("n", "text", true, false)],
         ));
-        let sql = &create_statements(&def, "postgres").unwrap()[0].1;
+        let sql = &create_statements(&def, "postgres").unwrap()[0].sql;
         assert!(!sql.contains("PRIMARY KEY"), "{sql}");
     }
 

@@ -200,6 +200,10 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             post(cube_models::create_tables),
         )
         .route(
+            &format!("{base}/v1/cube-models/:id/sql"),
+            post(cube_models::sql),
+        )
+        .route(
             &format!("{base}/v1/platform/model/generate"),
             post(model::platform_generate),
         )

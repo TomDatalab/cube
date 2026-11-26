@@ -116,6 +116,9 @@ export const SECTIONS: Section[] = [
       {
         method: 'POST', path: '/v1/cube-models/:id/create-tables', summary: 'Create the model\'s draft tables in its database (dryRun: only list the statements)', who: 'org owner with execute', body: { version: 1, dryRun: true },
       },
+      {
+        method: 'POST', path: '/v1/cube-models/:id/sql', summary: 'The SQL script of a model definition in its connection\'s dialect (runs nothing)', who: 'org owner', body: { definition: {}, options: { drop: false, onlyNew: false } },
+      },
       { method: 'GET', path: '/v1/platform/model', summary: 'The Platform\'s files, cubes and problems', who: 'platform admin' },
       { method: 'GET', path: '/v1/platform/model/files/:file', summary: 'One Platform file', who: 'platform admin' },
       {

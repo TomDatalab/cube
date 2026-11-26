@@ -480,7 +480,7 @@ pub async fn create_tables(
         return Err(ApiError::bad_request("Não há tabelas novas para criar"));
     }
     if request.dry_run {
-        let sql: Vec<&str> = statements.iter().map(|(_, sql)| sql.as_str()).collect();
+        let sql: Vec<&str> = statements.iter().map(|s| s.sql.as_str()).collect();
         return Ok(Json(json!({ "statements": sql })));
     }
     crate::rbac::enforce::authorize_execute(&state, &ctx, Some(ds)).await?;
@@ -512,7 +512,13 @@ pub async fn create_tables(
 
     let mut created: Vec<String> = Vec::new();
     let mut error: Option<String> = None;
-    for (name, sql) in &statements {
+    for statement in &statements {
+        let sql = &statement.sql;
+        // A draft's CREATE TABLE names its table; anything else, its first line.
+        let name = statement
+            .table
+            .clone()
+            .unwrap_or_else(|| sql.lines().next().unwrap_or("").to_string());
         let driver = match crate::orchestrator_adapter::driver_factory()(ds.to_string()).await {
             Ok(driver) => driver,
             Err(e) => {
@@ -528,7 +534,11 @@ pub async fn create_tables(
         .await;
         let _ = driver.release().await;
         match result {
-            Ok(Ok(_)) => created.push(name.clone()),
+            Ok(Ok(_)) => {
+                if let Some(table) = &statement.table {
+                    created.push(table.clone());
+                }
+            }
             Ok(Err(e)) => {
                 error = Some(format!("{name}: {e}"));
                 break;
@@ -614,4 +624,74 @@ mod tests {
         assert!(def.tables[0].draft.is_none());
         assert!(def.tables[1].draft.is_some());
     }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlOptions {
+    #[serde(default)]
+    pub drop: bool,
+    #[serde(default)]
+    pub only_new: bool,
+    #[serde(default)]
+    pub only: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlBody {
+    pub definition: Value,
+    #[serde(default)]
+    pub options: SqlOptions,
+}
+
+/// `{definition, options}` → `{script}`: the SQL of the definition as sent
+/// (it may not be saved yet) in its connection's dialect; runs nothing.
+/// `admin` on the organization.
+pub async fn sql(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    request: Result<Json<SqlBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let (model, _, _) = visible_model(&state, &ctx, &id).await?;
+    let request = body(request)?;
+    let rbac = super::rbac_of(&state)?;
+    let def: Definition = serde_json::from_value(request.definition)
+        .map_err(|e| ApiError::bad_request(format!("Definição inválida: {e}")))?;
+    cube_model::validate(&def).map_err(ApiError::bad_request)?;
+    let ds = def.data_source.as_str();
+    let own = rbac
+        .store
+        .connections_of_organization(model.organization_id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    if !own.iter().any(|c| c.name == ds) {
+        return Err(ApiError::bad_request(format!(
+            "A conexão {ds} não é desta organização"
+        )));
+    }
+    let db_type = db_type_of(&state, ds);
+    if cube_model::dialect(db_type).is_none() {
+        return Err(ApiError::bad_request(
+            "Gerar SQL só para conexões Postgres ou MySQL",
+        ));
+    }
+    cube_model::validate_types(&def, db_type).map_err(ApiError::bad_request)?;
+    let columns = crate::handlers::playground::data_source_schema(ds).await?;
+    let comments = def
+        .settings
+        .as_ref()
+        .and_then(|s| s.sql_generation.as_ref())
+        .and_then(|g| g.comments)
+        .unwrap_or(true);
+    let options = crate::rbac::ddl::ScriptOptions {
+        drop: request.options.drop,
+        only_new: request.options.only_new,
+        only: request.options.only,
+        comments,
+    };
+    let script = crate::rbac::ddl::script(&def, &columns, db_type, &options)
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "script": script })))
 }
