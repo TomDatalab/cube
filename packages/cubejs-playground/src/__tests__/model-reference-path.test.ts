@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  addPoint, endMarks, markPath, orthogonalPath, reducePoint,
+  addPoint, endMarks, endSides, markPath, orthogonalPath, reducePoint,
 } from '../pages/Schema/models/referencePath';
 import type { ModelJoin } from '../pages/Schema/models/modelGraph';
 
@@ -84,5 +84,13 @@ describe('referencePath', () => {
     const one = markPath({ x: 0, y: 0 }, 'left', { many: false, optional: false });
     expect(one).not.toContain('a ');
     expect(one).toContain('M -4 -6');
+  });
+
+  it('endSides leave towards the other table, swapped the other way', () => {
+    const left = { x: 0, width: 100 };
+    const right = { x: 300, width: 100 };
+    expect(endSides(left, right, false)).toEqual(['right', 'left']);
+    expect(endSides(right, left, false)).toEqual(['left', 'right']);
+    expect(endSides(left, right, true)).toEqual(['left', 'right']);
   });
 });

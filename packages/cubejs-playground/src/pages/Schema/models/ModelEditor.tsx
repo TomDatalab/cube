@@ -4,13 +4,15 @@ import {
   CSSProperties, DragEvent, useCallback, useEffect, useMemo, useRef, useState,
 } from 'react';
 import {
-  Background, ConnectionMode, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
+  Background, ConnectionMode, MiniMap, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
 } from '@xyflow/react';
 import type {
   Connection, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnConnectEnd, OnNodeDrag,
   OnSelectionChangeParams,
 } from '@xyflow/react';
-import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
+import {
+  ChevronDown, ChevronRight, CircleAlert, Map as MapIcon,
+} from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -31,7 +33,7 @@ import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
   End, ModelDefinition, Place, Point, TableColor, addDraftTable, addTable, canConnect, connect, drafts,
   emptyDefinition, joinLabel, layout, placeTables, removeJoin, removeTable, setColor, setJoin, setPrimary,
-  unlinked, withFormat,
+  showAllJoins, unlinked, withFormat,
   updateDraftTable, updateJoin,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
@@ -41,6 +43,13 @@ import {
 import { useHistory } from './history';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
+import {
+  AlignMode, Box as Bounds, DistributeMode, align, distribute, sameSize,
+} from './arrange';
+import { addPoint, endSides, orthogonalPath, reducePoint } from './referencePath';
+import { Hit, searchModel } from './search';
+import { SearchBox } from './SearchBox';
+import { TOOLS, Tool, ToolPalette } from './ToolPalette';
 import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
@@ -294,6 +303,22 @@ function TablePanel({
   );
 }
 
+type Panes = { left: boolean; right: boolean; top: boolean };
+const PANES_KEY = 'cubePlayground.modelPanes';
+
+// Which panes show, remembered in this browser.
+function readPanes(): Panes {
+  const all = { left: true, right: true, top: true };
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(PANES_KEY) ?? '{}');
+    return {
+      left: raw.left !== false, right: raw.right !== false, top: raw.top !== false,
+    };
+  } catch {
+    return all;
+  }
+}
+
 function readAliases(key: string): string[] {
   try {
     const raw = JSON.parse(window.localStorage.getItem(key) ?? '[]');
@@ -331,8 +356,25 @@ function Editor({
   // while it was on its way.
   const revision = useRef(0);
   const {
-    screenToFlowPosition, zoomIn, zoomOut, fitView,
+    screenToFlowPosition, zoomIn, zoomOut, zoomTo, fitView, setCenter, getZoom, getInternalNode,
   } = useReactFlow();
+  const [tool, setTool] = useState<Tool>('select');
+  const [zoomPercent, setZoomPercent] = useState(100);
+  const [panes, setPanes] = useState(readPanes);
+  const [showMap, setShowMap] = useState(true);
+  const [query, setQuery] = useState('');
+  const searchInput = useRef<HTMLInputElement>(null);
+  // The table clicked first with the reference tool: the parent.
+  const [refFrom, setRefFrom] = useState<string | null>(null);
+  const togglePane = (pane: keyof Panes) => setPanes((was) => {
+    const next = { ...was, [pane]: !was[pane] };
+    try {
+      window.localStorage.setItem(PANES_KEY, JSON.stringify(next));
+    } catch {
+      // Kept for this visit only.
+    }
+    return next;
+  });
   const canvas = useRef<HTMLDivElement>(null);
 
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -352,7 +394,6 @@ function Editor({
   const [selection, setSelection] = useState<string[]>([]);
   const [selectedEdge, setSelectedEdge] = useState<number | null>(null);
   const selected = selection.length ? parseNodeId(selection[0]).alias : null;
-  const setSelected = (alias: string | null) => setSelection(alias ? [alias] : []);
   const [clip, setClip] = useState<Clip | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
   // The reasons the ModelWriter gave for a change that does not compile.
@@ -498,10 +539,8 @@ function Editor({
         picked: picked?.alias === t.alias ? picked.column : null,
         onPick,
       };
-      const size = {
-        ...(t.width !== undefined ? { width: t.width } : {}),
-        ...(t.height !== undefined ? { height: t.height } : {}),
-      };
+      // Undefined, not absent: the old node may still carry a size.
+      const size = { width: t.width, height: t.height };
       const at = (id: string, x: number, y: number, shortcut?: string): TableFlowNode => ({
         ...previous.find((n) => n.id === id),
         id,
@@ -891,7 +930,141 @@ function Editor({
     }
   };
 
+  // The selected nodes as boxes on the canvas, in selection order.
+  const boxes = (): Bounds[] => selection.flatMap((id) => {
+    const n = nodes.find((x) => x.id === id);
+    if (!n) {
+      return [];
+    }
+    return [{
+      id,
+      x: n.position.x,
+      y: n.position.y,
+      width: n.width ?? n.measured?.width ?? 0,
+      height: n.height ?? n.measured?.height ?? 0,
+    }];
+  });
+
+  const moveTo = (places: Map<string, { x: number; y: number }>) => {
+    if (places.size) {
+      change(placeTables(def, places));
+    }
+  };
+
+  const onSize = (kind: 'fit' | 'width' | 'height') => {
+    const sizes = new Map<string, Place>();
+    if (kind === 'fit') {
+      selection.forEach((id) => sizes.set(parseNodeId(id).alias, { width: null, height: null }));
+    } else {
+      sameSize(boxes(), kind).forEach((size, id) => sizes.set(parseNodeId(id).alias, size));
+    }
+    if (sizes.size) {
+      change(placeTables(def, sizes));
+    }
+  };
+
+  // Where a reference is drawn now, as its edge draws it.
+  const referencePath = (index: number) => {
+    const j = def.joins[index];
+    const end = (alias: string, column: string) => {
+      const n = getInternalNode?.(alias);
+      const t = def.tables.find((x) => x.alias === alias);
+      const x = n?.internals.positionAbsolute.x ?? t?.x ?? 0;
+      const y = n?.internals.positionAbsolute.y ?? t?.y ?? 0;
+      const width = n?.measured.width ?? t?.width ?? 0;
+      const handle = n?.internals.handleBounds?.source?.find((h) => h.id === column);
+      return { x, width, y: handle ? y + handle.y + handle.height / 2 : y };
+    };
+    const a = end(j.from.alias, j.from.column);
+    const b = end(j.to.alias, j.to.column);
+    const [sa, sb] = endSides(a, b, Boolean(j.swapped));
+    return orthogonalPath(
+      { x: sa === 'right' ? a.x + a.width : a.x, y: a.y },
+      sa,
+      { x: sb === 'right' ? b.x + b.width : b.x, y: b.y },
+      sb,
+      j.points ?? []
+    );
+  };
+
+  const onReference = (what: 'add' | 'reduce' | 'swap') => {
+    const j = selectedEdge === null ? undefined : def.joins[selectedEdge];
+    if (!j || selectedEdge === null) {
+      return;
+    }
+    if (what === 'swap') {
+      change(setJoin(def, selectedEdge, { swapped: !j.swapped }));
+    } else if (what === 'add') {
+      change(setJoin(def, selectedEdge, { points: addPoint(j.points ?? [], referencePath(selectedEdge)) }));
+    } else {
+      change(setJoin(def, selectedEdge, { points: reducePoint(j.points ?? []) }));
+    }
+  };
+
+  const columnsOfTable = (t: ModelDefinition['tables'][number]) => (t.draft
+    ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
+    : columnsOf(t.schema, t.table) ?? []);
+  const hits = searchModel(def, columnsOfTable, query);
+
+  const pickHit = (hit: Hit) => {
+    if (hit.edgeIndex !== undefined) {
+      setSelection([]);
+      setSelectedEdge(hit.edgeIndex);
+    } else {
+      setSelection([hit.nodeId]);
+      setSelectedEdge(null);
+    }
+    const n = nodes.find((x) => x.id === hit.nodeId);
+    if (n) {
+      const width = n.width ?? n.measured?.width ?? 0;
+      const height = n.height ?? n.measured?.height ?? 0;
+      setCenter(n.position.x + width / 2, n.position.y + height / 2, { zoom: getZoom(), duration: 300 });
+    }
+  };
+
+  const chooseTool = (next: Tool) => {
+    setRefFrom(null);
+    if (next === 'table') {
+      setTableEdit({ kind: 'new' });
+      setTool('select');
+      return;
+    }
+    setTool(next);
+  };
+
+  // The reference tool: a click on the parent, then on the child. The
+  // child's column is `<parent>_<key>`, or the key's own name, or its first.
+  const onNodeClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
+    if (tool !== 'reference') {
+      return;
+    }
+    const { alias } = parseNodeId(node.id);
+    if (!refFrom || refFrom === alias) {
+      setRefFrom(alias);
+      return;
+    }
+    const parent = nodes.find((n) => n.id === refFrom)?.data;
+    const child = node.data;
+    const key = parent?.keys[0] ?? parent?.columns[0]?.name;
+    const names = child.columns.map((c) => c.name);
+    const column = [`${refFrom}_${key}`, key].find((c) => c && names.includes(c)) ?? names[0];
+    setRefFrom(null);
+    setTool('select');
+    if (key && column) {
+      link({ alias, column }, { alias: refFrom, column: key });
+    }
+  };
+
+  const toolKeys = Object.fromEntries(TOOLS.filter((t) => !t.soon).map((t, i) => [
+    String(i + 1), () => chooseTool(t.tool),
+  ]));
+
   useEditorShortcuts({
+    ...toolKeys,
+    'mod+f': () => searchInput.current?.focus(),
+    'mod+alt+n': () => togglePane('left'),
+    'mod+alt+p': () => togglePane('right'),
+    'mod+alt+b': () => togglePane('top'),
     'mod+z': undo,
     'mod+y': redo,
     'mod+shift+z': redo,
@@ -948,60 +1121,62 @@ function Editor({
 
   return (
     <div className="tw:flex tw:h-full tw:min-h-[560px] tw:flex-col tw:gap-3">
-      <div className="tw:flex tw:flex-wrap tw:items-end tw:gap-3">
-        <Field label="Name" htmlFor="model-name" className="tw:w-56">
-          <Input
-            id="model-name"
-            aria-label="Model name"
-            value={name}
-            onChange={(e) => {
-              setName(e.target.value);
-              edited();
-            }}
-          />
-        </Field>
-        <div className="tw:flex tw:flex-col tw:gap-2 tw:text-sm">
-          <span className="tw:font-medium">Connection</span>
-          <span className="tw:flex tw:h-9 tw:items-center tw:text-muted-foreground" data-slot="model-connection">
-            {def.dataSource || 'Drop a table to choose it'}
-          </span>
+      {panes.top ? (
+        <div data-slot="model-top-bar" className="tw:flex tw:flex-wrap tw:items-end tw:gap-3">
+          <Field label="Name" htmlFor="model-name" className="tw:w-56">
+            <Input
+              id="model-name"
+              aria-label="Model name"
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                edited();
+              }}
+            />
+          </Field>
+          <div className="tw:flex tw:flex-col tw:gap-2 tw:text-sm">
+            <span className="tw:font-medium">Connection</span>
+            <span className="tw:flex tw:h-9 tw:items-center tw:text-muted-foreground" data-slot="model-connection">
+              {def.dataSource || 'Drop a table to choose it'}
+            </span>
+          </div>
+          <Field label="Principal" htmlFor="model-principal" className="tw:w-44">
+            <SimpleSelect
+              id="model-principal"
+              value={def.primary ?? undefined}
+              placeholder="No table yet"
+              disabled={def.tables.length === 0}
+              options={def.tables.map((t) => ({ value: t.alias, label: t.alias }))}
+              onChange={(v) => v && change(setPrimary(def, v))}
+            />
+          </Field>
+          <Field label="Primary key" htmlFor="model-primary-key" className="tw:w-44">
+            <SimpleSelect
+              id="model-primary-key"
+              value={def.primaryKey ?? undefined}
+              placeholder="Choose a column"
+              disabled={principalColumns.length === 0}
+              options={principalColumns.map((c) => ({ value: c.name, label: c.name }))}
+              onChange={(v) => change({ ...def, primaryKey: v ?? null })}
+            />
+          </Field>
+          <div className="tw:ml-auto tw:flex tw:items-center tw:gap-2">
+            {dirty ? <Badge variant="secondary">Unsaved changes</Badge> : null}
+            <Button variant="outline" disabled={!dirty || busy !== null} onClick={() => save()}>
+              {busy === 'save' ? <Spinner className="tw:text-current" /> : null}
+              Save
+            </Button>
+            <Button disabled={busy !== null || def.tables.length === 0} onClick={build}>
+              {busy === 'build' ? <Spinner className="tw:text-current" /> : null}
+              Build cube
+            </Button>
+            <Button variant="destructive" disabled={busy !== null} onClick={() => setAsk('delete')}>
+              {busy === 'delete' ? <Spinner className="tw:text-current" /> : null}
+              Delete model
+            </Button>
+          </div>
         </div>
-        <Field label="Principal" htmlFor="model-principal" className="tw:w-44">
-          <SimpleSelect
-            id="model-principal"
-            value={def.primary ?? undefined}
-            placeholder="No table yet"
-            disabled={def.tables.length === 0}
-            options={def.tables.map((t) => ({ value: t.alias, label: t.alias }))}
-            onChange={(v) => v && change(setPrimary(def, v))}
-          />
-        </Field>
-        <Field label="Primary key" htmlFor="model-primary-key" className="tw:w-44">
-          <SimpleSelect
-            id="model-primary-key"
-            value={def.primaryKey ?? undefined}
-            placeholder="Choose a column"
-            disabled={principalColumns.length === 0}
-            options={principalColumns.map((c) => ({ value: c.name, label: c.name }))}
-            onChange={(v) => change({ ...def, primaryKey: v ?? null })}
-          />
-        </Field>
-        <div className="tw:ml-auto tw:flex tw:items-center tw:gap-2">
-          {dirty ? <Badge variant="secondary">Unsaved changes</Badge> : null}
-          <Button variant="outline" disabled={!dirty || busy !== null} onClick={() => save()}>
-            {busy === 'save' ? <Spinner className="tw:text-current" /> : null}
-            Save
-          </Button>
-          <Button disabled={busy !== null || def.tables.length === 0} onClick={build}>
-            {busy === 'build' ? <Spinner className="tw:text-current" /> : null}
-            Build cube
-          </Button>
-          <Button variant="destructive" disabled={busy !== null} onClick={() => setAsk('delete')}>
-            {busy === 'delete' ? <Spinner className="tw:text-current" /> : null}
-            Delete model
-          </Button>
-        </div>
-      </div>
+      ) : null}
 
       {missing.length ? (
         <Alert variant="destructive">
@@ -1030,40 +1205,77 @@ function Editor({
       ) : null}
 
       <ModelToolbar
-        selected={selectedTable
-          ? { alias: selectedTable.alias, draft: Boolean(selectedTable.draft), color: selectedTable.color }
-          : null}
-        hasDrafts={drafts(def).length > 0}
-        busy={busy !== null}
-        onNewTable={() => setTableEdit({ kind: 'new' })}
-        onColor={(color: TableColor | undefined) => selectedTable && change(setColor(def, selectedTable.alias, color))}
-        onEdit={() => selectedTable?.draft && setTableEdit({ kind: 'edit', alias: selectedTable.alias })}
-        onRemove={() => {
-          if (selectedTable) {
-            onRemove(selectedTable.alias);
-            setSelected(null);
-          }
-        }}
         history={{
           canUndo: history.canUndo, canRedo: history.canRedo, onUndo: undo, onRedo: redo,
+        }}
+        file={{
+          dirty,
+          busy: busy !== null,
+          hasDrafts: drafts(def).length > 0,
+          canBuild: def.tables.length > 0,
+          onSave: () => save(),
+          onCreate: openCreate,
+          onBuild: build,
         }}
         edit={{
           canCopy: selection.length > 0,
           canPaste: Boolean(clip?.tables.length),
+          canDelete: selection.length > 0 || selectedEdge !== null,
           onCopy: copySelection,
           onPaste: pasteClip,
           onPasteShortcut: pasteShortcut,
           onCut: cutSelection,
+          onDelete: deleteSelection,
         }}
-        onArrange={arrange}
-        onZoomIn={() => zoomIn()}
-        onZoomOut={() => zoomOut()}
-        onFitView={() => fitView(FIT_VIEW)}
-        onCreate={openCreate}
+        arrange={{
+          count: selection.length,
+          onSize,
+          onAlign: (mode: AlignMode) => moveTo(align(boxes(), mode)),
+          onDistribute: (mode: DistributeMode) => moveTo(distribute(boxes(), mode)),
+          onArrange: arrange,
+        }}
+        references={{
+          edgeSelected: selectedEdge !== null && Boolean(def.joins[selectedEdge]),
+          anyHidden: def.joins.some((j) => j.hidden),
+          onShowAll: () => change(showAllJoins(def)),
+          onAddPoint: () => onReference('add'),
+          onReducePoint: () => onReference('reduce'),
+          onSwap: () => onReference('swap'),
+        }}
+        zoom={{
+          percent: zoomPercent,
+          onZoomIn: () => zoomIn(),
+          onZoomOut: () => zoomOut(),
+          onOneToOne: () => zoomTo(1),
+          onZoomTo: (p: number) => zoomTo(p / 100),
+          onFit: () => fitView(FIT_VIEW),
+        }}
+        panes={{
+          ...panes,
+          onToggleLeft: () => togglePane('left'),
+          onToggleRight: () => togglePane('right'),
+          onToggleTop: () => togglePane('top'),
+        }}
+        table={{
+          selected: selectedTable
+            ? { alias: selectedTable.alias, draft: Boolean(selectedTable.draft), color: selectedTable.color }
+            : null,
+          onColor: (color: TableColor | undefined) => (
+            selectedTable && change(setColor(def, selectedTable.alias, color))
+          ),
+          onEdit: () => selectedTable?.draft && setTableEdit({ kind: 'edit', alias: selectedTable.alias }),
+        }}
+        search={(
+          <SearchBox query={query} hits={hits} onQuery={setQuery} onPick={pickHit} inputRef={searchInput} />
+        )}
       />
 
       <div className="tw:flex tw:min-h-0 tw:flex-1 tw:overflow-hidden tw:rounded-md tw:border">
-        <TablePanel tables={tables} dataSource={def.dataSource} locked={def.tables.length > 0} />
+        {panes.left ? (
+          <div data-slot="model-left-pane" className="tw:flex tw:shrink-0">
+            <TablePanel tables={tables} dataSource={def.dataSource} locked={def.tables.length > 0} />
+          </div>
+        ) : null}
         <div
           ref={canvas}
           className="tw:relative tw:min-w-0 tw:flex-1"
@@ -1089,13 +1301,39 @@ function Editor({
             onEdgeClick={onEdgeClick}
             onSelectionChange={onSelectionChange}
             onNodeDoubleClick={onNodeDoubleClick}
+            onNodeClick={onNodeClick}
+            onMove={(_event, viewport) => setZoomPercent(Math.round(viewport.zoom * 100))}
+            panOnDrag={tool !== 'area-select'}
+            selectionOnDrag={tool === 'area-select'}
             zoomOnDoubleClick={false}
             deleteKeyCode={null}
             fitView
             fitViewOptions={FIT_VIEW}
           >
             <Background />
+            {showMap ? (
+              <MiniMap
+                pannable
+                zoomable
+                position="bottom-right"
+                nodeColor="var(--muted)"
+                nodeStrokeColor="var(--foreground)"
+                maskColor="color-mix(in oklch, var(--background) 60%, transparent)"
+                style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+              />
+            ) : null}
           </ReactFlow>
+          <ToolPalette tool={tool} onTool={chooseTool} />
+          <button
+            type="button"
+            aria-label="Toggle minimap"
+            aria-pressed={showMap}
+            title={showMap ? 'Hide the minimap' : 'Show the minimap'}
+            className="tw:absolute tw:right-2 tw:bottom-2 tw:z-10 tw:flex tw:size-6 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded tw:border tw:bg-card tw:p-0 tw:text-muted-foreground tw:hover:text-foreground"
+            onClick={() => setShowMap((was) => !was)}
+          >
+            <MapIcon className="tw:size-3.5" />
+          </button>
           {picked ? (
             <div
               role="status"

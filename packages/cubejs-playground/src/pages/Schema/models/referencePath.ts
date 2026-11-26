@@ -28,6 +28,18 @@ export function endMarks(j: ModelJoin): { from: EndMark; to: EndMark } {
 }
 
 const out = (side: Side) => (side === 'right' ? 1 : -1);
+
+// The sides a reference leaves its two tables from: towards the other
+// table, or the other way when it is swapped.
+export function endSides(
+  source: { x: number; width: number },
+  target: { x: number; width: number },
+  swapped: boolean
+): [Side, Side] {
+  const rightward = source.x + source.width / 2 <= target.x + target.width / 2;
+  const [s, t]: [Side, Side] = rightward ? ['right', 'left'] : ['left', 'right'];
+  return swapped ? [t, s] : [s, t];
+}
 const same = (p: Point, q: Point) => p.x === q.x && p.y === q.y;
 
 export function orthogonalPath(

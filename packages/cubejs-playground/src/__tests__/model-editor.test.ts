@@ -18,6 +18,8 @@ const flow = vi.hoisted(() => ({
   props: null as any,
   zoomIn: null as any,
   zoomOut: null as any,
+  zoomTo: null as any,
+  setCenter: null as any,
   fitView: null as any,
 }));
 
@@ -59,6 +61,10 @@ vi.mock('@xyflow/react', async () => {
       screenToFlowPosition: (p: { x: number; y: number }) => p,
       zoomIn: flow.zoomIn,
       zoomOut: flow.zoomOut,
+      zoomTo: flow.zoomTo,
+      setCenter: flow.setCenter,
+      getZoom: () => 1,
+      getInternalNode: () => undefined,
       fitView: flow.fitView,
     }),
     applyNodeChanges: (_changes: unknown, nodes: unknown) => nodes,
@@ -114,6 +120,14 @@ const saved = (): ModelDefinition => ({
   }],
 });
 
+// Three tables in a row: orders at 0, customers at 300, products at 900.
+const threeTables = (): ModelDefinition => ({
+  ...saved(),
+  tables: [...saved().tables, {
+    alias: 'products', schema: 'public', table: 'products', x: 900, y: 0,
+  }],
+});
+
 const view = (definition: ModelDefinition, version = 3): CubeModelView => ({
   id: 'm1',
   organizationId: 'o1',
@@ -140,6 +154,8 @@ describe('ModelEditor', () => {
     Element.prototype.scrollIntoView = vi.fn() as any;
     flow.zoomIn = vi.fn();
     flow.zoomOut = vi.fn();
+    flow.zoomTo = vi.fn();
+    flow.setCenter = vi.fn();
     flow.fitView = vi.fn();
     api = {
       model: vi.fn(async () => view(saved())),
@@ -184,7 +200,23 @@ describe('ModelEditor', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
   };
-  const tool = (label: string) => document.querySelector(`[data-slot="model-toolbar"] button[aria-label="${label}"]`) as HTMLButtonElement;
+  const tool = (label: string) => document.querySelector([
+    `[data-slot="model-toolbar"] button[aria-label="${label}"]`,
+    `[data-slot="model-tool-palette"] button[aria-label="${label}"]`,
+  ].join(', ')) as HTMLButtonElement;
+  // A menu of the toolbar: opens it and returns its item.
+  const menuItem = async (menu: string, item: string) => {
+    const trigger = tool(menu);
+    await act(async () => trigger.click());
+    return document.querySelector(`[role="menuitem"][aria-label="${item}"]`) as HTMLElement;
+  };
+  const choose = async (menu: string, item: string) => {
+    const found = await menuItem(menu, item);
+    await act(async () => found.click());
+  };
+  const selectMany = async (ids: string[]) => {
+    await act(async () => flow.props.onSelectionChange({ nodes: ids.map((id) => ({ id })), edges: [] }));
+  };
   const fill = async (selector: string, value: string) => {
     const input = document.querySelector(selector) as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
@@ -684,22 +716,140 @@ describe('ModelEditor', () => {
   });
 
   describe('toolbar', () => {
-    it('has every tool, and enables them by the selection and the drafts', async () => {
+    it('has Redgate\'s groups and enables them by the selection', async () => {
+      api.model.mockResolvedValueOnce(view(threeTables()));
       await render();
-      const labels = ['New table', 'Table color', 'Edit table', 'Remove table', 'Arrange',
-        'Zoom in', 'Zoom out', 'Fit view', 'Create in database'];
+      const labels = ['Undo', 'Redo', 'Save changes', 'Export model to image', 'Export model to PDF file',
+        'Generate SQL script', 'Generate model documentation', 'Copy', 'Paste', 'Paste as shortcut', 'Cut', 'Delete',
+        'Size', 'Align', 'Distribution', 'Order', 'References', 'Arrange', 'Zoom out', '1:1', 'Zoom in', 'Fit view',
+        'Toggle navigation pane', 'Toggle properties pane', 'Toggle top bar', 'Create in database', 'Build cube'];
       labels.forEach((l) => expect(tool(l), l).toBeTruthy());
-      expect(tool('Table color').disabled).toBe(true);
-      expect(tool('Edit table').disabled).toBe(true);
-      expect(tool('Remove table').disabled).toBe(true);
-      expect(tool('Create in database').disabled).toBe(true);
-      expect(tool('New table').disabled).toBe(false);
-
+      ['Export model to image', 'Export model to PDF file', 'Generate SQL script', 'Generate model documentation', 'Order']
+        .forEach((l) => expect(tool(l).disabled, l).toBe(true));
+      expect(tool('Size').disabled).toBe(true);
+      expect(tool('Delete').disabled).toBe(true);
       await select('orders');
-      expect(tool('Table color').disabled).toBe(false);
-      expect(tool('Remove table').disabled).toBe(false);
-      // A table of the database is not edited here.
-      expect(tool('Edit table').disabled).toBe(true);
+      expect(tool('Size').disabled).toBe(false);
+      expect(tool('Align').disabled).toBe(true);
+      expect(tool('Delete').disabled).toBe(false);
+      await selectMany(['orders', 'customers']);
+      expect(tool('Align').disabled).toBe(false);
+      expect(tool('Distribution').disabled).toBe(true);
+      await selectMany(['orders', 'customers', 'products']);
+      expect(tool('Distribution').disabled).toBe(false);
+      expect(tool('Order').disabled).toBe(true);
+      expect(tool('References').disabled).toBe(true);
+    });
+
+    it('aligns the selected tables to the left', async () => {
+      await render();
+      await selectMany(['orders', 'customers']);
+      await choose('Align', 'Align left');
+      await act(async () => tool('Save changes').click());
+      const placed = api.saveModel.mock.calls[0][1].definition.tables;
+      expect(placed.map((t: any) => t.x)).toEqual([0, 0]);
+    });
+
+    it('distributes three tables with equal gaps', async () => {
+      api.model.mockResolvedValueOnce(view(threeTables()));
+      await render();
+      await selectMany(['orders', 'customers', 'products']);
+      await choose('Distribution', 'Distribute left');
+      await act(async () => tool('Save changes').click());
+      const placed = api.saveModel.mock.calls[0][1].definition.tables;
+      expect(placed.find((t: any) => t.alias === 'customers').x).toBe(450);
+    });
+
+    it('Same width copies the first selected table\'s width, Adjust to text clears it', async () => {
+      api.model.mockResolvedValueOnce(view({
+        ...saved(),
+        tables: saved().tables.map((t) => (t.alias === 'orders' ? { ...t, width: 220 } : t)),
+      }));
+      await render();
+      await selectMany(['orders', 'customers']);
+      await choose('Size', 'Same width');
+      expect(flow.props.nodes.find((n: any) => n.id === 'customers').width).toBe(220);
+      await choose('Size', 'Adjust to text');
+      expect(flow.props.nodes.find((n: any) => n.id === 'customers').width).toBeUndefined();
+      expect(flow.props.nodes.find((n: any) => n.id === 'orders').width).toBeUndefined();
+    });
+
+    it('adds and removes a reference point and swaps the orientation', async () => {
+      await render();
+      await act(async () => flow.props.onSelectionChange({ nodes: [], edges: [{ id: 'join-0', data: { index: 0 } }] }));
+      await choose('References', 'Add reference point');
+      const join = () => flow.props.edges[0].data.join;
+      expect(join().points).toHaveLength(1);
+      await choose('References', 'Reduce reference point');
+      expect(join().points).toBeUndefined();
+      await choose('References', 'Swap reference orientation');
+      expect(join().swapped).toBe(true);
+    });
+
+    it('zooms to a chosen percentage and back to 1:1', async () => {
+      await render();
+      const zoom = document.querySelector('select[aria-label="Zoom"]') as HTMLSelectElement;
+      await act(async () => {
+        zoom.value = '50';
+        zoom.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      expect(flow.zoomTo).toHaveBeenLastCalledWith(0.5);
+      await act(async () => tool('1:1').click());
+      expect(flow.zoomTo).toHaveBeenLastCalledWith(1);
+      await act(async () => flow.props.onMove?.({}, { x: 0, y: 0, zoom: 2 }));
+      expect(zoom.value).toBe('200');
+    });
+
+    it('search lists hits and centers the picked table', async () => {
+      await render();
+      await fill('input[aria-label="Search the model"]', 'amount');
+      const hit = document.querySelector('[data-slot="model-search-hit"]') as HTMLButtonElement;
+      expect(hit.textContent).toContain('orders.amount');
+      await act(async () => hit.click());
+      expect(flow.setCenter).toHaveBeenCalledTimes(1);
+      expect(flow.props.nodes.find((n: any) => n.id === 'orders').selected).toBe(true);
+    });
+
+    it('the palette\'s table tool opens the new-table dialog; tools 5-8 are disabled', async () => {
+      await render();
+      const palette = document.querySelector('[data-slot="model-tool-palette"]')!;
+      const labels = [...palette.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'));
+      expect(labels).toEqual(['Select', 'Select area', 'New table', 'New reference', 'New view', 'New note', 'New area', 'New cube']);
+      ['New view', 'New note', 'New area', 'New cube'].forEach((l) => expect(tool(l).disabled, l).toBe(true));
+      await act(async () => tool('New table').click());
+      expect(document.body.textContent).toContain('New table');
+      expect(document.querySelector('input[aria-label="Table name"]')).not.toBeNull();
+    });
+
+    it('the area tool selects by dragging instead of panning', async () => {
+      await render();
+      expect(flow.props.panOnDrag).toBe(true);
+      await act(async () => tool('Select area').click());
+      expect(flow.props.selectionOnDrag).toBe(true);
+      expect(flow.props.panOnDrag).toBe(false);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', code: 'Digit1', bubbles: true }));
+      });
+      expect(flow.props.panOnDrag).toBe(true);
+    });
+
+    it('toggles the panes with Ctrl+Alt+N / P / B', async () => {
+      await render();
+      const press = async (k: string) => act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          key: k, code: `Key${k.toUpperCase()}`, ctrlKey: true, altKey: true, bubbles: true,
+        }));
+      });
+      expect(document.querySelector('[data-slot="model-left-pane"]')).not.toBeNull();
+      await press('n');
+      expect(document.querySelector('[data-slot="model-left-pane"]')).toBeNull();
+      expect(tool('Toggle navigation pane').getAttribute('aria-pressed')).toBe('false');
+      await press('b');
+      expect(document.querySelector('[data-slot="model-top-bar"]')).toBeNull();
+      await press('b');
+      expect(document.querySelector('[data-slot="model-top-bar"]')).not.toBeNull();
+      await press('p');
+      expect(tool('Toggle properties pane').getAttribute('aria-pressed')).toBe('false');
     });
 
     it('edits only a draft and creates only with drafts', async () => {
@@ -713,13 +863,13 @@ describe('ModelEditor', () => {
       expect((document.querySelector('input[aria-label="Column 2 name"]') as HTMLInputElement).value).toBe('label');
     });
 
-    it('removes the selected table', async () => {
+    it('deletes the selected table', async () => {
       await render();
       await select('customers');
-      await act(async () => tool('Remove table').click());
+      await act(async () => tool('Delete').click());
       expect([...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'))).toEqual(['orders']);
       expect(document.querySelectorAll('[data-edge]').length).toBe(0);
-      expect(tool('Remove table').disabled).toBe(true);
+      expect(tool('Delete').disabled).toBe(true);
     });
 
     it('colors the selected table from the palette', async () => {
