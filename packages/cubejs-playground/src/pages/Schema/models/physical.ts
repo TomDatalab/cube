@@ -306,3 +306,38 @@ export function addReference(
     },
   };
 }
+
+type SettingGroup = 'validation' | 'format' | 'sqlGeneration' | 'scripts';
+
+// One of the model's settings; a value equal to its default (or empty)
+// leaves the key out, and empty groups go with it.
+export function setSetting(
+  def: ModelDefinition,
+  group: SettingGroup,
+  key: string,
+  value: string | boolean,
+  fallback: string | boolean
+): ModelDefinition {
+  const settings = { ...(def.settings ?? {}) } as Record<string, Record<string, unknown> | undefined>;
+  const values = { ...(settings[group] ?? {}) };
+  if (value === fallback || value === '') {
+    delete values[key];
+  } else {
+    values[key] = value;
+  }
+  if (Object.keys(values).length) {
+    settings[group] = values;
+  } else {
+    delete settings[group];
+  }
+  const { settings: _drop, ...rest } = def;
+  return Object.keys(settings).length ? { ...rest, settings: settings as ModelDefinition['settings'] } : rest;
+}
+
+// Every validation rule on (Redgate's "Select all") or off.
+export function setAllRules(def: ModelDefinition, ids: string[], on: boolean): ModelDefinition {
+  const { validation: _drop, ...others } = def.settings ?? {};
+  const settings = on ? others : { ...others, validation: Object.fromEntries(ids.map((id) => [id, false])) };
+  const { settings: _old, ...rest } = def;
+  return Object.keys(settings).length ? { ...rest, settings } : rest;
+}

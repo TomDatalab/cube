@@ -1,6 +1,7 @@
 import { ReactNode, useState } from 'react';
 import {
-  Box, ChevronDown, ChevronRight, Database, Spline, Square, StickyNote, Table2, TableProperties,
+  Box, ChevronDown, ChevronRight, CircleAlert, Database, Spline, Square, StickyNote, Table2, TableProperties,
+  TriangleAlert,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -11,6 +12,7 @@ import type { OrgDetail } from '../tree';
 import { useResizable } from '../useResizable';
 import { ResizeHandle } from '../ResizeHandle';
 import type { ModelDefinition, ModelTable } from './modelGraph';
+import type { Issue } from './validate';
 
 // What a table of the database tables section carries while dragged to the
 // canvas.
@@ -21,12 +23,13 @@ type Columns = { name: string; type: string }[];
 
 // A section of the pane, as Redgate's: a header that opens and closes it.
 function Section({
-  title, open, onToggle, disabled, children,
+  title, open, onToggle, disabled, badge, children,
 }: {
   title: string;
   open: boolean;
   onToggle(): void;
   disabled?: boolean;
+  badge?: ReactNode;
   children?: ReactNode;
 }) {
   const Chevron = open ? ChevronDown : ChevronRight;
@@ -41,7 +44,10 @@ function Section({
         className="tw:flex tw:w-full tw:cursor-pointer tw:items-center tw:justify-between tw:border-0 tw:bg-transparent tw:px-3 tw:py-2 tw:text-left tw:text-xs tw:font-semibold tw:tracking-wide tw:text-foreground tw:uppercase tw:hover:bg-accent tw:disabled:cursor-default tw:disabled:opacity-50"
         onClick={onToggle}
       >
-        {title}
+        <span className="tw:flex tw:items-center tw:gap-2">
+          {title}
+          {badge}
+        </span>
         <Chevron className="tw:size-4" />
       </button>
       {open ? <div className="tw:min-h-0 tw:flex-1 tw:overflow-y-auto tw:px-2 tw:pb-2">{children}</div> : null}
@@ -307,15 +313,52 @@ export type StructurePanelProps = StructureTreeProps & {
   tables: OrgDetail['tables'];
   dataSource: string;
   locked: boolean;
+  issues: Issue[];
+  onPickIssue(issue: Issue): void;
 };
+
+// The model's problems, errors first, each picking what it is about.
+function IssueList({ issues, onPick }: { issues: Issue[]; onPick(issue: Issue): void }) {
+  return (
+    <div data-slot="model-issues" className="tw:flex tw:flex-col tw:gap-2 tw:text-xs">
+      {[{ title: 'Errors', severity: 'error', Icon: CircleAlert, tone: 'tw:text-destructive' },
+        { title: 'Warnings', severity: 'warning', Icon: TriangleAlert, tone: 'tw:text-amber-500' }].map(({
+        title, severity, Icon, tone,
+      }) => {
+        const list = issues.filter((i) => i.severity === severity);
+        return (
+          <div key={title}>
+            <div className="tw:flex tw:items-center tw:gap-1.5 tw:font-medium">
+              <Icon className={cn('tw:size-3.5', tone)} />
+              {`${title} (${list.length})`}
+            </div>
+            <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-5">
+              {list.map((issue) => (
+                <li key={`${issue.rule}:${issue.message}`}>
+                  <button
+                    type="button"
+                    className="tw:w-full tw:cursor-pointer tw:rounded-sm tw:border-0 tw:bg-transparent tw:px-1 tw:py-0.5 tw:text-left tw:text-inherit tw:hover:bg-accent"
+                    onClick={() => onPick(issue)}
+                  >
+                    {issue.message}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 // The left pane, as Redgate's: Model structure, then our Database tables,
 // then Model explorer and Issues (later phases).
 export function StructurePanel({
-  tables, dataSource, locked, ...tree
+  tables, dataSource, locked, issues, onPickIssue, ...tree
 }: StructurePanelProps) {
   const [width, setWidth] = useResizable('cubePlayground.modelLeftWidth', PANE_WIDTH.initial, PANE_WIDTH.min, PANE_WIDTH.max);
-  const [open, setOpen] = useState({ structure: true, tables: true });
+  const [open, setOpen] = useState({ structure: true, tables: true, issues: false });
   return (
     <aside
       data-slot="model-left-pane"
@@ -338,7 +381,18 @@ export function StructurePanel({
         <DatabaseTables tables={tables} dataSource={dataSource} locked={locked} />
       </Section>
       <Section title="Model explorer" open={false} disabled onToggle={() => {}} />
-      <Section title="Issues" open={false} disabled onToggle={() => {}} />
+      <Section
+        title="Issues"
+        open={open.issues}
+        onToggle={() => setOpen((was) => ({ ...was, issues: !was.issues }))}
+        badge={issues.length ? (
+          <span className="tw:rounded-full tw:bg-muted tw:px-1.5 tw:text-[10px] tw:font-semibold tw:normal-case">
+            {issues.length}
+          </span>
+        ) : null}
+      >
+        <IssueList issues={issues} onPick={onPickIssue} />
+      </Section>
     </aside>
   );
 }

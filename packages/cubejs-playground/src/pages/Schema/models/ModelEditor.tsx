@@ -1112,6 +1112,18 @@ function Editor({
             selectedEdge={edgeAt}
             onPickNode={pickNode}
             onPickEdge={pickEdge}
+            issues={problemsFound}
+            onPickIssue={(issue) => {
+              if (issue.target.kind === 'table') {
+                pickNode(issue.target.alias);
+              } else {
+                const { id } = issue.target;
+                const at = def.joins.findIndex((j) => j.id === id);
+                if (at >= 0) {
+                  pickEdge(at);
+                }
+              }
+            }}
             tables={tables}
             dataSource={def.dataSource}
             locked={def.tables.length > 0}

@@ -800,13 +800,13 @@ describe('ModelEditor', () => {
       expect(pane().textContent).toContain('Reference properties');
     });
 
-    it('lists the explorer and issues as coming soon', async () => {
+    it('lists the explorer as coming soon and the issues as open', async () => {
       await render();
       const left = document.querySelector('[data-slot="model-left-pane"]') as HTMLElement;
       expect(left.textContent).toContain('Model structure');
       expect(left.textContent).toContain('Database tables');
       expect((left.querySelector('button[aria-label="Model explorer"]') as HTMLButtonElement).disabled).toBe(true);
-      expect((left.querySelector('button[aria-label="Issues"]') as HTMLButtonElement).disabled).toBe(true);
+      expect((left.querySelector('button[aria-label="Issues"]') as HTMLButtonElement).disabled).toBe(false);
     });
 
     it('hides the properties pane with its toggle', async () => {
@@ -1388,6 +1388,73 @@ describe('ModelEditor', () => {
       await act(async () => tool('Undo').click());
       expect(pane().textContent).toContain('Reference properties');
       expect((pane().querySelector('input[aria-label="Mandatory"]') as HTMLInputElement).checked).toBe(false);
+    });
+  });
+
+  describe('issues and model settings', () => {
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const noKey = () => {
+      const def = withDraft();
+      def.tables[2].draft!.columns[0].primaryKey = false;
+      return def;
+    };
+    const commitText = async (label: string, value: string) => {
+      await fill(`[data-slot="model-properties"] [aria-label="${label}"]`, value);
+      await act(async () => {
+        pane().querySelector(`[aria-label="${label}"]`)!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
+    };
+    const openSection = async (title: string) => act(async () => {
+      const header = [...pane().querySelectorAll('section > button')].find((x) => x.textContent!.trim() === title) as HTMLButtonElement;
+      header.click();
+    });
+    const lastSaved = async () => {
+      await act(async () => tool('Save changes').click());
+      return api.saveModel.mock.calls[api.saveModel.mock.calls.length - 1][1].definition;
+    };
+
+    it('lists the issues and selects the table of one', async () => {
+      api.model.mockResolvedValueOnce(view(noKey()));
+      await render();
+      const left = document.querySelector('[data-slot="model-left-pane"]') as HTMLElement;
+      const header = left.querySelector('button[aria-label="Issues"]') as HTMLButtonElement;
+      expect(header.disabled).toBe(false);
+      expect(header.textContent).toContain('1');
+      await act(async () => header.click());
+      const list = left.querySelector('[data-slot="model-issues"]') as HTMLElement;
+      expect(list.textContent).toContain('Warnings (1)');
+      const item = [...list.querySelectorAll('button')].find((b) => b.textContent!.includes('Table items has no primary key'))!;
+      await act(async () => item.click());
+      expect(flow.props.nodes.find((n: any) => n.id === 'items').selected).toBe(true);
+      expect(pane().textContent).toContain('Table properties');
+    });
+
+    it('switching a rule off hides its issues', async () => {
+      api.model.mockResolvedValueOnce(view(noKey()));
+      await render();
+      await openSection('Model validation settings');
+      await act(async () => (pane().querySelector('[aria-label="If has PK column(s) (warnings)"]') as HTMLInputElement).click());
+      const left = document.querySelector('[data-slot="model-left-pane"]') as HTMLElement;
+      expect((left.querySelector('button[aria-label="Issues"]') as HTMLButtonElement).textContent).not.toContain('1');
+      expect((await lastSaved()).settings.validation).toEqual({ 'table.hasPk': false });
+      await act(async () => button('Select all').click());
+      expect((await lastSaved()).settings).toBeUndefined();
+    });
+
+    it('edits the model\'s scripts, format and SQL generation settings', async () => {
+      await render();
+      await openSection('Additional SQL scripts');
+      await openSection('Format');
+      await openSection('SQL generation settings');
+      await commitText('Beginning of the create script', '-- begin');
+      await commitText('End of the drop script', '-- dropped');
+      await act(async () => (pane().querySelector('[aria-label="Generate DROP statements"]') as HTMLInputElement).click());
+      await act(async () => (pane().querySelector('[aria-label="Show N (nullable)"]') as HTMLInputElement).click());
+      expect((await lastSaved()).settings).toEqual({
+        scripts: { createBefore: '-- begin', dropAfter: '-- dropped' },
+        sqlGeneration: { drop: true },
+        format: { showNullable: true },
+      });
     });
   });
 
