@@ -2,13 +2,17 @@ import { useEffect, useRef } from 'react';
 
 // Keys that work while typing too: saving should not wait for a blur.
 const ANYWHERE = new Set(['mod+s']);
+// Keys the page keeps while some text is selected: copying it.
+const TEXT_KEYS = new Set(['mod+c', 'mod+x', 'mod+a']);
 
 function typing(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || typeof el.closest !== 'function') {
     return false;
   }
-  return Boolean(el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]'));
+  return Boolean(el.closest(
+    'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], [role="alertdialog"], [role="listbox"]'
+  ));
 }
 
 // `mod+shift+z`, `mod+alt+n`, `delete`, `1`: Ctrl or Cmd is `mod`; letters
@@ -40,6 +44,9 @@ export function useEditorShortcuts(map: Record<string, (e: KeyboardEvent) => voi
       const combo = comboOf(e);
       const run = current.current[combo];
       if (!run || (typing(e.target) && !ANYWHERE.has(combo))) {
+        return;
+      }
+      if (TEXT_KEYS.has(combo) && window.getSelection()?.isCollapsed === false) {
         return;
       }
       e.preventDefault();

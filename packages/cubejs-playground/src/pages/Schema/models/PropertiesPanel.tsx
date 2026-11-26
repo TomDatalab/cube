@@ -72,6 +72,29 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+// A text kept as typed and written to the model when the field is left,
+// so typing it is one step of undo.
+function DraftText({
+  id, label, value, onCommit,
+}: { id: string; label: string; value: string; onCommit(next: string): void }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  return (
+    <Textarea
+      id={id}
+      aria-label={label}
+      rows={2}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        if (text !== value) {
+          onCommit(text);
+        }
+      }}
+    />
+  );
+}
+
 function Value({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="tw:flex tw:flex-col tw:gap-0.5 tw:text-sm">
@@ -139,14 +162,13 @@ function ModelProperties({
         <Input id="model-name" aria-label="Model name" value={name} onChange={(e) => onName(e.target.value)} />
       </Field>
       <Field label="Description" htmlFor="model-description">
-        <Textarea
+        <DraftText
           id="model-description"
-          aria-label="Model description"
-          rows={2}
+          label="Model description"
           value={def.description ?? ''}
-          onChange={(e) => {
+          onCommit={(text) => {
             const { description: _drop, ...rest } = def;
-            onChange(e.target.value ? { ...rest, description: e.target.value } : rest);
+            onChange(text ? { ...rest, description: text } : rest);
           }}
         />
       </Field>
@@ -195,12 +217,12 @@ function TableProperties({
         <TableName def={def} alias={alias} onChange={onChange} onRenamed={onRenamed} />
         <Value label="Source">{`${table.schema}.${table.table}${table.draft ? ' (new)' : ''}`}</Value>
         <Field label="Comment" htmlFor="model-table-comment">
-          <Textarea
+          <DraftText
+            key={alias}
             id="model-table-comment"
-            aria-label="Table comment"
-            rows={2}
+            label="Table comment"
             value={table.comment ?? ''}
-            onChange={(e) => onChange(setTableComment(def, alias, e.target.value))}
+            onCommit={(text) => onChange(setTableComment(def, alias, text))}
           />
         </Field>
         <div className="tw:flex tw:flex-col tw:gap-1">

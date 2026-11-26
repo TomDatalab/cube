@@ -430,8 +430,10 @@ function Editor({
   const onSelectionChange = useCallback(({ nodes: chosen, edges: lines }: OnSelectionChangeParams) => {
     const ids = chosen.map((n) => n.id);
     setSelection((was) => (sameIds(was, ids) ? was : ids));
+    // A picked node wins: React Flow cannot unselect our controlled edges,
+    // so it may still report the reference picked before.
     const edge = lines[0]?.data as { index?: number } | undefined;
-    setSelectedEdge(typeof edge?.index === 'number' ? edge.index : null);
+    setSelectedEdge(ids.length === 0 && typeof edge?.index === 'number' ? edge.index : null);
   }, []);
 
   const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
@@ -485,15 +487,19 @@ function Editor({
     if (selection.length) {
       change(cut(def, selection).def);
       setSelection([]);
+      setSelectedEdge(null);
     } else if (selectedEdge !== null && def.joins[selectedEdge]) {
       change(removeJoin(def, selectedEdge));
       setSelectedEdge(null);
     }
   };
 
+  // References are selected by their place, which undo and redo may give
+  // to another one.
   const undo = () => {
     if (history.canUndo) {
       history.undo();
+      setSelectedEdge(null);
       edited();
     }
   };
@@ -501,6 +507,7 @@ function Editor({
   const redo = () => {
     if (history.canRedo) {
       history.redo();
+      setSelectedEdge(null);
       edited();
     }
   };
@@ -525,7 +532,10 @@ function Editor({
 
   const onConnect = (c: Connection) => {
     if (c.source && c.target && c.sourceHandle && c.targetHandle) {
-      link({ alias: c.source, column: c.sourceHandle }, { alias: c.target, column: c.targetHandle });
+      link(
+        { alias: parseNodeId(c.source).alias, column: c.sourceHandle },
+        { alias: parseNodeId(c.target).alias, column: c.targetHandle }
+      );
     }
   };
 
@@ -535,9 +545,11 @@ function Editor({
       return;
     }
     const point = 'changedTouches' in event ? event.changedTouches[0] : event;
-    const to = point && columnAt(document.elementFromPoint(point.clientX, point.clientY));
-    if (to && to.alias !== state.fromNode.id) {
-      link({ alias: state.fromNode.id, column: state.fromHandle.id }, to);
+    const at = point && columnAt(document.elementFromPoint(point.clientX, point.clientY));
+    const from = parseNodeId(state.fromNode.id).alias;
+    const to = at && { ...at, alias: parseNodeId(at.alias).alias };
+    if (to && to.alias !== from) {
+      link({ alias: from, column: state.fromHandle.id }, to);
     }
   };
 
@@ -597,6 +609,9 @@ function Editor({
       setBusy(null);
     }
   };
+
+  const latest = useRef({ dirty, busy, save });
+  latest.current = { dirty, busy, save };
 
   // Saves what is not saved, then builds; a cube edited by hand asks before
   // `force` overwrites it.
@@ -917,17 +932,22 @@ function Editor({
     'mod+z': undo,
     'mod+y': redo,
     'mod+shift+z': redo,
+    // A field that commits on blur commits first, then the save reads it.
     'mod+s': () => {
-      if (dirty && busy === null) {
-        save();
-      }
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      window.setTimeout(() => {
+        const now = latest.current;
+        if (now.dirty && now.busy === null) {
+          now.save();
+        }
+      }, 0);
     },
     'mod+c': copySelection,
     'mod+v': pasteClip,
     'mod+x': cutSelection,
     'mod+a': () => setSelection(nodes.map((n) => n.id)),
     delete: deleteSelection,
-  }, loaded && !loadError);
+  }, loaded && !loadError && !joinEdit && !tableEdit && !createAsk && !ask);
 
   if (loadError) {
     return (
@@ -1092,7 +1112,12 @@ function Editor({
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
-            onPaneClick={() => setPicked(null)}
+            onPaneClick={() => {
+              setPicked(null);
+              setSelectedEdge(null);
+            }}
+            minZoom={0.25}
+            maxZoom={4}
             connectionMode={ConnectionMode.Loose}
             connectionRadius={30}
             onEdgeClick={onEdgeClick}

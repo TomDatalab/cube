@@ -723,6 +723,9 @@ describe('ModelEditor', () => {
       await render();
       await rename('Sales 2');
       await key('s', { ctrlKey: true });
+      await act(async () => {
+        await new Promise((r) => { setTimeout(r, 20); });
+      });
       expect(api.saveModel).toHaveBeenCalledTimes(1);
       expect(api.saveModel.mock.calls[0][1].definition.formatVersion).toBe(2);
     });
@@ -754,6 +757,9 @@ describe('ModelEditor', () => {
     it('describes the model', async () => {
       await render();
       await fill('textarea[aria-label="Model description"]', 'Orders and their customers');
+      await act(async () => {
+        document.querySelector('textarea[aria-label="Model description"]')!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
       await act(async () => tool('Save changes').click());
       expect(api.saveModel.mock.calls[0][1].definition.description).toBe('Orders and their customers');
     });
@@ -776,6 +782,9 @@ describe('ModelEditor', () => {
       expect([...pane().querySelectorAll('[data-slot="model-property-column"]')].map((r) => r.textContent))
         .toEqual(['idinteger', 'customer_idinteger', 'amountnumeric']);
       await fill('textarea[aria-label="Table comment"]', 'every order');
+      await act(async () => {
+        document.querySelector('textarea[aria-label="Table comment"]')!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
       await act(async () => tool('Save changes').click());
       const def = api.saveModel.mock.calls[0][1].definition;
       expect(def.tables.find((t: any) => t.alias === 'orders').comment).toBe('every order');
@@ -815,6 +824,116 @@ describe('ModelEditor', () => {
       expect(pane()).not.toBeNull();
       await act(async () => tool('Toggle properties pane').click());
       expect(pane()).toBeNull();
+    });
+  });
+
+  describe('review fixes', () => {
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const key = async (k: string, opts: KeyboardEventInit = {}, target: EventTarget = document.body) => {
+      await act(async () => {
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...opts }));
+      });
+    };
+    const ids = () => [...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'));
+
+    it('a table picked after a reference replaces it, even while React Flow still reports the edge', async () => {
+      await render();
+      await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
+      expect(pane().textContent).toContain('Reference properties');
+      await act(async () => flow.props.onSelectionChange({
+        nodes: [{ id: 'orders' }], edges: [{ id: 'join-0', data: { index: 0 } }],
+      }));
+      expect(pane().textContent).toContain('Table properties');
+      expect(flow.props.edges[0].selected).toBe(false);
+    });
+
+    it('a click on the empty canvas drops the selected reference', async () => {
+      await render();
+      await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
+      await act(async () => flow.props.onPaneClick({}));
+      expect(pane().textContent).toContain('Model properties');
+    });
+
+    it('ignores canvas shortcuts while a dialog is open', async () => {
+      await render();
+      await select('customers');
+      await act(async () => tool('New table').click());
+      await key('Delete');
+      await key('a', { ctrlKey: true });
+      expect(ids()).toEqual(['orders', 'customers']);
+      expect(flow.props.nodes.filter((n: any) => n.selected).map((n: any) => n.id)).toEqual(['customers']);
+    });
+
+    it('leaves Ctrl+C to the page when text is selected', async () => {
+      await render();
+      await select('orders');
+      const text = document.querySelector('[data-slot="model-top-bar"] h2')!;
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      await key('c', { ctrlKey: true });
+      window.getSelection()!.removeAllRanges();
+      expect(tool('Paste').disabled).toBe(true);
+    });
+
+    it('Ctrl+S in the table name field saves the new name', async () => {
+      await render();
+      await select('orders');
+      await fill('input[aria-label="Selected table name"]', 'purchases');
+      const input = document.querySelector('input[aria-label="Selected table name"]') as HTMLInputElement;
+      input.focus();
+      await act(async () => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true }));
+      });
+      await act(async () => {
+        await new Promise((r) => { setTimeout(r, 20); });
+      });
+      expect(api.saveModel).toHaveBeenCalledTimes(1);
+      expect(api.saveModel.mock.calls[0][1].definition.tables.map((t: any) => t.alias)).toContain('purchases');
+    });
+
+    it('typing a comment is one undo step', async () => {
+      await render();
+      await select('orders');
+      await fill('textarea[aria-label="Table comment"]', 'e');
+      await fill('textarea[aria-label="Table comment"]', 'every order');
+      await act(async () => {
+        document.querySelector('textarea[aria-label="Table comment"]')!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
+      expect(tool('Undo').disabled).toBe(false);
+      await act(async () => tool('Undo').click());
+      expect(tool('Undo').disabled).toBe(true);
+      expect((document.querySelector('textarea[aria-label="Table comment"]') as HTMLTextAreaElement).value).toBe('');
+    });
+
+    it('undo drops a selected reference, whose index may now be another', async () => {
+      await render();
+      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 410, y: 20 } }]));
+      await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
+      await act(async () => tool('Undo').click());
+      expect(pane().textContent).toContain('Model properties');
+    });
+
+    it('zooms from 25% to 400%', async () => {
+      await render();
+      expect(flow.props.minZoom).toBe(0.25);
+      expect(flow.props.maxZoom).toBe(4);
+    });
+
+    it('links from a shortcut\'s column to its table', async () => {
+      api.model.mockResolvedValueOnce(view(threeTables()));
+      await render();
+      await select('orders');
+      await act(async () => tool('Copy').click());
+      await act(async () => tool('Paste as shortcut').click());
+      const error = vi.spyOn(notify, 'error');
+      await act(async () => flow.props.onConnect({
+        source: 'products', sourceHandle: 'id', target: 'orders~s1', targetHandle: 'customer_id',
+      }));
+      expect(error).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain('products.id → orders.customer_id');
+      error.mockRestore();
     });
   });
 
