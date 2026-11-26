@@ -20,6 +20,7 @@ const flow = vi.hoisted(() => ({
   zoomOut: null as any,
   zoomTo: null as any,
   setCenter: null as any,
+  updated: [] as string[],
   fitView: null as any,
 }));
 
@@ -50,6 +51,7 @@ vi.mock('@xyflow/react', async () => {
     ReactFlowProvider: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
     NodeResizer: () => null,
+    useUpdateNodeInternals: () => (id: string) => flow.updated.push(id),
     MiniMap: () => null,
     BaseEdge: () => null,
     EdgeLabelRenderer: () => null,
@@ -157,6 +159,7 @@ describe('ModelEditor', () => {
     flow.zoomIn = vi.fn();
     flow.zoomOut = vi.fn();
     flow.zoomTo = vi.fn();
+    flow.updated = [];
     flow.setCenter = vi.fn();
     flow.fitView = vi.fn();
     api = {
@@ -221,7 +224,10 @@ describe('ModelEditor', () => {
     await act(async () => found.click());
   };
   const selectMany = async (ids: string[]) => {
-    await act(async () => flow.props.onSelectionChange({ nodes: ids.map((id) => ({ id })), edges: [] }));
+    // As React Flow reports a user's selection: one change per node.
+    await act(async () => flow.props.onNodesChange(flow.props.nodes.map((n: any) => ({
+      type: 'select', id: n.id, selected: ids.includes(n.id),
+    }))));
   };
   const fill = async (selector: string, value: string) => {
     const input = document.querySelector(selector) as HTMLInputElement;
@@ -233,7 +239,9 @@ describe('ModelEditor', () => {
     });
   };
   const select = async (alias: string | null) => {
-    await act(async () => flow.props.onSelectionChange({ nodes: alias ? [{ id: alias }] : [], edges: [] }));
+    await act(async () => flow.props.onNodesChange(flow.props.nodes.map((n: any) => ({
+      type: 'select', id: n.id, selected: n.id === alias,
+    }))));
   };
   const node = (alias: string) => document.querySelector(`[data-node="${alias}"]`) as HTMLElement;
   const panelItem = (name: string) => [...document.querySelectorAll('[data-slot="model-table-item"]')]
@@ -829,13 +837,16 @@ describe('ModelEditor', () => {
     };
     const ids = () => [...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'));
 
+    it('takes selection only from the user\'s changes, never from React Flow echoing it', async () => {
+      await render();
+      expect(flow.props.onSelectionChange).toBeUndefined();
+    });
+
     it('a table picked after a reference replaces it, even while React Flow still reports the edge', async () => {
       await render();
       await act(async () => (document.querySelector('[data-edge]') as HTMLButtonElement).click());
       expect(pane().textContent).toContain('Reference properties');
-      await act(async () => flow.props.onSelectionChange({
-        nodes: [{ id: 'orders' }], edges: [{ id: 'join-0', data: { index: 0 } }],
-      }));
+      await act(async () => flow.props.onNodesChange([{ type: 'select', id: 'orders', selected: true }]));
       expect(pane().textContent).toContain('Table properties');
       expect(flow.props.edges[0].selected).toBe(false);
     });
@@ -994,7 +1005,7 @@ describe('ModelEditor', () => {
 
     it('adds and removes a reference point and swaps the orientation', async () => {
       await render();
-      await act(async () => flow.props.onSelectionChange({ nodes: [], edges: [{ id: 'join-0', data: { index: 0 } }] }));
+      await act(async () => flow.props.onEdgesChange([{ type: 'select', id: 'join-0', selected: true }]));
       await choose('References', 'Add reference point');
       const join = () => flow.props.edges[0].data.join;
       expect(join().points).toHaveLength(1);
@@ -1234,6 +1245,15 @@ describe('ModelEditor', () => {
       expect(node('items').textContent).toContain('title');
     });
 
+    it('remeasures a table whose columns change, so links to a new column draw', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await select('items');
+      flow.updated = [];
+      await act(async () => (document.querySelector('[data-slot="model-properties"] [aria-label="Add column"]') as HTMLElement).click());
+      expect(flow.updated).toContain('items');
+    });
+
     it('opens a column\'s details and sets default and comment', async () => {
       api.model.mockResolvedValueOnce(view(withDraft()));
       await render();
@@ -1371,6 +1391,13 @@ describe('ModelEditor', () => {
       await pickOption('Pair 2 primary column', 'name');
       await pickOption('Pair 2 foreign column', 'amount');
       expect((await savedJoin()).pairs).toEqual([{ from: 'amount', to: 'name' }]);
+    });
+
+    it('the reference tool leaves selection to the editor while it is on', async () => {
+      await render();
+      expect(flow.props.elementsSelectable).not.toBe(false);
+      await act(async () => tool('New reference').click());
+      expect(flow.props.elementsSelectable).toBe(false);
     });
 
     it('the reference tool adds the FK column to a new child table and selects the reference', async () => {

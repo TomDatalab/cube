@@ -8,7 +8,7 @@ import {
 } from '@xyflow/react';
 import type {
   Connection, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnConnectEnd, OnNodeDrag,
-  OnSelectionChangeParams,
+  EdgeChange, NodeSelectionChange,
 } from '@xyflow/react';
 import { CircleAlert, Map as MapIcon } from 'lucide-react';
 
@@ -448,21 +448,47 @@ function Editor({
     },
   }])), [def.joins, selectedEdge, onMovePoint]);
 
+  // The selection follows only what the user does (React Flow's `select`
+  // changes): listening to onSelectionChange too would echo the selection
+  // the editor itself hands React Flow, and the two chase each other.
   const onNodesChange = useCallback((changes: NodeChange<TableFlowNode>[]) => {
-    // Tables leave through their own button, which updates the definition.
-    const kept = changes.filter((c) => c.type !== 'remove');
-    setNodes((ns) => applyNodeChanges(kept, ns));
+    const picks = changes.filter((c): c is NodeSelectionChange => c.type === 'select');
+    if (picks.length) {
+      setSelection((was) => {
+        const next = was.filter((id) => !picks.some((c) => c.id === id && !c.selected));
+        picks.forEach((c) => {
+          if (c.selected && !next.includes(c.id)) {
+            next.push(c.id);
+          }
+        });
+        return sameIds(was, next) ? was : next;
+      });
+      if (picks.some((c) => c.selected)) {
+        setSelectedEdge(null);
+      }
+    }
+    // Tables leave through their own button, which updates the definition;
+    // selection comes from `selection`.
+    const kept = changes.filter((c) => c.type !== 'remove' && c.type !== 'select');
+    if (kept.length) {
+      setNodes((ns) => applyNodeChanges(kept, ns));
+    }
   }, []);
 
-  // React Flow asks for a stable handler.
-  const onSelectionChange = useCallback(({ nodes: chosen, edges: lines }: OnSelectionChangeParams) => {
-    const ids = chosen.map((n) => n.id);
-    setSelection((was) => (sameIds(was, ids) ? was : ids));
-    // A picked node wins: React Flow cannot unselect our controlled edges,
-    // so it may still report the reference picked before.
-    const edge = lines[0]?.data as { index?: number } | undefined;
-    const id = typeof edge?.index === 'number' ? joinsRef.current[edge.index]?.id ?? null : null;
-    setSelectedEdge(ids.length === 0 ? id : null);
+  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
+    changes.forEach((c) => {
+      if (c.type !== 'select') {
+        return;
+      }
+      const index = Number(c.id.replace('join-', ''));
+      const id = joinsRef.current[index]?.id ?? null;
+      if (c.selected && id) {
+        setSelection([]);
+        setSelectedEdge(id);
+      } else if (!c.selected) {
+        setSelectedEdge((was) => (was === id ? null : was));
+      }
+    });
   }, []);
 
   const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
@@ -1189,11 +1215,14 @@ function Editor({
             connectionMode={ConnectionMode.Loose}
             connectionRadius={30}
             onEdgeClick={onEdgeClick}
-            onSelectionChange={onSelectionChange}
+            onEdgesChange={onEdgesChange}
             onNodeDoubleClick={onNodeDoubleClick}
             onNodeClick={onNodeClick}
             onMove={(_event, viewport) => setZoomPercent(Math.round(viewport.zoom * 100))}
             panOnDrag={tool !== 'area-select'}
+            // The reference tool picks tables itself: a selection by React Flow
+            // on the same click would fight the reference it selects.
+            elementsSelectable={tool !== 'reference'}
             selectionOnDrag={tool === 'area-select'}
             zoomOnDoubleClick={false}
             deleteKeyCode={null}

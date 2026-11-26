@@ -1,5 +1,7 @@
-import { memo } from 'react';
-import { Handle, NodeResizer, Position } from '@xyflow/react';
+import { memo, useEffect } from 'react';
+import {
+  Handle, NodeResizer, Position, useUpdateNodeInternals,
+} from '@xyflow/react';
 import type { Node, NodeProps } from '@xyflow/react';
 import {
   ChevronDown, ChevronRight, Forward, X,
@@ -96,99 +98,108 @@ const ICON_BUTTON = 'nodrag tw:flex tw:size-4 tw:shrink-0 tw:cursor-pointer tw:i
 // A table on the canvas, drawn as Redgate draws it: a thin box, its name
 // centred on a header of its color, then one row per column with its name,
 // its type and PK/FK. Each column has a handle on both sides named after it.
-export const TableNode = memo(({ id, data, selected }: TableNodeProps) => (
-  <div
-    data-slot="model-table-node"
-    data-selected={selected || undefined}
-    className={cn(
-      'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
-      data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
-      selected && 'tw:ring-2 tw:ring-ring'
-    )}
-  >
-    <NodeResizer
-      isVisible={Boolean(selected)}
-      minWidth={160}
-      minHeight={28}
-      color="var(--ring)"
-      onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
-    />
+export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
+  // React Flow measures a node's handles once: a column added or renamed
+  // (a new foreign key, say) needs a new measure for its links to draw.
+  const updateNodeInternals = useUpdateNodeInternals();
+  const shape = data.columns.map((c) => c.name).join('\u0000');
+  useEffect(() => {
+    updateNodeInternals(id ?? data.alias);
+  }, [updateNodeInternals, id, data.alias, shape, data.collapsed]);
+  return (
     <div
-      data-slot="model-table-band"
-      className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
-      style={{ background: data.color ? `var(--model-${data.color})` : 'var(--muted)' }}
+      data-slot="model-table-node"
+      data-selected={selected || undefined}
+      className={cn(
+        'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
+        data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
+        selected && 'tw:ring-2 tw:ring-ring'
+      )}
     >
-      <button
-        type="button"
-        data-slot="model-table-toggle"
-        aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} ${data.alias}`}
-        aria-expanded={!data.collapsed}
-        title={data.collapsed ? 'Show the columns' : 'Hide the columns'}
-        className={ICON_BUTTON}
-        onClick={() => data.onToggle(data.alias)}
+      <NodeResizer
+        isVisible={Boolean(selected)}
+        minWidth={160}
+        minHeight={28}
+        color="var(--ring)"
+        onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
+      />
+      <div
+        data-slot="model-table-band"
+        className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
+        style={{ background: data.color ? `var(--model-${data.color})` : 'var(--muted)' }}
       >
-        {data.collapsed ? <ChevronRight className="tw:size-3" /> : <ChevronDown className="tw:size-3" />}
-      </button>
-      {data.shortcut ? <Forward aria-label="shortcut" className="tw:size-3 tw:shrink-0" /> : null}
-      <div className="tw:min-w-0 tw:flex-1 tw:text-center">
-        <div data-slot="model-table-name" className="tw:truncate tw:font-bold">{data.alias}</div>
-        {data.collapsed ? (
-          <div className="tw:truncate tw:text-foreground/60">
-            {`${data.columns.length} ${data.columns.length === 1 ? 'column' : 'columns'}`}
-          </div>
-        ) : null}
+        <button
+          type="button"
+          data-slot="model-table-toggle"
+          aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} ${data.alias}`}
+          aria-expanded={!data.collapsed}
+          title={data.collapsed ? 'Show the columns' : 'Hide the columns'}
+          className={ICON_BUTTON}
+          onClick={() => data.onToggle(data.alias)}
+        >
+          {data.collapsed ? <ChevronRight className="tw:size-3" /> : <ChevronDown className="tw:size-3" />}
+        </button>
+        {data.shortcut ? <Forward aria-label="shortcut" className="tw:size-3 tw:shrink-0" /> : null}
+        <div className="tw:min-w-0 tw:flex-1 tw:text-center">
+          <div data-slot="model-table-name" className="tw:truncate tw:font-bold">{data.alias}</div>
+          {data.collapsed ? (
+            <div className="tw:truncate tw:text-foreground/60">
+              {`${data.columns.length} ${data.columns.length === 1 ? 'column' : 'columns'}`}
+            </div>
+          ) : null}
+        </div>
+        {data.principal ? <span className="tw:text-[10px] tw:text-foreground/70">principal</span> : null}
+        {data.draft ? <span className="tw:text-[10px] tw:text-foreground/70">new</span> : null}
+        <button
+          type="button"
+          data-slot="model-table-remove"
+          aria-label={`Remove ${data.alias}`}
+          title={data.shortcut ? 'Remove this shortcut' : 'Remove from the model'}
+          className={ICON_BUTTON}
+          onClick={() => data.onRemove(id ?? data.alias)}
+        >
+          <X className="tw:size-3" />
+        </button>
+        {data.collapsed ? data.columns.map((c) => (
+          <span key={c.name}>
+            <Handle type="target" position={Position.Left} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
+            <Handle type="source" position={Position.Right} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
+          </span>
+        )) : null}
       </div>
-      {data.principal ? <span className="tw:text-[10px] tw:text-foreground/70">principal</span> : null}
-      {data.draft ? <span className="tw:text-[10px] tw:text-foreground/70">new</span> : null}
-      <button
-        type="button"
-        data-slot="model-table-remove"
-        aria-label={`Remove ${data.alias}`}
-        title={data.shortcut ? 'Remove this shortcut' : 'Remove from the model'}
-        className={ICON_BUTTON}
-        onClick={() => data.onRemove(id ?? data.alias)}
-      >
-        <X className="tw:size-3" />
-      </button>
-      {data.collapsed ? data.columns.map((c) => (
-        <span key={c.name}>
-          <Handle type="target" position={Position.Left} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
-          <Handle type="source" position={Position.Right} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
-        </span>
-      )) : null}
-    </div>
-    {!data.collapsed && data.missing ? (
-      <p className="tw:m-0 tw:px-2 tw:py-1 tw:text-destructive">Not in the connection</p>
-    ) : null}
-    {!data.collapsed && !data.missing ? (
-      <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
-        {data.columns.map((c) => (
-          <li
-            key={c.name}
-            data-column={c.name}
-            data-picked={data.picked === c.name || undefined}
-            className={cn(
-              'tw:relative tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4 tw:hover:bg-accent',
-              data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
-            )}
-          >
-            <Handle type="target" position={Position.Left} id={c.name} style={HANDLE_STYLE} />
-            <button
-              type="button"
-              data-slot="model-column-name"
-              title="Click, then click a column of another table to link them"
-              className="nodrag tw:min-w-0 tw:flex-1 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
-              onClick={() => data.onPick(data.alias, c.name)}
+      {!data.collapsed && data.missing ? (
+        <p className="tw:m-0 tw:px-2 tw:py-1 tw:text-destructive">Not in the connection</p>
+      ) : null}
+      {!data.collapsed && !data.missing ? (
+        <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
+          {data.columns.map((c) => (
+            <li
+              key={c.name}
+              data-column={c.name}
+              data-picked={data.picked === c.name || undefined}
+              className={cn(
+                'tw:relative tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4 tw:hover:bg-accent',
+                data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
+              )}
             >
-              {c.name}
-            </button>
-            {data.showTypes === false ? null : <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span>}
-            <span className="tw:w-9 tw:shrink-0 tw:text-right">{marks(data, c.name)}</span>
-            <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
-          </li>
-        ))}
-      </ul>
-    ) : null}
-  </div>
-));
+              <Handle type="target" position={Position.Left} id={c.name} style={HANDLE_STYLE} />
+              <button
+                type="button"
+                data-slot="model-column-name"
+                title="Click, then click a column of another table to link them"
+                className="nodrag tw:min-w-0 tw:flex-1 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
+                onClick={() => data.onPick(data.alias, c.name)}
+              >
+                {c.name}
+              </button>
+              {data.showTypes === false ? null : <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span>}
+              <span className="tw:w-9 tw:shrink-0 tw:text-right">{marks(data, c.name)}</span>
+              <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+});
 TableNode.displayName = 'TableNode';
