@@ -84,11 +84,17 @@
   --model-violet: var(--pg-model-violet, #8b5cf6);
   --model-pink: var(--pg-model-pink, #ec4899);
   --model-teal: var(--pg-model-teal, #14b8a6);
+  --model-view: var(--pg-model-view, #e0f0ff);
+  --model-view-border: var(--pg-model-view-border, #60a5fa);
+  --model-note: var(--pg-model-note, #fef9c3);
 }
 
 /* The dark accent is light: text on it is the dark page color. */
 :root[data-theme="dark"] {
   --primary-foreground: var(--pg-bg, #171b2c);
+  --model-view: var(--pg-model-view, #14304d);
+  --model-view-border: var(--pg-model-view-border, #2f6aa8);
+  --model-note: var(--pg-model-note, #4a4216);
 }
 
 /* What preflight would give shadcn's elements, and only them. */

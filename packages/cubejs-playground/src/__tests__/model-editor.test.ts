@@ -8,7 +8,10 @@ import {
 import { notify } from '@/components/kit';
 import { ApiError, CubeModelView } from '../pages/Schema/api';
 import { ModelEditor, ModelEditorProps } from '../pages/Schema/models/ModelEditor';
+import { AreaNode } from '../pages/Schema/models/AreaNode';
+import { NoteNode } from '../pages/Schema/models/NoteNode';
 import { TableNode } from '../pages/Schema/models/TableNode';
+import { ViewNode } from '../pages/Schema/models/ViewNode';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
 
 // React Flow measures its nodes before it draws edges, which jsdom cannot do:
@@ -1665,6 +1668,65 @@ describe('ModelEditor', () => {
     });
   });
 
+  describe('note node', () => {
+    it('note node shows its text', () => {
+      const host = document.createElement('div');
+      const own = createRoot(host);
+      const data = { id: 'n1', text: 'first\nsecond', onResize: () => {} };
+      act(() => own.render(createElement(NoteNode as any, { id: 'note:n1', data })));
+      const body = host.querySelector('[data-slot="model-note-node"]') as HTMLElement;
+      expect(body.textContent).toContain('first');
+      expect(body.textContent).toContain('second');
+      expect(body.getAttribute('style')).toContain('white-space: pre-wrap');
+      expect(body.getAttribute('style')).toContain('var(--model-note)');
+      act(() => own.render(createElement(NoteNode as any, { id: 'note:n1', data: { ...data, color: 'teal' } })));
+      expect(body.getAttribute('style')).toContain('var(--model-teal)');
+      act(() => own.unmount());
+    });
+  });
+
+  describe('area node', () => {
+    it('area node shows its name and is dashed', () => {
+      const host = document.createElement('div');
+      const own = createRoot(host);
+      const data = { id: 'a1', name: 'Sales', onResize: () => {} };
+      act(() => own.render(createElement(AreaNode as any, { id: 'area:a1', data })));
+      const box = host.querySelector('[data-slot="model-area-node"]') as HTMLElement;
+      expect(box.textContent).toContain('Sales');
+      expect(box.getAttribute('style')).toContain('dashed');
+      expect(box.getAttribute('style')).toContain('var(--model-slate)');
+      act(() => own.render(createElement(AreaNode as any, { id: 'area:a1', data: { ...data, fill: 'green', border: 'red' } })));
+      expect(box.getAttribute('style')).toContain('var(--model-green)');
+      expect(box.getAttribute('style')).toContain('var(--model-red)');
+      act(() => own.unmount());
+    });
+  });
+
+  describe('view node', () => {
+    it('view node lists its columns', () => {
+      const host = document.createElement('div');
+      const own = createRoot(host);
+      const data = {
+        id: 'v1',
+        name: 'sales_v',
+        columns: [{ name: 'id', type: 'integer' }, { name: 'total', type: 'numeric' }],
+        showTypes: true,
+        fixedSize: false,
+        onResize: () => {},
+      };
+      act(() => own.render(createElement(ViewNode as any, { id: 'view:v1', data })));
+      expect(host.querySelector('[data-slot="model-view-name"]')!.textContent).toBe('sales_v');
+      const row = host.querySelector('[data-column="total"]')!;
+      expect(row.textContent).toContain('total');
+      expect(row.textContent).toContain('numeric');
+      expect(host.querySelector('[data-handle="source"][data-id="node"]')).not.toBeNull();
+      expect(host.querySelector('[data-handle="target"][data-id="node"]')).not.toBeNull();
+      act(() => own.render(createElement(ViewNode as any, { id: 'view:v1', data: { ...data, showTypes: false } })));
+      expect(host.querySelector('[data-column="total"]')!.textContent).not.toContain('numeric');
+      act(() => own.unmount());
+    });
+  });
+
   describe('table node', () => {
     it('shows a draft with its badge and its columns', async () => {
       api.model.mockResolvedValueOnce(view(withDraft()));
@@ -1730,6 +1792,13 @@ describe('ModelEditor', () => {
       act(() => own.render(createElement(TableNode as any, { id: 'orders', data })));
       expect(host.querySelector('[aria-label="shortcut"]')).toBeNull();
       act(() => own.unmount());
+    });
+
+    it('table node has a node handle', async () => {
+      await render();
+      const items = node('orders');
+      expect(items.querySelectorAll('[data-handle="source"][data-id="node"]').length).toBe(1);
+      expect(items.querySelectorAll('[data-handle="target"][data-id="node"]').length).toBe(1);
     });
 
     it('bands the header with the table color', async () => {

@@ -10,6 +10,7 @@ import {
 import { cn } from '@/lib/utils';
 
 import type { TableColor } from './modelGraph';
+import { NODE_HANDLE_STYLE } from './ViewNode';
 
 export type TableNodeData = {
   alias: string;
@@ -123,6 +124,8 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
         color="var(--ring)"
         onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
       />
+      <Handle type="target" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
+      <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
       <div
         data-slot="model-table-band"
         className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
