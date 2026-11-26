@@ -142,7 +142,7 @@ describe('draft tables', () => {
     expect(draftProblem('public', 'ok', [], def)).not.toBeNull();
     expect(draftProblem('public', 'ok', [cols[0], cols[0]], def)).toMatch(/Duplicate/);
     expect(draftProblem('public', 'ok', [cols[0], { ...cols[0], name: 'ID' }], def)).toMatch(/Duplicate/);
-    expect(draftProblem('public', 'ok', [{ ...cols[0], type: 'blob' as never }], def)).not.toBeNull();
+    expect(draftProblem('public', 'ok', [{ ...cols[0], type: 'nope' as never }], def)).not.toBeNull();
     expect(draftProblem('public', 'users', cols, def)).toMatch(/already/);
     expect(draftProblem('public', 'users', cols, def, 'users')).toBeNull();
     expect(addDraftTable(def, 'ds', 'public', 'bad name', cols, 0, 0).error).toBeDefined();

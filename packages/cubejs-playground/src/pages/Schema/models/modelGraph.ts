@@ -1,3 +1,5 @@
+import { validType } from './dialect';
+
 export type Relationship = 'one_to_one' | 'one_to_many' | 'many_to_one';
 export type JoinKind = 'left' | 'inner';
 
@@ -26,11 +28,32 @@ export type TableColor = (typeof TABLE_COLORS)[number];
 
 export type DraftColumn = {
   name: string;
-  type: ColumnType;
+  // A portable type, or one of the connection's dialect (see dialect.ts).
+  type: string;
   nullable: boolean;
   primaryKey: boolean;
+  comment?: string;
+  // SQL text, as Redgate takes it.
+  default?: string;
+  check?: string;
+  autoIncrement?: boolean;
+  // MySQL only.
+  unsigned?: boolean;
+  zerofill?: boolean;
 };
-export type DraftTable = { columns: DraftColumn[] };
+export type UniqueKey = { name: string; columns: string[] };
+export type IndexColumn = { name: string; desc?: boolean };
+export type TableIndex = { name: string; columns: IndexColumn[]; unique: boolean };
+export type TableCheck = { name: string; expression: string };
+export type DraftTable = {
+  columns: DraftColumn[];
+  primaryKeyName?: string;
+  uniqueKeys?: UniqueKey[];
+  indexes?: TableIndex[];
+  checks?: TableCheck[];
+  scriptBefore?: string;
+  scriptAfter?: string;
+};
 
 export type Point = { x: number; y: number };
 // The same table shown again elsewhere on the canvas.
@@ -64,6 +87,31 @@ export type ModelJoin = {
   swapped?: boolean;
   // Not drawn on the canvas; still a link.
   hidden?: boolean;
+  // What the reference is as a foreign key, as Redgate shows it.
+  id?: string;
+  name?: string;
+  comment?: string;
+  // Of the child side.
+  cardinality?: Cardinality;
+  mandatory?: boolean;
+  onUpdate?: RefAction;
+  onDelete?: RefAction;
+  fromRole?: string;
+  toRole?: string;
+  // More column pairs after from.column = to.column.
+  pairs?: { from: string; to: string }[];
+};
+
+export const CARDINALITIES = ['0..*', '0..1', '1..*', '1..1'] as const;
+export type Cardinality = (typeof CARDINALITIES)[number];
+export const REF_ACTIONS = ['none', 'restrict', 'cascade', 'set null', 'set default'] as const;
+export type RefAction = (typeof REF_ACTIONS)[number];
+
+export type ModelSettings = {
+  validation?: Record<string, boolean>;
+  format?: { showTypes?: boolean; showNullable?: boolean };
+  sqlGeneration?: { drop?: boolean; comments?: boolean };
+  scripts?: { createBefore?: string; createAfter?: string; dropBefore?: string; dropAfter?: string };
 };
 
 export type ModelDefinition = {
@@ -74,6 +122,7 @@ export type ModelDefinition = {
   primary?: string | null;
   primaryKey?: string | null;
   joins: ModelJoin[];
+  settings?: ModelSettings;
 };
 
 export function emptyDefinition(): ModelDefinition {
@@ -284,7 +333,7 @@ export function draftProblem(
     if (badIdentifier(c.name)) {
       return `Invalid column name: ${c.name}`;
     }
-    if (!(COLUMN_TYPES as readonly string[]).includes(c.type)) {
+    if (!validType('postgres', c.type) && !validType('mysql', c.type)) {
       return `Invalid type for ${c.name}: ${c.type}`;
     }
     if (seen.has(c.name.toLowerCase())) {

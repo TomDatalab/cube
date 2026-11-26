@@ -66,6 +66,8 @@ export type CubeModelView = {
   version: number;
   updatedAt: string;
   updatedBy: string | null;
+  // On a GET: the dialect each connection designs tables in.
+  dialects?: Record<string, 'postgres' | 'mysql' | null>;
 };
 
 export function modelApi(rbac: Rbac, basePath = '/cube') {
@@ -183,6 +185,15 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
 
     async deleteModel(id: string, version: number): Promise<void> {
       await call('DELETE', `/cube-models/${enc(id)}?version=${version}`);
+    },
+
+    // The script of `definition` in its connection's dialect; runs nothing.
+    modelSql(
+      id: string,
+      definition: unknown,
+      options: { drop?: boolean; onlyNew?: boolean; only?: string[] }
+    ): Promise<{ script: string }> {
+      return call('POST', `/cube-models/${enc(id)}/sql`, { definition, options });
     },
 
     buildModel(
