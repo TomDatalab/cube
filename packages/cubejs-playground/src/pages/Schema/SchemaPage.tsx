@@ -989,7 +989,6 @@ export function SchemaPage({ history }: RouterProps) {
         ) : (
           <>
             <div style={{ display: 'flex', gap: 8, padding: 8, alignItems: 'center' }}>
-              <PanelToggle collapsed={false} onToggle={toggleTree} label="the data model tree" />
               <Input
                 allowClear
                 placeholder="Search"
@@ -1033,6 +1032,7 @@ export function SchemaPage({ history }: RouterProps) {
                   </ButtonDropdown>
                 </span>
               </Tooltip>
+              <PanelToggle collapsed={false} onToggle={toggleTree} label="the data model tree" />
             </div>
             {renderTree()}
           </>
