@@ -1,14 +1,14 @@
-import { ReactNode, useEffect, useState } from 'react';
-import { Ban, Minus, Plus } from 'lucide-react';
-
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Field, SimpleSelect, Spinner } from '@/components/kit';
 
+import type { Dialect } from './dialect';
+import type { Issue } from './validate';
+import { DraftText, Section, Value } from './PanelParts';
+import { TableProperties } from './TableProperties';
+
 import {
-  JoinKind, ModelDefinition, ModelTable, Relationship, TABLE_COLORS, joinLabel, removeJoin, renameTable,
-  setColor, setJoin, setPrimary, setTableComment,
+  JoinKind, ModelDefinition, ModelTable, Relationship, joinLabel, removeJoin, setJoin, setPrimary,
 } from './modelGraph';
 
 type Columns = { name: string; type: string }[];
@@ -25,7 +25,11 @@ export type PropertiesPanelProps = {
   columnsOf(t: ModelTable): Columns;
   onChange(next: ModelDefinition): void;
   onName(name: string): void;
-  onEditColumns(alias: string): void;
+  dialect: Dialect;
+  issues: Issue[];
+  // Bumped to focus the selected table's first column.
+  focusKey?: number;
+  onSqlPreview?(alias: string): void;
   // A table took a new name: what is selected follows it.
   onRenamed(from: string, to: string): void;
   // The reference was deleted: nothing is selected any more.
@@ -52,104 +56,6 @@ const JOINS: { value: JoinKind; label: string }[] = [
 ];
 
 const NATIVE_SELECT = 'tw:h-8 tw:w-full tw:rounded-md tw:border tw:bg-background tw:px-2 tw:text-sm tw:text-foreground';
-
-// A section of the pane that opens and closes with + and −, as Redgate's.
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <section className="tw:border-b">
-      <button
-        type="button"
-        aria-expanded={open}
-        className="tw:flex tw:w-full tw:cursor-pointer tw:items-center tw:justify-between tw:border-0 tw:bg-muted/50 tw:px-3 tw:py-2 tw:text-left tw:text-sm tw:font-semibold tw:text-foreground"
-        onClick={() => setOpen((was) => !was)}
-      >
-        {title}
-        {open ? <Minus className="tw:size-4" /> : <Plus className="tw:size-4" />}
-      </button>
-      {open ? <div className="tw:flex tw:flex-col tw:gap-3 tw:px-3 tw:py-3">{children}</div> : null}
-    </section>
-  );
-}
-
-// A text kept as typed and written to the model when the field is left,
-// so typing it is one step of undo.
-function DraftText({
-  id, label, value, onCommit,
-}: { id: string; label: string; value: string; onCommit(next: string): void }) {
-  const [text, setText] = useState(value);
-  useEffect(() => setText(value), [value]);
-  return (
-    <Textarea
-      id={id}
-      aria-label={label}
-      rows={2}
-      value={text}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        if (text !== value) {
-          onCommit(text);
-        }
-      }}
-    />
-  );
-}
-
-function Value({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="tw:flex tw:flex-col tw:gap-0.5 tw:text-sm">
-      <span className="tw:text-xs tw:text-muted-foreground">{label}</span>
-      <span className="tw:font-medium">{children}</span>
-    </div>
-  );
-}
-
-// The table's name, kept as typed until Enter or leaving the field.
-function TableName({
-  def, alias, onChange, onRenamed,
-}: {
-  def: ModelDefinition;
-  alias: string;
-  onChange(d: ModelDefinition): void;
-  onRenamed(from: string, to: string): void;
-}) {
-  const [value, setValue] = useState(alias);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    setValue(alias);
-    setError(null);
-  }, [alias]);
-  const commit = () => {
-    const result = renameTable(def, alias, value.trim());
-    if (result.error) {
-      setError(result.error);
-      return;
-    }
-    setError(null);
-    if (result.def !== def) {
-      onChange(result.def);
-      onRenamed(alias, value.trim());
-    }
-  };
-  return (
-    <Field label="Name" htmlFor="model-table-name">
-      <Input
-        id="model-table-name"
-        aria-label="Selected table name"
-        value={value}
-        aria-invalid={error ? true : undefined}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            commit();
-          }
-        }}
-      />
-      {error ? <p role="alert" className="tw:m-0 tw:text-xs tw:text-destructive">{error}</p> : null}
-    </Field>
-  );
-}
 
 function ModelProperties({
   def, name, columnsOf, onChange, onName, onDeleteModel, deleting, busy,
@@ -201,77 +107,6 @@ function ModelProperties({
         Delete model
       </Button>
     </Section>
-  );
-}
-
-function TableProperties({
-  def, alias, columnsOf, onChange, onEditColumns, onRenamed,
-}: PropertiesPanelProps & { alias: string }) {
-  const table = def.tables.find((t) => t.alias === alias);
-  if (!table) {
-    return null;
-  }
-  return (
-    <>
-      <Section title="General">
-        <TableName def={def} alias={alias} onChange={onChange} onRenamed={onRenamed} />
-        <Value label="Source">{`${table.schema}.${table.table}${table.draft ? ' (new)' : ''}`}</Value>
-        <Field label="Comment" htmlFor="model-table-comment">
-          <DraftText
-            key={alias}
-            id="model-table-comment"
-            label="Table comment"
-            value={table.comment ?? ''}
-            onCommit={(text) => onChange(setTableComment(def, alias, text))}
-          />
-        </Field>
-        <div className="tw:flex tw:flex-col tw:gap-1">
-          <span className="tw:text-xs tw:text-muted-foreground">Color</span>
-          <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-1" data-slot="model-color-palette">
-            {TABLE_COLORS.map((color) => (
-              <button
-                key={color}
-                type="button"
-                aria-label={color}
-                aria-pressed={table.color === color}
-                title={color}
-                className="tw:size-6 tw:cursor-pointer tw:rounded-full tw:border-2 tw:border-transparent tw:p-0 tw:aria-pressed:border-foreground"
-                style={{ background: `var(--model-${color})` }}
-                onClick={() => onChange(setColor(def, alias, color))}
-              />
-            ))}
-            <button
-              type="button"
-              aria-label="No color"
-              title="No color"
-              className="tw:flex tw:size-6 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded-full tw:border tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent"
-              onClick={() => onChange(setColor(def, alias, undefined))}
-            >
-              <Ban className="tw:size-3.5" />
-            </button>
-          </div>
-        </div>
-      </Section>
-      <Section title="Columns">
-        <div className="tw:grid tw:grid-cols-[1fr_auto] tw:gap-x-3 tw:text-xs tw:text-muted-foreground">
-          <span>Name</span>
-          <span>Type</span>
-        </div>
-        <ul className="tw:m-0 tw:flex tw:list-none tw:flex-col tw:gap-1 tw:p-0">
-          {columnsOf(table).map((c) => (
-            <li key={c.name} data-slot="model-property-column" className="tw:grid tw:grid-cols-[1fr_auto] tw:gap-x-3 tw:text-sm">
-              <span className="tw:truncate">{c.name}</span>
-              <span className="tw:text-muted-foreground">{c.type}</span>
-            </li>
-          ))}
-        </ul>
-        {table.draft ? (
-          <Button variant="outline" size="sm" onClick={() => onEditColumns(alias)}>Edit columns</Button>
-        ) : (
-          <p className="tw:m-0 tw:text-xs tw:text-muted-foreground">The columns come from the database.</p>
-        )}
-      </Section>
-    </>
   );
 }
 
@@ -344,7 +179,19 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         {TITLE[selected.kind]}
       </h2>
       {selected.kind === 'model' ? <ModelProperties {...props} /> : null}
-      {selected.kind === 'table' ? <TableProperties {...props} alias={selected.alias} /> : null}
+      {selected.kind === 'table' ? (
+        <TableProperties
+          def={props.def}
+          alias={selected.alias}
+          dialect={props.dialect}
+          columnsOf={props.columnsOf}
+          issues={props.issues.filter((i) => i.target.kind === 'table' && i.target.alias === selected.alias)}
+          onChange={props.onChange}
+          onRenamed={props.onRenamed}
+          focusKey={props.focusKey}
+          onSqlPreview={props.onSqlPreview}
+        />
+      ) : null}
       {selected.kind === 'reference' ? <ReferenceProperties {...props} index={selected.index} /> : null}
     </aside>
   );

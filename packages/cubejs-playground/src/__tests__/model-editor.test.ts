@@ -1074,14 +1074,13 @@ describe('ModelEditor', () => {
       expect(tool('Toggle properties pane').getAttribute('aria-pressed')).toBe('false');
     });
 
-    it('edits only a draft and creates only with drafts', async () => {
+    it('creates only with drafts and edits a draft in its properties', async () => {
       api.model.mockResolvedValueOnce(view(withDraft()));
       await render();
       expect(tool('Create in database').disabled).toBe(false);
       await select('items');
-      await act(async () => button('Edit columns').click());
-      expect(document.body.textContent).toContain('Edit table items');
-      expect((document.querySelector('input[aria-label="Column 2 name"]') as HTMLInputElement).value).toBe('label');
+      const pane = document.querySelector('[data-slot="model-properties"]')!;
+      expect((pane.querySelector('input[aria-label="Column 2 name"]') as HTMLInputElement).value).toBe('label');
     });
 
     it('deletes the selected table', async () => {
@@ -1196,16 +1195,118 @@ describe('ModelEditor', () => {
       expect(document.body.textContent).not.toContain('Unsaved changes');
     });
 
-    it('opens the edit of a draft on a double click', async () => {
+    it('a double click on a draft selects it and focuses its first column', async () => {
       api.model.mockResolvedValueOnce(view(withDraft()));
       await render();
-      await act(async () => flow.props.onNodeDoubleClick({}, { id: 'orders' }));
-      expect(document.body.textContent).not.toContain('Edit table');
       await act(async () => flow.props.onNodeDoubleClick({}, { id: 'items' }));
-      expect(document.body.textContent).toContain('Edit table items');
-      await fill('input[aria-label="Column 2 name"]', 'title');
-      await act(async () => button('Save table').click());
+      const first = document.querySelector('[data-slot="model-properties"] input[aria-label="Column 1 name"]');
+      expect(document.activeElement).toBe(first);
+      expect(document.body.textContent).not.toContain('Edit table items');
+    });
+  });
+
+  describe('table properties', () => {
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const blur = async (selector: string) => act(async () => {
+      pane().querySelector(selector)!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    const commit = async (label: string, value: string) => {
+      await fill(`[data-slot="model-properties"] [aria-label="${label}"]`, value);
+      await blur(`[aria-label="${label}"]`);
+    };
+    const click = async (label: string) => act(async () => (pane().querySelector(`[aria-label="${label}"]`) as HTMLElement).click());
+    const savedDraft = async () => {
+      await act(async () => tool('Save changes').click());
+      const def = api.saveModel.mock.calls[api.saveModel.mock.calls.length - 1][1].definition;
+      return def.tables.find((t: any) => t.alias === 'items').draft;
+    };
+
+    it('edits a draft column name, type, N and PK and saves them', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await select('items');
+      await commit('Column 2 name', 'title');
+      await commit('Column 2 type', 'varchar(80)');
+      await click('Column 2 allows nulls');
+      await click('Column 2 primary key');
+      await click('Add column');
+      const draft = await savedDraft();
+      expect(draft.columns[1]).toEqual({
+        name: 'title', type: 'varchar(80)', nullable: false, primaryKey: true,
+      });
+      expect(draft.columns[2].name).toBe('column_1');
       expect(node('items').textContent).toContain('title');
+    });
+
+    it('opens a column\'s details and sets default and comment', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await select('items');
+      await click('Column 2 details');
+      await commit('Column 2 default value', "'none'");
+      await commit('Column 2 comment', 'what it is');
+      await click('Column 2 auto increment');
+      const draft = await savedDraft();
+      expect(draft.columns[1]).toMatchObject({ default: "'none'", comment: 'what it is', autoIncrement: true });
+    });
+
+    it('adds a unique key, an index with DESC and a check', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await select('items');
+      await click('Add alternate key');
+      await click('Alternate key 1 column label');
+      await click('Add index');
+      await click('Index 1 column label');
+      await click('Index 1 label descending');
+      await click('Add check');
+      await commit('Check 1 expression', 'id > 0');
+      const draft = await savedDraft();
+      expect(draft.uniqueKeys).toEqual([{ name: 'items_ak_1', columns: ['label'] }]);
+      expect(draft.indexes).toEqual([{ name: 'items_idx_1', columns: [{ name: 'label', desc: true }], unique: false }]);
+      expect(draft.checks).toEqual([{ name: 'items_ck_1', expression: 'id > 0' }]);
+    });
+
+    it('reorders columns with Alt+ArrowDown', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await select('items');
+      const handle = pane().querySelector('[aria-label="Move id"]') as HTMLElement;
+      await act(async () => {
+        handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+      });
+      const draft = await savedDraft();
+      expect(draft.columns.map((c: any) => c.name)).toEqual(['label', 'id']);
+    });
+
+    it('a database table\'s columns are read-only', async () => {
+      await render();
+      await select('orders');
+      expect(pane().querySelector('input[aria-label="Column 1 name"]')).toBeNull();
+      expect(pane().textContent).toContain('The structure comes from the database');
+      expect(pane().querySelector('[aria-label="Add column"]')).toBeNull();
+    });
+
+    it('shows the table\'s issues', async () => {
+      const noKey = withDraft();
+      noKey.tables[2].draft!.columns[0].primaryKey = false;
+      api.model.mockResolvedValueOnce(view(noKey));
+      await render();
+      await select('items');
+      const section = pane().querySelector('[data-slot="model-table-issues"]')!;
+      expect(section.textContent).toContain('Warnings (1)');
+      expect(section.textContent).toContain('Table items has no primary key');
+    });
+
+    it('ignores canvas shortcuts while typing in a column', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      await render();
+      await select('items');
+      const input = pane().querySelector('[aria-label="Column 1 name"]')!;
+      await act(async () => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      });
+      expect(node('items')).not.toBeNull();
     });
   });
 

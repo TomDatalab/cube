@@ -34,6 +34,8 @@ import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from './clipboard';
 import { useHistory } from './history';
+import { Dialect, convertDrafts } from './dialect';
+import { issues } from './validate';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
 import {
@@ -219,6 +221,10 @@ function Editor({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState('');
+  // The dialect each connection designs tables in, from the server.
+  const [dialects, setDialects] = useState<Record<string, Dialect>>({});
+  // Bumped by a double click on a draft: its first column takes the focus.
+  const [focusKey, setFocusKey] = useState(0);
   const [version, setVersion] = useState(0);
   const history = useHistory<ModelDefinition>(emptyDefinition);
   const def = history.value;
@@ -254,7 +260,12 @@ function Editor({
         }
         setName(m.name);
         setVersion(m.version);
-        history.reset(definitionOf(m.definition));
+        const known = m.dialects ?? {};
+        setDialects(known);
+        const read = definitionOf(m.definition);
+        // Old models' portable types as the connection's dialect writes them;
+        // the next save stores them.
+        history.reset(convertDrafts(read, known[read.dataSource] ?? null));
         setDirty(false);
         setLoaded(true);
       },
@@ -441,7 +452,9 @@ function Editor({
 
   const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
     if (def.tables.some((t) => t.alias === node.id && t.draft)) {
-      setTableEdit({ kind: 'edit', alias: node.id });
+      setSelection([node.id]);
+      setSelectedEdge(null);
+      setFocusKey((k) => k + 1);
     }
   };
 
@@ -862,6 +875,10 @@ function Editor({
     ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
     : columnsOf(t.schema, t.table) ?? []);
   const hits = searchModel(def, columnsOfTable, query);
+  const dialect: Dialect = dialects[def.dataSource] ?? null;
+  // The same definition, the same problems: validation runs once per edit.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const problemsFound = useMemo(() => issues(def, columnsOfTable, dialect), [def, dialect, tables]);
 
   const centerOn = (nodeId: string) => {
     const n = nodes.find((x) => x.id === nodeId);
@@ -1180,7 +1197,9 @@ function Editor({
               setName(next);
               edited();
             }}
-            onEditColumns={(alias) => setTableEdit({ kind: 'edit', alias })}
+            dialect={dialect}
+            issues={problemsFound}
+            focusKey={focusKey}
             onRenamed={(from, to) => setSelection((was) => was.map((id) => {
               const { alias, shortcut } = parseNodeId(id);
               if (alias !== from) {
