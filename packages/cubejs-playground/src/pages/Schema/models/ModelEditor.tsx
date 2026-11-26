@@ -1074,7 +1074,7 @@ function Editor({
   const editedTable = tableEdit?.kind === 'edit' ? def.tables.find((t) => t.alias === tableEdit.alias) : undefined;
 
   return (
-    <div className="tw:flex tw:h-full tw:min-h-[560px] tw:flex-col tw:gap-3">
+    <div className="tw:flex tw:h-[calc(100vh-6rem)] tw:min-h-[560px] tw:flex-col tw:gap-3">
       {panes.top ? (
         <div data-slot="model-top-bar" className="tw:flex tw:items-center tw:gap-3">
           <h2 className="tw:m-0 tw:truncate tw:text-base tw:font-semibold">{name || 'Untitled model'}</h2>
