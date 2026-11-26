@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addDraftTable, addTable, canConnect, draftProblem, drafts, layout, setColor, updateDraftTable,
   connect, emptyDefinition, joinLabel, removeJoin, removeTable, setPrimary, unlinked,
-  updateJoin,
+  updateJoin, renameTable, setTableComment, placeTables, setJoin, showAllJoins, withFormat,
 } from '../pages/Schema/models/modelGraph';
 
 function build(tables: string[]) {
@@ -192,5 +192,53 @@ describe('draft tables', () => {
     expect(pos('b')).toEqual([320, 0]);
     expect(pos('c')).toEqual([320, 44 + 24 * 6 + 40]);
     expect(pos('d')).toEqual([640, 0]);
+  });
+
+  describe('v2 helpers', () => {
+    const linked = () => connect(build(['orders', 'customers']), { alias: 'orders', column: 'customer_id' }, { alias: 'customers', column: 'id' }, 'many_to_one', 'left');
+
+    it('renameTable moves primary and join ends, refuses bad and taken names', () => {
+      const def = linked();
+      const { def: next, error } = renameTable(def, 'orders', 'sales');
+      expect(error).toBeUndefined();
+      expect(next.primary).toBe('sales');
+      expect(next.tables.map((t) => t.alias)).toEqual(['sales', 'customers']);
+      expect(next.joins[0].from).toEqual({ alias: 'sales', column: 'customer_id' });
+      expect(renameTable(def, 'orders', '9x').error).toBe('Invalid name: 9x');
+      expect(renameTable(def, 'orders', 'customers').error).toBe('customers is already in this model');
+      expect(renameTable(def, 'orders', 'orders').def).toBe(def);
+    });
+
+    it('setTableComment sets and clears the comment', () => {
+      const def = setTableComment(linked(), 'orders', 'every order');
+      expect(def.tables[0].comment).toBe('every order');
+      expect('comment' in setTableComment(def, 'orders', '').tables[0]).toBe(false);
+    });
+
+    it('placeTables moves tables and shortcuts, sets and clears sizes', () => {
+      let def = linked();
+      def = { ...def, tables: def.tables.map((t) => (t.alias === 'orders' ? { ...t, shortcuts: [{ id: 's1', x: 0, y: 0 }] } : t)) };
+      def = placeTables(def, new Map([
+        ['orders', { x: 10.4, y: 20.6, width: 200, height: 120 }],
+        ['orders~s1', { x: 300, y: 5 }],
+      ]));
+      expect(def.tables[0]).toMatchObject({ x: 10, y: 21, width: 200, height: 120, shortcuts: [{ id: 's1', x: 300, y: 5 }] });
+      def = placeTables(def, new Map([['orders', { width: null, height: null }]]));
+      expect('width' in def.tables[0]).toBe(false);
+      expect('height' in def.tables[0]).toBe(false);
+      expect(def.tables[0].x).toBe(10);
+    });
+
+    it('setJoin patches one join; showAllJoins clears hidden', () => {
+      let def = linked();
+      def = setJoin(def, 0, { points: [{ x: 1, y: 2 }], swapped: true, hidden: true, join: 'inner' });
+      expect(def.joins[0]).toMatchObject({ points: [{ x: 1, y: 2 }], swapped: true, hidden: true, join: 'inner', relationship: 'many_to_one' });
+      def = showAllJoins(def);
+      expect('hidden' in def.joins[0]).toBe(false);
+    });
+
+    it('withFormat marks the definition as version 2', () => {
+      expect(withFormat(linked()).formatVersion).toBe(2);
+    });
   });
 });

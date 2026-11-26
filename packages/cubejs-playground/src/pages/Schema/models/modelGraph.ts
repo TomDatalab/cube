@@ -32,6 +32,10 @@ export type DraftColumn = {
 };
 export type DraftTable = { columns: DraftColumn[] };
 
+export type Point = { x: number; y: number };
+// The same table shown again elsewhere on the canvas.
+export type Shortcut = { id: string; x: number; y: number };
+
 export type ModelTable = {
   alias: string;
   schema: string;
@@ -40,6 +44,11 @@ export type ModelTable = {
   y: number;
   color?: TableColor;
   draft?: DraftTable;
+  comment?: string;
+  // A size fixed on the canvas; none follows the content.
+  width?: number;
+  height?: number;
+  shortcuts?: Shortcut[];
 };
 
 export type End = { alias: string; column: string };
@@ -49,10 +58,18 @@ export type ModelJoin = {
   to: End;
   relationship: Relationship;
   join: JoinKind;
+  // Bends of the line, in canvas coordinates.
+  points?: Point[];
+  // The line leaves its tables on the other side.
+  swapped?: boolean;
+  // Not drawn on the canvas; still a link.
+  hidden?: boolean;
 };
 
 export type ModelDefinition = {
+  formatVersion?: 2;
   dataSource: string;
+  description?: string;
   tables: ModelTable[];
   primary?: string | null;
   primaryKey?: string | null;
@@ -165,24 +182,42 @@ export function connect(
   };
 }
 
+export type JoinPatch = Partial<Pick<ModelJoin, 'relationship' | 'join' | 'points' | 'swapped' | 'hidden'>>;
+
+// Copies `value` into `key`, or drops the key for an empty or false value.
+function patched<T extends object>(target: T, patch: Partial<T>): T {
+  const out: any = { ...target };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      continue;
+    }
+    const empty = value === false || value === null || value === '' || (Array.isArray(value) && value.length === 0);
+    if (empty) {
+      delete out[key];
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+export function setJoin(def: ModelDefinition, index: number, patch: JoinPatch): ModelDefinition {
+  return {
+    ...def,
+    joins: def.joins.map((j, i) => (i === index ? patched(j, patch) : j)),
+  };
+}
+
 export function updateJoin(
   def: ModelDefinition,
   index: number,
   patch: Partial<Pick<ModelJoin, 'relationship' | 'join'>>
 ): ModelDefinition {
-  return {
-    ...def,
-    joins: def.joins.map((j, i) => {
-      if (i !== index) {
-        return j;
-      }
-      return {
-        ...j,
-        relationship: patch.relationship ?? j.relationship,
-        join: patch.join ?? j.join,
-      };
-    }),
-  };
+  return setJoin(def, index, patch);
+}
+
+export function showAllJoins(def: ModelDefinition): ModelDefinition {
+  return { ...def, joins: def.joins.map((j) => patched(j, { hidden: false })) };
 }
 
 export function removeJoin(def: ModelDefinition, index: number): ModelDefinition {
@@ -407,6 +442,75 @@ export function layout(def: ModelDefinition): ModelDefinition {
       nextY.set(layer, y + tableHeight(t) + GAP);
 
       return { ...t, x: layer * LAYER_WIDTH, y };
+    }),
+  };
+}
+
+export function withFormat(def: ModelDefinition): ModelDefinition {
+  return { ...def, formatVersion: 2 };
+}
+
+export function renameTable(
+  def: ModelDefinition,
+  alias: string,
+  next: string
+): { def: ModelDefinition; error?: string } {
+  if (next === alias) {
+    return { def };
+  }
+  if (badIdentifier(next)) {
+    return { def, error: `Invalid name: ${next}` };
+  }
+  if (def.tables.some((t) => t.alias === next)) {
+    return { def, error: `${next} is already in this model` };
+  }
+  const end = (e: End): End => (e.alias === alias ? { ...e, alias: next } : e);
+  return {
+    def: {
+      ...def,
+      primary: def.primary === alias ? next : def.primary,
+      tables: def.tables.map((t) => (t.alias === alias ? { ...t, alias: next } : t)),
+      joins: def.joins.map((j) => ({ ...j, from: end(j.from), to: end(j.to) })),
+    },
+  };
+}
+
+export function setTableComment(def: ModelDefinition, alias: string, comment: string): ModelDefinition {
+  return {
+    ...def,
+    tables: def.tables.map((t) => (t.alias === alias ? patched(t, { comment }) : t)),
+  };
+}
+
+export type Place = { x?: number; y?: number; width?: number | null; height?: number | null };
+
+// Moves and sizes tables, keyed by alias, and moves shortcuts, keyed by
+// `alias~id`; a null size goes back to following the content.
+export function placeTables(def: ModelDefinition, places: Map<string, Place>): ModelDefinition {
+  const round = (n: number | undefined) => (n === undefined ? undefined : Math.round(n));
+  return {
+    ...def,
+    tables: def.tables.map((t) => {
+      let out: ModelTable = t;
+      const own = places.get(t.alias);
+      if (own) {
+        out = patched(out, {
+          x: round(own.x),
+          y: round(own.y),
+          width: own.width === null ? null : round(own.width),
+          height: own.height === null ? null : round(own.height),
+        } as any);
+      }
+      if (t.shortcuts?.some((sc) => places.has(`${t.alias}~${sc.id}`))) {
+        out = {
+          ...out,
+          shortcuts: t.shortcuts.map((sc) => {
+            const p = places.get(`${t.alias}~${sc.id}`);
+            return p ? { ...sc, x: round(p.x) ?? sc.x, y: round(p.y) ?? sc.y } : sc;
+          }),
+        };
+      }
+      return out;
     }),
   };
 }
