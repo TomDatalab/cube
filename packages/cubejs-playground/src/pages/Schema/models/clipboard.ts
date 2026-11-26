@@ -25,7 +25,11 @@ export function copy(def: ModelDefinition, nodeIds: string[]): Clip {
   };
 }
 
+// The name itself when it is free, else the first free `<name>_<n>`.
 function free(base: string, taken: (name: string) => boolean): string {
+  if (!taken(base)) {
+    return base;
+  }
   let n = 1;
   while (taken(`${base}_${n}`)) {
     n += 1;
@@ -46,10 +50,7 @@ export function paste(
     const { shortcuts: _drop, ...rest } = t;
     let { table } = t;
     if (t.draft) {
-      const clash = (name: string) => tables.some((x) => x.schema === t.schema && x.table === name);
-      if (clash(table)) {
-        table = free(t.table, clash);
-      }
+      table = free(t.table, (name) => tables.some((x) => x.schema === t.schema && x.table === name));
     }
     tables.push({
       ...rest, alias, table, x: t.x + offset, y: t.y + offset,

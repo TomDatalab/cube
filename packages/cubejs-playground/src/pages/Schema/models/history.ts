@@ -41,7 +41,8 @@ export function redo<T>(h: History<T>): History<T> {
 
 export type HistoryApi<T> = {
   value: T;
-  set(next: T): void;
+  // The next value, or how to make it from the current one.
+  set(next: T | ((was: T) => T)): void;
   undo(): void;
   redo(): void;
   // A value that cannot be undone past, as after a load.
@@ -54,7 +55,10 @@ export function useHistory<T>(initial: T | (() => T)): HistoryApi<T> {
   const [h, setH] = useState<History<T>>(() => start(
     typeof initial === 'function' ? (initial as () => T)() : initial
   ));
-  const set = useCallback((next: T) => setH((was) => record(was, next)), []);
+  const set = useCallback((next: T | ((was: T) => T)) => setH((was) => record(
+    was,
+    typeof next === 'function' ? (next as (v: T) => T)(was.present) : next
+  )), []);
   const back = useCallback(() => setH(undo), []);
   const forward = useCallback(() => setH(redo), []);
   const reset = useCallback((value: T) => setH(start(value)), []);

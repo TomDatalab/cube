@@ -7,7 +7,7 @@ import {
   Background, ConnectionMode, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow,
 } from '@xyflow/react';
 import type {
-  Connection, Edge, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnConnectEnd, OnNodeDrag,
+  Connection, EdgeMouseHandler, NodeChange, NodeMouseHandler, OnConnectEnd, OnNodeDrag,
   OnSelectionChangeParams,
 } from '@xyflow/react';
 import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
@@ -29,12 +29,18 @@ import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
-  End, ModelDefinition, Place, TableColor, addDraftTable, placeTables, addTable, canConnect, connect, drafts,
-  emptyDefinition, joinLabel, layout, removeJoin, removeTable, setColor, setPrimary, unlinked,
+  End, ModelDefinition, Place, Point, TableColor, addDraftTable, addTable, canConnect, connect, drafts,
+  emptyDefinition, joinLabel, layout, placeTables, removeJoin, removeTable, setColor, setJoin, setPrimary,
+  unlinked, withFormat,
   updateDraftTable, updateJoin,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
-import { parseNodeId, removeShortcut } from './clipboard';
+import {
+  Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
+} from './clipboard';
+import { useHistory } from './history';
+import { useEditorShortcuts } from './useEditorShortcuts';
+import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
 import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
@@ -52,6 +58,10 @@ export const TABLE_MIME = 'application/x-cube-table';
 const EDITED = 'O cubo foi editado desde o último build';
 
 const NODE_TYPES = { table: TableNode };
+const EDGE_TYPES = { reference: ReferenceEdge };
+// Where a paste lands from what was copied.
+const PASTE_OFFSET = 20;
+const sameIds = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 const NEW_JOIN: JoinChoice = { relationship: 'many_to_one', join: 'left' };
 // A model of one or two tables would otherwise open at 2x.
 const FIT_VIEW = { maxZoom: 1 };
@@ -329,14 +339,21 @@ function Editor({
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState('');
   const [version, setVersion] = useState(0);
-  const [def, setDef] = useState<ModelDefinition>(emptyDefinition);
+  const history = useHistory<ModelDefinition>(emptyDefinition);
+  const def = history.value;
+  const setDef = history.set;
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'save' | 'build' | 'delete' | 'create' | null>(null);
   const [joinEdit, setJoinEdit] = useState<JoinEdit | null>(null);
   const [tableEdit, setTableEdit] = useState<TableEdit | null>(null);
   const [createAsk, setCreateAsk] = useState<CreateAsk | null>(null);
-  // The table selected on the canvas, by alias.
-  const [selected, setSelected] = useState<string | null>(null);
+  // The nodes selected on the canvas (tables and shortcuts) and the
+  // selected reference, by index.
+  const [selection, setSelection] = useState<string[]>([]);
+  const [selectedEdge, setSelectedEdge] = useState<number | null>(null);
+  const selected = selection.length ? parseNodeId(selection[0]).alias : null;
+  const setSelected = (alias: string | null) => setSelection(alias ? [alias] : []);
+  const [clip, setClip] = useState<Clip | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
   // The reasons the ModelWriter gave for a change that does not compile.
   const [problems, setProblems] = useState<string[]>([]);
@@ -357,7 +374,7 @@ function Editor({
         }
         setName(m.name);
         setVersion(m.version);
-        setDef(definitionOf(m.definition));
+        history.reset(definitionOf(m.definition));
         setDirty(false);
         setLoaded(true);
       },
@@ -366,6 +383,8 @@ function Editor({
     return () => {
       cancelled = true;
     };
+    // history.reset is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, modelId]);
 
   useEffect(() => {
@@ -441,8 +460,7 @@ function Editor({
   // The canvas' nodes follow the definition, keeping what React Flow
   // measured and selected on them.
   useEffect(() => {
-    setNodes((previous) => def.tables.map((t) => {
-      const old = previous.find((n) => n.id === t.alias);
+    setNodes((previous) => def.tables.flatMap((t) => {
       const columns = t.draft
         ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
         : columnsOf(t.schema, t.table);
@@ -460,48 +478,69 @@ function Editor({
         }
         return j.relationship === 'one_to_many' ? [j.to] : [];
       }).filter((e) => e.alias === t.alias).map((e) => e.column);
-      return {
-        ...old,
-        id: t.alias,
-        type: 'table' as const,
-        position: { x: t.x, y: t.y },
+      const data = {
+        alias: t.alias,
+        schema: t.schema,
+        table: t.table,
+        columns: columns ?? [],
+        principal,
+        missing: !columns,
+        draft: Boolean(t.draft),
+        color: t.color,
+        keys,
+        linked,
+        fks,
+        fixedSize: t.width !== undefined || t.height !== undefined,
+        onResize,
+        onRemove,
+        collapsed: collapsedTables.includes(t.alias),
+        onToggle: toggleTable,
+        picked: picked?.alias === t.alias ? picked.column : null,
+        onPick,
+      };
+      const size = {
         ...(t.width !== undefined ? { width: t.width } : {}),
         ...(t.height !== undefined ? { height: t.height } : {}),
-        data: {
-          alias: t.alias,
-          schema: t.schema,
-          table: t.table,
-          columns: columns ?? [],
-          principal,
-          missing: !columns,
-          draft: Boolean(t.draft),
-          color: t.color,
-          keys,
-          linked,
-          fks,
-          fixedSize: t.width !== undefined || t.height !== undefined,
-          onResize,
-          onRemove,
-          collapsed: collapsedTables.includes(t.alias),
-          onToggle: toggleTable,
-          picked: picked?.alias === t.alias ? picked.column : null,
-          onPick,
-        },
       };
+      const at = (id: string, x: number, y: number, shortcut?: string): TableFlowNode => ({
+        ...previous.find((n) => n.id === id),
+        id,
+        type: 'table' as const,
+        position: { x, y },
+        ...size,
+        selected: selection.includes(id),
+        data: shortcut ? { ...data, shortcut } : data,
+      });
+      return [
+        at(t.alias, t.x, t.y),
+        ...(t.shortcuts ?? []).map((sc) => at(shortcutNodeId(t.alias, sc.id), sc.x, sc.y, sc.id)),
+      ];
     }));
-  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick]);
+  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection]);
 
-  const edges: Edge[] = useMemo(() => def.joins.map((j, index) => ({
+  const onMovePoint = useCallback((index: number, pointIndex: number, to: Point) => {
+    setDef((d) => {
+      const points = [...(d.joins[index]?.points ?? [])];
+      points[pointIndex] = to;
+      return setJoin(d, index, { points });
+    });
+    revision.current += 1;
+    setDirty(true);
+  }, [setDef]);
+
+  const edges: ReferenceFlowEdge[] = useMemo(() => def.joins.flatMap((j, index) => (j.hidden ? [] : [{
     id: `join-${index}`,
     source: j.from.alias,
     sourceHandle: j.from.column,
     target: j.to.alias,
     targetHandle: j.to.column,
     label: joinLabel(j),
-    // Square lines, as a modeling tool draws them.
-    type: 'step',
-    data: { index },
-  })), [def.joins]);
+    type: 'reference' as const,
+    selected: selectedEdge === index,
+    data: {
+      index, join: j, label: joinLabel(j), onMovePoint,
+    },
+  }])), [def.joins, selectedEdge, onMovePoint]);
 
   const onNodesChange = useCallback((changes: NodeChange<TableFlowNode>[]) => {
     // Tables leave through their own button, which updates the definition.
@@ -510,8 +549,11 @@ function Editor({
   }, []);
 
   // React Flow asks for a stable handler.
-  const onSelectionChange = useCallback(({ nodes: chosen }: OnSelectionChangeParams) => {
-    setSelected(chosen[0]?.id ?? null);
+  const onSelectionChange = useCallback(({ nodes: chosen, edges: lines }: OnSelectionChangeParams) => {
+    const ids = chosen.map((n) => n.id);
+    setSelection((was) => (sameIds(was, ids) ? was : ids));
+    const edge = lines[0]?.data as { index?: number } | undefined;
+    setSelectedEdge(typeof edge?.index === 'number' ? edge.index : null);
   }, []);
 
   const onNodeDoubleClick: NodeMouseHandler<TableFlowNode> = (_event, node) => {
@@ -520,15 +562,69 @@ function Editor({
     }
   };
 
+  // One step of history per drag, whatever it moved: tables and shortcuts.
   const onNodeDragStop: OnNodeDrag<TableFlowNode> = (_event, _node, dragged) => {
-    const moved = new Map(dragged.map((n) => [n.id, n.position]));
-    change({
-      ...def,
-      tables: def.tables.map((t) => {
-        const p = moved.get(t.alias);
-        return p ? { ...t, x: Math.round(p.x), y: Math.round(p.y) } : t;
-      }),
-    });
+    change(placeTables(def, new Map(dragged.map((n) => [n.id, { x: n.position.x, y: n.position.y }]))));
+  };
+
+  const copySelection = () => {
+    if (selection.length) {
+      setClip(copy(def, selection));
+    }
+  };
+
+  const pasteClip = () => {
+    if (!clip?.tables.length) {
+      return;
+    }
+    const result = paste(def, clip, PASTE_OFFSET);
+    change(result.def);
+    setSelection(result.aliases);
+  };
+
+  const pasteShortcut = () => {
+    const tablesCopied = clip?.tables ?? [];
+    const source = tablesCopied.find((t) => !t.draft) ?? tablesCopied[0];
+    if (!source || !def.tables.some((t) => t.alias === source.alias)) {
+      return;
+    }
+    const result = addShortcut(def, source.alias, source.x + PASTE_OFFSET, source.y + PASTE_OFFSET);
+    change(result.def);
+    setSelection([shortcutNodeId(source.alias, result.id)]);
+  };
+
+  const cutSelection = () => {
+    if (!selection.length) {
+      return;
+    }
+    const result = cut(def, selection);
+    setClip(result.clip);
+    change(result.def);
+    setSelection([]);
+  };
+
+  const deleteSelection = () => {
+    if (selection.length) {
+      change(cut(def, selection).def);
+      setSelection([]);
+    } else if (selectedEdge !== null && def.joins[selectedEdge]) {
+      change(removeJoin(def, selectedEdge));
+      setSelectedEdge(null);
+    }
+  };
+
+  const undo = () => {
+    if (history.canUndo) {
+      history.undo();
+      edited();
+    }
+  };
+
+  const redo = () => {
+    if (history.canRedo) {
+      history.redo();
+      edited();
+    }
   };
 
   const link = (from: { alias: string; column: string }, to: { alias: string; column: string }) => {
@@ -570,6 +666,7 @@ function Editor({
   const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
     const index = Number((edge.data as { index?: number } | undefined)?.index);
     if (def.joins[index]) {
+      setSelectedEdge(index);
       setJoinEdit({ kind: 'edit', index });
     }
   };
@@ -608,7 +705,7 @@ function Editor({
     setProblems([]);
     const sent = revision.current;
     try {
-      const saved = await api.saveModel(modelId, { name, definition: def, version });
+      const saved = await api.saveModel(modelId, { name, definition: withFormat(def), version });
       setVersion(saved.version);
       if (revision.current === sent) {
         setDirty(false);
@@ -738,7 +835,9 @@ function Editor({
     try {
       const result = await api.createTables(modelId, createAsk.version, false);
       if (result.model) {
-        setDef(definitionOf(result.model.definition));
+        // What the server created is no draft any more: undoing past it
+        // would offer to create it again.
+        history.reset(definitionOf(result.model.definition));
         setVersion(result.model.version);
         setDirty(false);
       }
@@ -791,6 +890,22 @@ function Editor({
       runBuild();
     }
   };
+
+  useEditorShortcuts({
+    'mod+z': undo,
+    'mod+y': redo,
+    'mod+shift+z': redo,
+    'mod+s': () => {
+      if (dirty && busy === null) {
+        save();
+      }
+    },
+    'mod+c': copySelection,
+    'mod+v': pasteClip,
+    'mod+x': cutSelection,
+    'mod+a': () => setSelection(nodes.map((n) => n.id)),
+    delete: deleteSelection,
+  }, loaded && !loadError);
 
   if (loadError) {
     return (
@@ -929,6 +1044,17 @@ function Editor({
             setSelected(null);
           }
         }}
+        history={{
+          canUndo: history.canUndo, canRedo: history.canRedo, onUndo: undo, onRedo: redo,
+        }}
+        edit={{
+          canCopy: selection.length > 0,
+          canPaste: Boolean(clip?.tables.length),
+          onCopy: copySelection,
+          onPaste: pasteClip,
+          onPasteShortcut: pasteShortcut,
+          onCut: cutSelection,
+        }}
         onArrange={arrange}
         onZoomIn={() => zoomIn()}
         onZoomOut={() => zoomOut()}
@@ -949,6 +1075,8 @@ function Editor({
             nodes={nodes}
             edges={edges}
             nodeTypes={NODE_TYPES}
+            edgeTypes={EDGE_TYPES}
+            multiSelectionKeyCode={['Control', 'Meta']}
             colorMode={theme}
             style={FLOW_STYLE}
             onNodesChange={onNodesChange}

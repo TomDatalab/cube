@@ -1,6 +1,7 @@
 import { ReactElement, ReactNode, useState } from 'react';
 import {
-  Ban, DatabaseZap, Maximize, Network, Palette, Pencil, Plus, Trash2, ZoomIn, ZoomOut,
+  Ban, ClipboardPaste, Copy, DatabaseZap, Forward, Maximize, Network, Palette, Pencil, Plus, Redo2,
+  Scissors, Trash2, Undo2, ZoomIn, ZoomOut,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -26,6 +27,15 @@ export type ModelToolbarProps = {
   onZoomOut(): void;
   onFitView(): void;
   onCreate(): void;
+  history: { canUndo: boolean; canRedo: boolean; onUndo(): void; onRedo(): void };
+  edit: {
+    canCopy: boolean;
+    canPaste: boolean;
+    onCopy(): void;
+    onPaste(): void;
+    onPasteShortcut(): void;
+    onCut(): void;
+  };
 };
 
 // The hint of a toolbar button. The trigger is a span so the hint also
@@ -117,6 +127,14 @@ export function ModelToolbar(props: ModelToolbarProps) {
         data-slot="model-toolbar"
         className="tw:flex tw:flex-wrap tw:items-center tw:gap-0.5 tw:rounded-md tw:border tw:bg-card tw:p-1"
       >
+        <Tool label="Undo" hint="Undo (Ctrl + Z)" disabled={!props.history.canUndo} onClick={props.history.onUndo}><Undo2 /></Tool>
+        <Tool label="Redo" hint="Redo (Ctrl + Y)" disabled={!props.history.canRedo} onClick={props.history.onRedo}><Redo2 /></Tool>
+        <Divider />
+        <Tool label="Copy" hint="Copy (Ctrl + C)" disabled={!props.edit.canCopy} onClick={props.edit.onCopy}><Copy /></Tool>
+        <Tool label="Paste" hint="Paste (Ctrl + V)" disabled={!props.edit.canPaste} onClick={props.edit.onPaste}><ClipboardPaste /></Tool>
+        <Tool label="Paste as shortcut" disabled={!props.edit.canPaste} onClick={props.edit.onPasteShortcut}><Forward /></Tool>
+        <Tool label="Cut" hint="Cut (Ctrl + X)" disabled={!props.edit.canCopy} onClick={props.edit.onCut}><Scissors /></Tool>
+        <Divider />
         <Tool label="New table" onClick={props.onNewTable}><Plus /></Tool>
         <ColorTool selected={selected} onColor={props.onColor} />
         <Tool

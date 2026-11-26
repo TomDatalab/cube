@@ -445,7 +445,7 @@ describe('ModelEditor', () => {
 
   it('collapses a table to its header, keeping its links, and remembers it', async () => {
     await render();
-    expect(flow.props.edges.every((e: any) => e.type === 'step')).toBe(true);
+    expect(flow.props.edges.every((e: any) => e.type === 'reference')).toBe(true);
     await act(async () => (document.querySelector('[aria-label="Collapse orders"]') as HTMLButtonElement).click());
     const orders = document.querySelector('[data-node="orders"]')!;
     expect(orders.querySelector('[data-column]')).toBeNull();
@@ -587,6 +587,100 @@ describe('ModelEditor', () => {
     tables: [...saved().tables, {
       alias: 'items', schema: 'shop', table: 'items', x: 0, y: 300,
     }],
+  });
+
+  describe('editing', () => {
+    const key = async (k: string, opts: KeyboardEventInit = {}, target: EventTarget = document.body) => {
+      await act(async () => {
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...opts }));
+      });
+    };
+    const positionOf = (id: string) => flow.props.nodes.find((n: any) => n.id === id)?.position;
+    const ids = () => [...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'));
+
+    it('undoes and redoes a table move with Ctrl+Z and Ctrl+Y', async () => {
+      await render();
+      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 410, y: 20 } }]));
+      expect(positionOf('customers')).toEqual({ x: 410, y: 20 });
+      await key('z', { ctrlKey: true });
+      expect(positionOf('customers')).toEqual({ x: 300, y: 0 });
+      await key('y', { ctrlKey: true });
+      expect(positionOf('customers')).toEqual({ x: 410, y: 20 });
+      await key('z', { ctrlKey: true });
+      await key('Z', { ctrlKey: true, shiftKey: true });
+      expect(positionOf('customers')).toEqual({ x: 410, y: 20 });
+    });
+
+    it('ignores canvas shortcuts while typing in a field', async () => {
+      await render();
+      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 410, y: 20 } }]));
+      await select('customers');
+      const input = document.querySelector('input[aria-label="Model name"]') as HTMLInputElement;
+      await key('z', { ctrlKey: true }, input);
+      await key('Delete', {}, input);
+      await key('a', { ctrlKey: true }, input);
+      expect(positionOf('customers')).toEqual({ x: 410, y: 20 });
+      expect(ids()).toEqual(['orders', 'customers']);
+      expect(flow.props.nodes.filter((n: any) => n.selected).map((n: any) => n.id)).toEqual(['customers']);
+    });
+
+    it('Ctrl+A selects every table, Delete removes the selection', async () => {
+      await render();
+      await key('a', { ctrlKey: true });
+      expect(flow.props.nodes.every((n: any) => n.selected)).toBe(true);
+      await key('Delete');
+      expect(ids()).toEqual([]);
+    });
+
+    it('copies and pastes the selection with Ctrl+C / Ctrl+V', async () => {
+      await render();
+      await select('orders');
+      await key('c', { ctrlKey: true });
+      await key('v', { ctrlKey: true });
+      expect(ids()).toEqual(['orders', 'customers', 'orders_1']);
+      expect(positionOf('orders_1')).toEqual({ x: 20, y: 20 });
+      // The pasted table is the new selection.
+      expect(flow.props.nodes.filter((n: any) => n.selected).map((n: any) => n.id)).toEqual(['orders_1']);
+      await key('x', { ctrlKey: true });
+      expect(ids()).toEqual(['orders', 'customers']);
+      await key('v', { ctrlKey: true });
+      expect(ids()).toEqual(['orders', 'customers', 'orders_1']);
+      expect(positionOf('orders_1')).toEqual({ x: 40, y: 40 });
+    });
+
+    it('pastes as a shortcut from the toolbar and removes only the shortcut', async () => {
+      await render();
+      await select('orders');
+      await act(async () => tool('Copy').click());
+      await act(async () => tool('Paste as shortcut').click());
+      expect(ids()).toEqual(['orders', 'orders~s1', 'customers']);
+      expect(positionOf('orders~s1')).toEqual({ x: 20, y: 20 });
+      expect(node('orders~s1').querySelector('[aria-label="shortcut"]')).not.toBeNull();
+      await act(async () => (node('orders~s1').querySelector('[data-slot="model-table-remove"]') as HTMLButtonElement).click());
+      expect(ids()).toEqual(['orders', 'customers']);
+    });
+
+    it('clears history after create in database', async () => {
+      api.model.mockResolvedValueOnce(view(withDraft()));
+      api.createTables
+        .mockResolvedValueOnce({ statements: ['CREATE TABLE x'] })
+        .mockResolvedValueOnce({ model: view(created(), 5), created: ['shop.items'], detail: { tables: {} } });
+      await render();
+      expect(tool('Undo').disabled).toBe(true);
+      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 410, y: 20 } }]));
+      expect(tool('Undo').disabled).toBe(false);
+      await act(async () => tool('Create in database').click());
+      await act(async () => button('Create').click());
+      expect(tool('Undo').disabled).toBe(true);
+    });
+
+    it('saves with Ctrl+S and writes formatVersion 2', async () => {
+      await render();
+      await rename('Sales 2');
+      await key('s', { ctrlKey: true });
+      expect(api.saveModel).toHaveBeenCalledTimes(1);
+      expect(api.saveModel.mock.calls[0][1].definition.formatVersion).toBe(2);
+    });
   });
 
   describe('toolbar', () => {

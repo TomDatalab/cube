@@ -45,6 +45,13 @@ describe('clipboard', () => {
     expect(second.aliases).toEqual(['orders_2', 'customers_2']);
   });
 
+  it('a cut table pastes back under its own name', () => {
+    const { def, clip } = cut(model(), ['orders']);
+    const { def: next, aliases } = paste(def, clip);
+    expect(aliases).toEqual(['orders']);
+    expect(next.tables.find((t) => t.alias === 'orders')!.x).toBe(30);
+  });
+
   it('pastes a draft under a free table name', () => {
     let def = emptyDefinition();
     def = addDraftTable(def, 'ds', 'public', 'items', [
