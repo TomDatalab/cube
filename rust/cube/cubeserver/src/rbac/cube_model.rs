@@ -29,6 +29,127 @@ pub struct ModelTable {
     pub table: String,
     pub x: f64,
     pub y: f64,
+    /// A palette name from [`COLORS`]; none means the neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// The design of a table not in the database yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftTable>,
+}
+
+/// A table being designed: it becomes real with [`create_statements`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DraftTable {
+    pub columns: Vec<DraftColumn>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DraftColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub nullable: bool,
+    #[serde(default)]
+    pub primary_key: bool,
+}
+
+pub const COLORS: [&str; 8] = [
+    "slate", "blue", "green", "amber", "red", "violet", "pink", "teal",
+];
+pub const TYPES: [&str; 7] = [
+    "text", "integer", "bigint", "numeric", "boolean", "date", "timestamp",
+];
+
+/// `^[A-Za-z_][A-Za-z0-9_]*$`, at most 63 characters.
+fn valid_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    s.len() <= 63
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn validate_draft(table: &ModelTable, draft: &DraftTable) -> Result<(), String> {
+    let name = format!("{}.{}", table.schema, table.table);
+    if !valid_ident(&table.schema) {
+        return Err(format!("Schema inválido: {}", table.schema));
+    }
+    if !valid_ident(&table.table) {
+        return Err(format!("Nome de tabela inválido: {}", table.table));
+    }
+    if draft.columns.is_empty() {
+        return Err(format!("A tabela {name} precisa de ao menos uma coluna"));
+    }
+    let mut seen = HashSet::new();
+    for column in &draft.columns {
+        if !valid_ident(&column.name) {
+            return Err(format!("Nome de coluna inválido: {}", column.name));
+        }
+        if !TYPES.contains(&column.kind.as_str()) {
+            return Err(format!("Tipo inválido: {}", column.kind));
+        }
+        if !seen.insert(column.name.as_str()) {
+            return Err(format!("A coluna {} se repete em {name}", column.name));
+        }
+    }
+    Ok(())
+}
+
+/// One `CREATE TABLE` per draft table, in table order, as `(schema.table,
+/// sql)`. Only postgres and mysql; identifiers are quoted, types come from
+/// the closed [`TYPES`] list.
+pub fn create_statements(
+    def: &Definition,
+    db_type: &str,
+) -> Result<Vec<(String, String)>, String> {
+    if db_type != "postgres" && db_type != "mysql" {
+        return Err(format!("Criar tabelas não é suportado para {db_type}"));
+    }
+    let mysql = db_type == "mysql";
+    let mut out = Vec::new();
+    for table in &def.tables {
+        let Some(draft) = &table.draft else { continue };
+        validate_draft(table, draft)?;
+        let mut parts = Vec::new();
+        for c in &draft.columns {
+            let ty = match (c.kind.as_str(), mysql) {
+                ("integer", true) => "int",
+                ("numeric", true) => "decimal(18,4)",
+                ("numeric", false) => "numeric(18,4)",
+                ("timestamp", true) => "datetime",
+                (other, _) => other,
+            };
+            let null = if c.nullable && !c.primary_key {
+                ""
+            } else {
+                " NOT NULL"
+            };
+            parts.push(format!("{} {ty}{null}", quote(db_type, &c.name)));
+        }
+        let keys: Vec<String> = draft
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| quote(db_type, &c.name))
+            .collect();
+        if !keys.is_empty() {
+            parts.push(format!("PRIMARY KEY ({})", keys.join(", ")));
+        }
+        out.push((
+            format!("{}.{}", table.schema, table.table),
+            format!(
+                "CREATE TABLE {}.{} ({})",
+                quote(db_type, &table.schema),
+                quote(db_type, &table.table),
+                parts.join(", ")
+            ),
+        ));
+    }
+    Ok(out)
 }
 
 /// A link between two columns: `relationship` is one_to_one, one_to_many or
@@ -59,12 +180,27 @@ const JOINS: [&str; 2] = ["left", "inner"];
 /// model with no tables is a valid draft.
 pub fn validate(def: &Definition) -> Result<(), String> {
     let mut aliases = HashSet::new();
+    let mut drafts = HashSet::new();
     for table in &def.tables {
         if table.alias.trim().is_empty() {
             return Err("Toda tabela precisa de um alias".into());
         }
         if !aliases.insert(table.alias.as_str()) {
             return Err(format!("O alias {} se repete", table.alias));
+        }
+        if let Some(color) = &table.color {
+            if !COLORS.contains(&color.as_str()) {
+                return Err(format!("Cor inválida: {color}"));
+            }
+        }
+        if let Some(draft) = &table.draft {
+            validate_draft(table, draft)?;
+            if !drafts.insert((table.schema.as_str(), table.table.as_str())) {
+                return Err(format!(
+                    "A tabela nova {}.{} se repete",
+                    table.schema, table.table
+                ));
+            }
         }
     }
     if let Some(primary) = &def.primary {
@@ -130,6 +266,12 @@ pub fn build(
     columns: &cubedriver::DatabaseStructure,
     db_type: &str,
 ) -> Result<String, String> {
+    if let Some(t) = def.tables.iter().find(|t| t.draft.is_some()) {
+        return Err(format!(
+            "A tabela {}.{} ainda não existe no banco: use Criar no banco",
+            t.schema, t.table
+        ));
+    }
     validate(def)?;
     let primary = def.primary.as_deref().ok_or("Escolha a tabela principal")?;
     let primary_key = def
@@ -346,6 +488,8 @@ mod tests {
             table: table.into(),
             x: 0.0,
             y: 0.0,
+            color: None,
+            draft: None,
         }
     }
 
@@ -702,5 +846,142 @@ mod tests {
         };
         let yaml = run(&def).unwrap();
         assert!(yaml.contains("data_source: pg"), "{yaml}");
+    }
+
+    fn dcol(name: &str, kind: &str, nullable: bool, pk: bool) -> DraftColumn {
+        DraftColumn {
+            name: name.into(),
+            kind: kind.into(),
+            nullable,
+            primary_key: pk,
+        }
+    }
+
+    fn draft_table(alias: &str, name: &str, columns: Vec<DraftColumn>) -> ModelTable {
+        ModelTable {
+            draft: Some(DraftTable { columns }),
+            ..table(alias, name)
+        }
+    }
+
+    fn items_def() -> Definition {
+        Definition {
+            data_source: "ds".into(),
+            tables: vec![draft_table(
+                "i",
+                "items",
+                vec![
+                    dcol("id", "integer", false, true),
+                    dcol("order", "text", true, false),
+                    dcol("price", "numeric", false, false),
+                ],
+            )],
+            primary: None,
+            primary_key: None,
+            joins: vec![],
+        }
+    }
+
+    fn with_draft(t: ModelTable) -> Definition {
+        Definition {
+            tables: vec![t],
+            ..items_def()
+        }
+    }
+
+    #[test]
+    fn old_definitions_still_parse() {
+        let json = r#"{"dataSource":"ds","tables":[{"alias":"o","schema":"public","table":"orders","x":1.0,"y":2.0}],"primary":null,"primaryKey":null,"joins":[]}"#;
+        let def: Definition = serde_json::from_str(json).unwrap();
+        assert_eq!(def.tables[0].color, None);
+        assert_eq!(def.tables[0].draft, None);
+        let out = serde_json::to_string(&def).unwrap();
+        assert!(!out.contains("color") && !out.contains("draft"), "{out}");
+    }
+
+    #[test]
+    fn validate_checks_drafts() {
+        let ok = vec![dcol("id", "integer", false, true)];
+        let bad = |t: ModelTable| validate(&with_draft(t));
+        let e = bad(draft_table("i", "1x", ok.clone())).unwrap_err();
+        assert!(e.contains("inválido"), "{e}");
+        assert!(bad(draft_table("i", "items", vec![dcol("id", "uuid", false, true)])).is_err());
+        assert!(bad(draft_table("i", "items", vec![])).is_err());
+        assert!(bad(draft_table(
+            "i",
+            "items",
+            vec![dcol("id", "integer", false, true), dcol("id", "text", true, false)]
+        ))
+        .is_err());
+        let mut twice = with_draft(draft_table("i", "items", ok.clone()));
+        twice.tables.push(draft_table("j", "items", ok.clone()));
+        assert!(validate(&twice).is_err());
+        let mut orange = draft_table("i", "items", ok.clone());
+        orange.color = Some("orange".into());
+        assert!(bad(orange).is_err());
+        let mut blue = draft_table("i", "items", ok);
+        blue.color = Some("blue".into());
+        assert!(bad(blue).is_ok());
+    }
+
+    #[test]
+    fn build_refuses_drafts() {
+        let mut def = items_def();
+        def.tables.insert(0, table("o", "orders"));
+        def.primary = Some("o".into());
+        def.primary_key = Some("id".into());
+        let err = build("m", Uuid::nil(), "m", &def, &columns(), "postgres").unwrap_err();
+        assert_eq!(
+            err,
+            "A tabela public.items ainda não existe no banco: use Criar no banco"
+        );
+    }
+
+    #[test]
+    fn postgres_create_statement() {
+        let got = create_statements(&items_def(), "postgres").unwrap();
+        assert_eq!(got[0].0, "public.items");
+        assert_eq!(
+            got[0].1,
+            r#"CREATE TABLE "public"."items" ("id" integer NOT NULL, "order" text, "price" numeric(18,4) NOT NULL, PRIMARY KEY ("id"))"#
+        );
+    }
+
+    #[test]
+    fn mysql_create_statement() {
+        let mut def = items_def();
+        def.tables[0]
+            .draft
+            .as_mut()
+            .unwrap()
+            .columns
+            .push(dcol("at", "timestamp", true, false));
+        let got = create_statements(&def, "mysql").unwrap();
+        assert_eq!(
+            got[0].1,
+            "CREATE TABLE `public`.`items` (`id` int NOT NULL, `order` text, `price` decimal(18,4) NOT NULL, `at` datetime, PRIMARY KEY (`id`))"
+        );
+    }
+
+    #[test]
+    fn unsupported_db_type() {
+        assert_eq!(
+            create_statements(&items_def(), "bigquery").unwrap_err(),
+            "Criar tabelas não é suportado para bigquery"
+        );
+    }
+
+    #[test]
+    fn primary_key_is_not_null_and_optional() {
+        let def = with_draft(draft_table(
+            "i",
+            "items",
+            vec![dcol("id", "integer", true, true), dcol("n", "text", true, false)],
+        ));
+        let sql = &create_statements(&def, "postgres").unwrap()[0].1;
+        assert!(sql.contains(r#""id" integer NOT NULL"#), "{sql}");
+        let def = with_draft(draft_table("i", "items", vec![dcol("n", "text", true, false)]));
+        let sql = &create_statements(&def, "postgres").unwrap()[0].1;
+        assert!(!sql.contains("PRIMARY KEY"), "{sql}");
     }
 }
