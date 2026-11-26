@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from '../pages/Schema/models/clipboard';
+import { addView, nodeIdOf, setView } from '../pages/Schema/models/objects';
 import {
   ModelDefinition, addDraftTable, addTable, connect, emptyDefinition, removeTable,
 } from '../pages/Schema/models/modelGraph';
@@ -35,19 +36,19 @@ describe('clipboard', () => {
     const def = model();
     const clip = copy(def, ['orders', 'customers']);
     const first = paste(def, clip);
-    expect(first.aliases).toEqual(['orders_1', 'customers_1']);
+    expect(first.nodeIds).toEqual(['orders_1', 'customers_1']);
     const pasted = first.def.tables.find((t) => t.alias === 'orders_1')!;
     expect([pasted.x, pasted.y]).toEqual([30, 30]);
     expect(pasted.table).toBe('orders');
     const join = first.def.joins[first.def.joins.length - 1];
     expect([join.from.alias, join.to.alias]).toEqual(['orders_1', 'customers_1']);
     const second = paste(first.def, clip);
-    expect(second.aliases).toEqual(['orders_2', 'customers_2']);
+    expect(second.nodeIds).toEqual(['orders_2', 'customers_2']);
   });
 
   it('a cut table pastes back under its own name', () => {
     const { def, clip } = cut(model(), ['orders']);
-    const { def: next, aliases } = paste(def, clip);
+    const { def: next, nodeIds: aliases } = paste(def, clip);
     expect(aliases).toEqual(['orders']);
     expect(next.tables.find((t) => t.alias === 'orders')!.x).toBe(30);
   });
@@ -120,5 +121,28 @@ describe('clipboard', () => {
     const ids = next.joins.map((j) => j.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(next.joins[next.joins.length - 1].name).toBeUndefined();
+  });
+
+  it('copies and pastes a view with the table it depends on', () => {
+    let def = model();
+    const { def: withView, id } = addView(def, 100, 200, 'public');
+    def = setView(withView, id, { dependsOnTables: ['orders'] });
+    const clip = copy(def, ['orders', nodeIdOf('view', id)]);
+    const { def: next, nodeIds } = paste(def, clip);
+    expect(nodeIds).toEqual(['orders_1', 'view:v2']);
+    const pasted = next.views!.find((v) => v.id === 'v2')!;
+    expect(pasted.name).toBe('view_1_1');
+    expect(pasted.dependsOnTables).toEqual(['orders_1']);
+    expect([pasted.x, pasted.y]).toEqual([120, 220]);
+  });
+
+  it('pasting a view alone drops view dependencies on views not pasted', () => {
+    let { def } = addView(model(), 0, 0, 'public');
+    def = addView(def, 50, 50, 'public').def;
+    def = setView(def, 'v2', { dependsOnViews: ['v1'] });
+    const { def: next } = paste(def, copy(def, [nodeIdOf('view', 'v2')]));
+    expect(next.views!.find((v) => v.id === 'v3')!.dependsOnViews).toEqual([]);
+    const both = paste(def, copy(def, [nodeIdOf('view', 'v1'), nodeIdOf('view', 'v2')]));
+    expect(both.def.views!.find((v) => v.id === 'v4')!.dependsOnViews).toEqual(['v3']);
   });
 });

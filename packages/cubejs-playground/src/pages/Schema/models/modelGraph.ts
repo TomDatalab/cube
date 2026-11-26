@@ -114,6 +114,50 @@ export type ModelSettings = {
   scripts?: { createBefore?: string; createAfter?: string; dropBefore?: string; dropAfter?: string };
 };
 
+export type Note = {
+  id: string;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  z?: number;
+  text: string;
+  color?: TableColor;
+};
+
+export type Area = {
+  id: string;
+  name: string;
+  comment?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z?: number;
+  fill?: TableColor;
+  border?: TableColor;
+};
+
+export type ViewColumn = { name: string; type: string };
+
+export type ModelView = {
+  id: string;
+  name: string;
+  schema: string;
+  comment?: string;
+  sql: string;
+  columns: ViewColumn[];
+  dependsOnTables: string[];
+  dependsOnViews: string[];
+  scriptBefore?: string;
+  scriptAfter?: string;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  z?: number;
+};
+
 export type ModelDefinition = {
   formatVersion?: 2;
   dataSource: string;
@@ -123,7 +167,15 @@ export type ModelDefinition = {
   primaryKey?: string | null;
   joins: ModelJoin[];
   settings?: ModelSettings;
+  notes?: Note[];
+  areas?: Area[];
+  views?: ModelView[];
 };
+
+// The views of a model, with `f` applied to each one's table dependencies.
+function mapViewTables(def: ModelDefinition, f: (aliases: string[]) => string[]): Pick<ModelDefinition, 'views'> {
+  return def.views ? { views: def.views.map((v) => ({ ...v, dependsOnTables: f(v.dependsOnTables) })) } : {};
+}
 
 export function emptyDefinition(): ModelDefinition {
   return { dataSource: '', tables: [], joins: [] };
@@ -162,11 +214,15 @@ export function addTable(
 export function removeTable(def: ModelDefinition, alias: string): ModelDefinition {
   const tables = def.tables.filter((t) => t.alias !== alias);
   const joins = def.joins.filter((j) => j.from.alias !== alias && j.to.alias !== alias);
+  const views = mapViewTables(def, (list) => list.filter((a) => a !== alias));
   if (def.primary !== alias) {
-    return { ...def, tables, joins };
+    return {
+      ...def, tables, joins, ...views,
+    };
   }
   return {
     ...def,
+    ...views,
     dataSource: tables.length === 0 ? '' : def.dataSource,
     tables,
     joins,
@@ -517,6 +573,7 @@ export function renameTable(
       primary: def.primary === alias ? next : def.primary,
       tables: def.tables.map((t) => (t.alias === alias ? { ...t, alias: next } : t)),
       joins: def.joins.map((j) => ({ ...j, from: end(j.from), to: end(j.to) })),
+      ...mapViewTables(def, (list) => list.map((a) => (a === alias ? next : a))),
     },
   };
 }

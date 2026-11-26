@@ -516,7 +516,7 @@ function Editor({
     }
     const result = paste(def, clip, PASTE_OFFSET);
     change(result.def);
-    setSelection(result.aliases);
+    setSelection(result.nodeIds);
   };
 
   const pasteShortcut = () => {
