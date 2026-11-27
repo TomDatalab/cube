@@ -57,6 +57,12 @@ async function answer(response: Response): Promise<any> {
   return body;
 }
 
+// Who edits a model: `held` when the token asking holds the lock.
+export type LockState = { held: boolean; holder: string | null };
+
+// The header a model's writes carry the editor's lock token in.
+export const LOCK_HEADER = 'X-Model-Lock';
+
 export type CubeModelView = {
   id: string;
   organizationId: string;
@@ -98,6 +104,8 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
   }
 
   const legacy = async (path: string) => answer(await playgroundFetch(`playground/tree${path}`));
+
+  const locked = (lock?: string): Record<string, string> => (lock ? { [LOCK_HEADER]: lock } : {});
 
   const model = (org: OrgNode) => (
     org.slug === PLATFORM ? '/platform/model' : `/organizations/${enc(org.id!)}/model`
@@ -179,13 +187,36 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
 
     saveModel(
       id: string,
-      change: { name?: string; definition?: unknown; version: number }
+      change: { name?: string; definition?: unknown; version: number },
+      lock?: string
     ): Promise<CubeModelView> {
-      return call('PUT', `/cube-models/${enc(id)}`, change);
+      return call('PUT', `/cube-models/${enc(id)}`, change, locked(lock));
     },
 
-    async deleteModel(id: string, version: number): Promise<void> {
-      await call('DELETE', `/cube-models/${enc(id)}?version=${version}`);
+    async deleteModel(id: string, version: number, lock?: string): Promise<void> {
+      await call('DELETE', `/cube-models/${enc(id)}?version=${version}`, undefined, locked(lock));
+    },
+
+    // Claims the edit lock when it is free, expired or already ours;
+    // renewing it is claiming it again.
+    lockModel(id: string, token: string): Promise<LockState> {
+      return call('POST', `/cube-models/${enc(id)}/lock`, { token });
+    },
+
+    // Takes the lock from whoever holds it.
+    takeModelLock(id: string, token: string): Promise<LockState> {
+      return call('POST', `/cube-models/${enc(id)}/lock/take`, { token });
+    },
+
+    // `keepalive`: the release still goes out from `pagehide`.
+    async releaseModelLock(id: string, token: string): Promise<void> {
+      const response = await fetch(`${base}/v1/cube-models/${enc(id)}/lock?token=${enc(token)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+        keepalive: true,
+      });
+      onUnauthorized(response);
+      await answer(response);
     },
 
     // The script of `definition` in its connection's dialect; runs nothing.
@@ -199,20 +230,22 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
 
     buildModel(
       id: string,
-      force?: boolean
+      force?: boolean,
+      lock?: string
     ): Promise<{
       cubes: { cubeName: string; fileName: string; content: string }[];
       // Files of cubes no longer in the model, deleted by the build.
       removed: string[];
       detail: OrgDetail;
     }> {
-      return call('POST', `/cube-models/${enc(id)}/build`, { force });
+      return call('POST', `/cube-models/${enc(id)}/build`, { force }, locked(lock));
     },
 
     createTables(
       id: string,
       version: number,
-      dryRun: boolean
+      dryRun: boolean,
+      lock?: string
     ): Promise<{
       statements?: string[];
       model?: CubeModelView;
@@ -227,7 +260,7 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
         'POST',
         `/cube-models/${enc(id)}/create-tables`,
         { version, dryRun },
-        workspace ? { [WORKSPACE_HEADER]: workspace } : {}
+        { ...(workspace ? { [WORKSPACE_HEADER]: workspace } : {}), ...locked(lock) }
       );
     },
 

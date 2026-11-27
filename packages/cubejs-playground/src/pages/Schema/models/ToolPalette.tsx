@@ -40,8 +40,14 @@ export const TOOLS: {
   },
 ];
 
-// The row of tools floating on the canvas' top-left corner.
-export function ToolPalette({ tool, onTool }: { tool: Tool; onTool(t: Tool): void }) {
+// The tools that only look: the others add to the model.
+export const VIEW_TOOLS: Tool[] = ['select', 'area-select'];
+
+// The row of tools floating on the canvas' top-left corner; read-only keeps
+// the ones that only look.
+export function ToolPalette({
+  tool, onTool, readOnly = false,
+}: { tool: Tool; onTool(t: Tool): void; readOnly?: boolean }) {
   return (
     <TooltipProvider>
       <div
@@ -62,7 +68,7 @@ export function ToolPalette({ tool, onTool }: { tool: Tool; onTool(t: Tool): voi
                   variant={tool === t ? 'default' : 'ghost'}
                   aria-label={label}
                   aria-pressed={tool === t}
-                  disabled={soon}
+                  disabled={soon || (readOnly && !VIEW_TOOLS.includes(t))}
                   onClick={() => onTool(t)}
                 >
                   <Icon />

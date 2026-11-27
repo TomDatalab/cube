@@ -119,6 +119,15 @@ export const SECTIONS: Section[] = [
       {
         method: 'POST', path: '/v1/cube-models/:id/sql', summary: 'The SQL script of a model definition in its connection\'s dialect (runs nothing)', who: 'org owner', body: { definition: {}, options: { drop: false, onlyNew: false } },
       },
+      {
+        method: 'POST', path: '/v1/cube-models/:id/lock', summary: 'Claim or renew the edit lock of a model (held: false while someone else edits it)', who: 'org owner', body: { token: 'tab-token' },
+      },
+      {
+        method: 'POST', path: '/v1/cube-models/:id/lock/take', summary: 'Take the edit lock of a model from whoever holds it', who: 'org owner', body: { token: 'tab-token' },
+      },
+      {
+        method: 'DELETE', path: '/v1/cube-models/:id/lock', summary: 'Release the edit lock of a model held by the token', who: 'org owner', query: '?token=tab-token',
+      },
       { method: 'GET', path: '/v1/platform/model', summary: 'The Platform\'s files, cubes and problems', who: 'platform admin' },
       { method: 'GET', path: '/v1/platform/model/files/:file', summary: 'One Platform file', who: 'platform admin' },
       {

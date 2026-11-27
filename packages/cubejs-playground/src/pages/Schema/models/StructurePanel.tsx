@@ -285,7 +285,7 @@ function StructureTree({
 
 // A table of the connection: dragged to the canvas, its columns on demand.
 function TableItem({
-  ds, schema, table, columns, disabled, dataSource,
+  ds, schema, table, columns, disabled, dataSource, readOnly,
 }: {
   ds: string;
   schema: string;
@@ -293,6 +293,8 @@ function TableItem({
   columns: Columns;
   disabled: boolean;
   dataSource: string;
+  // Someone else edits the model: nothing is dragged to it.
+  readOnly: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const Chevron = open ? ChevronDown : ChevronRight;
@@ -312,7 +314,7 @@ function TableItem({
         </button>
         <div
           data-slot="model-table-item"
-          draggable={!disabled}
+          draggable={!disabled && !readOnly}
           aria-disabled={disabled || undefined}
           title={disabled
             ? `Tables of one connection only: this model reads ${dataSource}`
@@ -321,7 +323,7 @@ function TableItem({
             ? 'tw:min-w-0 tw:flex-1 tw:cursor-not-allowed tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:text-muted-foreground tw:opacity-50'
             : 'tw:min-w-0 tw:flex-1 tw:cursor-grab tw:truncate tw:rounded tw:px-1 tw:py-0.5 tw:hover:bg-accent'}
           onDragStart={(e) => {
-            if (disabled) {
+            if (disabled || readOnly) {
               e.preventDefault();
               return;
             }
@@ -348,12 +350,13 @@ function TableItem({
 
 // The connections' tables, ds › schema › table, matching the search.
 function DatabaseTables({
-  tables, dataSource, locked,
+  tables, dataSource, locked, readOnly,
 }: {
   tables: OrgDetail['tables'];
   dataSource: string;
   // The model has tables: only its connection's can join it.
   locked: boolean;
+  readOnly: boolean;
 }) {
   const [search, setSearch] = useState('');
   const needle = search.trim().toLowerCase();
@@ -395,6 +398,7 @@ function DatabaseTables({
                           columns={columns}
                           disabled={disabled}
                           dataSource={dataSource}
+                          readOnly={readOnly}
                         />
                       ))}
                     </ul>
@@ -415,6 +419,8 @@ export type StructurePanelProps = StructureTreeProps & {
   locked: boolean;
   issues: Issue[];
   onPickIssue(issue: Issue): void;
+  // Someone else edits the model: the tree still picks, nothing is added.
+  readOnly?: boolean;
 };
 
 // The model's problems, errors first, each picking what it is about.
@@ -455,7 +461,7 @@ function IssueList({ issues, onPick }: { issues: Issue[]; onPick(issue: Issue): 
 // The left pane, as Redgate's: Model structure, then our Database tables,
 // then Model explorer and Issues (later phases).
 export function StructurePanel({
-  tables, dataSource, locked, issues, onPickIssue, ...tree
+  tables, dataSource, locked, issues, onPickIssue, readOnly = false, ...tree
 }: StructurePanelProps) {
   const [width, setWidth] = useResizable('cubePlayground.modelLeftWidth', PANE_WIDTH.initial, PANE_WIDTH.min, PANE_WIDTH.max);
   const [open, setOpen] = useState({ structure: true, tables: true, issues: false });
@@ -478,7 +484,7 @@ export function StructurePanel({
         open={open.tables}
         onToggle={() => setOpen((was) => ({ ...was, tables: !was.tables }))}
       >
-        <DatabaseTables tables={tables} dataSource={dataSource} locked={locked} />
+        <DatabaseTables tables={tables} dataSource={dataSource} locked={locked} readOnly={readOnly} />
       </Section>
       <Section title="Model explorer" open={false} disabled onToggle={() => {}} />
       <Section

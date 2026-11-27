@@ -76,6 +76,9 @@ export type ModelToolbarProps = {
     onToggleTop(): void;
   };
   search: ReactNode;
+  // Someone else edits the model: what changes it is off; exports, SQL,
+  // copy, zoom, panes and search stay.
+  readOnly?: boolean;
 };
 
 // The hint of a toolbar button. The trigger is a span so the hint also
@@ -174,7 +177,7 @@ function createHint(file: ModelToolbarProps['file']): string {
 // Redgate's toolbar: history | file | clipboard | arrange | zoom | panes,
 // then the search on the right.
 export function ModelToolbar({
-  history, file, edit, arrange, references, zoom, panes, search,
+  history, file, edit, arrange, references, zoom, panes, search, readOnly = false,
 }: ModelToolbarProps) {
   const zoomOptions = ZOOM_CHOICES.includes(zoom.percent)
     ? ZOOM_CHOICES
@@ -187,11 +190,11 @@ export function ModelToolbar({
         data-slot="model-toolbar"
         className="tw:flex tw:flex-wrap tw:items-center tw:gap-0.5 tw:border-b tw:bg-card tw:px-2 tw:py-1"
       >
-        <Tool label="Undo" hint="Undo (Ctrl + Z)" disabled={!history.canUndo} onClick={history.onUndo}><Undo2 /></Tool>
-        <Tool label="Redo" hint="Redo (Ctrl + Y)" disabled={!history.canRedo} onClick={history.onRedo}><Redo2 /></Tool>
+        <Tool label="Undo" hint="Undo (Ctrl + Z)" disabled={readOnly || !history.canUndo} onClick={history.onUndo}><Undo2 /></Tool>
+        <Tool label="Redo" hint="Redo (Ctrl + Y)" disabled={readOnly || !history.canRedo} onClick={history.onRedo}><Redo2 /></Tool>
         <Divider />
 
-        <Tool label="Save changes" hint="Save changes (Ctrl + S)" disabled={!file.dirty || file.busy} onClick={file.onSave}>
+        <Tool label="Save changes" hint="Save changes (Ctrl + S)" disabled={readOnly || !file.dirty || file.busy} onClick={file.onSave}>
           <Save />
         </Tool>
         <Tool label="Export model to image" hint={SOON} disabled><Image /></Tool>
@@ -208,26 +211,26 @@ export function ModelToolbar({
         <Tool
           label="Create in database"
           hint={createHint(file)}
-          disabled={!file.canSql || !file.hasDrafts || file.busy}
+          disabled={readOnly || !file.canSql || !file.hasDrafts || file.busy}
           onClick={file.onCreate}
         >
           <DatabaseZap />
         </Tool>
-        <Tool label="Build cube" disabled={!file.canBuild || file.busy} onClick={file.onBuild}><Box /></Tool>
+        <Tool label="Build cube" disabled={readOnly || !file.canBuild || file.busy} onClick={file.onBuild}><Box /></Tool>
         <Divider />
 
         <Tool label="Copy" hint="Copy (Ctrl + C)" disabled={!edit.canCopy} onClick={edit.onCopy}><Copy /></Tool>
-        <Tool label="Paste" hint="Paste (Ctrl + V)" disabled={!edit.canPaste} onClick={edit.onPaste}>
+        <Tool label="Paste" hint="Paste (Ctrl + V)" disabled={readOnly || !edit.canPaste} onClick={edit.onPaste}>
           <ClipboardPaste />
         </Tool>
-        <Tool label="Paste as shortcut" disabled={!edit.canPaste} onClick={edit.onPasteShortcut}><Forward /></Tool>
-        <Tool label="Cut" hint="Cut (Ctrl + X)" disabled={!edit.canCopy} onClick={edit.onCut}><Scissors /></Tool>
-        <Tool label="Delete" hint="Delete (Del)" disabled={!edit.canDelete} onClick={edit.onDelete}><Trash2 /></Tool>
+        <Tool label="Paste as shortcut" disabled={readOnly || !edit.canPaste} onClick={edit.onPasteShortcut}><Forward /></Tool>
+        <Tool label="Cut" hint="Cut (Ctrl + X)" disabled={readOnly || !edit.canCopy} onClick={edit.onCut}><Scissors /></Tool>
+        <Tool label="Delete" hint="Delete (Del)" disabled={readOnly || !edit.canDelete} onClick={edit.onDelete}><Trash2 /></Tool>
         <Divider />
 
         <Menu
           label="Size"
-          disabled={arrange.count < 1}
+          disabled={readOnly || arrange.count < 1}
           items={[
             { label: 'Adjust to text', onClick: () => arrange.onSize('fit') },
             { label: 'Same width', disabled: arrange.count < 2, onClick: () => arrange.onSize('width') },
@@ -238,7 +241,7 @@ export function ModelToolbar({
         </Menu>
         <Menu
           label="Align"
-          disabled={arrange.count < 2}
+          disabled={readOnly || arrange.count < 2}
           items={[
             { label: 'Top', aria: 'Align top', onClick: () => arrange.onAlign('top') },
             { label: 'Center', aria: 'Align middle', onClick: () => arrange.onAlign('middle') },
@@ -253,7 +256,7 @@ export function ModelToolbar({
         </Menu>
         <Menu
           label="Distribution"
-          disabled={arrange.count < 3}
+          disabled={readOnly || arrange.count < 3}
           items={[
             { label: 'Justify', aria: 'Distribute vertical justify', onClick: () => arrange.onDistribute('v-justify') },
             { label: 'Top', aria: 'Distribute top', onClick: () => arrange.onDistribute('top') },
@@ -270,7 +273,7 @@ export function ModelToolbar({
         </Menu>
         <Menu
           label="Order"
-          disabled={!arrange.order.canOrder}
+          disabled={readOnly || !arrange.order.canOrder}
           items={[
             { label: 'Bring to front', aria: 'Bring to front', onClick: arrange.order.onFront },
             { label: 'Send to back', aria: 'Send to back', onClick: arrange.order.onBack },
@@ -280,7 +283,7 @@ export function ModelToolbar({
         </Menu>
         <Menu
           label="References"
-          disabled={!references.edgeSelected && !references.anyHidden}
+          disabled={readOnly || (!references.edgeSelected && !references.anyHidden)}
           items={[
             { label: 'Show all references', disabled: !references.anyHidden, onClick: references.onShowAll },
             { label: 'Add reference point', disabled: !references.edgeSelected, onClick: references.onAddPoint },
@@ -290,7 +293,12 @@ export function ModelToolbar({
         >
           <Spline />
         </Menu>
-        <Tool label="Arrange" hint="Arrange the tables in layers, starting from the first cube's source table" onClick={arrange.onArrange}>
+        <Tool
+          label="Arrange"
+          hint="Arrange the tables in layers, starting from the first cube's source table"
+          disabled={readOnly}
+          onClick={arrange.onArrange}
+        >
           <Network />
         </Tool>
         <Divider />

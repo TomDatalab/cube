@@ -62,12 +62,14 @@ import {
 } from './referencePath';
 import { Hit, searchModel } from './search';
 import { SearchBox } from './SearchBox';
-import { TOOLS, Tool, ToolPalette } from './ToolPalette';
+import { TOOLS, Tool, ToolPalette, VIEW_TOOLS } from './ToolPalette';
 import { StructurePanel, TABLE_MIME } from './StructurePanel';
 import { PropertiesPanel, Selected } from './PropertiesPanel';
 import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
+import { useEditLock } from './useEditLock';
+import { ReadOnlyBanner } from './ReadOnlyBanner';
 
 export { TABLE_MIME };
 
@@ -163,6 +165,10 @@ const STALE = 'Changed elsewhere: reopen';
 // The server's 409 for a version that is not the stored one. Its other 409
 // (a duplicate name) says its own reason.
 const STALE_SERVER = 'O model mudou desde que você abriu; abra de novo';
+// The server's 423 for a write while someone else holds the edit lock.
+const LOCKED_BY = 'editado por ';
+// What read-only drops from the shortcuts: the combos that change the model.
+const EDIT_KEYS = ['mod+z', 'mod+y', 'mod+shift+z', 'mod+s', 'mod+v', 'mod+x', 'delete'];
 const conflict = (e: any): string => (
   e instanceof ApiError && e.status === 409 && e.message === STALE_SERVER ? STALE : e.message
 );
@@ -281,7 +287,15 @@ function Editor({
   const [version, setVersion] = useState(0);
   const history = useHistory<ModelDefinition>(emptyDefinition);
   const def = history.value;
-  const setDef = history.set;
+  // While someone else holds the edit lock, or before the claim answers,
+  // every change is ignored; a reload goes through `history.reset`.
+  const readOnlyRef = useRef(true);
+  const { set: record } = history;
+  const setDef = useCallback((next: Parameters<typeof record>[0]) => {
+    if (!readOnlyRef.current) {
+      record(next);
+    }
+  }, [record]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'save' | 'build' | 'delete' | 'create' | null>(null);
   const [joinEdit, setJoinEdit] = useState<JoinEdit | null>(null);
@@ -317,33 +331,72 @@ function Editor({
   }
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
 
+  // The model as the server has it, replacing what is on the canvas and its
+  // history.
+  const showModel = (m: CubeModelView) => {
+    setName(m.name);
+    setVersion(m.version);
+    setBuiltNames(m.cubeNames ?? []);
+    const known = m.dialects ?? {};
+    setDialects(known);
+    const read = definitionOf(m.definition);
+    // Old models' portable types as the connection's dialect writes them;
+    // the next save stores them.
+    history.reset(ensureIds(convertDrafts(read, known[read.dataSource] ?? null)));
+    setDirty(false);
+    setLoaded(true);
+  };
+  const reload = () => api.model(modelId).then(showModel, (e: Error) => notify.error(e.message));
+
+  // Someone took the lock: what was not saved goes, the model as they left
+  // it comes.
+  const onLost = (holder: string) => {
+    setJoinEdit(null);
+    setCubeJoinAsk(null);
+    setTableEdit(null);
+    setCreateAsk(null);
+    setAsk(null);
+    setTool('select');
+    setRefFrom(null);
+    reload();
+    notify.info(`${holder} took control. Your unsaved changes were discarded.`);
+  };
+  const lock = useEditLock(api, modelId, onLost);
+  const readOnly = lock.status !== 'editing';
+  readOnlyRef.current = readOnly;
+  // A 423 from a write: the lock is someone else's now.
+  const refused = (e: unknown): boolean => {
+    if (!(e instanceof ApiError && e.status === 423)) {
+      return false;
+    }
+    const at = e.message.indexOf(LOCKED_BY);
+    lock.lost(at >= 0 ? e.message.slice(at + LOCKED_BY.length) : lock.holder ?? '');
+    return true;
+  };
+  // Back in control after reading: the model may have changed meanwhile.
+  const wasReadOnly = useRef(false);
+  useEffect(() => {
+    if (lock.status === 'editing' && wasReadOnly.current) {
+      reload();
+    }
+    wasReadOnly.current = lock.status === 'readOnly';
+    // reload reads only stable setters and the api.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lock.status]);
+  const take = () => lock.take().catch((e: Error) => notify.error(e.message));
+
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
     setLoadError(null);
     api.model(modelId).then(
-      (m) => {
-        if (cancelled) {
-          return;
-        }
-        setName(m.name);
-        setVersion(m.version);
-        setBuiltNames(m.cubeNames ?? []);
-        const known = m.dialects ?? {};
-        setDialects(known);
-        const read = definitionOf(m.definition);
-        // Old models' portable types as the connection's dialect writes them;
-        // the next save stores them.
-        history.reset(ensureIds(convertDrafts(read, known[read.dataSource] ?? null)));
-        setDirty(false);
-        setLoaded(true);
-      },
+      (m) => !cancelled && showModel(m),
       (e: Error) => !cancelled && setLoadError(e.message)
     );
     return () => {
       cancelled = true;
     };
-    // history.reset is stable.
+    // showModel reads only stable setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, modelId]);
 
@@ -364,10 +417,12 @@ function Editor({
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [dirty]);
 
-  const edited = () => {
-    revision.current += 1;
-    setDirty(true);
-  };
+  const edited = useCallback(() => {
+    if (!readOnlyRef.current) {
+      revision.current += 1;
+      setDirty(true);
+    }
+  }, []);
 
   // Every reference keeps an id, so new links get one as they are made.
   const change = (next: ModelDefinition) => {
@@ -414,17 +469,15 @@ function Editor({
   const onRemove = useCallback((nodeId: string) => {
     const { alias, shortcut } = parseNodeId(nodeId);
     setDef((d) => (shortcut ? removeShortcut(d, alias, shortcut) : removeTable(d, alias)));
-    revision.current += 1;
-    setDirty(true);
-  }, []);
+    edited();
+  }, [setDef, edited]);
 
   const onResize = useCallback((nodeId: string, box: { x: number; y: number; width: number; height: number }) => {
     const { shortcut } = objectOf(nodeId);
     const place: Place = shortcut ? { x: box.x, y: box.y } : box;
     setDef((d) => placeObjects(d, new Map([[nodeId, place]])));
-    revision.current += 1;
-    setDirty(true);
-  }, []);
+    edited();
+  }, [setDef, edited]);
 
   // The canvas' nodes follow the definition, keeping what React Flow
   // measured and selected on them.
@@ -571,15 +624,13 @@ function Editor({
 
   const onSetSide = useCallback((index: number, end: 'from' | 'to', side: Side) => {
     setDef((d) => setJoin(d, index, end === 'from' ? { fromSide: side } : { toSide: side }));
-    revision.current += 1;
-    setDirty(true);
-  }, [setDef]);
+    edited();
+  }, [setDef, edited]);
 
   const onSetPoints = useCallback((index: number, points: Point[]) => {
     setDef((d) => setJoin(d, index, { points }));
-    revision.current += 1;
-    setDirty(true);
-  }, [setDef]);
+    edited();
+  }, [setDef, edited]);
 
   const references: ReferenceFlowEdge[] = useMemo(() => def.joins.flatMap((j, index) => (j.hidden ? [] : [{
     id: `join-${index}`,
@@ -615,15 +666,13 @@ function Editor({
   }, [def.views, def.tables]);
   const onSetCubeJoinSide = useCallback((id: string, end: 'from' | 'to', side: Side) => {
     setDef((d) => setCubeJoin(d, id, end === 'from' ? { fromSide: side } : { toSide: side }));
-    revision.current += 1;
-    setDirty(true);
-  }, [setDef]);
+    edited();
+  }, [setDef, edited]);
 
   const onSetCubeJoinPoints = useCallback((id: string, points: Point[]) => {
     setDef((d) => setCubeJoin(d, id, { points }));
-    revision.current += 1;
-    setDirty(true);
-  }, [setDef]);
+    edited();
+  }, [setDef, edited]);
 
   const cubeLines: (CubeJoinFlowEdge | DependencyFlowEdge)[] = useMemo(() => [
     ...cubeSourceEdges(def),
@@ -830,20 +879,23 @@ function Editor({
   // A selection whose reference undo or redo takes away selects nothing:
   // `edgeAt` finds no reference with its id.
   const undo = () => {
-    if (history.canUndo) {
+    if (history.canUndo && !readOnly) {
       history.undo();
       edited();
     }
   };
 
   const redo = () => {
-    if (history.canRedo) {
+    if (history.canRedo && !readOnly) {
       history.redo();
       edited();
     }
   };
 
   const link = (from: { alias: string; column: string }, to: { alias: string; column: string }) => {
+    if (readOnly) {
+      return;
+    }
     const error = canConnect(def, from, to);
     if (error) {
       notify.error(error);
@@ -863,6 +915,9 @@ function Editor({
 
   // Two cubes join through the dialog; a cube and a table do not link.
   const onConnect = (c: Connection) => {
+    if (readOnly) {
+      return;
+    }
     const ends = [c.source, c.target].map((id) => objectOf(id ?? ''));
     if (ends.some((e) => e.kind === 'cube')) {
       if (ends[0].kind === 'cube' && ends[1].kind === 'cube' && ends[0].id !== ends[1].id) {
@@ -950,7 +1005,7 @@ function Editor({
     setProblems([]);
     const sent = revision.current;
     try {
-      const saved = await api.saveModel(modelId, { name, definition: withFormat(def), version });
+      const saved = await api.saveModel(modelId, { name, definition: withFormat(def), version }, lock.token);
       setVersion(saved.version);
       if (revision.current === sent) {
         setDirty(false);
@@ -959,7 +1014,9 @@ function Editor({
       onSaved?.(saved);
       return saved;
     } catch (e: any) {
-      notify.error(conflict(e));
+      if (!refused(e)) {
+        notify.error(conflict(e));
+      }
       return null;
     } finally {
       setBusy(null);
@@ -1007,11 +1064,14 @@ function Editor({
     setBusy('build');
     setProblems([]);
     try {
-      const result = force ? await api.buildModel(modelId, true) : await api.buildModel(modelId);
+      const result = await api.buildModel(modelId, force, lock.token);
       const names = result.cubes.map((c) => c.cubeName);
       setBuiltNames(names);
       onBuilt({ cubes: names, removed: (result.removed ?? []).map(baseName) }, result.detail);
     } catch (e: any) {
+      if (refused(e)) {
+        return;
+      }
       if (e instanceof ApiError && e.status === 409 && e.message === EDITED) {
         setAsk('overwrite');
       } else {
@@ -1028,9 +1088,11 @@ function Editor({
   const remove = async () => {
     setBusy('delete');
     try {
-      await api.deleteModel(modelId, version);
+      await api.deleteModel(modelId, version, lock.token);
     } catch (e: any) {
-      notify.error(conflict(e));
+      if (!refused(e)) {
+        notify.error(conflict(e));
+      }
       setBusy(null);
       return;
     }
@@ -1096,10 +1158,12 @@ function Editor({
     }
     setBusy('create');
     try {
-      const result = await api.createTables(modelId, current, true);
+      const result = await api.createTables(modelId, current, true, lock.token);
       setCreateAsk({ statements: result.statements ?? [], version: current, error: null });
     } catch (e: any) {
-      notify.error(conflict(e));
+      if (!refused(e)) {
+        notify.error(conflict(e));
+      }
     } finally {
       setBusy(null);
     }
@@ -1113,7 +1177,7 @@ function Editor({
     }
     setBusy('create');
     try {
-      const result = await api.createTables(modelId, createAsk.version, false);
+      const result = await api.createTables(modelId, createAsk.version, false, lock.token);
       if (result.model) {
         // What the server created is no draft any more: undoing past it
         // would offer to create it again.
@@ -1138,7 +1202,7 @@ function Editor({
           let { statements } = createAsk;
           if (result.model) {
             try {
-              statements = (await api.createTables(modelId, nextVersion, true)).statements ?? [];
+              statements = (await api.createTables(modelId, nextVersion, true, lock.token)).statements ?? [];
             } catch (e: any) {
               statements = [];
               setCreateAsk({
@@ -1155,6 +1219,9 @@ function Editor({
         setCreateAsk(null);
       }
     } catch (e: any) {
+      if (refused(e)) {
+        return;
+      }
       setCreateAsk({ ...createAsk, error: conflict(e) });
     } finally {
       setBusy(null);
@@ -1300,8 +1367,11 @@ function Editor({
     }
   };
 
-  // Each tool keeps its own number, whatever is not ready yet.
-  const toolKeys = Object.fromEntries(TOOLS.filter((t) => !t.soon).map((t) => [
+  // Each tool keeps its own number, whatever is not ready yet; read-only
+  // keeps the ones that only look.
+  const toolKeys = Object.fromEntries(TOOLS.filter((t) => (
+    !t.soon && (!readOnly || VIEW_TOOLS.includes(t.tool))
+  )).map((t) => [
     String(TOOLS.indexOf(t) + 1), () => chooseTool(t.tool),
   ]));
 
@@ -1310,7 +1380,7 @@ function Editor({
   const onPaneClick = (e: { clientX: number; clientY: number }) => {
     setPicked(null);
     setSelectedEdge(null);
-    if (tool !== 'note' && tool !== 'area' && tool !== 'view' && tool !== 'cube') {
+    if (readOnly || (tool !== 'note' && tool !== 'area' && tool !== 'view' && tool !== 'cube')) {
       return;
     }
     const p = screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -1329,7 +1399,7 @@ function Editor({
     setTool('select');
   };
 
-  useEditorShortcuts({
+  const shortcuts: Record<string, (e: KeyboardEvent) => void> = {
     ...toolKeys,
     'mod+f': () => searchInput.current?.focus(),
     'mod+g': () => dialect && openSql({}),
@@ -1354,7 +1424,14 @@ function Editor({
     'mod+x': cutSelection,
     'mod+a': () => setSelection(nodeIdsOf(def)),
     delete: deleteSelection,
-  }, loaded && !loadError && !joinEdit && !cubeJoinAsk && !tableEdit && !createAsk && !ask && !sqlAsk);
+  };
+  if (readOnly) {
+    EDIT_KEYS.forEach((combo) => delete shortcuts[combo]);
+  }
+  useEditorShortcuts(
+    shortcuts,
+    loaded && !loadError && !joinEdit && !cubeJoinAsk && !tableEdit && !createAsk && !ask && !sqlAsk
+  );
 
   if (loadError) {
     return (
@@ -1429,6 +1506,7 @@ function Editor({
       ) : null}
 
       <ModelToolbar
+        readOnly={readOnly}
         history={{
           canUndo: history.canUndo, canRedo: history.canRedo, onUndo: undo, onRedo: redo,
         }}
@@ -1492,6 +1570,8 @@ function Editor({
         )}
       />
 
+      {lock.status === 'readOnly' ? <ReadOnlyBanner holder={lock.holder} onTake={take} /> : null}
+
       <div className="tw:flex tw:min-h-0 tw:flex-1 tw:overflow-hidden tw:rounded-md tw:border">
         {panes.left ? (
           <StructurePanel
@@ -1524,6 +1604,7 @@ function Editor({
             tables={tables}
             dataSource={def.dataSource}
             locked={def.tables.length > 0}
+            readOnly={readOnly}
           />
         ) : null}
         <div
@@ -1550,6 +1631,8 @@ function Editor({
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
             onPaneClick={onPaneClick}
             minZoom={0.25}
             maxZoom={4}
@@ -1583,7 +1666,7 @@ function Editor({
               />
             ) : null}
           </ReactFlow>
-          <ToolPalette tool={tool} onTool={chooseTool} />
+          <ToolPalette tool={tool} onTool={chooseTool} readOnly={readOnly} />
           <button
             type="button"
             aria-label="Toggle minimap"
@@ -1605,38 +1688,41 @@ function Editor({
           ) : null}
         </div>
         {panes.right ? (
-          <PropertiesPanel
-            def={def}
-            name={name}
-            selected={propertiesOf}
-            columnsOf={columnsOfTable}
-            onChange={change}
-            onName={(next) => {
-              setName(next);
-              edited();
-            }}
-            dialect={dialect}
-            issues={problemsFound}
-            focusKey={focusKey}
-            // A table by its alias, a view by its id.
-            onSqlPreview={dialect ? (nodeId) => {
-              const only = previewIdOf(nodeId);
-              if (only) {
-                openSql({ only: [only] });
-              }
-            } : undefined}
-            onRenamed={(from, to) => setSelection((was) => was.map((id) => {
-              const { alias, shortcut } = parseNodeId(id);
-              if (alias !== from) {
-                return id;
-              }
-              return shortcut ? shortcutNodeId(to, shortcut) : to;
-            }))}
-            onDeselect={() => setSelectedEdge(null)}
-            onDeleteModel={() => setAsk('delete')}
-            deleting={busy === 'delete'}
-            busy={busy !== null}
-          />
+          // Read-only: every field and button of the pane is off.
+          <fieldset disabled={readOnly} className="tw:contents">
+            <PropertiesPanel
+              def={def}
+              name={name}
+              selected={propertiesOf}
+              columnsOf={columnsOfTable}
+              onChange={change}
+              onName={(next) => {
+                setName(next);
+                edited();
+              }}
+              dialect={dialect}
+              issues={problemsFound}
+              focusKey={focusKey}
+              // A table by its alias, a view by its id.
+              onSqlPreview={dialect ? (nodeId) => {
+                const only = previewIdOf(nodeId);
+                if (only) {
+                  openSql({ only: [only] });
+                }
+              } : undefined}
+              onRenamed={(from, to) => setSelection((was) => was.map((id) => {
+                const { alias, shortcut } = parseNodeId(id);
+                if (alias !== from) {
+                  return id;
+                }
+                return shortcut ? shortcutNodeId(to, shortcut) : to;
+              }))}
+              onDeselect={() => setSelectedEdge(null)}
+              onDeleteModel={() => setAsk('delete')}
+              deleting={busy === 'delete'}
+              busy={busy !== null}
+            />
+          </fieldset>
         ) : null}
       </div>
 

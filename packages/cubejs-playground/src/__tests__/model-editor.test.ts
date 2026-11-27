@@ -188,6 +188,9 @@ describe('ModelEditor', () => {
       deleteModel: vi.fn(async () => undefined),
       createTables: vi.fn(async () => ({})),
       modelSql: vi.fn(async () => ({ script: 'CREATE TABLE "public"."orders" ();\n' })),
+      lockModel: vi.fn(async () => ({ held: true, holder: 'me' })),
+      takeModelLock: vi.fn(async () => ({ held: true, holder: 'me' })),
+      releaseModelLock: vi.fn(async () => undefined),
     };
     onBuilt = vi.fn<(built: any, detail: any) => void>();
     onDeleted = vi.fn<() => void>();
@@ -302,7 +305,7 @@ describe('ModelEditor', () => {
     expect(document.body.textContent).toContain('The cube was edited by hand since the last build. Overwrite?');
     await act(async () => button('Overwrite').click());
     expect(api.buildModel).toHaveBeenCalledTimes(2);
-    expect(api.buildModel.mock.calls[1]).toEqual(['m1', true]);
+    expect(api.buildModel.mock.calls[1]).toEqual(['m1', true, expect.any(String)]);
     expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
   });
 
@@ -342,7 +345,7 @@ describe('ModelEditor', () => {
     await render();
     expect(document.body.textContent).not.toContain('Not linked');
     await act(async () => tool('Build cube').click());
-    expect(api.buildModel).toHaveBeenCalledWith('m1');
+    expect(api.buildModel).toHaveBeenCalledWith('m1', false, expect.any(String));
     expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
   });
 
@@ -565,7 +568,7 @@ describe('ModelEditor', () => {
       name.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => tool('Save changes').click());
-    expect(api.saveModel).toHaveBeenCalledWith('m1', expect.objectContaining({ name: 'Sales 2', version: 3 }));
+    expect(api.saveModel).toHaveBeenCalledWith('m1', expect.objectContaining({ name: 'Sales 2', version: 3 }), expect.any(String));
     expect(document.body.textContent).not.toContain('Unsaved changes');
   });
 
@@ -612,7 +615,7 @@ describe('ModelEditor', () => {
     expect(document.body.textContent).toContain('Delete model Sales? The cubes it built stay in Cubes.');
     expect(api.deleteModel).not.toHaveBeenCalled();
     await act(async () => button('Delete').click());
-    expect(api.deleteModel).toHaveBeenCalledWith('m1', 3);
+    expect(api.deleteModel).toHaveBeenCalledWith('m1', 3, expect.any(String));
     expect(onDeleted).toHaveBeenCalledTimes(1);
   });
 
@@ -1613,11 +1616,11 @@ describe('ModelEditor', () => {
       await render();
       expect(node('items').textContent).toContain('new');
       await act(async () => tool('Create in database').click());
-      expect(api.createTables).toHaveBeenCalledWith('m1', 3, true);
+      expect(api.createTables).toHaveBeenCalledWith('m1', 3, true, expect.any(String));
       expect(document.querySelector('[data-slot="model-create-statements"]')!.textContent).toContain(statements[0]);
       expect(document.body.textContent).toContain('This changes the database of warehouse');
       await act(async () => button('Create').click());
-      expect(api.createTables).toHaveBeenLastCalledWith('m1', 3, false);
+      expect(api.createTables).toHaveBeenLastCalledWith('m1', 3, false, expect.any(String));
       expect(node('items').textContent).not.toContain('new');
       expect(success).toHaveBeenCalledWith('Created: shop.items');
       expect(onTablesCreated).toHaveBeenCalledWith(detail);
@@ -1639,7 +1642,7 @@ describe('ModelEditor', () => {
       expect(document.querySelector('[data-slot="model-create-statements"]')).not.toBeNull();
       // A retry sends the version the run saved.
       await act(async () => button('Create').click());
-      expect(api.createTables).toHaveBeenLastCalledWith('m1', 4, false);
+      expect(api.createTables).toHaveBeenLastCalledWith('m1', 4, false, expect.any(String));
     });
 
     it('asks again after a partial failure and shows what is still to create', async () => {
@@ -1654,7 +1657,7 @@ describe('ModelEditor', () => {
       await render();
       await act(async () => tool('Create in database').click());
       await act(async () => button('Create').click());
-      expect(api.createTables).toHaveBeenLastCalledWith('m1', 4, true);
+      expect(api.createTables).toHaveBeenLastCalledWith('m1', 4, true, expect.any(String));
       const shown = document.querySelector('[data-slot="model-create-statements"]')!.textContent!;
       expect(shown).toContain(left[0]);
       expect(shown).not.toContain(statements[0]);
@@ -1687,7 +1690,7 @@ describe('ModelEditor', () => {
       await act(async () => tool('Create in database').click());
       expect(api.saveModel).toHaveBeenCalledTimes(1);
       expect(api.saveModel.mock.invocationCallOrder[0]).toBeLessThan(api.createTables.mock.invocationCallOrder[0]);
-      expect(api.createTables).toHaveBeenCalledWith('m1', 4, true);
+      expect(api.createTables).toHaveBeenCalledWith('m1', 4, true, expect.any(String));
     });
   });
 
@@ -2611,7 +2614,7 @@ describe('ModelEditor', () => {
       await act(async () => tool('Build cube').click());
       expect(document.body.textContent).toContain('Overwrite?');
       await act(async () => button('Overwrite').click());
-      expect(api.buildModel.mock.calls[1]).toEqual(['m1', true]);
+      expect(api.buildModel.mock.calls[1]).toEqual(['m1', true, expect.any(String)]);
       expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
     });
 
@@ -2833,6 +2836,78 @@ describe('ModelEditor', () => {
         expect(pane().textContent).toContain('Cube join properties');
         expect(flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1').selected).toBe(true);
       });
+    });
+  });
+
+  describe('edit lock', () => {
+    const BANNER = 'Read-only mode · The document is being edited by bob';
+    const token = () => api.lockModel.mock.calls[api.lockModel.mock.calls.length - 1][1];
+
+    it('read-only mode: banner, no edits, Take control', async () => {
+      api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+      await render();
+      expect(document.body.textContent).toContain(BANNER);
+      await select('orders');
+      // Copying changes nothing; what would paste it does.
+      await act(async () => tool('Copy').click());
+      ['Save changes', 'Delete', 'Paste', 'Create in database', 'Undo', 'New note', 'New table']
+        .forEach((label) => expect(tool(label).disabled, label).toBe(true));
+      // Looking around stays.
+      ['Select', 'Zoom in', 'Fit view', 'Copy'].forEach((label) => expect(tool(label).disabled, label).toBe(false));
+      expect(flow.props.nodesDraggable).toBe(false);
+      expect(flow.props.nodesConnectable).toBe(false);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      });
+      expect([...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node')))
+        .toEqual(['orders', 'customers', 'cube:c1']);
+      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 9, y: 9 } }]));
+      expect(document.body.textContent).not.toContain('Unsaved changes');
+      expect(document.querySelector('[data-slot="model-properties"]')!.closest('fieldset')!.disabled).toBe(true);
+      expect(document.querySelectorAll('fieldset[disabled] [data-slot="model-properties"] input').length).toBeGreaterThan(0);
+
+      await act(async () => button('Take control').click());
+      expect(api.takeModelLock).toHaveBeenCalledWith('m1', token());
+      expect(document.body.textContent).not.toContain('Read-only mode');
+      expect(tool('Delete').disabled).toBe(false);
+      expect(flow.props.nodesDraggable).toBe(true);
+    });
+
+    it('save sends the lock token, and a 423 turns the editor read-only', async () => {
+      const info = vi.spyOn(notify, 'info');
+      await render();
+      expect(document.body.textContent).not.toContain('Read-only mode');
+      await rename('Sales 2');
+      await act(async () => tool('Save changes').click());
+      expect(api.saveModel.mock.calls[0][2]).toBe(token());
+
+      await rename('Sales 3');
+      api.saveModel.mockRejectedValueOnce(new ApiError('O model está sendo editado por bob', 423));
+      await act(async () => tool('Save changes').click());
+      expect(document.body.textContent).toContain(BANNER);
+      expect(api.model).toHaveBeenCalledTimes(2);
+      expect(info).toHaveBeenCalledWith('bob took control. Your unsaved changes were discarded.');
+      // The reload replaced the unsaved name.
+      expect((document.querySelector('input[aria-label="Model name"]') as HTMLInputElement).value).toBe('Sales');
+      expect(document.body.textContent).not.toContain('Unsaved changes');
+      expect(tool('Undo').disabled).toBe(true);
+      info.mockRestore();
+    });
+
+    it('a 423 from a build turns the editor read-only too', async () => {
+      api.buildModel.mockRejectedValueOnce(new ApiError('O model está sendo editado por bob', 423));
+      await render();
+      await act(async () => tool('Build cube').click());
+      expect(api.buildModel.mock.calls[0][2]).toBe(token());
+      expect(document.body.textContent).toContain(BANNER);
+      expect(onBuilt).not.toHaveBeenCalled();
+    });
+
+    it('shows no banner before the lock answers, but edits nothing', async () => {
+      api.lockModel.mockImplementation(() => new Promise(() => {}));
+      await render();
+      expect(document.body.textContent).not.toContain('Read-only mode');
+      expect(tool('New note').disabled).toBe(true);
     });
   });
 });
