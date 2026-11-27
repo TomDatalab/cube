@@ -33,7 +33,12 @@ const HANDLE_STYLE = {
   border: '2px solid var(--card)',
 };
 
-type CubeNodeProps = Pick<NodeProps<CubeFlowNode>, 'data'> & { id?: string; selected?: boolean };
+type CubeNodeProps = Pick<NodeProps<CubeFlowNode>, 'data'> & {
+  id?: string;
+  selected?: boolean;
+  // Set by React Flow while a resizer is dragged, and for a fixed size.
+  width?: number;
+};
 
 function Section({ title, names, auto }: { title: string; names: string[]; auto: boolean }) {
   return (
@@ -61,7 +66,9 @@ function Section({ title, names, auto }: { title: string; names: string[]; auto:
 // A cube on the canvas: the table box, a header of its color with the Box
 // icon and the name, then its dimensions and its measures. An auto cube
 // (no members of its own) shows the generated names in italic.
-export const CubeNode = memo(({ id, data, selected }: CubeNodeProps) => {
+export const CubeNode = memo(({
+  id, data, selected, width,
+}: CubeNodeProps) => {
   const { cube } = data;
   const auto = cube.dimensions.length === 0 && cube.measures.length === 0;
   return (
@@ -70,7 +77,8 @@ export const CubeNode = memo(({ id, data, selected }: CubeNodeProps) => {
       data-selected={selected || undefined}
       className={cn(
         'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
-        data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
+        // The content follows the frame while it is dragged, not on release.
+        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
     >

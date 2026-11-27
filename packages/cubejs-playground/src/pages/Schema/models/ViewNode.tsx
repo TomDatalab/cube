@@ -24,12 +24,19 @@ export type ViewNodeData = {
 
 export type ViewFlowNode = Node<ViewNodeData, 'view'>;
 
-type ViewNodeProps = Pick<NodeProps<ViewFlowNode>, 'data'> & { id?: string; selected?: boolean };
+type ViewNodeProps = Pick<NodeProps<ViewFlowNode>, 'data'> & {
+  id?: string;
+  selected?: boolean;
+  // Set by React Flow while a resizer is dragged, and for a fixed size.
+  width?: number;
+};
 
 // A view on the canvas as Redgate draws it: a table's box with round
 // corners, its name centred in bold on a header, then one row per column
 // with its name and type. One color fills the whole view.
-export const ViewNode = memo(({ id, data, selected }: ViewNodeProps) => {
+export const ViewNode = memo(({
+  id, data, selected, width,
+}: ViewNodeProps) => {
   const line = data.color ? 'color-mix(in oklch, var(--foreground) 70%, transparent)' : 'var(--model-view-border)';
   return (
     <div
@@ -38,7 +45,8 @@ export const ViewNode = memo(({ id, data, selected }: ViewNodeProps) => {
       data-color={data.color}
       className={cn(
         'tw:flex tw:min-w-40 tw:flex-col tw:rounded-md tw:border tw:text-xs tw:text-foreground',
-        data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
+        // The content follows the frame while it is dragged, not on release.
+        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
       style={data.color

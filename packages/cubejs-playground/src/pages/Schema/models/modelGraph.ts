@@ -135,8 +135,38 @@ export type Note = {
   height?: number;
   z?: number;
   text: string;
+  // The box's color.
   color?: TableColor;
+} & NoteFormat;
+
+// How a note's text looks; every part optional (the defaults: 12px sans,
+// regular, top left, the theme's text color, a thin solid border).
+export const NOTE_FONTS = ['sans', 'serif', 'mono'] as const;
+export const NOTE_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 64, 72] as const;
+export const NOTE_ALIGNS = ['left', 'center', 'right'] as const;
+export const NOTE_VALIGNS = ['top', 'middle', 'bottom'] as const;
+export const NOTE_BORDERS = ['solid', 'dashed', 'dotted', 'none'] as const;
+export type NoteFormat = {
+  fontSize?: number;
+  fontFamily?: (typeof NOTE_FONTS)[number];
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  align?: (typeof NOTE_ALIGNS)[number];
+  valign?: (typeof NOTE_VALIGNS)[number];
+  textColor?: TableColor;
+  borderColor?: TableColor;
+  borderStyle?: (typeof NOTE_BORDERS)[number];
 };
+
+// A note's format: everything but its place, size, text and box color.
+export function noteFormat(note: Note): NoteFormat {
+  const {
+    id: _id, x: _x, y: _y, width: _w, height: _h, z: _z, text: _text, color: _color, ...format
+  } = note;
+  return format;
+}
 
 export type Area = {
   id: string;

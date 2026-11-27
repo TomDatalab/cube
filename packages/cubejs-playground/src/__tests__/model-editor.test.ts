@@ -1965,9 +1965,53 @@ describe('ModelEditor', () => {
       await act(async () => (pane().querySelector('[data-slot="model-color-palette"] button[aria-label="blue"]') as HTMLButtonElement).click());
       let def = await savedDef();
       expect(def.notes[0]).toEqual(expect.objectContaining({ text: 'changed', color: 'blue' }));
-      await act(async () => (pane().querySelector('button[aria-label="none"]') as HTMLButtonElement).click());
+      await act(async () => (pane().querySelector('[data-slot="model-color-palette"] button[aria-label="none"]') as HTMLButtonElement).click());
       def = await savedDef();
       expect('color' in def.notes[0]).toBe(false);
+    });
+
+    it('formats a note\'s text: font, size, styles, alignment, colors and border', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('note:n1');
+      const pick = async (sel: string, value: string) => act(async () => {
+        const el = pane().querySelector(sel) as HTMLSelectElement;
+        el.value = value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      const click = async (sel: string) => act(async () => (pane().querySelector(sel) as HTMLButtonElement).click());
+      await pick('select[aria-label="Font family"]', 'serif');
+      await pick('select[aria-label="Font size"]', '24');
+      await click('button[aria-label="Bold"]');
+      await click('button[aria-label="Underline"]');
+      await click('button[aria-label="Align center"]');
+      await pick('select[aria-label="Vertical alignment"]', 'middle');
+      await click('[data-slot="model-note-text-color"] button[aria-label="red"]');
+      await click('[data-slot="model-color-palette"] button[aria-label="amber"]');
+      await pick('select[aria-label="Border style"]', 'dashed');
+      await click('[data-slot="model-note-border-color"] button[aria-label="blue"]');
+      let def = await savedDef();
+      expect(def.notes[0]).toEqual(expect.objectContaining({
+        fontFamily: 'serif',
+        fontSize: 24,
+        bold: true,
+        underline: true,
+        align: 'center',
+        valign: 'middle',
+        textColor: 'red',
+        color: 'amber',
+        borderStyle: 'dashed',
+        borderColor: 'blue',
+      }));
+      expect(pane().querySelector('button[aria-label="Bold"]')!.getAttribute('aria-pressed')).toBe('true');
+      // Back to the defaults, nothing of them is saved.
+      await click('button[aria-label="Bold"]');
+      await pick('select[aria-label="Font size"]', '12');
+      await click('button[aria-label="Align left"]');
+      def = await savedDef();
+      expect(def.notes[0]).not.toHaveProperty('bold');
+      expect(def.notes[0]).not.toHaveProperty('fontSize');
+      expect(def.notes[0]).not.toHaveProperty('align');
     });
 
     it('edits an area\'s name, comment, fill and border', async () => {

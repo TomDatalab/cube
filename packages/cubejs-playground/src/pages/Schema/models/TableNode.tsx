@@ -75,7 +75,12 @@ export function columnAt(element: Element | null): { alias: string; column: stri
   return alias && column ? { alias, column } : null;
 }
 
-type TableNodeProps = Pick<NodeProps<TableFlowNode>, 'data'> & { id?: string; selected?: boolean };
+type TableNodeProps = Pick<NodeProps<TableFlowNode>, 'data'> & {
+  id?: string;
+  selected?: boolean;
+  // Set by React Flow while a resizer is dragged, and for a fixed size.
+  width?: number;
+};
 
 // What a table row shows after its type, as Redgate writes it.
 function marks(data: TableNodeData, column: string) {
@@ -101,7 +106,9 @@ const ICON_BUTTON = 'nodrag tw:flex tw:size-4 tw:shrink-0 tw:cursor-pointer tw:i
 // A table on the canvas, drawn as Redgate draws it: a thin box, its name
 // centred on a header of its color, then one row per column with its name,
 // its type and PK/FK. Each column has a handle on both sides named after it.
-export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
+export const TableNode = memo(({
+  id, data, selected, width,
+}: TableNodeProps) => {
   // React Flow measures a node's handles once: a column added or renamed
   // (a new foreign key, say) needs a new measure for its links to draw.
   const updateNodeInternals = useUpdateNodeInternals();
@@ -115,7 +122,8 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
       data-selected={selected || undefined}
       className={cn(
         'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
-        data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
+        // The content follows the frame while it is dragged, not on release.
+        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
       style={data.bodyColor ? { background: `var(--model-${data.bodyColor})`, color: 'var(--model-ink)' } : undefined}

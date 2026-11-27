@@ -27,7 +27,7 @@ import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
   End, ModelDefinition, Place, Point, REL_LABEL, addDraftTable, addTable, canConnect, connect, drafts,
-  emptyDefinition, joinLabel, layout, removeJoin, removeTable, setJoin, showAllJoins,
+  emptyDefinition, joinLabel, layout, noteFormat, removeJoin, removeTable, setJoin, showAllJoins,
   updateDraftTable, updateJoin, withFormat,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
@@ -580,7 +580,7 @@ function Editor({
           zIndex: n.z ?? 0,
           selected: selection.includes(id),
           data: {
-            id: n.id, text: n.text, color: n.color, onResize, readOnly,
+            id: n.id, text: n.text, color: n.color, format: noteFormat(n), onResize, readOnly,
           },
         };
       });

@@ -226,10 +226,44 @@ pub struct Note {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z: Option<i32>,
     pub text: String,
-    /// A palette name from [`COLORS`].
+    /// The box's color, a palette name from [`COLORS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The text's format, all optional: the size in pixels
+    /// ([`NOTE_FONT_SIZES`]), a family from [`NOTE_FONTS`], the styles, the
+    /// alignment ([`NOTE_ALIGNS`], [`NOTE_VALIGNS`]) and the text color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strike: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valign: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    /// The box's border: a color from [`COLORS`] and a style from
+    /// [`NOTE_BORDERS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_style: Option<String>,
 }
+
+/// A note's text size, in pixels.
+pub const NOTE_FONT_SIZES: std::ops::RangeInclusive<f64> = 6.0..=72.0;
+pub const NOTE_FONTS: &[&str] = &["sans", "serif", "mono"];
+pub const NOTE_ALIGNS: &[&str] = &["left", "center", "right"];
+pub const NOTE_VALIGNS: &[&str] = &["top", "middle", "bottom"];
+pub const NOTE_BORDERS: &[&str] = &["solid", "dashed", "dotted", "none"];
 
 /// A labelled rectangle drawn behind the other objects.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -980,6 +1014,25 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         }
         size_ok(&note.id, &[note.width, note.height])?;
         color_ok(&note.color)?;
+        color_ok(&note.text_color)?;
+        color_ok(&note.border_color)?;
+        if let Some(size) = note.font_size {
+            if !size.is_finite() || !NOTE_FONT_SIZES.contains(&size) {
+                return Err(format!("Tamanho de fonte inválido em {}: {size}", note.id));
+            }
+        }
+        for (value, allowed) in [
+            (&note.font_family, NOTE_FONTS),
+            (&note.align, NOTE_ALIGNS),
+            (&note.valign, NOTE_VALIGNS),
+            (&note.border_style, NOTE_BORDERS),
+        ] {
+            if let Some(v) = value {
+                if !allowed.contains(&v.as_str()) {
+                    return Err(format!("Formato inválido em {}: {v}", note.id));
+                }
+            }
+        }
     }
     let mut seen = HashSet::new();
     for area in &def.areas {
@@ -2995,6 +3048,20 @@ mod tests {
         assert_eq!(e, "Cor inválida: #fff");
         let e = bad(&|v| v["notes"][0]["color"] = "nope".into());
         assert_eq!(e, "Cor inválida: nope");
+        let e = bad(&|v| v["notes"][0]["textColor"] = "nope".into());
+        assert_eq!(e, "Cor inválida: nope");
+        let e = bad(&|v| v["notes"][0]["borderColor"] = "nope".into());
+        assert_eq!(e, "Cor inválida: nope");
+        let e = bad(&|v| v["notes"][0]["fontSize"] = 200.0.into());
+        assert_eq!(e, "Tamanho de fonte inválido em n1: 200");
+        let e = bad(&|v| v["notes"][0]["fontFamily"] = "comic".into());
+        assert_eq!(e, "Formato inválido em n1: comic");
+        let e = bad(&|v| v["notes"][0]["align"] = "justify".into());
+        assert_eq!(e, "Formato inválido em n1: justify");
+        let e = bad(&|v| v["notes"][0]["valign"] = "up".into());
+        assert_eq!(e, "Formato inválido em n1: up");
+        let e = bad(&|v| v["notes"][0]["borderStyle"] = "double".into());
+        assert_eq!(e, "Formato inválido em n1: double");
         let e = bad(&|v| v["views"][0]["color"] = "navy".into());
         assert_eq!(e, "Cor inválida: navy");
         let e = bad(&|v| v["tables"][0]["bodyColor"] = "beige".into());
@@ -3224,5 +3291,27 @@ mod tests {
         value["cubes"][0]["sourceLines"][0]["toSide"] = "right".into();
         value["cubes"][0]["sourceLines"][0]["extra"] = true.into();
         assert!(serde_json::from_value::<Definition>(value).is_err());
+    }
+
+    #[test]
+    fn keeps_a_formatted_note() {
+        let note = serde_json::json!({
+            "id": "n1", "x": 0.0, "y": 0.0, "text": "hi", "color": "amber",
+            "fontSize": 18.0, "fontFamily": "serif", "bold": true, "italic": true,
+            "underline": true, "strike": true, "align": "center", "valign": "middle",
+            "textColor": "red", "borderColor": "blue", "borderStyle": "dashed"
+        });
+        let def: Definition = serde_json::from_value(serde_json::json!({
+            "dataSource": "ds", "tables": [], "joins": [], "notes": [note.clone()]
+        }))
+        .unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap()["notes"][0], note);
+        // Unset styles are left out.
+        let plain: Note = serde_json::from_value(serde_json::json!({
+            "id": "n2", "x": 0.0, "y": 0.0, "text": "", "bold": false
+        }))
+        .unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("bold"));
     }
 }
