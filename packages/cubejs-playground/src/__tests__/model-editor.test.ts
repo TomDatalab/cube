@@ -2792,6 +2792,8 @@ describe('ModelEditor', () => {
       const row = document.querySelector('[data-node="cube:c1"] [data-member="customer_id"]')!;
       expect(row.textContent).toBe('Cliente');
       expect(row.getAttribute('title')).toBe('customer_id');
+      // The cube is built with the friendly name as the member's alias.
+      expect(pane().querySelector('[data-slot="model-cube-alias"]')?.textContent).toBe('→ cliente');
       // An auto cube lists the members it generates, and keeps their names by member.
       await select('cube:c2');
       const names = [...pane().querySelectorAll('[data-slot="model-cube-friendly"] input')].map((e) => e.getAttribute('aria-label'));

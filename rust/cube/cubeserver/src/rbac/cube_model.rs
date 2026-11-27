@@ -1287,6 +1287,9 @@ struct Shaped {
     segments: Vec<Yaml>,
     /// What a cube join may name on this cube.
     dimension_names: HashSet<String>,
+    /// The Cube name each member with a friendly name is written as (its
+    /// alias), by the member's name in the model.
+    aliases: HashMap<String, String>,
 }
 
 /// One YAML per cube of `def`, in `def.cubes` order, checked against the
@@ -1327,7 +1330,8 @@ pub fn build_all(
                     ));
                 }
             }
-            on.push(format!("{{CUBE.{}}} = {{{to_name}.{}}}", pair.from, pair.to));
+            let alias = |i: usize, m: &str| shaped[i].aliases.get(m).cloned().unwrap_or_else(|| m.to_string());
+            on.push(format!("{{CUBE.{}}} = {{{to_name}.{}}}", alias(from, &pair.from), alias(to, &pair.to)));
         }
         let mut written = Mapping::new();
         written.insert("name".into(), to_name.into());
@@ -1488,6 +1492,7 @@ fn explicit(
         measures,
         segments: Vec::new(),
         dimension_names: cube.dimensions.iter().map(|d| d.name.clone()).collect(),
+        aliases: HashMap::new(),
     })
 }
 
@@ -1575,6 +1580,7 @@ fn shape(
                     measures: vec![count()],
                     segments: Vec::new(),
                     dimension_names,
+                    aliases: HashMap::new(),
                 }
             } else {
                 let mut shaped = explicit(cube, &|c| {
@@ -1592,6 +1598,7 @@ fn shape(
     };
     shaped.segments = segments(cube)?;
     titled(&mut shaped, &cube.member_titles);
+    aliased(&mut shaped, name);
     Ok(shaped)
 }
 
@@ -1607,6 +1614,94 @@ fn titled(shaped: &mut Shaped, titles: &std::collections::BTreeMap<String, Strin
             m.insert("title".into(), title.into());
         }
     }
+}
+
+/// The Cube name a friendly name gives a member: accents stripped, snake
+/// case (`Data de instalação` → `data_de_instalacao`). None when it has no
+/// letter or digit.
+pub(crate) fn alias_of(title: &str) -> Option<String> {
+    if !title.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    Some(snake(&crate::rbac::slug::slugify(title)))
+}
+
+/// A member with a friendly name (`title`) is written under its alias: the
+/// name comes from the title, the SQL still reads the column. The others
+/// keep theirs; a clash takes `_2`, `_3`… `{CUBE.x}`, `{x}` and `{cube.x}`
+/// in the cube's SQL follow the renames.
+fn aliased(shaped: &mut Shaped, cube: &str) {
+    let name_of = |m: &Yaml| m.get("name").and_then(Yaml::as_str).map(str::to_string);
+    let alias = |m: &Yaml| m.get("title").and_then(Yaml::as_str).and_then(alias_of);
+    let members = || shaped.dimensions.iter().chain(shaped.measures.iter());
+    let mut taken: BTreeSet<String> = members()
+        .chain(shaped.segments.iter())
+        .filter(|m| alias(m).is_none())
+        .filter_map(name_of)
+        .collect();
+    let mut aliases = HashMap::new();
+    for m in members() {
+        if let (Some(old), Some(base)) = (name_of(m), alias(m)) {
+            let new = if base == old && !taken.contains(&old) {
+                taken.insert(old.clone());
+                old.clone()
+            } else {
+                unique(&mut taken, base)
+            };
+            aliases.insert(old, new);
+        }
+    }
+    let renamed = |token: &str| -> Option<String> {
+        let (prefix, member) = match token.split_once('.') {
+            Some((p, m)) if p == "CUBE" || p == cube => (Some(p), m),
+            Some(_) => return None,
+            None => (None, token),
+        };
+        let new = aliases.get(member)?;
+        Some(prefix.map_or_else(|| new.clone(), |p| format!("{p}.{new}")))
+    };
+    for m in shaped
+        .dimensions
+        .iter_mut()
+        .chain(shaped.measures.iter_mut())
+        .chain(shaped.segments.iter_mut())
+    {
+        let Yaml::Mapping(m) = m else { continue };
+        if let Some(new) = m.get("name").and_then(Yaml::as_str).and_then(|n| aliases.get(n)) {
+            m.insert("name".into(), new.as_str().into());
+        }
+        if let Some(sql) = m.get("sql").and_then(Yaml::as_str) {
+            let sql = rewrite_refs(sql, &renamed);
+            m.insert("sql".into(), sql.into());
+        }
+    }
+    shaped.aliases = aliases;
+}
+
+/// `sql` with each `{token}` that `renamed` maps replaced, in one pass.
+fn rewrite_refs(sql: &str, renamed: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let token = &after[..close];
+                match renamed(token) {
+                    Some(new) => out.push_str(&format!("{{{new}}}")),
+                    None => out.push_str(&format!("{{{token}}}")),
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A join oriented from the primary: `from` is already in the tree.
@@ -1787,6 +1882,7 @@ fn joined(
         measures: vec![Yaml::Mapping(count)],
         segments: Vec::new(),
         dimension_names,
+        aliases: HashMap::new(),
     })
 }
 
@@ -2046,14 +2142,80 @@ mod tests {
         .collect();
         let built = build_def(&def).unwrap();
         let orders = yaml_of(&built, "orders");
-        assert_eq!(member(&orders, "dimensions", "customer_id")["title"].as_str(), Some("Cliente"));
-        assert_eq!(member(&orders, "measures", "count")["title"].as_str(), Some("Quantidade de pedidos"));
-        // A blank title is no title.
+        // The friendly name is the member's alias: its name, while the SQL
+        // still reads the column.
+        let cliente = member(&orders, "dimensions", "cliente");
+        assert_eq!(cliente["title"].as_str(), Some("Cliente"));
+        assert_eq!(cliente["sql"].as_str(), Some("{CUBE}.\"customer_id\""));
+        assert_eq!(
+            member(&orders, "measures", "quantidade_de_pedidos")["title"].as_str(),
+            Some("Quantidade de pedidos")
+        );
+        assert!(orders["dimensions"].as_sequence().unwrap().iter().all(|d| d["name"] != "customer_id"));
+        // The cube join follows the alias.
+        assert_eq!(orders["joins"][0]["sql"].as_str(), Some("{CUBE.cliente} = {customers.id}"));
+        // A blank title is no title, and no alias.
         assert!(member(&orders, "dimensions", "id")["title"].is_null());
         // Kept through a save.
         let json = serde_json::to_value(&def).unwrap();
         assert_eq!(json["cubes"][0]["memberTitles"]["customer_id"], "Cliente");
         assert!(serde_json::to_value(two_cubes()).unwrap()["cubes"][0].get("memberTitles").is_none());
+    }
+
+    #[test]
+    fn alias_of_a_friendly_name() {
+        assert_eq!(alias_of("Data de instalação").as_deref(), Some("data_de_instalacao"));
+        assert_eq!(alias_of("  Nº de série ").as_deref(), Some("n_de_serie"));
+        assert_eq!(alias_of("1ª conexão").as_deref(), Some("c_1_conexao"));
+        assert_eq!(alias_of("--"), None);
+    }
+
+    #[test]
+    fn aliases_clash_and_rewrite_references() {
+        let mut def = two_cubes();
+        def.cubes[0].member_titles = [
+            // Clashes with the auto member `id`, which keeps its name.
+            ("customer_id".to_string(), "Id".to_string()),
+            ("order_id".to_string(), "Situação".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        def.cubes[0].segments = vec![CubeSegment {
+            name: "open".into(),
+            sql: "{CUBE.order_id} = 'open' AND {orders.order_id} <> '' AND {order_id} IS NOT NULL AND {other.status} = 1"
+                .into(),
+            ..Default::default()
+        }];
+        let built = build_def(&def).unwrap();
+        let orders = yaml_of(&built, "orders");
+        assert_eq!(member(&orders, "dimensions", "id")["primary_key"].as_bool(), Some(true));
+        assert_eq!(member(&orders, "dimensions", "id_2")["title"].as_str(), Some("Id"));
+        assert_eq!(
+            orders["segments"][0]["sql"].as_str(),
+            Some("{CUBE.situacao} = 'open' AND {orders.situacao} <> '' AND {situacao} IS NOT NULL AND {other.status} = 1")
+        );
+        assert_eq!(orders["joins"][0]["sql"].as_str(), Some("{CUBE.id_2} = {customers.id}"));
+    }
+
+    #[test]
+    fn explicit_members_take_their_titles_as_aliases() {
+        let mut def = two_cubes();
+        def.cube_joins.clear();
+        let mut c = def.cubes[0].clone();
+        c.dimensions = vec![CubeDimension {
+            name: "order_id".into(),
+            kind: "number".into(),
+            column: Some("order_id".into()),
+            title: Some("Situação do pedido".into()),
+            ..Default::default()
+        }];
+        def.cubes = vec![c];
+        def.tables.truncate(1);
+        let built = build_def(&def).unwrap();
+        let orders = yaml_of(&built, "orders");
+        let d = member(&orders, "dimensions", "situacao_do_pedido");
+        assert_eq!(d["sql"].as_str(), Some("{CUBE}.\"order_id\""));
+        assert_eq!(d["title"].as_str(), Some("Situação do pedido"));
     }
 
     #[test]
@@ -2134,7 +2296,7 @@ mod tests {
         );
         assert_eq!(payments["title"].as_str(), Some("Pagamentos"));
         assert_eq!(payments["description"].as_str(), Some("Tudo que entrou"));
-        let id = member(&payments, "dimensions", "id");
+        let id = member(&payments, "dimensions", "codigo");
         assert_eq!(id["primary_key"].as_bool(), Some(true));
         assert_eq!(id["title"].as_str(), Some("Código"));
         let total = member(&payments, "measures", "total");

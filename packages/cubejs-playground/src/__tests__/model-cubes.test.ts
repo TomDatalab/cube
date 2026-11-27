@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addCube, addCubeJoin, addMember, autoMembers, cubeKeyOf, cubeReads, cubeType, dimensionNames, generateMembers,
   moveCubeJoinEnd, removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource,
-  memberTitles, setCubeSourceLine, setMemberTitle, swapCubeJoin,
+  aliasOf, memberAliases, memberTitles, setCubeSourceLine, setMemberTitle, swapCubeJoin,
   setMember, snake,
 } from '../pages/Schema/models/cubes';
 import {
@@ -121,6 +121,17 @@ describe('cubes', () => {
     const own = setMemberTitle({ ...def, cubes: [made] }, cube.id, 'dimensions', name, 'Client');
     expect(own.cubes![0].dimensions.find((d) => d.name === name)!.title).toBe('Client');
     expect(memberTitles(own.cubes![0])[name]).toBe('Client');
+  });
+
+  it('aliasOf and memberAliases match the server', () => {
+    expect(aliasOf('Data de instalação')).toBe('data_de_instalacao');
+    expect(aliasOf('  Nº de série ')).toBe('n_de_serie');
+    expect(aliasOf('1ª conexão')).toBe('c_1_conexao');
+    expect(aliasOf('--')).toBeUndefined();
+    // `id` keeps its name; the title that clashes with it takes `_2`; a blank title is none.
+    expect(memberAliases(['id', 'customer_id', 'status', 'count'], { customer_id: 'Id', status: 'Situação', count: ' ' }))
+      .toEqual({ customer_id: 'id_2', status: 'situacao' });
+    expect(memberAliases(['a'], { a: 'Open' }, ['open'])).toEqual({ a: 'open_2' });
   });
 
   it('cubeReads walks references from the primary', () => {
