@@ -210,7 +210,8 @@ export const TableNode = memo(({
               data-column={c.name}
               data-picked={data.picked === c.name || undefined}
               className={cn(
-                'tw:relative tw:col-span-full tw:grid tw:grid-cols-subgrid tw:items-center tw:px-1.5 tw:leading-4 tw:hover:bg-accent',
+                // Room for the link dots, half inside the box, at each side.
+                'tw:relative tw:col-span-full tw:grid tw:grid-cols-subgrid tw:items-center tw:px-3 tw:leading-4 tw:hover:bg-accent',
                 data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
               )}
             >

@@ -93,7 +93,8 @@ export const CubeNode = memo(({
       <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
       <div
         data-slot="model-cube-band"
-        className="tw:relative tw:flex tw:items-center tw:gap-1 tw:border-b tw:border-foreground/70 tw:px-1.5 tw:py-1"
+        // Room for the join dots at each side.
+        className="tw:relative tw:flex tw:items-center tw:gap-1 tw:border-b tw:border-foreground/70 tw:px-3 tw:py-1"
         style={{ background: paint(cube.color ?? 'violet', cube.colorTransparency) }}
       >
         <Box aria-hidden className="tw:size-3 tw:shrink-0" />
