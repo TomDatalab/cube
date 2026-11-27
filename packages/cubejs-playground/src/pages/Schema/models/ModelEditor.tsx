@@ -47,7 +47,8 @@ import {
   sendToBack,
 } from './objects';
 import {
-  addCube, addCubeJoin, autoMembers, cubeKeyOf, dimensionNames, removeCubeJoin, setCubeJoin, setCubeSourceLine,
+  addCube, addCubeJoin, autoMembers, cubeKeyOf, dimensionNames, memberTitles, removeCubeJoin, setCubeJoin,
+  setCubeSourceLine,
 } from './cubes';
 import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
@@ -671,6 +672,7 @@ function Editor({
             cube: c,
             dimensions: shown.dimensions.map((d) => d.name),
             measures: shown.measures.map((m) => m.name),
+            titles: memberTitles(c),
             issues: problemsFound.filter((i) => i.target.kind === 'cube' && i.target.id === c.id).length,
             fixedSize: c.width !== undefined || c.height !== undefined,
             onResize,

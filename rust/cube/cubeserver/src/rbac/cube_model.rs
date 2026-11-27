@@ -82,6 +82,10 @@ pub struct CubeNode {
     /// How transparent the cube's color is, in percent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_transparency: Option<f64>,
+    /// Friendly titles of members by name, for the members a cube in auto
+    /// mode generates (a member of its own keeps its own `title`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub member_titles: std::collections::BTreeMap<String, String>,
     /// The shape of the dashed line to each table the cube reads, when it
     /// was reshaped on the canvas.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1587,7 +1591,22 @@ fn shape(
         _ => joined(def, cube, columns, db_type, primary()?, auto)?,
     };
     shaped.segments = segments(cube)?;
+    titled(&mut shaped, &cube.member_titles);
     Ok(shaped)
+}
+
+/// Gives each member named in `titles` that title, unless it has one.
+fn titled(shaped: &mut Shaped, titles: &std::collections::BTreeMap<String, String>) {
+    for member in shaped.dimensions.iter_mut().chain(shaped.measures.iter_mut()) {
+        let Yaml::Mapping(m) = member else { continue };
+        let Some(title) = m.get("name").and_then(Yaml::as_str).and_then(|n| titles.get(n)) else {
+            continue;
+        };
+        let title = title.trim();
+        if !title.is_empty() && !m.contains_key("title") {
+            m.insert("title".into(), title.into());
+        }
+    }
 }
 
 /// A join oriented from the primary: `from` is already in the tree.
@@ -2012,6 +2031,29 @@ mod tests {
             member(&orders, "measures", "count")["type"].as_str(),
             Some("count")
         );
+    }
+
+    #[test]
+    fn auto_members_take_their_friendly_titles() {
+        let mut def = two_cubes();
+        def.cubes[0].member_titles = [
+            ("customer_id".to_string(), "Cliente".to_string()),
+            ("count".to_string(), "Quantidade de pedidos".to_string()),
+            ("ghost".to_string(), "Ninguém".to_string()),
+            ("id".to_string(), "  ".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let built = build_def(&def).unwrap();
+        let orders = yaml_of(&built, "orders");
+        assert_eq!(member(&orders, "dimensions", "customer_id")["title"].as_str(), Some("Cliente"));
+        assert_eq!(member(&orders, "measures", "count")["title"].as_str(), Some("Quantidade de pedidos"));
+        // A blank title is no title.
+        assert!(member(&orders, "dimensions", "id")["title"].is_null());
+        // Kept through a save.
+        let json = serde_json::to_value(&def).unwrap();
+        assert_eq!(json["cubes"][0]["memberTitles"]["customer_id"], "Cliente");
+        assert!(serde_json::to_value(two_cubes()).unwrap()["cubes"][0].get("memberTitles").is_none());
     }
 
     #[test]

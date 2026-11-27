@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addCube, addCubeJoin, addMember, autoMembers, cubeKeyOf, cubeReads, cubeType, dimensionNames, generateMembers,
   moveCubeJoinEnd, removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource,
-  setCubeSourceLine, swapCubeJoin,
+  memberTitles, setCubeSourceLine, setMemberTitle, swapCubeJoin,
   setMember, snake,
 } from '../pages/Schema/models/cubes';
 import {
@@ -100,6 +100,27 @@ describe('cubes', () => {
     expect(made.dimensions.map((d) => d.name)).toEqual(before);
     expect(made.measures.map((m) => m.name)).toEqual(['count']);
     expect(dimensionNames(next, made, columnsOf)).toEqual(before);
+  });
+
+  it('friendly names: kept by name for an auto cube, carried by Generate members', () => {
+    const { def, cube } = joined();
+    const name = dimensionNames(def, cube, columnsOf)[0];
+    let next = setMemberTitle(def, cube.id, 'dimensions', name, '  Cliente ');
+    next = setMemberTitle(next, cube.id, 'measures', 'count', 'Quantidade');
+    expect(next.cubes![0].memberTitles).toEqual({ [name]: 'Cliente', count: 'Quantidade' });
+    expect(memberTitles(next.cubes![0])).toEqual({ [name]: 'Cliente', count: 'Quantidade' });
+    // A blank title takes it away, and the empty map goes too.
+    const cleared = setMemberTitle(setMemberTitle(next, cube.id, 'measures', 'count', ''), cube.id, 'dimensions', name, ' ');
+    expect(cleared.cubes![0]).not.toHaveProperty('memberTitles');
+    // Generated, the members carry their titles and the map is gone.
+    const made = generateMembers(next, cube.id, columnsOf).cubes![0];
+    expect(made).not.toHaveProperty('memberTitles');
+    expect(made.dimensions.find((d) => d.name === name)!.title).toBe('Cliente');
+    expect(made.measures[0].title).toBe('Quantidade');
+    // A cube with members of its own sets the member's title.
+    const own = setMemberTitle({ ...def, cubes: [made] }, cube.id, 'dimensions', name, 'Client');
+    expect(own.cubes![0].dimensions.find((d) => d.name === name)!.title).toBe('Client');
+    expect(memberTitles(own.cubes![0])[name]).toBe('Client');
   });
 
   it('cubeReads walks references from the primary', () => {

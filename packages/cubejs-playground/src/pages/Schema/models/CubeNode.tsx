@@ -18,6 +18,8 @@ export type CubeNodeData = {
   // The names shown: the cube's own, or the generated ones in auto mode.
   dimensions: string[];
   measures: string[];
+  // Friendly titles by member name: shown in place of the names.
+  titles?: Record<string, string>;
   issues: number;
   // Sized by hand: the box fills the node's fixed size.
   fixedSize?: boolean;
@@ -36,7 +38,9 @@ type CubeNodeProps = Pick<NodeProps<CubeFlowNode>, 'data'> & {
   width?: number;
 };
 
-function Section({ title, names, auto }: { title: string; names: string[]; auto: boolean }) {
+function Section({
+  title, names, auto, titles = {},
+}: { title: string; names: string[]; auto: boolean; titles?: Record<string, string> }) {
   return (
     <div data-slot={`model-cube-${title.toLowerCase()}`}>
       <div className="tw:px-1.5 tw:py-0.5 tw:text-[10px] tw:font-semibold tw:uppercase tw:text-foreground/60">
@@ -48,10 +52,11 @@ function Section({ title, names, auto }: { title: string; names: string[]; auto:
             key={n}
             data-member={n}
             data-auto={auto || undefined}
-            title={auto ? 'generated at build' : undefined}
+            data-titled={titles[n] ? true : undefined}
+            title={[titles[n] ? n : '', auto ? 'generated at build' : ''].filter(Boolean).join(' · ') || undefined}
             className={cn('tw:truncate tw:px-1.5 tw:leading-4', auto && 'tw:italic')}
           >
-            {n}
+            {titles[n] ?? n}
           </li>
         ))}
       </ul>
@@ -113,8 +118,8 @@ export const CubeNode = memo(({
         <Handle type="target" position={Position.Left} id="join" style={HANDLE_STYLE} />
         <Handle type="source" position={Position.Right} id="join" style={HANDLE_STYLE} />
       </div>
-      <Section title="Dimensions" names={data.dimensions} auto={auto} />
-      <Section title="Measures" names={data.measures} auto={auto} />
+      <Section title="Dimensions" names={data.dimensions} auto={auto} titles={data.titles} />
+      <Section title="Measures" names={data.measures} auto={auto} titles={data.titles} />
     </div>
   );
 });

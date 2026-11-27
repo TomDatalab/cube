@@ -313,8 +313,49 @@ export function autoMembers(
 const isAuto = (c: CubeNode) => c.dimensions.length === 0 && c.measures.length === 0;
 
 // "Generate members": the auto members, written out.
+// The auto members made the cube's own; their friendly titles go with them.
 export function generateMembers(def: ModelDefinition, id: string, columnsOf: ColumnsOf): ModelDefinition {
-  return mapCube(def, id, (c) => ({ ...c, ...autoMembers(def, c, columnsOf) }));
+  return mapCube(def, id, (c) => {
+    const titles = c.memberTitles ?? {};
+    const titled = <T extends { name: string; title?: string }>(m: T): T => (
+      titles[m.name] ? { ...m, title: titles[m.name] } : m
+    );
+    const { memberTitles: _drop, ...rest } = c;
+    const generated = autoMembers(def, c, columnsOf);
+    return { ...rest, dimensions: generated.dimensions.map(titled), measures: generated.measures.map(titled) };
+  });
+}
+
+// A member's friendly title, by its name: the member's own `title`, or for
+// an auto cube its entry in `memberTitles`. A blank title is none.
+export function setMemberTitle(
+  def: ModelDefinition,
+  id: string,
+  group: 'dimensions' | 'measures',
+  name: string,
+  title: string
+): ModelDefinition {
+  const next = title.trim() || undefined;
+  return mapCube(def, id, (c) => {
+    if (!isAuto(c)) {
+      const members = (c[group] as AnyMember[]).map((m) => (m.name === name ? merged(m, { title: next }) : m));
+      return { ...c, [group]: members };
+    }
+    const { [name]: _old, ...others } = c.memberTitles ?? {};
+    const titles = next ? { ...others, [name]: next } : others;
+    const { memberTitles: _drop, ...rest } = c;
+    return Object.keys(titles).length ? { ...rest, memberTitles: titles } : rest;
+  });
+}
+
+// The friendly titles shown for a cube's members, by name.
+export function memberTitles(cube: CubeNode): Record<string, string> {
+  if (isAuto(cube)) {
+    return cube.memberTitles ?? {};
+  }
+  return Object.fromEntries([...cube.dimensions, ...cube.measures]
+    .filter((m) => m.title)
+    .map((m) => [m.name, m.title!]));
 }
 
 // What a cube join may pair on this cube.

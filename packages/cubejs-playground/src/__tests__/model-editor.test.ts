@@ -2780,6 +2780,29 @@ describe('ModelEditor', () => {
       expect(pane().textContent).toContain('Cube join properties');
     });
 
+    it('gives each member of a cube a friendly name, shown on the canvas', async () => {
+      api.model.mockResolvedValueOnce(view(twoCubes()));
+      await render();
+      await select('cube:c1');
+      const input = () => pane().querySelector('input[aria-label="Friendly name of customer_id"]') as HTMLInputElement;
+      await fill('[data-slot="model-properties"] input[aria-label="Friendly name of customer_id"]', 'Cliente');
+      await act(async () => input().dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
+      let def = await savedDef();
+      expect(def.cubes[0].dimensions.find((d: any) => d.name === 'customer_id').title).toBe('Cliente');
+      const row = document.querySelector('[data-node="cube:c1"] [data-member="customer_id"]')!;
+      expect(row.textContent).toBe('Cliente');
+      expect(row.getAttribute('title')).toBe('customer_id');
+      // An auto cube lists the members it generates, and keeps their names by member.
+      await select('cube:c2');
+      const names = [...pane().querySelectorAll('[data-slot="model-cube-friendly"] input')].map((e) => e.getAttribute('aria-label'));
+      expect(names).toContain('Friendly name of id');
+      await fill('[data-slot="model-properties"] input[aria-label="Friendly name of count"]', 'Clientes');
+      await act(async () => (pane().querySelector('input[aria-label="Friendly name of count"]') as HTMLInputElement)
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
+      def = await savedDef();
+      expect(def.cubes[1].memberTitles).toEqual({ count: 'Clientes' });
+    });
+
     it('deleting a cube removes it and its joins, and one undo brings both back', async () => {
       api.model.mockResolvedValueOnce(view(joined()));
       await render();

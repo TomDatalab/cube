@@ -281,6 +281,9 @@ export type CubeNode = {
   height?: number;
   z?: number;
   colorTransparency?: number;
+  // Friendly titles by member name, for the members an auto cube generates
+  // (a member of its own has its own `title`).
+  memberTitles?: Record<string, string>;
   // The dashed lines to the tables it reads, where they were reshaped.
   sourceLines?: CubeSourceLine[];
 };

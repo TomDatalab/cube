@@ -6,8 +6,8 @@ import { Input } from '@/components/ui/input';
 import { Field } from '@/components/kit';
 
 import {
-  addMember, cubeReads, generateMembers, removeMember, renameCube, renameMember, setCube, setCubeSource,
-  setMember,
+  addMember, autoMembers, cubeReads, generateMembers, memberTitles, removeMember, renameCube, renameMember, setCube,
+  setCubeSource, setMember, setMemberTitle,
 } from './cubes';
 import type { MemberGroup } from './cubes';
 import {
@@ -176,13 +176,21 @@ export function CubeProperties({
       }));
     }
   };
+  const lookup = (schema: string, table: string) => {
+    const t = def.tables.find((x) => x.schema === schema && x.table === table);
+    return t ? columnsOf(t) : undefined;
+  };
   const generate = () => {
-    onChange(generateMembers(def, id, (schema, table) => {
-      const t = def.tables.find((x) => x.schema === schema && x.table === table);
-      return t ? columnsOf(t) : undefined;
-    }));
+    onChange(generateMembers(def, id, lookup));
     setConfirming(false);
   };
+  // Every dimension and measure the cube has, its own or generated, with the
+  // friendly title it is shown and queried by.
+  const auto = cube.dimensions.length === 0 && cube.measures.length === 0;
+  const shown = auto ? autoMembers(def, cube, lookup) : cube;
+  const titles = memberTitles(cube);
+  const friendly = (['dimensions', 'measures'] as const).flatMap((group) => shown[group]
+    .map((m) => ({ group, name: m.name })));
 
   const rows = (group: MemberGroup) => {
     const { one } = GROUP_LABEL[group];
@@ -303,6 +311,32 @@ export function CubeProperties({
             onCommit={(description) => patch({ description: description || undefined })}
           />
         </Field>
+      </Section>
+
+      <Section title="Friendly names">
+        {friendly.length === 0 ? (
+          <span className="tw:text-xs tw:text-muted-foreground">No members yet</span>
+        ) : (
+          <div className="tw:grid tw:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] tw:items-center tw:gap-x-2 tw:gap-y-1" data-slot="model-cube-friendly">
+            <span className="tw:text-[11px] tw:font-semibold tw:text-muted-foreground">Member</span>
+            <span className="tw:text-[11px] tw:font-semibold tw:text-muted-foreground">Friendly name</span>
+            {friendly.map(({ group, name }) => (
+              <div key={`${id}:${group}:${name}`} className="tw:contents">
+                <span className="tw:truncate tw:font-mono tw:text-xs" title={`${group === 'dimensions' ? 'Dimension' : 'Measure'} ${name}`}>
+                  {name}
+                </span>
+                <DraftText
+                  key={`${id}:${group}:${name}:${titles[name] ?? ''}`}
+                  label={`Friendly name of ${name}`}
+                  multiline={false}
+                  placeholder={name}
+                  value={titles[name] ?? ''}
+                  onCommit={(title) => onChange(setMemberTitle(def, id, group, name, title))}
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
       <Section title="Source">
