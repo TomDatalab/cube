@@ -1,3 +1,4 @@
+import { compactSvg } from './compactSvg';
 import { fontEmbedCSS } from './fontEmbed';
 import type { Rect } from './pages';
 
@@ -47,5 +48,7 @@ export async function renderDiagram(
     // page in every format made a small model's SVG several megabytes.
     fontEmbedCSS: await fontEmbedCSS(viewport, kept),
   };
-  return format === 'svg' ? toSvg(viewport, options) : toPng(viewport, options);
+  // An SVG keeps html-to-image's markup, so its style text is trimmed; a PNG
+  // is pixels.
+  return format === 'svg' ? compactSvg(await toSvg(viewport, options)) : toPng(viewport, options);
 }

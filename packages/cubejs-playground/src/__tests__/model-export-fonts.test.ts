@@ -100,3 +100,26 @@ describe('renderDiagram fonts', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('renderDiagram svg', () => {
+  beforeEach(() => {
+    const markup = '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject>'
+      + '<div xmlns="http://www.w3.org/1999/xhtml" style="--tw-x: 1; color: red">a</div></foreignObject></svg>';
+    fake.toSvg = vi.fn(async () => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`);
+    fake.toPng = vi.fn(async () => 'data:image/png;base64,x');
+  });
+
+  it('compacts the SVG html-to-image made, not the PNG', async () => {
+    const el = document.createElement('div');
+    el.className = 'react-flow__viewport';
+    document.body.appendChild(el);
+    const bounds = {
+      x: 0, y: 0, width: 10, height: 10,
+    };
+    const out = decodeURIComponent(await renderDiagram(el, bounds, 'svg'));
+    expect(out).toContain('color: red');
+    expect(out).not.toContain('--tw-x');
+    expect(await renderDiagram(el, bounds, 'png')).toBe('data:image/png;base64,x');
+    el.remove();
+  });
+});
