@@ -31,7 +31,8 @@ export const AreaNode = memo(({ id, data, selected }: AreaNodeProps) => (
       selected && 'tw:ring-2 tw:ring-ring'
     )}
     style={{
-      background: `color-mix(in oklch, var(--model-${data.fill ?? 'slate'}) var(--model-area-tint), var(--card))`,
+      // The color as picked, solid: mixed with the page it no longer matches.
+      background: `var(--model-${data.fill ?? 'slate'})`,
       border: `1.5px dashed var(--model-${data.border ?? 'slate'})`,
     }}
   >
