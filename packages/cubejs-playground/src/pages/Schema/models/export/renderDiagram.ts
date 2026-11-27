@@ -1,3 +1,4 @@
+import { fontEmbedCSS } from './fontEmbed';
 import type { Rect } from './pages';
 
 // What an export leaves out: the minimap, the zoom controls, the handles and
@@ -42,6 +43,9 @@ export async function renderDiagram(
       transform: `translate(${-bounds.x}px, ${-bounds.y}px) scale(1)`,
     },
     filter: kept,
+    // Only the faces the diagram's text uses, in woff2: every face of the
+    // page in every format made a small model's SVG several megabytes.
+    fontEmbedCSS: await fontEmbedCSS(viewport, kept),
   };
   return format === 'svg' ? toSvg(viewport, options) : toPng(viewport, options);
 }
