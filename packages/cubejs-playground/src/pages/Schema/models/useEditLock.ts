@@ -27,6 +27,9 @@ export function useEditLock(api: LockApi, modelId: string, onLost: (holder: stri
   const [state, setState] = useState<Pick<EditLock, 'status' | 'holder'>>({ status: 'pending', holder: null });
   // Whether the last answer gave us the lock: losing it is news only then.
   const held = useRef(false);
+  // Bumped by lost() and take(): an answer to a claim sent before them is
+  // stale and is dropped.
+  const epoch = useRef(0);
   const latest = useRef({ api, onLost });
   latest.current = { api, onLost };
 
@@ -47,12 +50,16 @@ export function useEditLock(api: LockApi, modelId: string, onLost: (holder: stri
   useEffect(() => {
     let alive = true;
     held.current = false;
+    epoch.current += 1;
     setState({ status: 'pending', holder: null });
     // A renewal that does not reach the server keeps what we knew.
-    const claim = () => latest.current.api.lockModel(modelId, token).then(
-      (answer) => alive && apply(answer),
-      () => {}
-    );
+    const claim = () => {
+      const sent = epoch.current;
+      return latest.current.api.lockModel(modelId, token).then(
+        (answer) => alive && sent === epoch.current && apply(answer),
+        () => {}
+      );
+    };
     const release = () => {
       try {
         Promise.resolve(latest.current.api.releaseModelLock(modelId, token)).catch(() => {});
@@ -72,13 +79,23 @@ export function useEditLock(api: LockApi, modelId: string, onLost: (holder: stri
   }, [modelId, token, apply]);
 
   const take = useCallback(async () => {
-    apply(await latest.current.api.takeModelLock(modelId, token));
+    epoch.current += 1;
+    const sent = epoch.current;
+    const answer = await latest.current.api.takeModelLock(modelId, token);
+    if (sent === epoch.current) {
+      apply(answer);
+    }
   }, [modelId, token, apply]);
 
+  // Reported once: a renewal may have told us already.
   const lost = useCallback((holder: string) => {
+    epoch.current += 1;
+    const had = held.current;
     held.current = false;
     setState({ status: 'readOnly', holder });
-    latest.current.onLost(holder);
+    if (had) {
+      latest.current.onLost(holder);
+    }
   }, []);
 
   return {

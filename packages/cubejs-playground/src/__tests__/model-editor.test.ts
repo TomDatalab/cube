@@ -2873,6 +2873,22 @@ describe('ModelEditor', () => {
       expect(flow.props.nodesDraggable).toBe(true);
     });
 
+    it('stays read-only after Take control until the model is reloaded', async () => {
+      api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+      await render();
+      let finish: (v: CubeModelView) => void = () => {};
+      api.model.mockImplementationOnce(() => new Promise<CubeModelView>((resolve) => { finish = resolve; }));
+      await act(async () => button('Take control').click());
+      expect(api.model).toHaveBeenCalledTimes(2);
+      expect(tool('New note').disabled).toBe(true);
+      expect(flow.props.nodesDraggable).toBe(false);
+      await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 9, y: 9 } }]));
+      expect(document.body.textContent).not.toContain('Unsaved changes');
+      await act(async () => finish(view(saved())));
+      expect(tool('New note').disabled).toBe(false);
+      expect(flow.props.nodesDraggable).toBe(true);
+    });
+
     it('save sends the lock token, and a 423 turns the editor read-only', async () => {
       const info = vi.spyOn(notify, 'info');
       await render();

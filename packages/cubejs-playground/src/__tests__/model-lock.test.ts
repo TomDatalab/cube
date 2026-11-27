@@ -103,6 +103,41 @@ describe('useEditLock', () => {
     expect(onLost).toHaveBeenCalledWith('bob');
   });
 
+  it('lost() after a renewal already reported the loss calls onLost once', async () => {
+    await mount();
+    api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+    await tick(30_000);
+    expect(onLost).toHaveBeenCalledTimes(1);
+    // A save on its way meanwhile answers 423.
+    await act(async () => lock.lost('bob'));
+    expect(onLost).toHaveBeenCalledTimes(1);
+    expect(lock.status).toBe('readOnly');
+  });
+
+  it('a held answer to a renewal sent before lost() does not undo it', async () => {
+    await mount();
+    let answer: (s: LockState) => void = () => {};
+    api.lockModel.mockImplementationOnce(() => new Promise<LockState>((resolve) => { answer = resolve; }));
+    await tick(30_000);
+    await act(async () => lock.lost('bob'));
+    await act(async () => answer({ held: true, holder: 'me' }));
+    expect(lock.status).toBe('readOnly');
+    expect(lock.holder).toBe('bob');
+    expect(onLost).toHaveBeenCalledTimes(1);
+  });
+
+  it('a renewal answered after take() does not report a loss', async () => {
+    api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+    await mount();
+    let answer: (s: LockState) => void = () => {};
+    api.lockModel.mockImplementationOnce(() => new Promise<LockState>((resolve) => { answer = resolve; }));
+    await tick(30_000);
+    await act(async () => lock.take());
+    await act(async () => answer({ held: false, holder: 'bob' }));
+    expect(lock.status).toBe('editing');
+    expect(onLost).not.toHaveBeenCalled();
+  });
+
   it('take() claims through takeModelLock', async () => {
     api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
     await mount();

@@ -362,7 +362,18 @@ function Editor({
     notify.info(`${holder} took control. Your unsaved changes were discarded.`);
   };
   const lock = useEditLock(api, modelId, onLost);
-  const readOnly = lock.status !== 'editing';
+  // Back in control after reading (Take control, or an expired lock
+  // claimed): the model may have changed meanwhile, so it stays read-only
+  // until the reload lands. Set while rendering, so no render unlocks first.
+  const [lastStatus, setLastStatus] = useState(lock.status);
+  const [regaining, setRegaining] = useState(false);
+  if (lock.status !== lastStatus) {
+    setLastStatus(lock.status);
+    if (lock.status === 'editing' && lastStatus === 'readOnly') {
+      setRegaining(true);
+    }
+  }
+  const readOnly = lock.status !== 'editing' || regaining;
   readOnlyRef.current = readOnly;
   // A 423 from a write: the lock is someone else's now.
   const refused = (e: unknown): boolean => {
@@ -373,16 +384,13 @@ function Editor({
     lock.lost(at >= 0 ? e.message.slice(at + LOCKED_BY.length) : lock.holder ?? '');
     return true;
   };
-  // Back in control after reading: the model may have changed meanwhile.
-  const wasReadOnly = useRef(false);
   useEffect(() => {
-    if (lock.status === 'editing' && wasReadOnly.current) {
-      reload();
+    if (regaining) {
+      reload().finally(() => setRegaining(false));
     }
-    wasReadOnly.current = lock.status === 'readOnly';
     // reload reads only stable setters and the api.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lock.status]);
+  }, [regaining]);
   const take = () => lock.take().catch((e: Error) => notify.error(e.message));
 
   useEffect(() => {
