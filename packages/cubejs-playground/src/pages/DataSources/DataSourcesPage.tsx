@@ -42,6 +42,7 @@ import { connectionLabel, DATA_SOURCE_DRAG_TYPE, deleteConfirmation } from './or
 import { OrganizationDropPanel } from './OrganizationDropPanel';
 import { dataSourceSections } from './sections';
 import { Content, Header } from '../components/Ui';
+import { CONNECTOR_LOGOS } from '../../shared/connector-logos';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -121,7 +122,12 @@ function databasesFor(connectors: string[]): Database[] {
   const list = known.filter((db) => connectors.includes(db.driver));
   connectors
     .filter((driver) => !known.some((db) => db.driver === driver))
-    .forEach((driver) => list.push({ title: driver, driver, settings: GENERIC_SETTINGS }));
+    .forEach((driver) => list.push({
+      title: CONNECTOR_LOGOS[driver]?.title ?? driver,
+      driver,
+      logo: CONNECTOR_LOGOS[driver]?.logo,
+      settings: GENERIC_SETTINGS,
+    }));
   return list;
 }
 
