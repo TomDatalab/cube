@@ -189,16 +189,16 @@ pub struct Group {
     pub created_by: String,
 }
 
-/// A model: a canvas of joined tables built into one Cube YAML cube.
+/// A model: a canvas of tables and cubes, each cube built into its own
+/// Cube YAML file.
 #[derive(Debug, Clone)]
 pub struct CubeModel {
     pub id: Uuid,
     pub organization_id: Uuid,
     pub name: String,
     pub definition: serde_json::Value,
+    /// The name of the cube a definition without cubes converts to.
     pub cube_name: Option<String>,
-    pub cube_file_id: Option<Uuid>,
-    pub cube_built_hash: Option<String>,
     pub version: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -474,8 +474,26 @@ fn group_from(r: &Row) -> Group {
     }
 }
 
-const CUBE_MODEL_COLS: &str = "id, organization_id, name, definition, cube_name, cube_file_id, \
-     cube_built_hash, version, created_at, updated_at, created_by, updated_by";
+const CUBE_MODEL_COLS: &str = "id, organization_id, name, definition, cube_name, \
+     version, created_at, updated_at, created_by, updated_by";
+
+/// What the last build of a model wrote for one of its cubes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltRecord {
+    pub cube_id: String,
+    pub cube_name: String,
+    pub file_id: Uuid,
+    pub built_hash: String,
+}
+
+fn built_record_from(r: &Row) -> BuiltRecord {
+    BuiltRecord {
+        cube_id: r.get(0),
+        cube_name: r.get(1),
+        file_id: r.get(2),
+        built_hash: r.get(3),
+    }
+}
 
 fn cube_model_from(r: &Row) -> CubeModel {
     CubeModel {
@@ -484,13 +502,11 @@ fn cube_model_from(r: &Row) -> CubeModel {
         name: r.get(2),
         definition: r.get(3),
         cube_name: r.get(4),
-        cube_file_id: r.get(5),
-        cube_built_hash: r.get(6),
-        version: r.get(7),
-        created_at: r.get(8),
-        updated_at: r.get(9),
-        created_by: r.get(10),
-        updated_by: r.get(11),
+        version: r.get(5),
+        created_at: r.get(6),
+        updated_at: r.get(7),
+        created_by: r.get(8),
+        updated_by: r.get(9),
     }
 }
 
@@ -2075,25 +2091,71 @@ impl Store {
         }
     }
 
-    /// Records the last build. The version is not bumped.
-    pub async fn set_cube_model_build(
-        &self,
-        id: Uuid,
-        cube_name: &str,
-        file_id: Uuid,
-        hash: &str,
-    ) -> Result<(), StoreError> {
+    /// The records of model `model_id`'s last build, by cube name.
+    pub async fn cube_model_cubes(&self, model_id: Uuid) -> Result<Vec<BuiltRecord>, StoreError> {
         let c = self.conn().await?;
-        let n = c
-            .execute(
-                "UPDATE cube_models SET cube_name = $2, cube_file_id = $3, cube_built_hash = $4 \
-                 WHERE id = $1",
-                &[&id, &cube_name, &file_id, &hash],
+        let rows = c
+            .query(
+                "SELECT cube_id, cube_name, file_id, built_hash FROM cube_model_cubes \
+                 WHERE model_id = $1 ORDER BY cube_name, cube_id",
+                &[&model_id],
             )
             .await?;
-        if n == 0 {
+        Ok(rows.iter().map(built_record_from).collect())
+    }
+
+    /// The build records of every model of the organization, as
+    /// `(model_id, record)` by cube name.
+    pub async fn cube_model_cubes_of(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<(Uuid, BuiltRecord)>, StoreError> {
+        let c = self.conn().await?;
+        let rows = c
+            .query(
+                "SELECT r.cube_id, r.cube_name, r.file_id, r.built_hash, r.model_id \
+                 FROM cube_model_cubes r JOIN cube_models m ON m.id = r.model_id \
+                 WHERE m.organization_id = $1 ORDER BY r.cube_name, r.cube_id",
+                &[&organization_id],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get(4), built_record_from(r)))
+            .collect())
+    }
+
+    /// Replaces the records of model `model_id`'s last build, in one
+    /// transaction. The model's version is not bumped; `NotFound` when the
+    /// model is gone.
+    pub async fn set_cube_model_cubes(
+        &self,
+        model_id: Uuid,
+        records: &[BuiltRecord],
+    ) -> Result<(), StoreError> {
+        let mut c = self.conn().await?;
+        let tx = c.transaction().await?;
+        if tx
+            .query_opt(
+                "SELECT 1 FROM cube_models WHERE id = $1 FOR UPDATE",
+                &[&model_id],
+            )
+            .await?
+            .is_none()
+        {
             return Err(StoreError::NotFound);
         }
+        tx.execute("DELETE FROM cube_model_cubes WHERE model_id = $1", &[&model_id])
+            .await?;
+        for r in records {
+            tx.execute(
+                "INSERT INTO cube_model_cubes (model_id, cube_id, cube_name, file_id, built_hash) \
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[&model_id, &r.cube_id, &r.cube_name, &r.file_id, &r.built_hash],
+            )
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

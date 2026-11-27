@@ -1401,7 +1401,8 @@ db_test!(cube_models_crud, |store, _url| {
     let def = json!({"tables": [], "joins": []});
     let m = store.create_cube_model(o.id, "sales", &def, "ann").await.unwrap();
     assert_eq!((m.version, m.definition.clone()), (1, def.clone()));
-    assert!(m.cube_name.is_none() && m.cube_file_id.is_none() && m.cube_built_hash.is_none());
+    assert!(m.cube_name.is_none());
+    assert!(store.cube_model_cubes(m.id).await.unwrap().is_empty());
     assert!(matches!(
         store.create_cube_model(o.id, "sales", &def, "ann").await,
         Err(StoreError::Conflict(_))
@@ -1424,13 +1425,25 @@ db_test!(cube_models_crud, |store, _url| {
         Err(StoreError::NotFound)
     ));
 
-    let f = Uuid::new_v4();
-    store.set_cube_model_build(m.id, "sales_cube", f, "h1").await.unwrap();
-    let b = store.cube_model(m.id).await.unwrap().unwrap();
-    assert_eq!(b.version, 2);
-    assert_eq!(b.cube_name.as_deref(), Some("sales_cube"));
-    assert_eq!(b.cube_file_id, Some(f));
-    assert_eq!(b.cube_built_hash.as_deref(), Some("h1"));
+    use cubeserver::rbac::store::BuiltRecord;
+    let record = |id: &str, name: &str, hash: &str| BuiltRecord {
+        cube_id: id.into(),
+        cube_name: name.into(),
+        file_id: Uuid::new_v4(),
+        built_hash: hash.into(),
+    };
+    let (a, b) = (record("c2", "a_cube", "h2"), record("c1", "sales_cube", "h1"));
+    store.set_cube_model_cubes(m.id, &[b.clone(), a.clone()]).await.unwrap();
+    assert_eq!(store.cube_model_cubes(m.id).await.unwrap(), vec![a.clone(), b.clone()]);
+    assert_eq!(store.cube_model_cubes_of(o.id).await.unwrap(), vec![(m.id, a.clone()), (m.id, b.clone())]);
+    // Replaced as a whole; the model's version is not bumped.
+    store.set_cube_model_cubes(m.id, &[b.clone()]).await.unwrap();
+    assert_eq!(store.cube_model_cubes(m.id).await.unwrap(), vec![b.clone()]);
+    assert_eq!(store.cube_model(m.id).await.unwrap().unwrap().version, 2);
+    assert!(matches!(
+        store.set_cube_model_cubes(Uuid::new_v4(), &[]).await,
+        Err(StoreError::NotFound)
+    ));
 
     assert!(matches!(
         store.delete_cube_model(m.id, 1).await,
@@ -1438,6 +1451,7 @@ db_test!(cube_models_crud, |store, _url| {
     ));
     store.delete_cube_model(m.id, 2).await.unwrap();
     assert!(store.cube_model(m.id).await.unwrap().is_none());
+    assert!(store.cube_model_cubes(m.id).await.unwrap().is_empty());
     assert!(matches!(
         store.delete_cube_model(m.id, 2).await,
         Err(StoreError::NotFound)

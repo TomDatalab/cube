@@ -49,17 +49,22 @@ pub(crate) fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> Write
 }
 
 /// The node's detail; an organization's also lists its models
-/// (`models: [{id, name, cubeName}]`, by name).
+/// (`models: [{id, name, cubeNames}]`, by name; `cubeNames` are those of
+/// the last build, by name).
 pub(crate) async fn detail_of(state: &AppState, scope: &Scope) -> Result<Value, ApiError> {
     let mut detail = org_detail_for(state, &scope.slug, scope.owner_only).await?;
     if let Some(org) = scope.organization {
-        let models: Vec<Value> = super::rbac_of(state)?
-            .store
+        let store = &super::rbac_of(state)?.store;
+        let records = super::cube_models::records_of(store, org).await?;
+        let models: Vec<Value> = store
             .cube_models_of(org)
             .await
             .map_err(|e| store_error(e, "Conflict"))?
             .iter()
-            .map(|m| json!({ "id": m.id, "name": m.name, "cubeName": m.cube_name }))
+            .map(|m| {
+                let names = super::cube_models::cube_names(records.get(&m.id));
+                json!({ "id": m.id, "name": m.name, "cubeNames": names })
+            })
             .collect();
         detail["models"] = json!(models);
     }

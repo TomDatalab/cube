@@ -1,10 +1,11 @@
 //! Models: `/v1/organizations/{id}/cube-models` and `/v1/cube-models/{id}`.
 //!
 //! A model is a canvas of tables of one connection, linked by their columns,
-//! that Build cube turns into ONE cube file of the organization (see
-//! `rbac::cube_model`). The organization's admins manage its models, as they
-//! do its model files; a model of another organization answers 404. Deleting
-//! a model keeps its cube file.
+//! and of cubes on them, that Build cube turns into one cube file per cube
+//! of the organization (see `rbac::cube_model`); `cube_model_cubes` records
+//! which file each cube's last build wrote. The organization's admins manage
+//! its models, as they do its model files; a model of another organization
+//! answers 404. Deleting a model keeps its cube files.
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
@@ -21,10 +22,11 @@ use crate::error::ApiError;
 use crate::handlers::scaffold::snake;
 use crate::rbac::cube_model::{self, Definition};
 use crate::rbac::model_snapshot::source_path;
-use crate::rbac::model_store::ModelChange;
+use crate::rbac::model_store::{ModelChange, ModelFile};
 use crate::rbac::model_writer::WriteError;
-use crate::rbac::store::{CubeModel, StoreError};
+use crate::rbac::store::{BuiltRecord, CubeModel, Store, StoreError};
 use crate::services::RequestContext;
+use std::collections::HashMap;
 
 const DUPLICATE: &str = "Já existe um model com este nome nesta organização";
 const STALE: &str = "O model mudou desde que você abriu; abra de novo";
@@ -116,17 +118,79 @@ fn definition(state: &AppState, value: Value) -> Result<Value, ApiError> {
     serde_json::to_value(&def).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
-fn view(model: &CubeModel) -> Value {
+/// The name of the cube a definition without cubes converts to: the
+/// model's `cube_name`, else the name cube `c1` was last built under, else
+/// the model's name in snake case.
+fn conversion_name(model: &CubeModel, records: &[BuiltRecord]) -> String {
+    model
+        .cube_name
+        .clone()
+        .or_else(|| {
+            records
+                .iter()
+                .find(|r| r.cube_id == "c1")
+                .map(|r| r.cube_name.clone())
+        })
+        .unwrap_or_else(|| snake(&model.name))
+}
+
+/// The model's definition with [`cube_model::upgrade`] applied; as stored
+/// when it does not read as a [`Definition`].
+fn upgraded(model: &CubeModel, records: &[BuiltRecord]) -> Value {
+    let Ok(mut def) = serde_json::from_value::<Definition>(model.definition.clone()) else {
+        return model.definition.clone();
+    };
+    cube_model::upgrade(&mut def, &conversion_name(model, records));
+    serde_json::to_value(&def).unwrap_or_else(|_| model.definition.clone())
+}
+
+/// The build records of the organization's models, by model.
+pub(crate) async fn records_of(
+    store: &Store,
+    org: uuid::Uuid,
+) -> Result<HashMap<uuid::Uuid, Vec<BuiltRecord>>, ApiError> {
+    let mut out: HashMap<uuid::Uuid, Vec<BuiltRecord>> = HashMap::new();
+    for (model, record) in store
+        .cube_model_cubes_of(org)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+    {
+        out.entry(model).or_default().push(record);
+    }
+    Ok(out)
+}
+
+/// The cube names of a model's last build, by name.
+pub(crate) fn cube_names(records: Option<&Vec<BuiltRecord>>) -> Vec<String> {
+    let mut names: Vec<String> = records
+        .map(|rs| rs.iter().map(|r| r.cube_name.clone()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn view(model: &CubeModel, records: &[BuiltRecord]) -> Value {
+    let mut names: Vec<&str> = records.iter().map(|r| r.cube_name.as_str()).collect();
+    names.sort();
     json!({
         "id": model.id,
         "organizationId": model.organization_id,
         "name": model.name,
-        "definition": model.definition,
-        "cubeName": model.cube_name,
+        "definition": upgraded(model, records),
+        "cubeNames": names,
         "version": model.version,
         "updatedAt": model.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "updatedBy": model.updated_by,
     })
+}
+
+/// [`view`] of `model` with its build records read from the store.
+async fn view_of(store: &Store, model: &CubeModel) -> Result<Value, ApiError> {
+    let records = store
+        .cube_model_cubes(model.id)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    Ok(view(model, &records))
 }
 
 /// The model in the path, its organization's scope and the caller's
@@ -166,13 +230,14 @@ pub async fn list(
     let (scope, _) = org_scope(&state, &ctx, &org).await?;
     let rbac = super::rbac_of(&state)?;
     let org = scope.organization.ok_or_else(not_found)?;
+    let records = records_of(&rbac.store, org).await?;
     let models: Vec<Value> = rbac
         .store
         .cube_models_of(org)
         .await
         .map_err(|e| store_error(e, "Conflict"))?
         .iter()
-        .map(view)
+        .map(|m| view(m, records.get(&m.id).map_or(&[][..], Vec::as_slice)))
         .collect();
     Ok(Json(json!({ "models": models })))
 }
@@ -195,7 +260,7 @@ pub async fn create(
         .create_cube_model(org, &name, &definition, &actor)
         .await
         .map_err(model_error)?;
-    Ok((StatusCode::CREATED, Json(view(&model))))
+    Ok((StatusCode::CREATED, Json(view(&model, &[]))))
 }
 
 /// `admin` on the organization.
@@ -205,7 +270,7 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let (model, _, _) = visible_model(&state, &ctx, &id).await?;
-    let mut body = view(&model);
+    let mut body = view_of(&super::rbac_of(&state)?.store, &model).await?;
     // The dialect each connection designs tables in, for the editor's types.
     let dialects: serde_json::Map<String, Value> = state
         .config
@@ -244,7 +309,7 @@ pub async fn update(
         )
         .await
         .map_err(model_error)?;
-    Ok(Json(view(&updated)))
+    Ok(Json(view_of(&rbac.store, &updated).await?))
 }
 
 /// `?version=` → 204: `admin` on the organization. The cube file stays.
@@ -282,12 +347,15 @@ fn built_from(content: &str, id: uuid::Uuid) -> bool {
     })
 }
 
-/// `{force?}` → `{fileName, content, cubeName, detail}`: `admin` on the
-/// organization. Reads the columns of the model's connection, builds the
-/// cube and writes it: over the file of the last build when that file still
-/// holds what was built (or with `force`), else 409; at `<cubeName>.yml`
-/// when there is no such file. A file at that path that carries this model's
-/// header is taken as the last build's, its record lost. `detail` is the
+/// `{force?}` → `{cubes: [{cubeName, fileName, content}], removed, detail}`:
+/// `admin` on the organization. Reads the columns of the model's connection,
+/// builds every cube and writes each over the file of its last build, or at
+/// `<cubeName>.yml` when there is none (a file there that carries this
+/// model's header is taken as the last build's, its record lost). The file
+/// of a cube no longer in the model is deleted; `removed` names those files.
+/// 409 when a file was edited since the build that wrote it (unless
+/// `force`), when another file of the organization declares a cube of the
+/// same name, or when a new cube's path is another file's. `detail` is the
 /// organization's new detail.
 pub async fn build(
     State(state): State<AppState>,
@@ -304,7 +372,8 @@ pub async fn build(
     let org = model.organization_id;
     let mut def: Definition = serde_json::from_value(model.definition.clone())
         .map_err(|e| ApiError::bad_request(format!("Definição inválida: {e}")))?;
-    let ds = def.data_source.as_str();
+    let ds = def.data_source.clone();
+    let ds = ds.as_str();
     let own = rbac
         .store
         .connections_of_organization(org)
@@ -320,115 +389,211 @@ pub async fn build(
     // Not while a data source is being deleted; see `generate_schema`.
     let _guard = crate::handlers::data_sources::WRITE.lock().await;
     let columns = crate::handlers::playground::data_source_schema(ds).await?;
-    let db_type = state
-        .config
-        .data_sources
-        .iter()
-        .find(|(n, _)| n == ds)
-        .map(|(_, t)| t.as_str())
-        .unwrap_or("");
-    let cube_name = model
-        .cube_name
-        .clone()
-        .unwrap_or_else(|| snake(&model.name));
-    cube_model::upgrade(&mut def, &cube_name);
-    let first = cube_model::build_all(&model.name, model.id, &def, &columns, db_type)
-        .map_err(ApiError::bad_request)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::bad_request("Crie um cubo antes do build"))?;
-    let content = first.content;
-
-    let mut path = format!("{}.yml", first.cube_name);
-    writer
-        .write(&actor, "build model", |rows| {
-            let built = model
-                .cube_file_id
-                .and_then(|file| {
-                    rows.files
-                        .iter()
-                        .find(|f| f.id == file && f.organization_id == Some(org))
-                })
-                // A build whose record was lost: the file at the path still
-                // carries this model's header.
-                .or_else(|| {
-                    rows.files.iter().find(|f| {
-                        f.organization_id == Some(org)
-                            && f.path == path
-                            && built_from(&f.content, model.id)
-                    })
-                });
-            if let Some(row) = built {
-                if !force && model.cube_built_hash.as_deref() != Some(&sha256_hex(&row.content)) {
-                    return Err(WriteError::new(StatusCode::CONFLICT, EDITED));
-                }
-                path = row.path.clone();
-                return Ok(vec![ModelChange::Put {
-                    id: Some(row.id),
-                    organization_id: row.organization_id,
-                    path: row.path.clone(),
-                    content: content.clone(),
-                    expected_version: Some(row.version),
-                    managed_by: None,
-                }]);
-            }
-            if rows
-                .files
-                .iter()
-                .any(|f| f.organization_id == Some(org) && f.path == path)
-            {
-                return Err(WriteError::new(
-                    StatusCode::CONFLICT,
-                    format!(
-                        "O caminho {path} já é de outro arquivo; renomeie ou mova esse arquivo"
-                    ),
-                ));
-            }
-            Ok(vec![ModelChange::Put {
-                id: None,
-                organization_id: Some(org),
-                path: path.clone(),
-                content: content.clone(),
-                expected_version: None,
-                managed_by: None,
-            }])
-        })
-        .await
-        .map_err(|e| redacted(e, scope.owner_only, &scope.slug))?;
-
-    // `write` does not say which row it wrote: read it back by its path.
-    let rows = rbac
+    let db_type = db_type_of(&state, ds);
+    let records = rbac
         .store
-        .model_rows()
+        .cube_model_cubes(model.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
+    cube_model::upgrade(&mut def, &conversion_name(&model, &records));
+    let built = cube_model::build_all(&model.name, model.id, &def, &columns, db_type)
+        .map_err(ApiError::bad_request)?;
+    if built.is_empty() && records.is_empty() {
+        return Err(ApiError::bad_request("Crie um cubo antes do build"));
+    }
     let slugs = rbac
         .store
         .organization_slugs()
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
-    let row = rows
-        .files
-        .iter()
-        .find(|f| f.organization_id == Some(org) && f.path == path)
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::CONFLICT,
-                "O modelo mudou durante o build; tente de novo",
-            )
-        })?;
+    let name_of = |f: &ModelFile| {
+        source_path(f, &slugs).unwrap_or_else(|| format!("{}/{}", scope.slug, f.path))
+    };
+
+    // The path each built cube is written at, and the names of the files removed.
+    let mut paths: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    writer
+        .write(&actor, "build model", |rows| {
+            let files: Vec<&ModelFile> = rows
+                .files
+                .iter()
+                .filter(|f| f.organization_id == Some(org))
+                .collect();
+            let by_id = |id: uuid::Uuid| files.iter().copied().find(|f| f.id == id);
+            // A file holds what its build wrote: the hash of the record of
+            // that file. A file no record names was not recorded: edited.
+            let edited = |f: &ModelFile| {
+                !force
+                    && !records
+                        .iter()
+                        .any(|r| r.file_id == f.id && r.built_hash == sha256_hex(&f.content))
+            };
+            let kept: Vec<uuid::Uuid> = records
+                .iter()
+                .filter(|r| built.iter().any(|b| b.cube_id == r.cube_id))
+                .map(|r| r.file_id)
+                .collect();
+
+            // Each built cube's file: its record's, or an unrecorded one at
+            // its path with this model's header.
+            let mut found: Vec<Option<&ModelFile>> = Vec::new();
+            for b in &built {
+                let path = format!("{}.yml", b.cube_name);
+                let row = records
+                    .iter()
+                    .find(|r| r.cube_id == b.cube_id)
+                    .and_then(|r| by_id(r.file_id))
+                    .or_else(|| {
+                        files.iter().copied().find(|f| {
+                            f.path == path && !kept.contains(&f.id) && built_from(&f.content, model.id)
+                        })
+                    });
+                if row.is_some_and(edited) {
+                    return Err(WriteError::new(StatusCode::CONFLICT, EDITED));
+                }
+                found.push(row);
+            }
+            // The files of the cubes no longer in the model; one whose file
+            // is gone is just dropped.
+            let gone: Vec<&ModelFile> = records
+                .iter()
+                .filter(|r| !built.iter().any(|b| b.cube_id == r.cube_id))
+                .filter_map(|r| by_id(r.file_id))
+                .filter(|f| !found.iter().any(|row| row.is_some_and(|row| row.id == f.id)))
+                .collect();
+            if gone.iter().any(|f| edited(f)) {
+                return Err(WriteError::new(StatusCode::CONFLICT, EDITED));
+            }
+
+            let mut changes = Vec::new();
+            for (b, row) in built.iter().zip(&found) {
+                match row {
+                    Some(row) => {
+                        paths.push(row.path.clone());
+                        changes.push(ModelChange::Put {
+                            id: Some(row.id),
+                            organization_id: row.organization_id,
+                            path: row.path.clone(),
+                            content: b.content.clone(),
+                            expected_version: Some(row.version),
+                            managed_by: None,
+                        });
+                    }
+                    None => {
+                        let path = format!("{}.yml", b.cube_name);
+                        if files.iter().any(|f| f.path == path) {
+                            return Err(WriteError::new(
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "O caminho {path} já é de outro arquivo; renomeie ou mova esse arquivo"
+                                ),
+                            ));
+                        }
+                        paths.push(path.clone());
+                        changes.push(ModelChange::Put {
+                            id: None,
+                            organization_id: Some(org),
+                            path,
+                            content: b.content.clone(),
+                            expected_version: None,
+                            managed_by: None,
+                        });
+                    }
+                }
+            }
+            // A cube name another file of the organization declares, after the
+            // paths: a new cube's path taken by another file says so first.
+            let ours = |f: &ModelFile| {
+                found.iter().any(|row| row.is_some_and(|row| row.id == f.id))
+                    || gone.iter().any(|g| g.id == f.id)
+            };
+            let declared: Vec<(&ModelFile, Vec<String>)> = files
+                .iter()
+                .copied()
+                .filter(|f| !ours(f))
+                .map(|f| (f, cubes_declared(&f.content)))
+                .collect();
+            for b in &built {
+                if let Some((f, _)) = declared.iter().find(|(_, names)| names.contains(&b.cube_name)) {
+                    return Err(WriteError::new(
+                        StatusCode::CONFLICT,
+                        format!("O cubo {} já existe em {}, fora deste model", b.cube_name, name_of(f)),
+                    ));
+                }
+            }
+
+            for f in &gone {
+                removed.push(name_of(f));
+                changes.push(ModelChange::Delete {
+                    id: f.id,
+                    expected_version: Some(f.version),
+                });
+            }
+            Ok(changes)
+        })
+        .await
+        .map_err(|e| redacted(e, scope.owner_only, &scope.slug))?;
+
+    // `write` does not say which rows it wrote: read them back by path.
+    let rows = rbac
+        .store
+        .model_rows()
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let mut new_records = Vec::new();
+    let mut cubes = Vec::new();
+    for (b, path) in built.iter().zip(&paths) {
+        let row = rows
+            .files
+            .iter()
+            .find(|f| f.organization_id == Some(org) && &f.path == path)
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "O modelo mudou durante o build; tente de novo",
+                )
+            })?;
+        new_records.push(BuiltRecord {
+            cube_id: b.cube_id.clone(),
+            cube_name: b.cube_name.clone(),
+            file_id: row.id,
+            built_hash: sha256_hex(&b.content),
+        });
+        cubes.push(json!({
+            "cubeName": b.cube_name,
+            "fileName": name_of(row),
+            "content": b.content,
+        }));
+    }
     rbac.store
-        .set_cube_model_build(model.id, &cube_name, row.id, &sha256_hex(&content))
+        .set_cube_model_cubes(model.id, &new_records)
         .await
         .map_err(model_error)?;
-    let file_name = source_path(row, &slugs).unwrap_or_else(|| format!("{}/{path}", scope.slug));
     let detail = detail_of(&state, &scope).await?;
     Ok(Json(json!({
-        "fileName": file_name,
-        "content": content,
-        "cubeName": cube_name,
+        "cubes": cubes,
+        "removed": removed,
         "detail": detail,
     })))
+}
+
+/// The names of the cubes the YAML `content` declares (`cubes[].name`);
+/// none when it does not parse.
+fn cubes_declared(content: &str) -> Vec<String> {
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+        return Vec::new();
+    };
+    doc.get("cubes")
+        .and_then(|v| v.as_sequence())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Drops `draft` from the tables of `def` named in `created` (`schema.table`).
@@ -626,7 +791,7 @@ pub async fn create_tables(
         }
     }
     let detail = detail_of(&state, &scope).await?;
-    let mut out = json!({ "model": view(&model), "created": created, "detail": detail });
+    let mut out = json!({ "model": view_of(&rbac.store, &model).await?, "created": created, "detail": detail });
     if let Some(error) = error {
         out["error"] = json!(error);
     }

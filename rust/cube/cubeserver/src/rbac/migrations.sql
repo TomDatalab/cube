@@ -263,3 +263,20 @@ CREATE TABLE IF NOT EXISTS cube_models (
     updated_by text NOT NULL,
     UNIQUE (organization_id, name)
 );
+
+-- What the last build of a model wrote, per cube: its file and the hash of
+-- what was written. Moved here from cube_models.cube_file_id/cube_built_hash
+-- (cube_models.cube_name stays: it names the converted cube).
+CREATE TABLE IF NOT EXISTS cube_model_cubes (
+    model_id uuid NOT NULL REFERENCES cube_models (id) ON DELETE CASCADE,
+    cube_id text NOT NULL,
+    cube_name text NOT NULL,
+    file_id uuid NOT NULL,
+    built_hash text NOT NULL,
+    PRIMARY KEY (model_id, cube_id)
+);
+INSERT INTO cube_model_cubes (model_id, cube_id, cube_name, file_id, built_hash)
+    SELECT id, 'c1', cube_name, cube_file_id, cube_built_hash FROM cube_models
+    WHERE cube_name IS NOT NULL AND cube_file_id IS NOT NULL AND cube_built_hash IS NOT NULL
+    ON CONFLICT DO NOTHING;
+UPDATE cube_models SET cube_file_id = NULL, cube_built_hash = NULL WHERE cube_file_id IS NOT NULL;
