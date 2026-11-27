@@ -535,7 +535,7 @@ function Editor({
           zIndex: AREA_Z + (a.z ?? 0),
           selected: selection.includes(id),
           data: {
-            id: a.id, name: a.name, fill: a.fill, border: a.border, onResize,
+            id: a.id, name: a.name, fill: a.fill, border: a.border, onResize, readOnly,
           },
         };
       });
@@ -557,6 +557,7 @@ function Editor({
             showTypes,
             fixedSize: v.width !== undefined || v.height !== undefined,
             onResize,
+            readOnly,
           },
         };
       });
@@ -572,7 +573,7 @@ function Editor({
           zIndex: n.z ?? 0,
           selected: selection.includes(id),
           data: {
-            id: n.id, text: n.text, color: n.color, onResize,
+            id: n.id, text: n.text, color: n.color, onResize, readOnly,
           },
         };
       });
@@ -611,6 +612,7 @@ function Editor({
           fixedSize: t.width !== undefined || t.height !== undefined,
           onResize,
           onRemove,
+          readOnly,
           collapsed: collapsedTables.includes(t.alias),
           onToggle: toggleTable,
           picked: picked?.alias === t.alias ? picked.column : null,
@@ -653,12 +655,13 @@ function Editor({
             issues: problemsFound.filter((i) => i.target.kind === 'cube' && i.target.id === c.id).length,
             fixedSize: c.width !== undefined || c.height !== undefined,
             onResize,
+            readOnly,
           },
         };
       });
       return [...areas, ...tableNodes, ...views, ...cubes, ...notes];
     });
-  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound]);
+  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound, readOnly]);
 
   const onSetSide = useCallback((index: number, end: 'from' | 'to', side: Side) => {
     setDef((d) => setJoin(d, index, end === 'from' ? { fromSide: side } : { toSide: side }));
@@ -753,8 +756,11 @@ function Editor({
       }
     }
     // Tables leave through their own button, which updates the definition;
-    // selection comes from `selection`.
-    const kept = changes.filter((c) => c.type !== 'remove' && c.type !== 'select');
+    // selection comes from `selection`. Read-only, what a resizer or a drag
+    // would change stays off the canvas too: only measurements land.
+    const kept = changes.filter((c) => c.type !== 'remove' && c.type !== 'select' && !(readOnlyRef.current && (
+      c.type === 'position' || (c.type === 'dimensions' && (c.resizing !== undefined || c.setAttributes))
+    )));
     if (kept.length) {
       setNodes((ns) => applyNodeChanges(kept, ns));
     }

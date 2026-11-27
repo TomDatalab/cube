@@ -11,6 +11,8 @@ import type { CubeNode as CubeModel, ModelDefinition } from './modelGraph';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type CubeNodeData = {
+  // Someone else edits the model: no resizer.
+  readOnly?: boolean;
   cube: CubeModel;
   // The names shown: the cube's own, or the generated ones in auto mode.
   dimensions: string[];
@@ -72,13 +74,15 @@ export const CubeNode = memo(({ id, data, selected }: CubeNodeProps) => {
         selected && 'tw:ring-2 tw:ring-ring'
       )}
     >
-      <NodeResizer
-        isVisible={Boolean(selected)}
-        minWidth={160}
-        minHeight={28}
-        color="var(--ring)"
-        onResizeEnd={(_event, box) => data.onResize(id ?? `cube:${cube.id}`, box)}
-      />
+      {data.readOnly ? null : (
+        <NodeResizer
+          isVisible={Boolean(selected)}
+          minWidth={160}
+          minHeight={28}
+          color="var(--ring)"
+          onResizeEnd={(_event, box) => data.onResize(id ?? `cube:${cube.id}`, box)}
+        />
+      )}
       <Handle type="target" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
       <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
       <div

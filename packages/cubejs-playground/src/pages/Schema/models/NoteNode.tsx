@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils';
 import type { TableColor } from './modelGraph';
 
 export type NoteNodeData = {
+  // Someone else edits the model: no resizer.
+  readOnly?: boolean;
   id: string;
   text: string;
   color?: TableColor;
@@ -35,13 +37,15 @@ export const NoteNode = memo(({ id, data, selected }: NoteNodeProps) => (
       overflowWrap: 'anywhere',
     }}
   >
-    <NodeResizer
-      isVisible={Boolean(selected)}
-      minWidth={60}
-      minHeight={30}
-      color="var(--ring)"
-      onResizeEnd={(_event, box) => data.onResize(id ?? `note:${data.id}`, box)}
-    />
+    {data.readOnly ? null : (
+      <NodeResizer
+        isVisible={Boolean(selected)}
+        minWidth={60}
+        minHeight={30}
+        color="var(--ring)"
+        onResizeEnd={(_event, box) => data.onResize(id ?? `note:${data.id}`, box)}
+      />
+    )}
     {data.text}
   </div>
 ));

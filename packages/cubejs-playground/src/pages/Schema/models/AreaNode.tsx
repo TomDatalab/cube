@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils';
 import type { TableColor } from './modelGraph';
 
 export type AreaNodeData = {
+  // Someone else edits the model: no resizer.
+  readOnly?: boolean;
   id: string;
   name: string;
   fill?: TableColor;
@@ -33,13 +35,15 @@ export const AreaNode = memo(({ id, data, selected }: AreaNodeProps) => (
       border: `1.5px dashed var(--model-${data.border ?? 'slate'})`,
     }}
   >
-    <NodeResizer
-      isVisible={Boolean(selected)}
-      minWidth={80}
-      minHeight={60}
-      color="var(--ring)"
-      onResizeEnd={(_event, box) => data.onResize(id ?? `area:${data.id}`, box)}
-    />
+    {data.readOnly ? null : (
+      <NodeResizer
+        isVisible={Boolean(selected)}
+        minWidth={80}
+        minHeight={60}
+        color="var(--ring)"
+        onResizeEnd={(_event, box) => data.onResize(id ?? `area:${data.id}`, box)}
+      />
+    )}
     <span
       data-slot="model-area-name"
       className="tw:absolute tw:right-2 tw:bottom-1 tw:max-w-full tw:truncate tw:font-bold"

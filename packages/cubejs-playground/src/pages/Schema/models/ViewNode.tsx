@@ -8,6 +8,8 @@ import type { ViewColumn } from './modelGraph';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type ViewNodeData = {
+  // Someone else edits the model: no resizer.
+  readOnly?: boolean;
   id: string;
   name: string;
   columns: ViewColumn[];
@@ -34,13 +36,15 @@ export const ViewNode = memo(({ id, data, selected }: ViewNodeProps) => (
     )}
     style={{ background: 'var(--model-view)', borderColor: 'var(--model-view-border)' }}
   >
-    <NodeResizer
-      isVisible={Boolean(selected)}
-      minWidth={160}
-      minHeight={28}
-      color="var(--ring)"
-      onResizeEnd={(_event, box) => data.onResize(id ?? `view:${data.id}`, box)}
-    />
+    {data.readOnly ? null : (
+      <NodeResizer
+        isVisible={Boolean(selected)}
+        minWidth={160}
+        minHeight={28}
+        color="var(--ring)"
+        onResizeEnd={(_event, box) => data.onResize(id ?? `view:${data.id}`, box)}
+      />
+    )}
     <Handle type="target" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
     <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
     <div

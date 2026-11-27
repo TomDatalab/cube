@@ -13,6 +13,8 @@ import type { TableColor } from './modelGraph';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type TableNodeData = {
+  // Someone else edits the model: no resizer, no Remove.
+  readOnly?: boolean;
   alias: string;
   schema: string;
   table: string;
@@ -116,13 +118,15 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
         selected && 'tw:ring-2 tw:ring-ring'
       )}
     >
-      <NodeResizer
-        isVisible={Boolean(selected)}
-        minWidth={160}
-        minHeight={28}
-        color="var(--ring)"
-        onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
-      />
+      {data.readOnly ? null : (
+        <NodeResizer
+          isVisible={Boolean(selected)}
+          minWidth={160}
+          minHeight={28}
+          color="var(--ring)"
+          onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
+        />
+      )}
       <Handle type="target" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
       <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
       <div
@@ -151,16 +155,18 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
           ) : null}
         </div>
         {data.draft ? <span className="tw:text-[10px] tw:text-foreground/70">new</span> : null}
-        <button
-          type="button"
-          data-slot="model-table-remove"
-          aria-label={`Remove ${data.alias}`}
-          title={data.shortcut ? 'Remove this shortcut' : 'Remove from the model'}
-          className={ICON_BUTTON}
-          onClick={() => data.onRemove(id ?? data.alias)}
-        >
-          <X className="tw:size-3" />
-        </button>
+        {data.readOnly ? null : (
+          <button
+            type="button"
+            data-slot="model-table-remove"
+            aria-label={`Remove ${data.alias}`}
+            title={data.shortcut ? 'Remove this shortcut' : 'Remove from the model'}
+            className={ICON_BUTTON}
+            onClick={() => data.onRemove(id ?? data.alias)}
+          >
+            <X className="tw:size-3" />
+          </button>
+        )}
         {data.collapsed ? data.columns.map((c) => (
           <span key={c.name}>
             <Handle type="target" position={Position.Left} id={c.name} style={HIDDEN_HANDLE_STYLE} isConnectable={false} />

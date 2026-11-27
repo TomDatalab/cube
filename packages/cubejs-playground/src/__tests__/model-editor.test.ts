@@ -27,6 +27,8 @@ const flow = vi.hoisted(() => ({
   setCenter: null as any,
   updated: [] as string[],
   fitView: null as any,
+  // The changes the editor applied to its nodes.
+  applied: [] as any[],
 }));
 
 vi.mock('@xyflow/react', async () => {
@@ -56,7 +58,7 @@ vi.mock('@xyflow/react', async () => {
     ReactFlowProvider: ({ children }: any) => children,
     ViewportPortal: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
-    NodeResizer: () => null,
+    NodeResizer: () => h('span', { 'data-resizer': '' }),
     useUpdateNodeInternals: () => (id: string) => flow.updated.push(id),
     MiniMap: () => null,
     BaseEdge: ({ id }: any) => h('path', { 'data-edge-path': id }),
@@ -79,7 +81,10 @@ vi.mock('@xyflow/react', async () => {
       getInternalNode: () => undefined,
       fitView: flow.fitView,
     }),
-    applyNodeChanges: (_changes: unknown, nodes: unknown) => nodes,
+    applyNodeChanges: (changes: unknown[], nodes: unknown) => {
+      flow.applied.push(...changes);
+      return nodes;
+    },
   };
 });
 
@@ -186,6 +191,7 @@ describe('ModelEditor', () => {
     flow.zoomOut = vi.fn();
     flow.zoomTo = vi.fn();
     flow.updated = [];
+    flow.applied = [];
     flow.setCenter = vi.fn();
     flow.fitView = vi.fn();
     api = {
@@ -2900,6 +2906,28 @@ describe('ModelEditor', () => {
       expect(preview.matches(':disabled')).toBe(false);
       await act(async () => preview.click());
       expect(api.modelSql).toHaveBeenCalledWith('m1', expect.anything(), { drop: false, onlyNew: false, only: ['orders'] });
+    });
+
+    it('read-only nodes have no Remove button and no resizer, and resizes are dropped', async () => {
+      api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+      await render();
+      await select('orders');
+      expect(node('orders').querySelector('[data-slot="model-table-remove"]')).toBeNull();
+      ['orders', 'customers', 'cube:c1'].forEach((id) => expect(node(id).querySelector('[data-resizer]'), id).toBeNull());
+      flow.applied = [];
+      await act(async () => flow.props.onNodesChange([
+        {
+          id: 'orders', type: 'dimensions', resizing: true, setAttributes: true, dimensions: { width: 400, height: 300 },
+        },
+        { id: 'orders', type: 'position', position: { x: 50, y: 50 } },
+        { id: 'customers', type: 'dimensions', dimensions: { width: 180, height: 90 } },
+      ]));
+      // What React Flow measures still lands; what a resizer would change does not.
+      expect(flow.applied).toEqual([{ id: 'customers', type: 'dimensions', dimensions: { width: 180, height: 90 } }]);
+
+      await act(async () => button('Take control').click());
+      expect(node('orders').querySelector('[data-slot="model-table-remove"]')).not.toBeNull();
+      expect(node('orders').querySelector('[data-resizer]')).not.toBeNull();
     });
 
     it('stays read-only after Take control until the model is reloaded', async () => {
