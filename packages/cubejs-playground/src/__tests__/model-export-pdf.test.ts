@@ -94,7 +94,8 @@ describe('exportPdf slicing', () => {
     ]);
     expect(fake.pdf.addPage).toHaveBeenCalledTimes(3);
     expect(fake.pdf.addImage).toHaveBeenCalledTimes(4);
-    expect(fake.pdf.addImage.mock.calls[0].slice(1)).toEqual(['PNG', 10, 10, 277, 190]);
+    // Deflated: jsPDF stores a PNG raw otherwise (9 MB a page).
+    expect(fake.pdf.addImage.mock.calls[0].slice(1)).toEqual(['PNG', 10, 10, 277, 190, undefined, 'FAST']);
     expect(fake.pdf.save).toHaveBeenCalledWith('Sales.pdf');
   });
 

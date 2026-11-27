@@ -65,7 +65,8 @@ export async function exportPdf(
     if (i > 0) {
       pdf.addPage(format, orientation);
     }
-    pdf.addImage(canvas, 'PNG', margin, margin, page.width - 2 * margin, page.height - 2 * margin);
+    // 'FAST' deflates the PNG: jsPDF stores it raw otherwise.
+    pdf.addImage(canvas, 'PNG', margin, margin, page.width - 2 * margin, page.height - 2 * margin, undefined, 'FAST');
   });
   pdf.save(fileName);
 }
