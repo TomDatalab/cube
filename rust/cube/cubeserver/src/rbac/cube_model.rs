@@ -21,7 +21,9 @@ pub struct Definition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub tables: Vec<ModelTable>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<String>,
     pub joins: Vec<ModelJoin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +34,157 @@ pub struct Definition {
     pub areas: Vec<Area>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<ModelView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cubes: Vec<CubeNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cube_joins: Vec<CubeJoin>,
+}
+
+pub const DIMENSION_TYPES: [&str; 5] = ["string", "number", "time", "boolean", "geo"];
+pub const MEASURE_TYPES: [&str; 8] = [
+    "count",
+    "count_distinct",
+    "count_distinct_approx",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "number",
+];
+pub const MEASURE_FORMATS: [&str; 2] = ["percent", "currency"];
+pub const SOURCE_KINDS: [&str; 3] = ["table", "joined", "sql"];
+
+/// A cube drawn on the canvas, with its own members.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// A palette name from [`COLORS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub source: CubeSource,
+    pub dimensions: Vec<CubeDimension>,
+    pub measures: Vec<CubeMeasure>,
+    pub segments: Vec<CubeSegment>,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<i32>,
+}
+
+/// Where a cube reads from. `kind` is one of [`SOURCE_KINDS`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeSource {
+    pub kind: String,
+    /// The table alias for `table`, the primary table for `joined`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    /// A column of `table`, used in auto mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<String>,
+    /// The query of a `sql` cube.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    /// Aliases a `sql` cube reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeDimension {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// `alias.column` in a `joined` cube, a plain column otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub primary_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeMeasure {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeSegment {
+    pub name: String,
+    pub sql: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// A reference between two cubes; `on` pairs dimensions of `from` and `to`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeJoin {
+    pub id: String,
+    /// Cube ids.
+    pub from: String,
+    pub to: String,
+    pub relationship: String,
+    pub on: Vec<ColumnPair>,
+    pub points: Vec<Point>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+/// Turns the old single-cube shape into a cube on the canvas: a set
+/// `primary` becomes cube `c1` (when there are no cubes yet), and `primary`
+/// and `primaryKey` are cleared either way.
+pub fn upgrade(def: &mut Definition, cube_name: &str) {
+    if let Some(primary) = def.primary.take() {
+        if def.cubes.is_empty() {
+            let x = def.tables.iter().map(|t| t.x).fold(0.0, f64::max) + 320.0;
+            let y = def
+                .tables
+                .iter()
+                .find(|t| t.alias == primary)
+                .map_or(0.0, |t| t.y);
+            def.cubes.push(CubeNode {
+                id: "c1".into(),
+                name: cube_name.into(),
+                source: CubeSource {
+                    kind: "joined".into(),
+                    table: Some(primary),
+                    primary_key: def.primary_key.clone(),
+                    ..Default::default()
+                },
+                x,
+                y,
+                ..Default::default()
+            });
+        }
+    }
+    def.primary_key = None;
 }
 
 /// Free text on the canvas.
@@ -770,6 +923,133 @@ pub fn validate(def: &Definition) -> Result<(), String> {
                 view.name
             ));
         }
+    }
+
+    validate_cubes(def, &aliases)
+}
+
+fn validate_cubes(def: &Definition, aliases: &HashSet<&str>) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    let mut names = HashSet::new();
+    for cube in &def.cubes {
+        let name = cube.name.as_str();
+        if !seen.insert(cube.id.as_str()) {
+            return Err(format!("O objeto {} se repete", cube.id));
+        }
+        for size in [cube.width, cube.height].into_iter().flatten() {
+            if !size.is_finite() || size <= 0.0 {
+                return Err(format!("Tamanho inválido em {}: {size}", cube.id));
+            }
+        }
+        if !cube.x.is_finite() || !cube.y.is_finite() {
+            return Err(format!("Posição inválida em {}", cube.id));
+        }
+        if !valid_ident(name) {
+            return Err(format!("Nome de cubo inválido: {name}"));
+        }
+        if !names.insert(name) {
+            return Err(format!("O cubo {name} se repete"));
+        }
+        if let Some(c) = &cube.color {
+            if !COLORS.contains(&c.as_str()) {
+                return Err(format!("Cor inválida: {c}"));
+            }
+        }
+        if !SOURCE_KINDS.contains(&cube.source.kind.as_str()) {
+            return Err(format!(
+                "Origem inválida no cubo {name}: {}",
+                cube.source.kind
+            ));
+        }
+        for t in cube.source.table.iter().chain(&cube.source.tables) {
+            if !aliases.contains(t.as_str()) {
+                return Err(format!(
+                    "O cubo {name} lê a tabela {t}, que não está no model"
+                ));
+            }
+        }
+        let mut members = HashSet::new();
+        let member_names = cube
+            .dimensions
+            .iter()
+            .map(|m| &m.name)
+            .chain(cube.measures.iter().map(|m| &m.name))
+            .chain(cube.segments.iter().map(|m| &m.name));
+        for m in member_names {
+            if !valid_ident(m) {
+                return Err(format!("Nome de membro inválido: {name}.{m}"));
+            }
+            if !members.insert(m.as_str()) {
+                return Err(format!("O membro {name}.{m} se repete"));
+            }
+        }
+        let needs = |m: &str| format!("O membro {name}.{m} precisa de SQL ou de coluna, não dos dois");
+        for d in &cube.dimensions {
+            if !DIMENSION_TYPES.contains(&d.kind.as_str()) {
+                return Err(format!("Tipo inválido em {name}.{}: {}", d.name, d.kind));
+            }
+            if d.sql.is_some() == d.column.is_some() {
+                return Err(needs(&d.name));
+            }
+        }
+        for m in &cube.measures {
+            if !MEASURE_TYPES.contains(&m.kind.as_str()) {
+                return Err(format!("Tipo inválido em {name}.{}: {}", m.name, m.kind));
+            }
+            if let Some(f) = &m.format {
+                if !MEASURE_FORMATS.contains(&f.as_str()) {
+                    return Err(format!("Tipo inválido em {name}.{}: {f}", m.name));
+                }
+            }
+            let both = m.sql.is_some() && m.column.is_some();
+            let neither = m.sql.is_none() && m.column.is_none() && m.kind != "count";
+            if both || neither {
+                return Err(needs(&m.name));
+            }
+        }
+    }
+
+    let ids: HashMap<&str, &str> = def
+        .cubes
+        .iter()
+        .map(|c| (c.id.as_str(), c.name.as_str()))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for join in &def.cube_joins {
+        if !seen.insert(join.id.as_str()) {
+            return Err(format!("O objeto {} se repete", join.id));
+        }
+        let (Some(a), Some(b)) = (ids.get(join.from.as_str()), ids.get(join.to.as_str())) else {
+            return Err(format!(
+                "A ligação {} liga cubos que não estão no model",
+                join.id
+            ));
+        };
+        if join.from == join.to {
+            return Err(format!(
+                "A ligação {} liga cubos que não estão no model",
+                join.id
+            ));
+        }
+        if !RELATIONSHIPS.contains(&join.relationship.as_str()) {
+            return Err(format!("Relacionamento inválido: {}", join.relationship));
+        }
+        if join.on.is_empty() {
+            return Err(format!("A ligação {} não tem colunas", join.id));
+        }
+        if join.points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Err(format!("Ponto inválido na ligação {}", join.id));
+        }
+        let key = if join.from < join.to {
+            (join.from.as_str(), join.to.as_str())
+        } else {
+            (join.to.as_str(), join.from.as_str())
+        };
+        if pairs.contains(&key) {
+            return Err(format!("Os cubos {a} e {b} já estão ligados"));
+        }
+        pairs.push(key);
     }
 
     Ok(())
@@ -1847,6 +2127,164 @@ mod tests {
         assert_eq!(
             validate_types(&def, "postgres").unwrap_err(),
             "Tipo inválido para recent.id: int"
+        );
+    }
+
+    fn cubes_json() -> serde_json::Value {
+        let mut v = v2_json();
+        v["cubes"] = serde_json::json!([{
+            "id": "c1", "name": "sales", "title": "Sales", "description": "d", "color": "teal",
+            "source": { "kind": "joined", "table": "orders", "primaryKey": "id" },
+            "dimensions": [
+                { "name": "status", "type": "string", "column": "orders.status", "title": "Status" },
+                { "name": "id", "type": "number", "sql": "orders.id", "primaryKey": true }
+            ],
+            "measures": [
+                { "name": "count", "type": "count" },
+                { "name": "total", "type": "sum", "column": "orders.total", "title": "T", "format": "currency" }
+            ],
+            "segments": [{ "name": "big", "sql": "total > 10", "title": "Big" }],
+            "x": 10.0, "y": 20.0, "width": 240.0, "height": 180.0, "z": 4
+        }, {
+            "id": "c2", "name": "recent", 
+            "source": { "kind": "sql", "sql": "select 1", "tables": ["customers"] },
+            "dimensions": [], "measures": [], "segments": [],
+            "x": 400.0, "y": 20.0
+        }]);
+        v["cubeJoins"] = serde_json::json!([{
+            "id": "cj1", "from": "c1", "to": "c2", "relationship": "many_to_one",
+            "on": [{ "from": "status", "to": "id" }],
+            "points": [{ "x": 1.0, "y": 2.0 }], "hidden": true
+        }]);
+        v
+    }
+
+    #[test]
+    fn accepts_cubes_and_cube_joins() {
+        let value = cubes_json();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap(), value);
+        let old = serde_json::to_value(orders_customers()).unwrap();
+        let keys = old.as_object().unwrap();
+        for k in ["cubes", "cubeJoins"] {
+            assert!(!keys.contains_key(k), "{k}");
+        }
+    }
+
+    #[test]
+    fn upgrade_turns_primary_into_a_cube() {
+        let mut def: Definition = serde_json::from_value(v2_json()).unwrap();
+        upgrade(&mut def, "vendas");
+        assert_eq!(
+            def.cubes,
+            vec![CubeNode {
+                id: "c1".into(),
+                name: "vendas".into(),
+                source: CubeSource {
+                    kind: "joined".into(),
+                    table: Some("orders".into()),
+                    primary_key: Some("id".into()),
+                    ..Default::default()
+                },
+                x: 620.0,
+                y: 0.0,
+                ..Default::default()
+            }]
+        );
+        assert_eq!((def.primary.clone(), def.primary_key.clone()), (None, None));
+        let once = def.clone();
+        upgrade(&mut def, "vendas");
+        assert_eq!(def, once);
+        let mut none = orders_customers();
+        none.primary = None;
+        upgrade(&mut none, "vendas");
+        assert!(none.cubes.is_empty());
+    }
+
+    #[test]
+    fn refuses_bad_cubes() {
+        let bad = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = cubes_json();
+            edit(&mut value);
+            let def: Definition = serde_json::from_value(value).unwrap();
+            validate(&def).unwrap_err()
+        };
+        assert_eq!(bad(&|v| v["cubes"][1]["id"] = "c1".into()), "O objeto c1 se repete");
+        assert_eq!(bad(&|v| v["cubes"][0]["name"] = "1x".into()), "Nome de cubo inválido: 1x");
+        assert_eq!(bad(&|v| v["cubes"][1]["name"] = "sales".into()), "O cubo sales se repete");
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["source"]["kind"] = "view".into()),
+            "Origem inválida no cubo sales: view"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["source"]["table"] = "ghost".into()),
+            "O cubo sales lê a tabela ghost, que não está no model"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][1]["source"]["tables"] = serde_json::json!(["ghost"])),
+            "O cubo recent lê a tabela ghost, que não está no model"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["dimensions"][0]["name"] = "a-b".into()),
+            "Nome de membro inválido: sales.a-b"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["measures"][1]["name"] = "status".into()),
+            "O membro sales.status se repete"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["dimensions"][0]["type"] = "int".into()),
+            "Tipo inválido em sales.status: int"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["measures"][1]["type"] = "median".into()),
+            "Tipo inválido em sales.total: median"
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["measures"][1]["format"] = "euro".into()),
+            "Tipo inválido em sales.total: euro"
+        );
+        let both = "O membro sales.status precisa de SQL ou de coluna, não dos dois";
+        assert_eq!(bad(&|v| v["cubes"][0]["dimensions"][0]["sql"] = "x".into()), both);
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["dimensions"][0].as_object_mut().unwrap().remove("column")
+                .map(|_| ()).unwrap_or(())),
+            both
+        );
+        assert_eq!(
+            bad(&|v| v["cubes"][0]["measures"][1].as_object_mut().unwrap().remove("column")
+                .map(|_| ()).unwrap_or(())),
+            "O membro sales.total precisa de SQL ou de coluna, não dos dois"
+        );
+        assert_eq!(bad(&|v| v["cubes"][0]["color"] = "nope".into()), "Cor inválida: nope");
+    }
+
+    #[test]
+    fn refuses_bad_cube_joins() {
+        let bad = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = cubes_json();
+            edit(&mut value);
+            let def: Definition = serde_json::from_value(value).unwrap();
+            validate(&def).unwrap_err()
+        };
+        let msg = "A ligação cj1 liga cubos que não estão no model";
+        assert_eq!(bad(&|v| v["cubeJoins"][0]["to"] = "c9".into()), msg);
+        assert_eq!(bad(&|v| v["cubeJoins"][0]["to"] = "c1".into()), msg);
+        assert_eq!(
+            bad(&|v| v["cubeJoins"][0]["relationship"] = "many".into()),
+            "Relacionamento inválido: many"
+        );
+        assert_eq!(
+            bad(&|v| v["cubeJoins"][0]["on"] = serde_json::json!([])),
+            "A ligação cj1 não tem colunas"
+        );
+        assert_eq!(
+            bad(&|v| v["cubeJoins"].as_array_mut().unwrap().push(serde_json::json!({
+                "id": "cj2", "from": "c2", "to": "c1", "relationship": "one_to_one",
+                "on": [{ "from": "id", "to": "id" }], "points": []
+            }))),
+            "Os cubos recent e sales já estão ligados"
         );
     }
 }
