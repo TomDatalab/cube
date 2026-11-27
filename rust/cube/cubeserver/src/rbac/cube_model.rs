@@ -1287,9 +1287,8 @@ struct Shaped {
     segments: Vec<Yaml>,
     /// What a cube join may name on this cube.
     dimension_names: HashSet<String>,
-    /// The SQL of each dimension renamed to its friendly name, by its name
-    /// in the model: a reference to it is written as that SQL, since a name
-    /// with spaces cannot be referenced.
+    /// The friendly name each renamed member is written under, by its name
+    /// in the model.
     renamed: HashMap<String, String>,
 }
 
@@ -1331,12 +1330,12 @@ pub fn build_all(
                     ));
                 }
             }
-            let left = shaped[from].renamed.get(&pair.from).cloned().unwrap_or_else(|| format!("{{CUBE.{}}}", pair.from));
-            let right = match shaped[to].renamed.get(&pair.to) {
-                Some(sql) => sql.replace("{CUBE}", &format!("{{{to_name}}}")),
-                None => format!("{{{to_name}.{}}}", pair.to),
-            };
-            on.push(format!("{left} = {right}"));
+            let written = |i: usize, m: &str| shaped[i].renamed.get(m).cloned().unwrap_or_else(|| m.to_string());
+            on.push(format!(
+                "{{CUBE.{}}} = {{{to_name}.{}}}",
+                written(from, &pair.from),
+                written(to, &pair.to)
+            ));
         }
         let mut written = Mapping::new();
         written.insert("name".into(), to_name.into());
@@ -1617,61 +1616,43 @@ fn friendly_name_ok(name: &str) -> bool {
 }
 
 /// Each member with a friendly name (`title`) is written under it: its
-/// `name` is the friendly name, its SQL still reads the column. A name with
-/// spaces cannot be referenced in SQL, so `{CUBE.x}`, `{x}` and `{cube.x}`
-/// of a renamed dimension become its SQL; of a renamed measure, an error.
+/// `name` is the friendly name, its SQL still reads the column, and
+/// `{CUBE.x}`, `{x}` and `{cube.x}` in the cube's SQL follow the rename.
 fn named(shaped: &mut Shaped, cube: &str) -> Result<(), String> {
     let text = |m: &Yaml, key: &str| m.get(key).and_then(Yaml::as_str).map(str::to_string);
-    let mut renamed_dims = HashMap::new();
-    let mut renamed_measures = HashMap::new();
+    let mut renamed = HashMap::new();
     let mut final_names = HashSet::new();
-    for (group, list) in [("dimensions", &shaped.dimensions), ("measures", &shaped.measures)] {
-        for m in list {
-            let Some(old) = text(m, "name") else { continue };
-            let new = text(m, "title").map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-            let new = match new {
-                Some(new) if new != old => {
-                    if !friendly_name_ok(&new) {
-                        return Err(format!(
-                            "O nome amigável \"{new}\" de {cube}.{old} não é válido: use letras, números, _ e espaços simples"
-                        ));
-                    }
-                    if group == "dimensions" {
-                        renamed_dims.insert(old.clone(), (new.clone(), text(m, "sql")));
-                    } else {
-                        renamed_measures.insert(old.clone(), new.clone());
-                    }
-                    new
+    for m in shaped.dimensions.iter().chain(shaped.measures.iter()) {
+        let Some(old) = text(m, "name") else { continue };
+        let new = match text(m, "title").map(|t| t.trim().to_string()) {
+            Some(new) if !new.is_empty() && new != old => {
+                if !friendly_name_ok(&new) {
+                    return Err(format!(
+                        "O nome amigável \"{new}\" de {cube}.{old} não é válido: use letras, números, _ e espaços simples"
+                    ));
                 }
-                _ => old,
-            };
-            if !final_names.insert(new.clone()) {
-                return Err(format!("O nome \"{new}\" se repete no cubo {cube}"));
+                renamed.insert(old, new.clone());
+                new
             }
+            _ => old,
+        };
+        if !final_names.insert(new.clone()) {
+            return Err(format!("O nome \"{new}\" se repete no cubo {cube}"));
         }
     }
-    if renamed_dims.is_empty() && renamed_measures.is_empty() {
+    if renamed.is_empty() {
         return Ok(());
     }
-    // What `{token}` of a renamed member is written as, if anything.
     let replace = |token: &str| -> Result<Option<String>, String> {
-        let member = match token.split_once('.') {
-            Some((p, m)) if p == "CUBE" || p == cube => m,
+        let (prefix, member) = match token.split_once('.') {
+            Some((p, m)) if p == "CUBE" || p == cube => (Some(p), m),
             Some(_) => return Ok(None),
-            None => token,
+            None => (None, token),
         };
-        if let Some((_, sql)) = renamed_dims.get(member) {
-            return match sql {
-                Some(sql) => Ok(Some(format!("({sql})"))),
-                None => Err(format!("A dimensão {cube}.{member} não tem SQL para ser referenciada")),
-            };
-        }
-        if let Some(new) = renamed_measures.get(member) {
-            return Err(format!(
-                "A medida {cube}.{member} tem o nome amigável \"{new}\" e por isso não pode ser usada no SQL de outro membro"
-            ));
-        }
-        Ok(None)
+        Ok(renamed.get(member.trim()).map(|new| match prefix {
+            Some(p) => format!("{{{p}.{new}}}"),
+            None => format!("{{{new}}}"),
+        }))
     };
     for m in shaped
         .dimensions
@@ -1681,30 +1662,14 @@ fn named(shaped: &mut Shaped, cube: &str) -> Result<(), String> {
     {
         let Yaml::Mapping(m) = m else { continue };
         if let Some(sql) = m.get("sql").and_then(Yaml::as_str) {
-            let mut sql = sql.to_string();
-            // An inlined SQL may reference another renamed dimension.
-            for _ in 0..8 {
-                let next = rewrite_refs(&sql, &replace)?;
-                if next == sql {
-                    break;
-                }
-                sql = next;
-            }
+            let sql = rewrite_refs(sql, &replace)?;
             m.insert("sql".into(), sql.into());
         }
-        let renamed = m
-            .get("name")
-            .and_then(Yaml::as_str)
-            .and_then(|n| renamed_dims.get(n).map(|(new, _)| new).or_else(|| renamed_measures.get(n)))
-            .cloned();
-        if let Some(new) = renamed {
+        if let Some(new) = m.get("name").and_then(Yaml::as_str).and_then(|n| renamed.get(n)).cloned() {
             m.insert("name".into(), new.into());
         }
     }
-    shaped.renamed = renamed_dims
-        .into_iter()
-        .filter_map(|(old, (_, sql))| sql.map(|sql| (old, format!("({sql})"))))
-        .collect();
+    shaped.renamed = renamed;
     Ok(())
 }
 
@@ -2196,11 +2161,8 @@ mod tests {
             Some("Quantidade de pedidos")
         );
         assert!(orders["dimensions"].as_sequence().unwrap().iter().all(|d| d["name"] != "customer_id"));
-        // A name with spaces cannot be referenced: the cube join reads the column.
-        assert_eq!(
-            orders["joins"][0]["sql"].as_str(),
-            Some(r#"({CUBE}."customer_id") = {customers.id}"#)
-        );
+        // The cube join names it by its friendly name.
+        assert_eq!(orders["joins"][0]["sql"].as_str(), Some("{CUBE.Cliente} = {customers.id}"));
         // What the server compiles: the model loads and a query plans.
         let yaml = &built.iter().map(|b| b.content.clone()).collect::<Vec<_>>().join("\n---\n");
         let model = cubeplanner::Model::from_yaml_documents(
@@ -2245,23 +2207,24 @@ mod tests {
         }];
         def.cubes = vec![c.clone()];
         let orders = yaml_of(&build_def(&def).unwrap(), "orders");
-        // A renamed dimension is referenced by its SQL; the others as before.
+        // References follow the rename; the others are kept.
         assert_eq!(
             orders["segments"][0]["sql"].as_str(),
-            Some(r#"({CUBE}."order_id") > 0 AND ({CUBE}."order_id") < 9 AND {id} > 0 AND {other.order_id} = 1"#)
+            Some("{CUBE.Pedido} > 0 AND {orders.Pedido} < 9 AND {id} > 0 AND {other.order_id} = 1")
         );
         assert!(member(&orders, "dimensions", "Pedido")["sql"].is_string());
 
-        // A renamed measure cannot be used in SQL.
-        let mut bad = c.clone();
-        bad.measures.push(CubeMeasure {
+        // A renamed measure is referenced by its friendly name too.
+        let mut half = c.clone();
+        half.measures.push(CubeMeasure {
             name: "avg".into(),
             kind: "number".into(),
             sql: Some("{n} / 2".into()),
             ..Default::default()
         });
-        def.cubes = vec![bad];
-        assert!(build_def(&def).unwrap_err().contains("não pode ser usada no SQL"));
+        def.cubes = vec![half];
+        let orders = yaml_of(&build_def(&def).unwrap(), "orders");
+        assert_eq!(member(&orders, "measures", "avg")["sql"].as_str(), Some("{Quantidade} / 2"));
 
         // A friendly name that is not a name, or one taken twice.
         for (title, err) in [("Total.", "não é válido"), ("Total!", "não é válido"), ("id", "se repete")] {

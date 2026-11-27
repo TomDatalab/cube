@@ -9,6 +9,7 @@ import { useDeepMemo } from '../../hooks/deep-memo';
 import { apiFetch } from '../../shared/helpers';
 import { metaToTypes } from '../../utils';
 import { CubeGraphQLConverter } from './CubeGraphQLConverter';
+import { withGraphQLNames } from './graphqlNames';
 import { useSecurityContext, useToken } from '../../hooks';
 
 const Wrapper = styled.div`
@@ -80,7 +81,8 @@ export default function GraphiQLSandbox({
     }
 
     try {
-      const converter = new CubeGraphQLConverter(query, types);
+      const named = withGraphQLNames(query, types);
+      const converter = new CubeGraphQLConverter(named.query, named.types);
       return converter.convert().replace('{', ' { ').replace('}', ' } ');
     } catch (error: any) {
       return `# ${error}\n`;

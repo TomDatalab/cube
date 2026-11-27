@@ -165,7 +165,7 @@ pub fn get_json_query(
         });
 
         for member_node in &cube_node.children {
-            let member_name = &member_node.name;
+            let member_name = &meta.member_of_field(&cube_name, &member_node.name);
             let member_type = meta.member_type(&cube_name, member_name);
             let key = format!("{cube_name}.{member_name}");
 
@@ -231,7 +231,54 @@ pub fn get_json_query(
         query.insert("ungrouped".to_string(), ungrouped.clone());
     }
 
+    members_of_fields(&mut query, meta);
     CubeQueryJson(Value::Object(query))
+}
+
+/// `cube.field` as the member the model names: a GraphQL field of a member
+/// named with spaces (`quantidadeTotal`) back to `Quantidade Total`.
+fn member_of(path: &str, meta: &MetaConfig) -> String {
+    match path.split_once('.') {
+        Some((cube, field)) => format!("{cube}.{}", meta.member_of_field(cube, field)),
+        None => path.to_string(),
+    }
+}
+
+/// Every member the query names — order, filters at any depth, time
+/// dimensions — as the model names it.
+fn members_of_fields(query: &mut Map<String, Value>, meta: &MetaConfig) {
+    fn filters(list: &mut Value, meta: &MetaConfig) {
+        let Some(items) = list.as_array_mut() else { return };
+        for item in items {
+            let Some(obj) = item.as_object_mut() else { continue };
+            if let Some(Value::String(member)) = obj.get("member") {
+                let member = member_of(member, meta);
+                obj.insert("member".to_string(), Value::String(member));
+            }
+            for key in ["and", "or"] {
+                if let Some(inner) = obj.get_mut(key) {
+                    filters(inner, meta);
+                }
+            }
+        }
+    }
+    if let Some(Value::Array(order)) = query.get_mut("order") {
+        for pair in order {
+            if let Some(Value::String(member)) = pair.get_mut(0) {
+                *member = member_of(member, meta);
+            }
+        }
+    }
+    if let Some(Value::Array(tds)) = query.get_mut("timeDimensions") {
+        for td in tds {
+            if let Some(Value::String(member)) = td.get_mut("dimension") {
+                *member = member_of(member, meta);
+            }
+        }
+    }
+    if let Some(list) = query.get_mut("filters") {
+        filters(list, meta);
+    }
 }
 
 /// The cube name as the data model spells it.

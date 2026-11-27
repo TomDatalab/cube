@@ -2801,6 +2801,13 @@ describe('ModelEditor', () => {
         .dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
       def = await savedDef();
       expect(def.cubes[1].memberTitles).toEqual({ count: 'Clientes' });
+      // A name the cube cannot be built with is flagged at once.
+      expect(pane().querySelector('[data-slot="model-cube-friendly-problem"]')).toBeNull();
+      await fill('[data-slot="model-properties"] input[aria-label="Friendly name of id"]', 'Total!');
+      await act(async () => (pane().querySelector('input[aria-label="Friendly name of id"]') as HTMLInputElement)
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
+      expect(pane().querySelector('[data-slot="model-cube-friendly-problem"]')?.textContent)
+        .toBe('Use letters, digits, _ and single spaces');
     });
 
     it('deleting a cube removes it and its joins, and one undo brings both back', async () => {

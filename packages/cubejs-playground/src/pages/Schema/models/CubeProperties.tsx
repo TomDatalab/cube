@@ -6,8 +6,8 @@ import { Input } from '@/components/ui/input';
 import { Field } from '@/components/kit';
 
 import {
-  addMember, autoMembers, cubeReads, generateMembers, memberTitles, removeMember, renameCube, renameMember, setCube,
-  setCubeSource, setMember, setMemberTitle,
+  addMember, autoMembers, cubeReads, friendlyNameProblem, generateMembers, memberTitles, removeMember, renameCube,
+  renameMember, setCube, setCubeSource, setMember, setMemberTitle,
 } from './cubes';
 import type { MemberGroup } from './cubes';
 import {
@@ -333,6 +333,15 @@ export function CubeProperties({
                   value={titles[name] ?? ''}
                   onCommit={(title) => onChange(setMemberTitle(def, id, group, name, title))}
                 />
+                {friendlyNameProblem(friendly.map((m) => m.name), titles, name) ? (
+                  <span
+                    role="alert"
+                    data-slot="model-cube-friendly-problem"
+                    className="tw:col-span-2 tw:text-[11px] tw:text-destructive"
+                  >
+                    {friendlyNameProblem(friendly.map((m) => m.name), titles, name)}
+                  </span>
+                ) : null}
               </div>
             ))}
           </div>

@@ -45,6 +45,36 @@ cubes:
         type: time
 "#;
 
+/// The same table, its members named with friendly names.
+const FRIENDLY: &str = r#"
+cubes:
+  - name: pedidos
+    sql_table: public.orders
+    measures:
+      - name: Quantidade Total
+        type: count
+      - name: Soma dos Usuários
+        type: sum
+        sql: "{CUBE}.user_id"
+      - name: Usuário Médio
+        type: number
+        sql: "{Soma dos Usuários} / NULLIF({CUBE.Quantidade Total}, 0)"
+    dimensions:
+      - name: Código do Pedido
+        sql: id
+        type: number
+        primary_key: true
+      - name: Situação do Pedido
+        sql: status
+        type: string
+      - name: Data do Pedido
+        sql: created_at
+        type: time
+    segments:
+      - name: concluidos
+        sql: "{CUBE.Situação do Pedido} = 'completed'"
+"#;
+
 /// Parses `postgres://user:pass@host:port/db` into the `CUBEJS_DB_*` variables
 /// the driver reads, and sets them for this process.
 fn set_env_from_url(url: &str) -> Option<()> {
@@ -107,6 +137,7 @@ impl MetaService for NoMeta {
 fn app(cache_prefix: &str) -> (tempfile::TempDir, axum::Router) {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("orders.yml"), MODEL).expect("write model");
+    std::fs::write(dir.path().join("pedidos.yml"), FRIENDLY).expect("write model");
 
     let planner =
         Arc::new(PlannerQueryService::load(dir.path(), Dialect::Postgres, 2).expect("plans"));
@@ -281,4 +312,45 @@ async fn an_unknown_member_is_reported_to_the_client() {
 
     assert_ne!(status, StatusCode::OK);
     assert!(body["error"].as_str().unwrap().contains("nope"), "{body}");
+}
+
+#[tokio::test]
+async fn members_named_with_friendly_names_query_a_real_database() {
+    let url = require_pg!();
+    set_env_from_url(&url).expect("a postgres:// url");
+
+    let (_dir, router) = app("test_load_friendly");
+    let (status, body) = load(
+        router.clone(),
+        json!({
+            "measures": ["pedidos.Quantidade Total", "pedidos.Usuário Médio"],
+            "dimensions": ["pedidos.Situação do Pedido"],
+            "timeDimensions": [{ "dimension": "pedidos.Data do Pedido", "granularity": "month" }],
+            "filters": [{ "member": "pedidos.Situação do Pedido", "operator": "set" }],
+            "segments": ["pedidos.concluidos"],
+            "order": [["pedidos.Quantidade Total", "desc"]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["data"].as_array().expect("rows");
+    assert!(!rows.is_empty(), "{body}");
+    for row in rows {
+        assert_eq!(row["pedidos.Situação do Pedido"], "completed", "{row}");
+        assert!(row.get("pedidos.Quantidade Total").is_some(), "{row}");
+        assert!(row.get("pedidos.Usuário Médio").is_some(), "{row}");
+        assert!(row.get("pedidos.Data do Pedido.month").is_some(), "{row}");
+    }
+
+    // The same counts as the cube with plain names.
+    let (_, plain) = load(router, json!({ "measures": ["orders.count"], "segments": [] })).await;
+    let (_, friendly) = load(
+        app("test_load_friendly_2").1,
+        json!({ "measures": ["pedidos.Quantidade Total"] }),
+    )
+    .await;
+    assert_eq!(
+        plain["data"][0]["orders.count"], friendly["data"][0]["pedidos.Quantidade Total"],
+        "{plain} {friendly}"
+    );
 }

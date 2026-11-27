@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addCube, addCubeJoin, addMember, autoMembers, cubeKeyOf, cubeReads, cubeType, dimensionNames, generateMembers,
   moveCubeJoinEnd, removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource,
-  memberTitles, setCubeSourceLine, setMemberTitle, swapCubeJoin,
+  friendlyNameProblem, memberTitles, setCubeSourceLine, setMemberTitle, swapCubeJoin,
   setMember, snake,
 } from '../pages/Schema/models/cubes';
 import {
@@ -121,6 +121,17 @@ describe('cubes', () => {
     const own = setMemberTitle({ ...def, cubes: [made] }, cube.id, 'dimensions', name, 'Client');
     expect(own.cubes![0].dimensions.find((d) => d.name === name)!.title).toBe('Client');
     expect(memberTitles(own.cubes![0])[name]).toBe('Client');
+  });
+
+  it('friendlyNameProblem follows the server rules', () => {
+    const names = ['id', 'count', 'status'];
+    expect(friendlyNameProblem(names, { count: 'Quantidade Total' }, 'count')).toBeUndefined();
+    expect(friendlyNameProblem(names, { status: 'Situação do Pedido' }, 'status')).toBeUndefined();
+    for (const bad of ['Total!', 'a.b', 'a  b', '1 a']) {
+      expect(friendlyNameProblem(names, { count: bad }, 'count')).toBe('Use letters, digits, _ and single spaces');
+    }
+    expect(friendlyNameProblem(names, { count: 'id' }, 'count')).toBe('Already the name of id');
+    expect(friendlyNameProblem(names, { count: 'Total', status: 'Total' }, 'status')).toBe('Already the name of count');
   });
 
   it('cubeReads walks references from the primary', () => {

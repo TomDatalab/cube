@@ -1,6 +1,7 @@
 import { Meta, Query } from '@cubejs-client/core';
 import * as t from 'graphql/language';
 
+import { withGraphQLNames } from '../../components/GraphQL/graphqlNames';
 import { apiFetch } from '../../shared/helpers';
 import { unCapitalize } from './uncapitalize';
 import { uniqArray } from './uniq-array';
@@ -626,7 +627,8 @@ export function convertJsonQueryToGraphQL({ meta, query }: { meta?: Meta | null;
     return '';
   }
 
-  const converter = new CubeGraphQLConverter(query, types);
+  const named = withGraphQLNames(query, types);
+  const converter = new CubeGraphQLConverter(named.query, named.types);
 
   return converter.convert();
 }

@@ -358,6 +358,23 @@ export function memberTitles(cube: CubeNode): Record<string, string> {
     .map((m) => [m.name, m.title!]));
 }
 
+// Why a member's friendly name cannot be built (the server's
+// cube_model::named): the name each member is built under is its friendly
+// name — words of letters, digits and `_`, one space between them — and two
+// members cannot share one. Undefined when it is fine.
+export function friendlyNameProblem(names: string[], titles: Record<string, string>, name: string): string | undefined {
+  const title = titles[name]?.trim();
+  if (!title || title === name) {
+    return undefined;
+  }
+  if (!/^[\p{L}_][\p{L}\p{N}_]*( [\p{L}\p{N}_]+)*$/u.test(title)) {
+    return 'Use letters, digits, _ and single spaces';
+  }
+  const builtAs = (n: string) => titles[n]?.trim() || n;
+  const other = names.find((n) => n !== name && builtAs(n) === title);
+  return other ? `Already the name of ${other}` : undefined;
+}
+
 // What a cube join may pair on this cube.
 export function dimensionNames(def: ModelDefinition, cube: CubeNode, columnsOf: ColumnsOf): string[] {
   const dimensions = isAuto(cube) ? autoMembers(def, cube, columnsOf).dimensions : cube.dimensions;
