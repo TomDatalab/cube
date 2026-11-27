@@ -130,7 +130,7 @@ function ModelList({
                 onClick={() => onOpen(m.id)}
               >
                 <span className="tw:truncate">{m.name}</span>
-                <span className="tw:text-muted-foreground">{m.cubeName ? `cube ${m.cubeName}` : 'not built yet'}</span>
+                <span className="tw:text-muted-foreground">{m.cubeNames?.length ? `cube ${m.cubeNames.join(', ')}` : 'not built yet'}</span>
               </button>
             </li>
           ))}
@@ -648,17 +648,21 @@ export function SchemaPage({ history }: RouterProps) {
       if (!detail) {
         return current;
       }
-      const entry = { id: saved.id, name: saved.name, cubeName: saved.cubeName };
+      const entry = { id: saved.id, name: saved.name, cubeNames: saved.cubeNames };
       const models = [...(detail.models || []).filter((m) => m.id !== saved.id), entry]
         .sort((a, b) => a.name.localeCompare(b.name));
       return { ...current, [slug]: { ...detail, models } };
     });
   };
 
-  // The build answers with the organization's refreshed detail.
+  // The build answers with the organization's refreshed detail; `cubeName`
+  // is its first cube (none when the model has no cubes).
   const afterBuild = (slug: string, cubeName: string, detail: OrgDetail) => {
     setDetails((current) => ({ ...current, [slug]: detail }));
     refreshOrgs();
+    if (!cubeName) {
+      return;
+    }
     toast.success(`Cube ${cubeName} built`, {
       action: { label: 'Open cube', onClick: () => openUnder(slug, 'cubes', `cube:${slug}:${cubeName}`) },
     });

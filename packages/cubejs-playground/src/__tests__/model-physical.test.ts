@@ -17,8 +17,16 @@ const columnsOf = (t: ModelTable) => (t.draft
 function model(): ModelDefinition {
   return {
     dataSource: 'pg',
-    primary: 'customers',
-    primaryKey: 'id',
+    cubes: [{
+      id: 'c1',
+      name: 'customers',
+      source: { kind: 'joined', table: 'customers', primaryKey: 'id' },
+      dimensions: [],
+      measures: [],
+      segments: [],
+      x: 600,
+      y: 0,
+    }],
     tables: [
       {
         alias: 'customers', schema: 's', table: 'customers', x: 0, y: 0,
@@ -78,6 +86,24 @@ describe('physical', () => {
     expect(items(def).uniqueKeys![0].columns).toEqual(['code']);
     expect(items(def).indexes![0].columns[0].name).toBe('code');
     expect(def.joins[1].from.column).toBe('code');
+  });
+
+  it('a cube on the table follows a renamed column; a removed one drops its key only', () => {
+    const base = model();
+    const def: ModelDefinition = {
+      ...base,
+      cubes: [{
+        ...base.cubes![0],
+        source: { kind: 'joined', table: 'items', primaryKey: 'id' },
+        dimensions: [{ name: 'sku', type: 'string', column: 'items.sku' }],
+      }],
+    };
+    const renamed = renameColumn(renameColumn(def, 'items', 'sku', 'code'), 'items', 'id', 'key');
+    expect(renamed.cubes![0].source.primaryKey).toBe('key');
+    expect(renamed.cubes![0].dimensions[0].column).toBe('items.code');
+    const removed = removeColumn(removeColumn(def, 'items', 'id'), 'items', 'sku');
+    expect(removed.cubes![0].source).toEqual({ kind: 'joined', table: 'items' });
+    expect(removed.cubes![0].dimensions).toEqual(def.cubes![0].dimensions);
   });
 
   it('removeColumn drops empty keys and the references using it', () => {

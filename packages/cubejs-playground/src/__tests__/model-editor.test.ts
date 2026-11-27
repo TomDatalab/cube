@@ -115,8 +115,16 @@ const saved = (): ModelDefinition => ({
       alias: 'customers', schema: 'public', table: 'customers', x: 300, y: 0,
     },
   ],
-  primary: 'orders',
-  primaryKey: 'id',
+  cubes: [{
+    id: 'c1',
+    name: 'sales',
+    source: { kind: 'joined', table: 'orders', primaryKey: 'id' },
+    dimensions: [],
+    measures: [],
+    segments: [],
+    x: 620,
+    y: 0,
+  }],
   joins: [{
     from: { alias: 'orders', column: 'customer_id' },
     to: { alias: 'customers', column: 'id' },
@@ -138,7 +146,7 @@ const view = (definition: ModelDefinition, version = 3): CubeModelView => ({
   organizationId: 'o1',
   name: 'Sales',
   definition,
-  cubeName: null,
+  cubeNames: [],
   version,
   updatedAt: '2026-11-25T00:00:00Z',
   updatedBy: null,
@@ -146,7 +154,9 @@ const view = (definition: ModelDefinition, version = 3): CubeModelView => ({
   dialects: { warehouse: 'postgres' },
 });
 
-const built = { fileName: 'model/sales.yml', content: '', cubeName: 'sales', detail: {} as any };
+const built = {
+  cubes: [{ cubeName: 'sales', fileName: 'model/sales.yml', content: '' }], removed: [], detail: {} as any,
+};
 
 describe('ModelEditor', () => {
   let root: ReturnType<typeof createRoot>;
@@ -250,13 +260,14 @@ describe('ModelEditor', () => {
   const panelItem = (name: string) => [...document.querySelectorAll('[data-slot="model-table-item"]')]
     .find((li) => li.textContent!.trim() === name) as HTMLElement;
 
-  it('shows the saved tables, the principal and each link label', async () => {
+  it('shows the saved tables, the cube key and each link label', async () => {
     await render();
     expect(api.model).toHaveBeenCalledWith('m1');
     const nodes = [...document.querySelectorAll('[data-node]')];
     expect(nodes.map((n) => n.getAttribute('data-node'))).toEqual(['orders', 'customers']);
-    expect(nodes[0].textContent).toContain('principal');
-    expect(nodes[1].textContent).not.toContain('principal');
+    // The cube on orders gives it its key.
+    expect(nodes[0].querySelector('[data-handle="source"][data-id="id"]')!.parentElement!.textContent).toContain('PK');
+    expect(nodes[0].textContent).not.toContain('principal');
     // A handle on each side of every column, named after it.
     expect(nodes[0].querySelectorAll('[data-handle="source"][data-id="customer_id"]').length).toBe(1);
     expect(nodes[0].querySelectorAll('[data-handle="target"][data-id="customer_id"]').length).toBe(1);
@@ -312,20 +323,18 @@ describe('ModelEditor', () => {
     expect(document.querySelector('[data-slot="model-problems"]')).toBeNull();
   });
 
-  it('does not build while a table is not linked, and says which', async () => {
+  it('builds while a table is not linked: a joined cube does not read it', async () => {
     api.model.mockResolvedValueOnce(view({
       ...saved(),
       tables: [...saved().tables, {
         alias: 'products', schema: 'public', table: 'products', x: 0, y: 300,
       }],
     }));
-    const error = vi.spyOn(notify, 'error');
     await render();
+    expect(document.body.textContent).not.toContain('Not linked');
     await act(async () => tool('Build cube').click());
-    expect(error).toHaveBeenCalledWith('Link every table to the principal before building: products');
-    expect(api.buildModel).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain('Build anyway');
-    error.mockRestore();
+    expect(api.buildModel).toHaveBeenCalledWith('m1');
+    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
   });
 
   it('does not retry a build whose path belongs to another file', async () => {
@@ -745,11 +754,11 @@ describe('ModelEditor', () => {
       });
     };
 
-    it('the properties pane edits the model\'s name, principal and primary key', async () => {
+    it('the properties pane edits the model\'s name; cubes replace the principal', async () => {
       await render();
       expect(pane().textContent).toContain('Model properties');
-      expect(pane().querySelector('#model-principal')).not.toBeNull();
-      expect(pane().querySelector('#model-primary-key')).not.toBeNull();
+      expect(pane().querySelector('#model-principal')).toBeNull();
+      expect(pane().querySelector('#model-primary-key')).toBeNull();
       expect(pane().textContent).toContain('warehouse');
       expect(pane().textContent).toContain('2 tables');
       await rename('Sales 2');
@@ -1178,7 +1187,7 @@ describe('ModelEditor', () => {
 
     it('resets the schema when the connection changes', async () => {
       api.model.mockResolvedValueOnce(view({
-        dataSource: '', tables: [], primary: null, primaryKey: null, joins: [],
+        dataSource: '', tables: [], joins: [],
       } as any));
       await render();
       await act(async () => tool('New table').click());
@@ -2145,7 +2154,6 @@ describe('ModelEditor', () => {
         schema: 'public',
         table: 'orders',
         columns: [{ name: 'id', type: 'integer' }],
-        principal: false,
         missing: false,
         draft: false,
         keys: [],

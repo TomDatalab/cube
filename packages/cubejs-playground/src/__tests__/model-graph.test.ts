@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addDraftTable, addTable, canConnect, draftProblem, drafts, layout, setColor, updateDraftTable,
-  connect, emptyDefinition, joinLabel, removeJoin, removeTable, setPrimary, unlinked,
+  connect, emptyDefinition, joinLabel, removeJoin, removeTable,
   updateJoin, renameTable, setTableComment, placeTables, setJoin, showAllJoins, withFormat,
 } from '../pages/Schema/models/modelGraph';
 
@@ -19,11 +19,13 @@ describe('modelGraph', () => {
     expect(emptyDefinition()).toEqual({ dataSource: '', tables: [], joins: [] });
   });
 
-  it('addTable sets dataSource and primary, aliases duplicates, refuses other ds', () => {
+  it('addTable sets dataSource, aliases duplicates, refuses other ds', () => {
     const a = addTable(emptyDefinition(), 'ds', 'public', 'users', 1, 2);
     expect(a.error).toBeUndefined();
     expect(a.def.dataSource).toBe('ds');
-    expect(a.def.primary).toBe('users');
+    expect(a.def).toEqual({
+      dataSource: 'ds', tables: [{ alias: 'users', schema: 'public', table: 'users', x: 1, y: 2 }], joins: [],
+    });
     const b = addTable(a.def, 'ds', 'public', 'users', 0, 0);
     const c = addTable(b.def, 'ds', 'public', 'users', 0, 0);
     expect(c.def.tables.map((t) => t.alias)).toEqual(['users', 'users_2', 'users_3']);
@@ -40,16 +42,15 @@ describe('modelGraph', () => {
     expect(JSON.stringify(def)).toBe(snap);
   });
 
-  it('removeTable drops joins, moves primary, resets dataSource', () => {
+  it('removeTable drops joins, resets dataSource', () => {
     let def = build(['a', 'b']);
     def = connect(def, { alias: 'a', column: 'id' }, { alias: 'b', column: 'x' }, 'one_to_many', 'left');
     const r = removeTable(def, 'a');
     expect(r.joins).toEqual([]);
-    expect(r.primary).toBe('b');
+    expect(r.dataSource).toBe('ds');
     const e = removeTable(r, 'b');
     expect(e.dataSource).toBe('');
     expect(e.tables).toEqual([]);
-    expect(e.primary ?? null).toBeNull();
   });
 
   it('canConnect refuses same alias, duplicate pair and cycles', () => {
@@ -80,14 +81,6 @@ describe('modelGraph', () => {
     expect(joinLabel({ ...base, relationship: 'one_to_one', join: 'left' })).toBe('1:1 · LEFT');
   });
 
-  it('unlinked lists aliases not reachable from primary', () => {
-    let def = build(['a', 'b', 'c']);
-    expect(unlinked(def)).toEqual(['b', 'c']);
-    def = connect(def, { alias: 'b', column: 'x' }, { alias: 'a', column: 'y' }, 'many_to_one', 'left');
-    expect(unlinked(def)).toEqual(['c']);
-    expect(unlinked(emptyDefinition())).toEqual([]);
-  });
-
   it('reuses a freed alias after removal', () => {
     let def = build(['customers', 'customers']);
     expect(def.tables.map((t) => t.alias)).toEqual(['customers', 'customers_2']);
@@ -96,18 +89,20 @@ describe('modelGraph', () => {
     expect(def.tables.map((t) => t.alias).sort()).toEqual(['customers', 'customers_2']);
   });
 
-  it('clears primaryKey when the primary changes', () => {
-    const def = { ...build(['a', 'b']), primaryKey: 'id' };
-    expect(removeTable(def, 'b').primaryKey).toBe('id');
-    const r = removeTable(def, 'a');
-    expect(r.primary).toBe('b');
-    expect(r.primaryKey).toBeNull();
-    expect(removeTable(r, 'b').primaryKey).toBeNull();
-    expect(setPrimary(def, 'a')).toBe(def);
-    expect(setPrimary(def, 'zzz')).toBe(def);
-    const s = setPrimary(def, 'b');
-    expect(s.primary).toBe('b');
-    expect(s.primaryKey).toBeNull();
+  it('removeTable keeps cubes and their members, dropping only the source table', () => {
+    const cube = {
+      id: 'c1',
+      name: 'sales',
+      source: { kind: 'joined' as const, table: 'a', primaryKey: 'id' },
+      dimensions: [{ name: 'a_id', type: 'number' as const, column: 'a.id' }],
+      measures: [],
+      segments: [],
+      x: 0,
+      y: 0,
+    };
+    const def = { ...build(['a', 'b']), cubes: [cube] };
+    expect(removeTable(def, 'b').cubes).toEqual([cube]);
+    expect(removeTable(def, 'a').cubes).toEqual([{ ...cube, source: { kind: 'joined' } }]);
   });
 
   it('canConnect refuses unknown aliases', () => {
@@ -132,15 +127,14 @@ describe('draft tables', () => {
     expect(updateDraftTable(ok.def, 'other', 'public', 'sales', cols).error).toBe('public.sales is already in this model');
   });
 
-  it('adds a draft table and makes the first one the primary', () => {
+  it('adds a draft table', () => {
     const a = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
     expect(a.error).toBeUndefined();
-    expect(a.def.primary).toBe('users');
+    expect('primary' in a.def).toBe(false);
     expect(a.def.dataSource).toBe('ds');
     expect(drafts(a.def)).toHaveLength(1);
     const b = addDraftTable(a.def, 'ds', 'other', 'users', cols, 0, 0);
     expect(b.def.tables.map((t) => t.alias)).toEqual(['users', 'users_2']);
-    expect(b.def.primary).toBe('users');
     expect(addDraftTable(a.def, 'x', 'public', 't', cols, 0, 0).error).toMatch(/one connection/);
   });
 
@@ -161,11 +155,16 @@ describe('draft tables', () => {
     let { def } = addDraftTable(emptyDefinition(), 'ds', 'public', 'users', cols, 0, 0);
     def = addTable(def, 'ds', 'public', 'orders', 0, 0).def;
     def = connect(def, { alias: 'orders', column: 'user_id' }, { alias: 'users', column: 'name' }, 'many_to_one', 'left');
-    def = { ...def, primaryKey: 'name' };
+    def = {
+      ...def,
+      cubes: [{
+        id: 'c1', name: 'users', source: { kind: 'table', table: 'users', primaryKey: 'name' }, dimensions: [], measures: [], segments: [], x: 0, y: 0,
+      }],
+    };
     const r = updateDraftTable(def, 'users', 'public', 'users', [cols[0]]);
     expect(r.error).toBeUndefined();
     expect(r.def.joins).toEqual([]);
-    expect(r.def.primaryKey).toBeNull();
+    expect(r.def.cubes![0].source).toEqual({ kind: 'table', table: 'users' });
     expect(r.def.tables[0].alias).toBe('users');
     expect(r.def.tables[0].draft?.columns).toHaveLength(1);
   });
@@ -206,11 +205,10 @@ describe('draft tables', () => {
   describe('v2 helpers', () => {
     const linked = () => connect(build(['orders', 'customers']), { alias: 'orders', column: 'customer_id' }, { alias: 'customers', column: 'id' }, 'many_to_one', 'left');
 
-    it('renameTable moves primary and join ends, refuses bad and taken names', () => {
+    it('renameTable moves join ends, refuses bad and taken names', () => {
       const def = linked();
       const { def: next, error } = renameTable(def, 'orders', 'sales');
       expect(error).toBeUndefined();
-      expect(next.primary).toBe('sales');
       expect(next.tables.map((t) => t.alias)).toEqual(['sales', 'customers']);
       expect(next.joins[0].from).toEqual({ alias: 'sales', column: 'customer_id' });
       expect(renameTable(def, 'orders', '9x').error).toBe('Invalid name: 9x');

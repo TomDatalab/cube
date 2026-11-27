@@ -1,3 +1,4 @@
+import { cubeKeyOf } from './cubes';
 import { Dialect, validType } from './dialect';
 import { IDENTIFIER, ModelDefinition, ModelJoin, ModelTable } from './modelGraph';
 import { referenceEnds } from './physical';
@@ -151,14 +152,15 @@ const SEVERITY = new Map(RULES.map((r) => [r.id, r.severity]));
 type Columns = { name: string; type: string }[];
 
 // The columns a table's key is made of, or null when the model cannot know
-// them (a table of the database that is not the principal).
+// them (a table of the database no cube gives a key).
 function keysOf(def: ModelDefinition, t: ModelTable): string[][] | null {
   if (t.draft) {
     const pk = t.draft.columns.filter((c) => c.primaryKey).map((c) => c.name);
     return [...(pk.length ? [pk] : []), ...(t.draft.uniqueKeys ?? []).map((k) => k.columns)];
   }
-  if (def.primary === t.alias && def.primaryKey) {
-    return [[def.primaryKey]];
+  const cubeKey = cubeKeyOf(def, t.alias);
+  if (cubeKey) {
+    return [[cubeKey]];
   }
   return null;
 }

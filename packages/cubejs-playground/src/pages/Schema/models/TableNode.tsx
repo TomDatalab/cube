@@ -17,14 +17,13 @@ export type TableNodeData = {
   schema: string;
   table: string;
   columns: { name: string; type: string }[];
-  principal: boolean;
   // Not in the connection's tables any more.
   missing: boolean;
   // Designed in the model, not in the database yet.
   draft: boolean;
   color?: TableColor;
-  // The columns shown with a key: the model's primary key on the principal,
-  // a draft's own primary key columns.
+  // The columns shown with a key: the primary key a cube gives the table
+  // (cubeKeyOf), a draft's own primary key columns.
   keys: string[];
   // The columns that are an end of a link.
   linked: string[];
@@ -151,7 +150,6 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
             </div>
           ) : null}
         </div>
-        {data.principal ? <span className="tw:text-[10px] tw:text-foreground/70">principal</span> : null}
         {data.draft ? <span className="tw:text-[10px] tw:text-foreground/70">new</span> : null}
         <button
           type="button"

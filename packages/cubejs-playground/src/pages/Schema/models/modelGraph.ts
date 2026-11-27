@@ -158,19 +158,113 @@ export type ModelView = {
   z?: number;
 };
 
+export const SOURCE_KINDS = ['table', 'joined', 'sql'] as const;
+export type CubeSourceKind = (typeof SOURCE_KINDS)[number];
+export const DIMENSION_TYPES = ['string', 'number', 'time', 'boolean', 'geo'] as const;
+export type DimensionType = (typeof DIMENSION_TYPES)[number];
+export const MEASURE_TYPES = [
+  'count',
+  'count_distinct',
+  'count_distinct_approx',
+  'sum',
+  'avg',
+  'min',
+  'max',
+  'number',
+] as const;
+export type MeasureType = (typeof MEASURE_TYPES)[number];
+export const MEASURE_FORMATS = ['percent', 'currency'] as const;
+export type MeasureFormat = (typeof MEASURE_FORMATS)[number];
+
+// Where a cube reads from.
+export type CubeSource = {
+  kind: CubeSourceKind;
+  // The table alias of a `table` cube, the primary table of a `joined` one.
+  table?: string;
+  // A column of `table`, used in auto mode.
+  primaryKey?: string;
+  // The query of a `sql` cube, and the aliases it reads.
+  sql?: string;
+  tables?: string[];
+};
+
+export type CubeDimension = {
+  name: string;
+  type: DimensionType;
+  // `alias.column` in a `joined` cube, a plain column otherwise.
+  column?: string;
+  sql?: string;
+  primaryKey?: boolean;
+  title?: string;
+};
+
+export type CubeMeasure = {
+  name: string;
+  type: MeasureType;
+  column?: string;
+  sql?: string;
+  title?: string;
+  format?: MeasureFormat;
+};
+
+export type CubeSegment = { name: string; sql: string; title?: string };
+
+// A cube drawn on the canvas, with its own members; none at all is auto mode.
+export type CubeNode = {
+  id: string;
+  name: string;
+  title?: string;
+  description?: string;
+  color?: TableColor;
+  source: CubeSource;
+  dimensions: CubeDimension[];
+  measures: CubeMeasure[];
+  segments: CubeSegment[];
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  z?: number;
+};
+
+// A reference between two cubes (by id); `on` pairs dimensions of `from` and `to`.
+export type CubeJoin = {
+  id: string;
+  from: string;
+  to: string;
+  relationship: Relationship;
+  on: { from: string; to: string }[];
+  points: Point[];
+  hidden?: boolean;
+};
+
 export type ModelDefinition = {
   formatVersion?: 2;
   dataSource: string;
   description?: string;
   tables: ModelTable[];
-  primary?: string | null;
-  primaryKey?: string | null;
   joins: ModelJoin[];
   settings?: ModelSettings;
   notes?: Note[];
   areas?: Area[];
   views?: ModelView[];
+  cubes?: CubeNode[];
+  cubeJoins?: CubeJoin[];
 };
+
+// The cubes of a model, with `f` applied to each one's source.
+function mapCubeSources(def: ModelDefinition, f: (c: CubeNode) => CubeNode): Pick<ModelDefinition, 'cubes'> {
+  return def.cubes ? { cubes: def.cubes.map(f) } : {};
+}
+
+// The cube's source without `keys`.
+function withoutSource(c: CubeNode, keys: (keyof CubeSource)[]): CubeNode {
+  const source = { ...c.source };
+  for (const key of keys) {
+    delete source[key];
+  }
+  return { ...c, source };
+}
 
 // The views of a model, with `f` applied to each one's table dependencies.
 function mapViewTables(def: ModelDefinition, f: (aliases: string[]) => string[]): Pick<ModelDefinition, 'views'> {
@@ -200,12 +294,10 @@ export function addTable(
   for (let n = 2; taken.has(alias); n++) {
     alias = `${table}_${n}`;
   }
-  const first = def.tables.length === 0;
   return {
     def: {
       ...def,
       dataSource: ds,
-      primary: first ? alias : def.primary,
       tables: [...def.tables, { alias, schema, table, x, y }],
     },
   };
@@ -215,27 +307,26 @@ export function removeTable(def: ModelDefinition, alias: string): ModelDefinitio
   const tables = def.tables.filter((t) => t.alias !== alias);
   const joins = def.joins.filter((j) => j.from.alias !== alias && j.to.alias !== alias);
   const views = mapViewTables(def, (list) => list.filter((a) => a !== alias));
-  if (def.primary !== alias) {
-    return {
-      ...def, tables, joins, ...views,
-    };
-  }
+  // A cube that read the table keeps its members; validation flags them.
+  const cubes = mapCubeSources(def, (c) => {
+    let out = c;
+    if (out.source.table === alias) {
+      out = withoutSource(out, ['table', 'primaryKey']);
+    }
+    if (out.source.tables?.includes(alias)) {
+      const rest = out.source.tables.filter((a) => a !== alias);
+      out = rest.length ? { ...out, source: { ...out.source, tables: rest } } : withoutSource(out, ['tables']);
+    }
+    return out;
+  });
   return {
     ...def,
     ...views,
+    ...cubes,
     dataSource: tables.length === 0 ? '' : def.dataSource,
     tables,
     joins,
-    primary: tables[0]?.alias ?? null,
-    primaryKey: null,
   };
-}
-
-export function setPrimary(def: ModelDefinition, alias: string): ModelDefinition {
-  if (def.primary === alias || !def.tables.some((t) => t.alias === alias)) {
-    return def;
-  }
-  return { ...def, primary: alias, primaryKey: null };
 }
 
 export function canConnect(def: ModelDefinition, from: End, to: End): string | null {
@@ -336,31 +427,6 @@ export function joinLabel(j: ModelJoin): string {
   return `${REL_LABEL[j.relationship]} · ${j.join.toUpperCase()}`;
 }
 
-export function unlinked(def: ModelDefinition): string[] {
-  if (def.tables.length === 0) {
-    return [];
-  }
-  const start = def.primary ?? def.tables[0].alias;
-  const seen = new Set([start]);
-  const queue = [start];
-  while (queue.length) {
-    const cur = queue.shift() as string;
-    for (const j of def.joins) {
-      let other: string | null = null;
-      if (j.from.alias === cur) {
-        other = j.to.alias;
-      } else if (j.to.alias === cur) {
-        other = j.from.alias;
-      }
-      if (other && !seen.has(other)) {
-        seen.add(other);
-        queue.push(other);
-      }
-    }
-  }
-  return def.tables.map((t) => t.alias).filter((a) => !seen.has(a));
-}
-
 export const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_IDENTIFIER = 63;
 
@@ -431,12 +497,10 @@ export function addDraftTable(
   for (let n = 2; taken.has(alias); n++) {
     alias = `${table}_${n}`;
   }
-  const first = def.tables.length === 0;
   return {
     def: {
       ...def,
       dataSource: ds,
-      primary: first ? alias : def.primary,
       tables: [...def.tables, { alias, schema, table, x, y, draft: { columns } }],
     },
   };
@@ -458,11 +522,12 @@ export function updateDraftTable(
   }
   const names = new Set(columns.map((c) => c.name));
   const gone = (e: End) => e.alias === alias && !names.has(e.column);
-  const keepsPk = def.primary !== alias || !def.primaryKey || names.has(def.primaryKey);
+  const lostKey = (c: CubeNode) => c.source.table === alias && c.source.primaryKey !== undefined
+    && !names.has(c.source.primaryKey);
   return {
     def: {
       ...def,
-      primaryKey: keepsPk ? def.primaryKey : null,
+      ...mapCubeSources(def, (c) => (lostKey(c) ? withoutSource(c, ['primaryKey']) : c)),
       tables: def.tables.map((t) => {
         if (t.alias !== alias) {
           return t;
@@ -512,7 +577,7 @@ export function layout(def: ModelDefinition): ModelDefinition {
   if (def.tables.length === 0) {
     return def;
   }
-  const start = def.primary ?? def.tables[0].alias;
+  const start = def.cubes?.find((c) => c.source.table)?.source.table ?? def.tables[0].alias;
   const depth = new Map<string, number>([[start, 0]]);
   const queue = [start];
   while (queue.length) {
@@ -568,10 +633,27 @@ export function renameTable(
     return { def, error: `${next} is already in this model` };
   }
   const end = (e: End): End => (e.alias === alias ? { ...e, alias: next } : e);
+  const prefix = `${alias}.`;
+  const column = <M extends { column?: string }>(m: M): M => (m.column?.startsWith(prefix)
+    ? { ...m, column: `${next}.${m.column.slice(prefix.length)}` }
+    : m);
+  const cubes = mapCubeSources(def, (c) => {
+    const source = {
+      ...c.source,
+      ...(c.source.table === alias ? { table: next } : {}),
+      ...(c.source.tables ? { tables: c.source.tables.map((a) => (a === alias ? next : a)) } : {}),
+    };
+    if (c.source.kind !== 'joined') {
+      return { ...c, source };
+    }
+    return {
+      ...c, source, dimensions: c.dimensions.map(column), measures: c.measures.map(column),
+    };
+  });
   return {
     def: {
       ...def,
-      primary: def.primary === alias ? next : def.primary,
+      ...cubes,
       tables: def.tables.map((t) => (t.alias === alias ? { ...t, alias: next } : t)),
       joins: def.joins.map((j) => ({ ...j, from: end(j.from), to: end(j.to) })),
       ...mapViewTables(def, (list) => list.map((a) => (a === alias ? next : a))),

@@ -38,7 +38,7 @@ export type OrgDetail = {
   tables: Record<string, Record<string, Record<string, { name: string; type: string }[]>>>;
   files: { id?: string; fileName: string; path?: string; version?: number; editable?: boolean }[];
   errors: { file: string; cube: string; message: string }[];
-  models?: { id: string; name: string; cubeName?: string | null }[];
+  models?: { id: string; name: string; cubeNames?: string[] }[];
 };
 
 export type NodeKey = string;

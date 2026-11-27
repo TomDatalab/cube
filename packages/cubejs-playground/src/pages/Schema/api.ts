@@ -62,7 +62,8 @@ export type CubeModelView = {
   organizationId: string;
   name: string;
   definition: unknown;
-  cubeName: string | null;
+  // The cubes its last build wrote, by name.
+  cubeNames: string[];
   version: number;
   updatedAt: string;
   updatedBy: string | null;
@@ -199,7 +200,12 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
     buildModel(
       id: string,
       force?: boolean
-    ): Promise<{ fileName: string; content: string; cubeName: string; detail: OrgDetail }> {
+    ): Promise<{
+      cubes: { cubeName: string; fileName: string; content: string }[];
+      // Files of cubes no longer in the model, deleted by the build.
+      removed: string[];
+      detail: OrgDetail;
+    }> {
       return call('POST', `/cube-models/${enc(id)}/build`, { force });
     },
 

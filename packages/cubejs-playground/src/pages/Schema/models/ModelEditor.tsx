@@ -26,7 +26,7 @@ import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
   End, ModelDefinition, Place, Point, addDraftTable, addTable, canConnect, connect, drafts,
-  emptyDefinition, joinLabel, layout, removeJoin, removeTable, setJoin, showAllJoins, unlinked,
+  emptyDefinition, joinLabel, layout, removeJoin, removeTable, setJoin, showAllJoins,
   updateDraftTable, updateJoin, withFormat,
 } from './modelGraph';
 import { TableFlowNode, TableNode, columnAt } from './TableNode';
@@ -38,6 +38,7 @@ import {
   addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, previewIdOf,
   sendToBack,
 } from './objects';
+import { cubeKeyOf } from './cubes';
 import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from './clipboard';
@@ -442,9 +443,9 @@ function Editor({
         const columns = t.draft
           ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
           : columnsOf(t.schema, t.table);
-        const principal = def.primary === t.alias;
+        const cubeKey = cubeKeyOf(def, t.alias);
         const keys = [
-          ...(principal && def.primaryKey ? [def.primaryKey] : []),
+          ...(cubeKey ? [cubeKey] : []),
           ...(t.draft?.columns.filter((c) => c.primaryKey).map((c) => c.name) ?? []),
         ];
         const linked = def.joins.flatMap((j) => [j.from, j.to])
@@ -461,7 +462,6 @@ function Editor({
           schema: t.schema,
           table: t.table,
           columns: columns ?? [],
-          principal,
           missing: !columns,
           draft: Boolean(t.draft),
           color: t.color,
@@ -873,7 +873,8 @@ function Editor({
     setProblems([]);
     try {
       const result = force ? await api.buildModel(modelId, true) : await api.buildModel(modelId);
-      onBuilt(result.cubeName, result.detail);
+      // Task 7 shows every cube built and the files removed.
+      onBuilt(result.cubes[0]?.cubeName ?? '', result.detail);
     } catch (e: any) {
       if (e instanceof ApiError && e.status === 409 && e.message === EDITED) {
         setAsk('overwrite');
@@ -1021,16 +1022,6 @@ function Editor({
       setCreateAsk({ ...createAsk, error: conflict(e) });
     } finally {
       setBusy(null);
-    }
-  };
-
-  const loose = unlinked(def);
-  const build = () => {
-    if (loose.length) {
-      setProblems([]);
-      notify.error(`Link every table to the principal before building: ${loose.join(', ')}`);
-    } else {
-      runBuild();
     }
   };
 
@@ -1253,7 +1244,7 @@ function Editor({
     propertiesOf = { kind: 'reference', index: edgeAt };
   } else if (selected && def.tables.some((t) => t.alias === selected)) {
     propertiesOf = { kind: 'table', alias: selected };
-  } else if (first && first.kind !== 'table' && nodeIdsOf(def).includes(selection[0])) {
+  } else if (first && first.kind !== 'table' && first.kind !== 'cube' && nodeIdsOf(def).includes(selection[0])) {
     propertiesOf = { kind: first.kind, id: first.id };
   }
   const editing = joinEdit?.kind === 'edit' ? def.joins[joinEdit.index] : undefined;
@@ -1289,11 +1280,6 @@ function Editor({
           </AlertDescription>
         </Alert>
       ) : null}
-      {loose.length ? (
-        <p className="tw:m-0 tw:text-sm tw:text-muted-foreground">
-          {`Not linked to the principal yet: ${loose.join(', ')}`}
-        </p>
-      ) : null}
 
       <ModelToolbar
         history={{
@@ -1306,7 +1292,7 @@ function Editor({
           canBuild: def.tables.length > 0,
           onSave: () => save(),
           onCreate: openCreate,
-          onBuild: build,
+          onBuild: () => runBuild(),
           canSql: dialect !== null,
           onSql: () => openSql({}),
         }}
@@ -1480,7 +1466,12 @@ function Editor({
             issues={problemsFound}
             focusKey={focusKey}
             // A table by its alias, a view by its id.
-            onSqlPreview={dialect ? (nodeId) => openSql({ only: [previewIdOf(nodeId)] }) : undefined}
+            onSqlPreview={dialect ? (nodeId) => {
+              const only = previewIdOf(nodeId);
+              if (only) {
+                openSql({ only: [only] });
+              }
+            } : undefined}
             onRenamed={(from, to) => setSelection((was) => was.map((id) => {
               const { alias, shortcut } = parseNodeId(id);
               if (alias !== from) {

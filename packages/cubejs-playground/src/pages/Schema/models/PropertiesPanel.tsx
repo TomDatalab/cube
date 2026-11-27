@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Field, SimpleSelect, Spinner } from '@/components/kit';
+import { Field, Spinner } from '@/components/kit';
 
 import type { Dialect } from './dialect';
 import type { Issue } from './validate';
@@ -16,7 +16,7 @@ import { AreaProperties } from './AreaProperties';
 import { ViewProperties } from './ViewProperties';
 
 import {
-  ModelDefinition, ModelTable, setPrimary,
+  ModelDefinition, ModelTable,
 } from './modelGraph';
 
 type Columns = { name: string; type: string }[];
@@ -72,10 +72,8 @@ function sizeOf(def: ModelDefinition): string {
 }
 
 function ModelProperties({
-  def, name, columnsOf, onChange, onName, onDeleteModel, deleting, busy,
+  def, name, onChange, onName, onDeleteModel, deleting, busy,
 }: PropertiesPanelProps) {
-  const principal = def.tables.find((t) => t.alias === def.primary);
-  const principalColumns = principal ? columnsOf(principal) : [];
   return (
     <Section title="General">
       <Field label="Name" htmlFor="model-name">
@@ -95,26 +93,6 @@ function ModelProperties({
       <Value label="Connection">
         <span data-slot="model-connection">{def.dataSource || 'Drop a table to choose it'}</span>
       </Value>
-      <Field label="Principal" htmlFor="model-principal">
-        <SimpleSelect
-          id="model-principal"
-          value={def.primary ?? undefined}
-          placeholder="No table yet"
-          disabled={def.tables.length === 0}
-          options={def.tables.map((t) => ({ value: t.alias, label: t.alias }))}
-          onChange={(v) => v && onChange(setPrimary(def, v))}
-        />
-      </Field>
-      <Field label="Primary key" htmlFor="model-primary-key">
-        <SimpleSelect
-          id="model-primary-key"
-          value={def.primaryKey ?? undefined}
-          placeholder="Choose a column"
-          disabled={principalColumns.length === 0}
-          options={principalColumns.map((c) => ({ value: c.name, label: c.name }))}
-          onChange={(v) => onChange({ ...def, primaryKey: v ?? null })}
-        />
-      </Field>
       <Value label="Size">{sizeOf(def)}</Value>
       <Button variant="destructive" size="sm" disabled={busy} onClick={onDeleteModel}>
         {deleting ? <Spinner className="tw:text-current" /> : null}

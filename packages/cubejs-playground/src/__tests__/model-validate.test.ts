@@ -14,8 +14,16 @@ const columnsOf = (t: ModelTable) => (t.draft
 function model(): ModelDefinition {
   return {
     dataSource: 'pg',
-    primary: 'customers',
-    primaryKey: 'id',
+    cubes: [{
+      id: 'c1',
+      name: 'customers',
+      source: { kind: 'joined', table: 'customers', primaryKey: 'id' },
+      dimensions: [],
+      measures: [],
+      segments: [],
+      x: 600,
+      y: 0,
+    }],
     tables: [
       {
         alias: 'customers', schema: 's', table: 'customers', x: 0, y: 0,

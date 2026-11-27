@@ -4,6 +4,7 @@ import {
   addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from '../pages/Schema/models/clipboard';
 import { addView, nodeIdOf, setView } from '../pages/Schema/models/objects';
+import { addCube, addCubeJoin, setCubeSource } from '../pages/Schema/models/cubes';
 import {
   ModelDefinition, addDraftTable, addTable, connect, emptyDefinition, removeTable,
 } from '../pages/Schema/models/modelGraph';
@@ -160,5 +161,41 @@ describe('clipboard', () => {
     def = addDraftTable(def, 'ds', 'public', 'view_1_1', cols, 0, 0).def;
     const { def: next } = paste(def, copy(def, ['view:v1']));
     expect(next.views![1].name).toBe('view_1_2');
+  });
+
+  it('pasting two joined cubes keeps their join', () => {
+    let { def } = addCube(addCube(model(), 900, 0).def, 900, 300);
+    def = setCubeSource(def, 'c1', { kind: 'joined', table: 'orders', primaryKey: 'id' });
+    def = setCubeSource(def, 'c2', { kind: 'sql', sql: 'select 1', tables: ['customers', 'items'] });
+    def = addCubeJoin(def, 'c1', 'c2', 'many_to_one', [{ from: 'a', to: 'b' }]).def;
+    const clip = copy(def, ['orders', nodeIdOf('cube', 'c1'), nodeIdOf('cube', 'c2')]);
+    expect(clip.cubes.map((c) => c.id)).toEqual(['c1', 'c2']);
+    expect(clip.cubeJoins.map((j) => j.id)).toEqual(['cj1']);
+    const { def: next, nodeIds } = paste(def, clip);
+    expect(nodeIds).toEqual(['orders_1', 'cube:c3', 'cube:c4']);
+    const [c3, c4] = next.cubes!.slice(2);
+    expect([c3.id, c3.name, c3.x, c3.y]).toEqual(['c3', 'cube_1_1', 920, 20]);
+    expect(c4.name).toBe('cube_2_1');
+    // Sources follow the tables pasted with them.
+    expect(c3.source).toEqual({ kind: 'joined', table: 'orders_1', primaryKey: 'id' });
+    expect(c4.source.tables).toEqual(['customers', 'items']);
+    expect(next.cubeJoins).toHaveLength(2);
+    expect(next.cubeJoins![1]).toEqual({
+      id: 'cj2', from: 'c3', to: 'c4', relationship: 'many_to_one', on: [{ from: 'a', to: 'b' }], points: [],
+    });
+  });
+
+  it('pasting one of them drops it', () => {
+    let { def } = addCube(addCube(model(), 900, 0).def, 900, 300);
+    def = addCubeJoin(def, 'c1', 'c2', 'many_to_one', [{ from: 'a', to: 'b' }]).def;
+    const clip = copy(def, [nodeIdOf('cube', 'c2')]);
+    expect(clip.cubeJoins).toEqual([]);
+    const { def: next, nodeIds } = paste(def, clip);
+    expect(nodeIds).toEqual(['cube:c3']);
+    expect(next.cubeJoins!.map((j) => j.id)).toEqual(['cj1']);
+    const gone = paste(removeTable(def, 'orders'), clip).def.cubes![2];
+    expect(gone.source).toEqual({ kind: 'table' });
+    const { def: back } = paste(cut(def, [nodeIdOf('cube', 'c2')]).def, clip);
+    expect(back.cubes!.map((c) => [c.id, c.name])).toEqual([['c1', 'cube_1'], ['c2', 'cube_2']]);
   });
 });

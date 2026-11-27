@@ -6,12 +6,12 @@ import {
 
 // Everything on the canvas: tables (and their shortcuts) plus the objects
 // of Redgate's model that are not tables.
-export type ObjectKind = 'table' | 'note' | 'area' | 'view';
+export type ObjectKind = 'table' | 'note' | 'area' | 'view' | 'cube';
 type Loose = Exclude<ObjectKind, 'table'>;
 
-const LOOSE: Loose[] = ['note', 'area', 'view'];
+const LOOSE: Loose[] = ['note', 'area', 'view', 'cube'];
 const MAX_IDENTIFIER = 63;
-const PREFIX: Record<Loose, string> = { note: 'n', area: 'a', view: 'v' };
+const PREFIX: Record<Exclude<Loose, 'cube'>, string> = { note: 'n', area: 'a', view: 'v' };
 
 export function nodeIdOf(kind: Loose, id: string): string {
   return `${kind}:${id}`;
@@ -30,7 +30,7 @@ export function objectOf(nodeId: string): { kind: ObjectKind; id: string; shortc
 }
 
 // `<prefix><k>` with the smallest free k >= 1.
-function freeId(prefix: string, ids: string[]): string {
+export function freeId(prefix: string, ids: string[]): string {
   const taken = new Set(ids);
   let n = 1;
   while (taken.has(`${prefix}${n}`)) {
@@ -39,7 +39,7 @@ function freeId(prefix: string, ids: string[]): string {
   return `${prefix}${n}`;
 }
 
-function freeName(base: string, isTaken: (name: string) => boolean): string {
+export function freeName(base: string, isTaken: (name: string) => boolean): string {
   let n = 1;
   while (isTaken(`${base}${n}`)) {
     n += 1;
@@ -105,7 +105,7 @@ export function addView(
 }
 
 // Merges a patch; an `undefined` value removes its key.
-function merged<T extends object>(target: T, patch: Record<string, unknown>): T {
+export function merged<T extends object>(target: T, patch: Record<string, unknown>): T {
   const out = { ...target } as Record<string, unknown>;
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) {
@@ -178,14 +178,20 @@ export function setViewColumnType(
 
 // What the SQL preview's `only` carries: a table's alias, a view's node id
 // (`view:<id>`), so a table aliased like a view id never collides with it.
-export function previewIdOf(nodeId: string): string {
+// A cube has no DDL: none.
+export function previewIdOf(nodeId: string): string | null {
   const { kind, id } = objectOf(nodeId);
+  if (kind === 'cube') {
+    return null;
+  }
   return kind === 'view' ? nodeIdOf('view', id) : id;
 }
 
 export function removeObjects(def: ModelDefinition, nodeIds: string[]): ModelDefinition {
   let next = def;
-  const gone: Record<Loose, Set<string>> = { note: new Set(), area: new Set(), view: new Set() };
+  const gone: Record<Loose, Set<string>> = {
+    note: new Set(), area: new Set(), view: new Set(), cube: new Set(),
+  };
   for (const nodeId of nodeIds) {
     const { kind, id, shortcut } = objectOf(nodeId);
     if (kind === 'table') {
@@ -206,6 +212,15 @@ export function removeObjects(def: ModelDefinition, nodeIds: string[]): ModelDef
       views: next.views
         .filter((v) => !gone.view.has(v.id))
         .map((v) => ({ ...v, dependsOnViews: v.dependsOnViews.filter((d) => !gone.view.has(d)) })),
+    };
+  }
+  if (next.cubes && gone.cube.size) {
+    next = {
+      ...next,
+      cubes: next.cubes.filter((c) => !gone.cube.has(c.id)),
+      ...(next.cubeJoins ? {
+        cubeJoins: next.cubeJoins.filter((j) => !gone.cube.has(j.from) && !gone.cube.has(j.to)),
+      } : {}),
     };
   }
   return next;
@@ -240,6 +255,7 @@ export function placeObjects(def: ModelDefinition, places: Map<string, Place>): 
     ...(def.notes ? { notes: def.notes.map((n) => apply('note', n, true)) } : {}),
     ...(def.areas ? { areas: def.areas.map((a) => apply('area', a, false)) } : {}),
     ...(def.views ? { views: def.views.map((v) => apply('view', v, true)) } : {}),
+    ...(def.cubes ? { cubes: def.cubes.map((c) => apply('cube', c, true)) } : {}),
   };
 }
 
@@ -281,5 +297,6 @@ export function nodeIdsOf(def: ModelDefinition): string[] {
     ...(def.notes ?? []).map((n) => nodeIdOf('note', n.id)),
     ...(def.areas ?? []).map((a) => nodeIdOf('area', a.id)),
     ...(def.views ?? []).map((v) => nodeIdOf('view', v.id)),
+    ...(def.cubes ?? []).map((c) => nodeIdOf('cube', c.id)),
   ];
 }

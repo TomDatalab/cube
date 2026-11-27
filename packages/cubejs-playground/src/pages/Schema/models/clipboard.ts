@@ -1,5 +1,5 @@
 import {
-  Area, End, ModelDefinition, ModelJoin, ModelTable, ModelView, Note, removeShortcut,
+  Area, CubeJoin, CubeNode, End, ModelDefinition, ModelJoin, ModelTable, ModelView, Note, removeShortcut,
 } from './modelGraph';
 
 import {
@@ -15,6 +15,9 @@ export type Clip = {
   notes: Note[];
   areas: Area[];
   views: ModelView[];
+  cubes: CubeNode[];
+  // Only those between two copied cubes.
+  cubeJoins: CubeJoin[];
 };
 
 const SEPARATOR = '~';
@@ -36,12 +39,15 @@ export function copy(def: ModelDefinition, nodeIds: string[]): Clip {
   const notes = ids('note');
   const areas = ids('area');
   const views = ids('view');
+  const cubes = ids('cube');
   return {
     tables: def.tables.filter((t) => aliases.has(t.alias)),
     joins: def.joins.filter((j) => aliases.has(j.from.alias) && aliases.has(j.to.alias)),
     notes: (def.notes ?? []).filter((n) => notes.has(n.id)),
     areas: (def.areas ?? []).filter((a) => areas.has(a.id)),
     views: (def.views ?? []).filter((v) => views.has(v.id)),
+    cubes: (def.cubes ?? []).filter((c) => cubes.has(c.id)),
+    cubeJoins: (def.cubeJoins ?? []).filter((j) => cubes.has(j.from) && cubes.has(j.to)),
   };
 }
 
@@ -127,11 +133,58 @@ export function paste(
       dependsOnViews: v.dependsOnViews.filter((d) => viewIds.has(d)).map((d) => viewIds.get(d) as string),
     }));
   }
+  // Pasted cubes: new ids, free names, and sources that follow the tables
+  // pasted with them.
+  const cubes: CubeNode[] = [...(def.cubes ?? [])];
+  const cubeIds = new Map<string, string>();
+  const usedCubes = new Set(cubes.map((c) => c.id));
+  const pastedCubes: CubeNode[] = [];
+  const alias = (a: string) => renamed.get(a) ?? a;
+  const prefix = (column: string | undefined) => {
+    const at = column?.indexOf('.') ?? -1;
+    return column && at > 0 ? `${alias(column.slice(0, at))}${column.slice(at)}` : column;
+  };
+  for (const c of clip.cubes) {
+    const id = smallestFree('c', usedCubes);
+    cubeIds.set(c.id, id);
+    const name = free(c.name, (n) => cubes.some((x) => x.name === n));
+    const joined = c.source.kind === 'joined';
+    const column = <M extends { column?: string }>(m: M): M => (joined && m.column
+      ? { ...m, column: prefix(m.column) }
+      : m);
+    // A table no longer in the model is no source.
+    const known = (a: string) => tables.some((t) => t.alias === a);
+    const { table: _table, primaryKey: _key, tables: _tables, ...source } = c.source;
+    if (c.source.table && known(alias(c.source.table))) {
+      Object.assign(source, { table: alias(c.source.table), ...(_key ? { primaryKey: _key } : {}) });
+    }
+    const read = (_tables ?? []).map(alias).filter(known);
+    if (read.length) {
+      Object.assign(source, { tables: read });
+    }
+    const pasted = moved({
+      ...c, id, name, source, dimensions: c.dimensions.map(column), measures: c.measures.map(column),
+    });
+    cubes.push(pasted);
+    pastedCubes.push(pasted);
+  }
+  const usedCubeJoins = new Set((def.cubeJoins ?? []).map((j) => j.id));
+  const cubeJoins = clip.cubeJoins
+    .filter((j) => cubeIds.has(j.from) && cubeIds.has(j.to))
+    .map((j) => ({
+      ...j,
+      id: smallestFree('cj', usedCubeJoins),
+      from: cubeIds.get(j.from) as string,
+      to: cubeIds.get(j.to) as string,
+      points: j.points.map((p) => ({ x: p.x + offset, y: p.y + offset })),
+    }));
   return {
     def: {
       ...def,
       tables,
       joins: [...def.joins, ...joins],
+      ...(def.cubes || pastedCubes.length ? { cubes } : {}),
+      ...(def.cubeJoins || cubeJoins.length ? { cubeJoins: [...(def.cubeJoins ?? []), ...cubeJoins] } : {}),
       ...(def.notes || notes.length ? { notes: [...(def.notes ?? []), ...notes] } : {}),
       ...(def.areas || areas.length ? { areas: [...(def.areas ?? []), ...areas] } : {}),
       ...(def.views || views.length ? { views } : {}),
@@ -141,6 +194,7 @@ export function paste(
       ...notes.map((n) => nodeIdOf('note', n.id)),
       ...areas.map((a) => nodeIdOf('area', a.id)),
       ...pastedViews.map((p) => nodeIdOf('view', p.id)),
+      ...pastedCubes.map((c) => nodeIdOf('cube', c.id)),
     ],
   };
 }

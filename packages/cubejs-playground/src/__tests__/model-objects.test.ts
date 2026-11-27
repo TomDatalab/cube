@@ -5,6 +5,7 @@ import {
   removeObjects, renameView, sendToBack, setNote, setView, setViewColumnType, setViewSchema,
 } from '../pages/Schema/models/objects';
 import { addShortcut } from '../pages/Schema/models/clipboard';
+import { addCube } from '../pages/Schema/models/cubes';
 import {
   ModelDefinition, addDraftTable, addTable, emptyDefinition, removeTable, renameTable,
 } from '../pages/Schema/models/modelGraph';
@@ -24,6 +25,8 @@ describe('model objects', () => {
     expect(objectOf('orders')).toEqual({ kind: 'table', id: 'orders' });
     expect(objectOf('orders~s1')).toEqual({ kind: 'table', id: 'orders', shortcut: 's1' });
     expect(nodeIdOf('note', 'n1')).toBe('note:n1');
+    expect(objectOf('cube:c1')).toEqual({ kind: 'cube', id: 'c1' });
+    expect(nodeIdOf('cube', 'c1')).toBe('cube:c1');
   });
 
   it('adds notes, areas and views with the smallest free id', () => {
@@ -101,6 +104,15 @@ describe('model objects', () => {
     expect(def.areas![0]).toMatchObject({ width: 400, height: 300 });
   });
 
+  it('places cubes like views: a null size frees', () => {
+    let { def } = addCube(base(), 0, 0);
+    def = placeObjects(def, new Map([['cube:c1', { x: 4.6, y: 5, width: 300, height: 200 }]]));
+    expect(def.cubes![0]).toMatchObject({ x: 5, y: 5, width: 300, height: 200 });
+    def = placeObjects(def, new Map([['cube:c1', { width: null, height: null }]]));
+    expect('width' in def.cubes![0]).toBe(false);
+    expect('height' in def.cubes![0]).toBe(false);
+  });
+
   it('bring to front and send to back reorder only notes and areas', () => {
     let def = base();
     for (let i = 0; i < 3; i++) def = addNote(def, 0, 0).def;
@@ -134,6 +146,7 @@ describe('model objects', () => {
     let { def } = addShortcut(base(), 'orders', 0, 0);
     def = addView(addArea(addNote(def, 0, 0).def, 0, 0).def, 0, 0, 'public').def;
     expect(nodeIdsOf(def)).toEqual(['orders', 'orders~s1', 'customers', 'note:n1', 'area:a1', 'view:v1']);
+    expect(nodeIdsOf(addCube(def, 0, 0).def)).toContain('cube:c1');
   });
 
   it('view names avoid draft tables of the same schema', () => {
@@ -149,6 +162,7 @@ describe('model objects', () => {
     expect(previewIdOf('view:v1')).toBe('view:v1');
     expect(previewIdOf('v1')).toBe('v1');
     expect(previewIdOf('orders')).toBe('orders');
+    expect(previewIdOf('cube:c1')).toBeNull();
   });
 
   it('setViewSchema validates like renameView', () => {

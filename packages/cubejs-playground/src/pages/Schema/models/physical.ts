@@ -1,9 +1,21 @@
+import { cubeKeyOf } from './cubes';
 import type { Dialect } from './dialect';
 import type {
-  DraftColumn, DraftTable, End, ModelDefinition, ModelJoin, ModelTable, TableCheck, TableIndex, UniqueKey,
+  CubeNode, DraftColumn, DraftTable, End, ModelDefinition, ModelJoin, ModelTable, TableCheck, TableIndex, UniqueKey,
 } from './modelGraph';
 
 type Columns = { name: string; type: string }[];
+
+// The cubes of `def` that read `alias` as their table, through `edit`.
+function withCubesOn(def: ModelDefinition, alias: string, edit: (c: CubeNode) => CubeNode): ModelDefinition {
+  if (!def.cubes) {
+    return def;
+  }
+  return {
+    ...def,
+    cubes: def.cubes.map((c) => (c.source.kind !== 'sql' && c.source.table === alias ? edit(c) : c)),
+  };
+}
 
 // The draft of `alias` through `edit`; other tables and non-drafts as they are.
 function withDraft(def: ModelDefinition, alias: string, edit: (d: DraftTable) => DraftTable): ModelDefinition {
@@ -97,9 +109,20 @@ export function renameColumn(def: ModelDefinition, alias: string, from: string, 
     columns: d.columns.map((c) => (c.name === from ? { ...c, name: to } : c)),
   }, rename));
   const end = (e: End): End => (e.alias === alias && e.column === from ? { ...e, column: to } : e);
+  // The cube key and the members of the column follow it.
+  const cubeColumn = (c: CubeNode) => {
+    const old = c.source.kind === 'joined' ? `${alias}.${from}` : from;
+    const renamed = c.source.kind === 'joined' ? `${alias}.${to}` : to;
+    const member = <M extends { column?: string }>(m: M): M => (m.column === old ? { ...m, column: renamed } : m);
+    return {
+      ...c,
+      source: c.source.primaryKey === from ? { ...c.source, primaryKey: to } : c.source,
+      dimensions: c.dimensions.map(member),
+      measures: c.measures.map(member),
+    };
+  };
   return {
-    ...next,
-    primaryKey: def.primary === alias && def.primaryKey === from ? to : def.primaryKey,
+    ...withCubesOn(next, alias, cubeColumn),
     joins: next.joins.map((j) => ({
       ...j,
       from: end(j.from),
@@ -124,9 +147,16 @@ export function removeColumn(def: ModelDefinition, alias: string, name: string):
   const toUses = (j: ModelJoin) => j.to.alias === alias
     && (j.to.column === name || Boolean(j.pairs?.some((p) => p.to === name)));
   const uses = (j: ModelJoin) => fromUses(j) || toUses(j);
+  // A member of the column stays, for the validation to flag; the key goes.
+  const dropKey = (c: CubeNode) => {
+    if (c.source.primaryKey !== name) {
+      return c;
+    }
+    const { primaryKey: _drop, ...source } = c.source;
+    return { ...c, source };
+  };
   return {
-    ...next,
-    primaryKey: def.primary === alias && def.primaryKey === name ? null : def.primaryKey,
+    ...withCubesOn(next, alias, dropKey),
     joins: next.joins.filter((j) => !uses(j)),
   };
 }
@@ -258,8 +288,9 @@ function keyOf(def: ModelDefinition, t: ModelTable, columns: Columns): string | 
   if (draftKey) {
     return draftKey;
   }
-  if (def.primary === t.alias && def.primaryKey) {
-    return def.primaryKey;
+  const cubeKey = cubeKeyOf(def, t.alias);
+  if (cubeKey) {
+    return cubeKey;
   }
   return columns.find((c) => c.name === 'id')?.name ?? columns[0]?.name;
 }
