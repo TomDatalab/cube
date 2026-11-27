@@ -54,6 +54,7 @@ vi.mock('@xyflow/react', async () => {
       );
     },
     ReactFlowProvider: ({ children }: any) => children,
+    ViewportPortal: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
     NodeResizer: () => null,
     useUpdateNodeInternals: () => (id: string) => flow.updated.push(id),
@@ -981,8 +982,8 @@ describe('ModelEditor', () => {
         'Size', 'Align', 'Distribution', 'Order', 'References', 'Arrange', 'Zoom out', '1:1', 'Zoom in', 'Fit view',
         'Toggle navigation pane', 'Toggle properties pane', 'Toggle top bar', 'Create in database', 'Build cube'];
       labels.forEach((l) => expect(tool(l), l).toBeTruthy());
-      ['Export model to image', 'Export model to PDF file', 'Generate model documentation', 'Order']
-        .forEach((l) => expect(tool(l).disabled, l).toBe(true));
+      ['Generate model documentation', 'Order'].forEach((l) => expect(tool(l).disabled, l).toBe(true));
+      ['Export model to image', 'Export model to PDF file'].forEach((l) => expect(tool(l).disabled, l).toBe(false));
       expect(tool('Size').disabled).toBe(true);
       expect(tool('Delete').disabled).toBe(true);
       await select('orders');

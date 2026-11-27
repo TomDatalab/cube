@@ -115,6 +115,13 @@ export type ModelSettings = {
   format?: { showTypes?: boolean; showNullable?: boolean };
   sqlGeneration?: { drop?: boolean; comments?: boolean };
   scripts?: { createBefore?: string; createAfter?: string; dropBefore?: string; dropAfter?: string };
+  // How the diagram prints to PDF; margin in mm, 0 to 50.
+  print?: {
+    pageSize?: 'A4' | 'A3' | 'Letter' | 'Legal';
+    orientation?: 'portrait' | 'landscape';
+    margin?: number;
+    showPageBreaks?: boolean;
+  };
 };
 
 export type Note = {

@@ -77,6 +77,9 @@ export type ModelToolbarProps = {
   };
   // SQL over the model; it changes nothing, so it stays open read-only.
   explorer: { onOpen(): void };
+  // The diagram as an image or a PDF; on read-only too. `busy` while a PDF
+  // is being made.
+  exports: { onImage(): void; onPdf(): void; busy: boolean };
   search: ReactNode;
   // Someone else edits the model: what changes it is off; exports, SQL,
   // copy, zoom, panes and search stay.
@@ -179,7 +182,7 @@ function createHint(file: ModelToolbarProps['file']): string {
 // Redgate's toolbar: history | file | clipboard | arrange | zoom | panes,
 // then the search on the right.
 export function ModelToolbar({
-  history, file, edit, arrange, references, zoom, panes, explorer, search, readOnly = false,
+  history, file, edit, arrange, references, zoom, panes, explorer, exports, search, readOnly = false,
 }: ModelToolbarProps) {
   const zoomOptions = ZOOM_CHOICES.includes(zoom.percent)
     ? ZOOM_CHOICES
@@ -199,8 +202,8 @@ export function ModelToolbar({
         <Tool label="Save changes" hint="Save changes (Ctrl + S)" disabled={readOnly || !file.dirty || file.busy} onClick={file.onSave}>
           <Save />
         </Tool>
-        <Tool label="Export model to image" hint={SOON} disabled><Image /></Tool>
-        <Tool label="Export model to PDF file" hint={SOON} disabled><FileText /></Tool>
+        <Tool label="Export model to image" disabled={exports.busy} onClick={exports.onImage}><Image /></Tool>
+        <Tool label="Export model to PDF file" disabled={exports.busy} onClick={exports.onPdf}><FileText /></Tool>
         <Tool
           label="Generate SQL script"
           hint={file.canSql ? 'Generate SQL script (Ctrl + G)' : 'Only for Postgres and MySQL connections'}

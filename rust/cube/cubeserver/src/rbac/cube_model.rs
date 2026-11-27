@@ -283,6 +283,46 @@ pub struct Settings {
     pub sql_generation: Option<SqlGeneration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<ModelScripts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print: Option<PrintSettings>,
+}
+
+/// How the diagram prints to PDF; every field falls back to the client's
+/// default (A4, landscape, 10 mm, no page breaks).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrintSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
+    /// Millimetres on every side, 0 to 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_page_breaks: Option<bool>,
+}
+
+const PAGE_SIZES: [&str; 4] = ["A4", "A3", "Letter", "Legal"];
+const ORIENTATIONS: [&str; 2] = ["portrait", "landscape"];
+
+fn validate_print(print: &PrintSettings) -> Result<(), String> {
+    if let Some(v) = &print.page_size {
+        if !PAGE_SIZES.contains(&v.as_str()) {
+            return Err(format!("Tamanho de página inválido: {v}"));
+        }
+    }
+    if let Some(v) = &print.orientation {
+        if !ORIENTATIONS.contains(&v.as_str()) {
+            return Err(format!("Orientação inválida: {v}"));
+        }
+    }
+    if let Some(v) = print.margin {
+        if !v.is_finite() || !(0.0..=50.0).contains(&v) {
+            return Err(format!("Margem inválida: {v}"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -774,6 +814,9 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         if v != 2 {
             return Err(format!("formatVersion inválido: {v}"));
         }
+    }
+    if let Some(print) = def.settings.as_ref().and_then(|s| s.print.as_ref()) {
+        validate_print(print)?;
     }
     let mut aliases = HashSet::new();
     let mut drafts = HashSet::new();
@@ -2781,6 +2824,45 @@ mod tests {
             { "name": "uk", "columns": ["sku"] }, { "name": "uk", "columns": ["price"] }
         ]));
         assert!(e.contains("O nome uk se repete em shop.items"), "{e}");
+    }
+
+    #[test]
+    fn refuses_bad_print_settings() {
+        let with_print = |print: serde_json::Value| {
+            let mut value = physical_json();
+            value["settings"]["print"] = print;
+            value
+        };
+        let bad = |print: serde_json::Value| {
+            let def: Definition = serde_json::from_value(with_print(print)).unwrap();
+            validate(&def).unwrap_err()
+        };
+        assert_eq!(
+            bad(serde_json::json!({ "pageSize": "A5" })),
+            "Tamanho de página inválido: A5"
+        );
+        assert_eq!(
+            bad(serde_json::json!({ "orientation": "up" })),
+            "Orientação inválida: up"
+        );
+        assert_eq!(
+            bad(serde_json::json!({ "margin": 60 })),
+            "Margem inválida: 60"
+        );
+        assert_eq!(
+            bad(serde_json::json!({ "margin": -1 })),
+            "Margem inválida: -1"
+        );
+        // Unknown fields are refused by serde.
+        let unknown = with_print(serde_json::json!({ "scale": 2 }));
+        assert!(serde_json::from_value::<Definition>(unknown).is_err());
+
+        let value = with_print(serde_json::json!({
+            "pageSize": "Letter", "orientation": "portrait", "margin": 0.0, "showPageBreaks": true
+        }));
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap(), value);
     }
 
     #[test]

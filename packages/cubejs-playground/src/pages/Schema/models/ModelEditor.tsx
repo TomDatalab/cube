@@ -54,6 +54,10 @@ import { issues } from './validate';
 import { SqlDialog, SqlOptions } from './SqlDialog';
 import { ExplorerDialog } from './explorer/ExplorerDialog';
 import { explorerTables } from './explorer/explorerTables';
+import { ExportImageDialog } from './export/ExportImageDialog';
+import { PageBreaks } from './export/PageBreaks';
+import { exportPdf } from './export/exportPdf';
+import { diagramBounds, pageGrid } from './export/pages';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
 import {
@@ -283,6 +287,8 @@ function Editor({
   // The Generate SQL dialog: open with its limits, options and answer.
   const [sqlAsk, setSqlAsk] = useState<{ only?: string[] } | null>(null);
   const [explorerOpen, setExplorerOpen] = useState(false);
+  const [imageOpen, setImageOpen] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const [sqlOptions, setSqlOptions] = useState<SqlOptions>({ drop: false, onlyNew: false });
   const [sqlScript, setSqlScript] = useState<{ script: string | null; error: string | null; loading: boolean }>(
     { script: null, error: null, loading: false }
@@ -333,6 +339,12 @@ function Editor({
     lastAsk.current = ask;
   }
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
+  // Where the PDF's pages break, over the whole diagram, when asked.
+  const print = def.settings?.print;
+  const pageBreaks = useMemo(
+    () => (print?.showPageBreaks ? pageGrid(diagramBounds(nodes, 'all')!, print) : null),
+    [nodes, print]
+  );
 
   // The model as the server has it, replacing what is on the canvas and its
   // history.
@@ -1306,6 +1318,21 @@ function Editor({
   };
 
   const hits = searchModel(def, columnsOfTable, query);
+
+  // The PDF goes at once, with the model's print settings, as Redgate's.
+  const printPdf = async () => {
+    if (!canvas.current) {
+      return;
+    }
+    setPdfBusy(true);
+    try {
+      await exportPdf(canvas.current, diagramBounds(nodes, 'all')!, print, `${name || 'model'}.pdf`);
+    } catch (e: any) {
+      notify.error(e?.message ?? 'The PDF could not be made');
+    } finally {
+      setPdfBusy(false);
+    }
+  };
   // The dimensions a cube join may pair, generated ones in auto mode.
   const cubeDimensions = (id: string) => {
     const c = (def.cubes ?? []).find((x) => x.id === id);
@@ -1577,6 +1604,7 @@ function Editor({
           onToggleTop: () => togglePane('top'),
         }}
         explorer={{ onOpen: () => setExplorerOpen(true) }}
+        exports={{ onImage: () => setImageOpen(true), onPdf: printPdf, busy: pdfBusy }}
         search={(
           <SearchBox query={query} hits={hits} onQuery={setQuery} onPick={pickHit} inputRef={searchInput} />
         )}
@@ -1666,6 +1694,7 @@ function Editor({
             fitViewOptions={FIT_VIEW}
           >
             <Background />
+            {pageBreaks ? <PageBreaks pages={pageBreaks} /> : null}
             {showMap ? (
               <MiniMap
                 pannable
@@ -1813,6 +1842,14 @@ function Editor({
         tables={() => explorerTables(def, columnsOfTable)}
         onFind={pickNode}
         onClose={() => setExplorerOpen(false)}
+      />
+
+      <ExportImageDialog
+        open={imageOpen}
+        name={name}
+        nodes={nodes}
+        target={() => canvas.current}
+        onClose={() => setImageOpen(false)}
       />
 
       <CreateTablesDialog

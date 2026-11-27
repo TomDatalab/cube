@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field, Spinner } from '@/components/kit';
@@ -16,6 +18,7 @@ import { AreaProperties } from './AreaProperties';
 import { ViewProperties } from './ViewProperties';
 import { CubeProperties } from './CubeProperties';
 import { CubeJoinProperties } from './CubeJoinProperties';
+import { PAGE_SIZES, PRINT_DEFAULTS, PageSize } from './export/pages';
 
 import {
   ModelDefinition, ModelTable,
@@ -115,8 +118,91 @@ const SCRIPTS: { key: 'createBefore' | 'createAfter' | 'dropBefore' | 'dropAfter
   { key: 'dropAfter', label: 'End of the drop script' },
 ];
 
-// Redgate's other model sections: scripts, validation rules, format and
-// SQL generation, each closed until opened.
+const SELECT = 'tw:h-8 tw:w-full tw:rounded-md tw:border tw:bg-background tw:px-2 tw:text-sm tw:text-foreground';
+const PAGE_SIZE_CHOICES = Object.keys(PAGE_SIZES) as PageSize[];
+
+// The margin as typed, written on leaving the field or on Enter, kept
+// within 0 to 50 mm.
+function MarginField({ value, onCommit }: { value: number; onCommit(next: number): void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const commit = () => {
+    const typed = Number(text);
+    const next = text.trim() === '' || !Number.isFinite(typed) ? value : Math.min(50, Math.max(0, typed));
+    setText(String(next));
+    if (next !== value) {
+      onCommit(next);
+    }
+  };
+  return (
+    <Input
+      id="model-print-margin"
+      type="number"
+      min={0}
+      max={50}
+      aria-label="Margins (mm)"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          commit();
+        }
+      }}
+    />
+  );
+}
+
+// How the diagram prints to PDF, and whether the canvas shows where the
+// pages break.
+function PrintSettingsSection({ def, onChange }: Pick<PropertiesPanelProps, 'def' | 'onChange'>) {
+  const print = def.settings?.print;
+  return (
+    <Section title="Print settings" defaultOpen={false}>
+      <Field label="Page size" htmlFor="model-print-size">
+        <select
+          id="model-print-size"
+          aria-label="Page size"
+          className={SELECT}
+          value={print?.pageSize ?? PRINT_DEFAULTS.pageSize}
+          onChange={(e) => onChange(setSetting(def, 'print', 'pageSize', e.target.value, PRINT_DEFAULTS.pageSize))}
+        >
+          {PAGE_SIZE_CHOICES.map((size) => <option key={size} value={size}>{size}</option>)}
+        </select>
+      </Field>
+      <Field label="Orientation" htmlFor="model-print-orientation">
+        <select
+          id="model-print-orientation"
+          aria-label="Orientation"
+          className={SELECT}
+          value={print?.orientation ?? PRINT_DEFAULTS.orientation}
+          onChange={(e) => onChange(
+            setSetting(def, 'print', 'orientation', e.target.value, PRINT_DEFAULTS.orientation)
+          )}
+        >
+          <option value="portrait">Portrait</option>
+          <option value="landscape">Landscape</option>
+        </select>
+      </Field>
+      <Field label="Margins (mm)" htmlFor="model-print-margin">
+        <MarginField
+          value={print?.margin ?? PRINT_DEFAULTS.margin}
+          onCommit={(mm) => onChange(setSetting(def, 'print', 'margin', mm, PRINT_DEFAULTS.margin))}
+        />
+      </Field>
+      <Check
+        label="Show page breaks"
+        checked={print?.showPageBreaks ?? PRINT_DEFAULTS.showPageBreaks}
+        onChange={(on) => onChange(setSetting(def, 'print', 'showPageBreaks', on, PRINT_DEFAULTS.showPageBreaks))}
+      >
+        Show page breaks
+      </Check>
+    </Section>
+  );
+}
+
+// Redgate's other model sections: scripts, validation rules, format, print
+// and SQL generation, each closed until opened.
 function ModelSettings({ def, onChange }: Pick<PropertiesPanelProps, 'def' | 'onChange'>) {
   const s = def.settings ?? {};
   const groups = [...new Set(RULES.map((r) => r.group))];
@@ -176,6 +262,7 @@ function ModelSettings({ def, onChange }: Pick<PropertiesPanelProps, 'def' | 'on
           Show N (nullable)
         </Check>
       </Section>
+      <PrintSettingsSection def={def} onChange={onChange} />
       <Section title="SQL generation settings" defaultOpen={false}>
         <Check
           label="Generate DROP statements"

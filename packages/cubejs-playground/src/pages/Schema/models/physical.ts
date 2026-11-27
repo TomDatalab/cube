@@ -407,7 +407,7 @@ export function addReference(
   };
 }
 
-type SettingGroup = 'validation' | 'format' | 'sqlGeneration' | 'scripts';
+type SettingGroup = 'validation' | 'format' | 'sqlGeneration' | 'scripts' | 'print';
 
 // One of the model's settings; a value equal to its default (or empty)
 // leaves the key out, and empty groups go with it.
@@ -415,8 +415,8 @@ export function setSetting(
   def: ModelDefinition,
   group: SettingGroup,
   key: string,
-  value: string | boolean,
-  fallback: string | boolean
+  value: string | boolean | number,
+  fallback: string | boolean | number
 ): ModelDefinition {
   const settings = { ...(def.settings ?? {}) } as Record<string, Record<string, unknown> | undefined>;
   const values = { ...(settings[group] ?? {}) };
