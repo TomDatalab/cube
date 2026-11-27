@@ -255,13 +255,15 @@ export function TableProperties({
   const taken = [...keys.map((k) => k.name), ...indexes.map((i) => i.name), ...checks.map((c) => c.name)];
   return (
     <>
-      <Section title="General">
-        {onSqlPreview ? (
+      <Section
+        title="General"
+        action={onSqlPreview ? (
           <Button variant="link" size="sm" className="tw:self-end tw:p-0" onClick={() => onSqlPreview(alias)}>
             <Code />
             SQL preview
           </Button>
         ) : null}
+      >
         <TableName def={def} alias={alias} onChange={onChange} onRenamed={onRenamed} />
         <Value label="Source">{`${table.schema}.${table.table}${draft ? ' (new)' : ''}`}</Value>
         <Field label="Comment" htmlFor="model-table-comment">

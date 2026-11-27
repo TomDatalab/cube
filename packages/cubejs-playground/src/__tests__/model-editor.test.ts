@@ -2870,14 +2870,36 @@ describe('ModelEditor', () => {
         .toEqual(['orders', 'customers', 'cube:c1']);
       await act(async () => flow.props.onNodeDragStop({}, { id: 'customers' }, [{ id: 'customers', position: { x: 9, y: 9 } }]));
       expect(document.body.textContent).not.toContain('Unsaved changes');
-      expect(document.querySelector('[data-slot="model-properties"]')!.closest('fieldset')!.disabled).toBe(true);
-      expect(document.querySelectorAll('fieldset[disabled] [data-slot="model-properties"] input').length).toBeGreaterThan(0);
+      const fields = () => [...document.querySelectorAll<HTMLInputElement>(
+        '[data-slot="model-properties"] input, [data-slot="model-properties"] textarea, [data-slot="model-properties"] select'
+      )];
+      expect(fields().length).toBeGreaterThan(0);
+      fields().forEach((f) => expect(f.matches(':disabled'), f.getAttribute('aria-label') ?? f.id).toBe(true));
 
       await act(async () => button('Take control').click());
       expect(api.takeModelLock).toHaveBeenCalledWith('m1', token());
       expect(document.body.textContent).not.toContain('Read-only mode');
       expect(tool('Delete').disabled).toBe(false);
       expect(flow.props.nodesDraggable).toBe(true);
+    });
+
+    it('read-only: a closed section opens, its fields stay off, SQL preview works', async () => {
+      api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+      await render();
+      const header = button('Print settings');
+      expect(header.matches(':disabled')).toBe(false);
+      await act(async () => header.click());
+      expect(header.getAttribute('aria-expanded')).toBe('true');
+      const size = document.querySelector('select[aria-label="Page size"]') as HTMLSelectElement;
+      expect(size).not.toBeNull();
+      expect(size.matches(':disabled')).toBe(true);
+      expect((document.querySelector('input[aria-label="Model name"]') as HTMLInputElement).matches(':disabled')).toBe(true);
+
+      await select('orders');
+      const preview = button('SQL preview');
+      expect(preview.matches(':disabled')).toBe(false);
+      await act(async () => preview.click());
+      expect(api.modelSql).toHaveBeenCalledWith('m1', expect.anything(), { drop: false, onlyNew: false, only: ['orders'] });
     });
 
     it('stays read-only after Take control until the model is reloaded', async () => {

@@ -81,6 +81,7 @@ import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
 import { useEditLock } from './useEditLock';
 import { ReadOnlyBanner } from './ReadOnlyBanner';
+import { ReadOnlyContext } from './PanelParts';
 
 export { TABLE_MIME };
 
@@ -1770,8 +1771,9 @@ function Editor({
           ) : null}
         </div>
         {panes.right ? (
-          // Read-only: every field and button of the pane is off.
-          <fieldset disabled={readOnly} className="tw:contents">
+          // Read-only: every field of the pane is off; its sections still
+          // open, and SQL preview still shows.
+          <ReadOnlyContext.Provider value={readOnly}>
             <PropertiesPanel
               def={def}
               name={name}
@@ -1804,7 +1806,7 @@ function Editor({
               deleting={busy === 'delete'}
               busy={busy !== null}
             />
-          </fieldset>
+          </ReadOnlyContext.Provider>
         ) : null}
       </div>
 

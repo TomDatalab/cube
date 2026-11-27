@@ -1,5 +1,5 @@
 import {
-  KeyboardEvent, ReactNode, useEffect, useState,
+  createContext, KeyboardEvent, ReactNode, useContext, useEffect, useState,
 } from 'react';
 import { Ban, Minus, Plus } from 'lucide-react';
 
@@ -9,12 +9,18 @@ import { cn } from '@/lib/utils';
 
 import { TABLE_COLORS, TableColor } from './modelGraph';
 
+// While someone else edits the model, the pane only shows: every field of a
+// section is off, but its header still opens and closes it.
+export const ReadOnlyContext = createContext(false);
+
 // A section of the properties pane that opens and closes with + and −, as
-// Redgate's.
+// Redgate's. `action` sits above the fields and stays on when read-only
+// (it only shows something, as SQL preview).
 export function Section({
-  title, slot, defaultOpen = true, children,
-}: { title: string; slot?: string; defaultOpen?: boolean; children: ReactNode }) {
+  title, slot, defaultOpen = true, action, children,
+}: { title: string; slot?: string; defaultOpen?: boolean; action?: ReactNode; children: ReactNode }) {
   const [open, setOpen] = useState(defaultOpen);
+  const readOnly = useContext(ReadOnlyContext);
   return (
     <section className="tw:border-b" data-slot={slot}>
       <button
@@ -26,7 +32,14 @@ export function Section({
         {title}
         {open ? <Minus className="tw:size-4" /> : <Plus className="tw:size-4" />}
       </button>
-      {open ? <div className="tw:flex tw:flex-col tw:gap-3 tw:px-3 tw:py-3">{children}</div> : null}
+      {open ? (
+        <div className="tw:flex tw:flex-col tw:gap-3 tw:px-3 tw:py-3">
+          {action}
+          <fieldset disabled={readOnly} className="tw:contents">
+            {children}
+          </fieldset>
+        </div>
+      ) : null}
     </section>
   );
 }

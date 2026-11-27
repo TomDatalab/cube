@@ -150,13 +150,15 @@ export function ViewProperties({
   });
   return (
     <>
-      <Section title="General">
-        {dialect && onSqlPreview ? (
+      <Section
+        title="General"
+        action={dialect && onSqlPreview ? (
           <Button variant="link" size="sm" className="tw:self-end tw:p-0" onClick={() => onSqlPreview(nodeIdOf('view', id))}>
             <Code />
             SQL preview
           </Button>
         ) : null}
+      >
         <ViewName def={def} id={id} onChange={onChange} />
         <Field label="Schema" htmlFor="model-view-schema">
           <CheckedText
