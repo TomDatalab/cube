@@ -443,11 +443,16 @@ pub const TYPES: [&str; 7] = [
 
 /// `^[A-Za-z_][A-Za-z0-9_]*$`, at most 63 characters.
 fn valid_ident(s: &str) -> bool {
+    s.len() <= 63 && ident_pattern(s)
+}
+
+/// `^[A-Za-z_][A-Za-z0-9_]*$`, of any length: a cube name (Cube has no
+/// cap, and a converted model's name may be long).
+fn ident_pattern(s: &str) -> bool {
     let mut chars = s.chars();
-    s.len() <= 63
-        && chars
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -944,7 +949,7 @@ fn validate_cubes(def: &Definition, aliases: &HashSet<&str>) -> Result<(), Strin
         if !cube.x.is_finite() || !cube.y.is_finite() {
             return Err(format!("Posição inválida em {}", cube.id));
         }
-        if !valid_ident(name) {
+        if !ident_pattern(name) {
             return Err(format!("Nome de cubo inválido: {name}"));
         }
         if !names.insert(name) {
@@ -1226,10 +1231,19 @@ fn explicit(
     cube: &CubeNode,
     column: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<Shaped, String> {
-    let sql_of = |c: &Option<String>, sql: &Option<String>| -> Result<Option<String>, String> {
+    let name = cube.name.as_str();
+    // A member's SQL: its column's, else its own, which must not be blank
+    // unless `optional` (a count), when a blank one is left out.
+    let sql_of = |member: &str,
+                  c: &Option<String>,
+                  sql: &Option<String>,
+                  optional: bool|
+     -> Result<Option<String>, String> {
         match (c, sql) {
             (Some(c), _) => column(c).map(Some),
-            (None, sql) => Ok(sql.clone()),
+            (None, Some(sql)) if !sql.trim().is_empty() => Ok(Some(sql.clone())),
+            (None, _) if optional => Ok(None),
+            (None, _) => Err(format!("O membro {name}.{member} está sem SQL")),
         }
     };
     let text = |m: &mut Mapping, key: &str, v: &Option<String>| {
@@ -1241,7 +1255,7 @@ fn explicit(
     for d in &cube.dimensions {
         let mut m = Mapping::new();
         m.insert("name".into(), d.name.as_str().into());
-        text(&mut m, "sql", &sql_of(&d.column, &d.sql)?);
+        text(&mut m, "sql", &sql_of(&d.name, &d.column, &d.sql, false)?);
         m.insert("type".into(), d.kind.as_str().into());
         if d.primary_key {
             m.insert("primary_key".into(), true.into());
@@ -1253,7 +1267,7 @@ fn explicit(
     for x in &cube.measures {
         let mut m = Mapping::new();
         m.insert("name".into(), x.name.as_str().into());
-        text(&mut m, "sql", &sql_of(&x.column, &x.sql)?);
+        text(&mut m, "sql", &sql_of(&x.name, &x.column, &x.sql, x.kind == "count")?);
         m.insert("type".into(), x.kind.as_str().into());
         text(&mut m, "title", &x.title);
         text(&mut m, "format", &x.format);
@@ -1268,17 +1282,20 @@ fn explicit(
     })
 }
 
-fn segments(cube: &CubeNode) -> Vec<Yaml> {
+fn segments(cube: &CubeNode) -> Result<Vec<Yaml>, String> {
     cube.segments
         .iter()
         .map(|s| {
+            if s.sql.trim().is_empty() {
+                return Err(format!("O segmento {}.{} está sem SQL", cube.name, s.name));
+            }
             let mut m = Mapping::new();
             m.insert("name".into(), s.name.as_str().into());
             m.insert("sql".into(), s.sql.as_str().into());
             if let Some(title) = &s.title {
                 m.insert("title".into(), title.as_str().into());
             }
-            Yaml::Mapping(m)
+            Ok(Yaml::Mapping(m))
         })
         .collect()
 }
@@ -1307,11 +1324,12 @@ fn shape(
             if auto {
                 return Err(format!("O cubo {name} não tem membros"));
             }
+            let query = cube.source.sql.as_deref().unwrap_or("").trim();
+            if query.is_empty() {
+                return Err(format!("O cubo {name} está sem SQL"));
+            }
             let mut shaped = explicit(cube, &|c| Ok(format!("{{CUBE}}.{}", q(c))))?;
-            shaped.source = (
-                "sql",
-                cube.source.sql.as_deref().unwrap_or("").trim().to_string(),
-            );
+            shaped.source = ("sql", query.to_string());
             shaped
         }
         "table" => {
@@ -1363,7 +1381,7 @@ fn shape(
         }
         _ => joined(def, cube, columns, db_type, primary()?, auto)?,
     };
-    shaped.segments = segments(cube);
+    shaped.segments = segments(cube)?;
     Ok(shaped)
 }
 
@@ -1888,6 +1906,73 @@ mod tests {
         assert_eq!(positive["sql"].as_str(), Some("{CUBE}.x > 0"));
         assert_eq!(positive["title"].as_str(), Some("Positivos"));
         assert!(q["measures"].is_null());
+    }
+
+    /// A sql cube `q` (SELECT 1 AS x) with dimension `x`, measure `n`
+    /// (sum of x) and segment `s`.
+    fn sql_cube() -> Definition {
+        let mut q = cube_node("c1", "q", "sql", None);
+        q.source.sql = Some("SELECT 1 AS x".into());
+        q.dimensions = vec![dimension("x", "number", None, Some("{CUBE}.x"))];
+        q.measures = vec![CubeMeasure {
+            name: "n".into(),
+            kind: "sum".into(),
+            sql: Some("{CUBE}.x".into()),
+            ..Default::default()
+        }];
+        q.segments = vec![CubeSegment {
+            name: "s".into(),
+            sql: "{CUBE}.x > 0".into(),
+            title: None,
+        }];
+        Definition {
+            data_source: "default".into(),
+            cubes: vec![q],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn blank_sql_saves_but_does_not_build() {
+        let blank = |edit: &dyn Fn(&mut CubeNode)| {
+            let mut def = sql_cube();
+            edit(&mut def.cubes[0]);
+            validate(&def).unwrap();
+            build_def(&def).unwrap_err()
+        };
+        assert_eq!(blank(&|c| c.dimensions[0].sql = Some("  ".into())), "O membro q.x está sem SQL");
+        assert_eq!(blank(&|c| c.measures[0].sql = Some("".into())), "O membro q.n está sem SQL");
+        assert_eq!(blank(&|c| c.segments[0].sql = " \n".into()), "O segmento q.s está sem SQL");
+        assert_eq!(blank(&|c| c.source.sql = Some(" ".into())), "O cubo q está sem SQL");
+        assert_eq!(blank(&|c| c.source.sql = None), "O cubo q está sem SQL");
+
+        // A count needs no SQL: a blank one is left out.
+        let mut def = sql_cube();
+        def.cubes[0].measures[0] = CubeMeasure {
+            name: "n".into(),
+            kind: "count".into(),
+            sql: Some(" ".into()),
+            ..Default::default()
+        };
+        let built = build_def(&def).unwrap();
+        let n = member(&yaml_of(&built, "q"), "measures", "n").clone();
+        assert!(n["sql"].is_null(), "{n:?}");
+        assert_eq!(n["type"].as_str(), Some("count"));
+    }
+
+    #[test]
+    fn a_long_cube_name_is_valid() {
+        let long = "a".repeat(80);
+        let mut def = sql_cube();
+        def.cubes[0].name = long.clone();
+        validate(&def).unwrap();
+        assert_eq!(build_def(&def).unwrap()[0].cube_name, long);
+        def.cubes[0].name = format!("1{long}");
+        assert_eq!(validate(&def).unwrap_err(), format!("Nome de cubo inválido: 1{long}"));
+        // Member names keep the 63-character cap.
+        let mut def = sql_cube();
+        def.cubes[0].dimensions[0].name = "x".repeat(64);
+        assert_eq!(validate(&def).unwrap_err(), format!("Nome de membro inválido: q.{}", "x".repeat(64)));
     }
 
     #[test]

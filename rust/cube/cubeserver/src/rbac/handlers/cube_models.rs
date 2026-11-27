@@ -482,6 +482,19 @@ pub async fn build(
                     }
                     None => {
                         let path = format!("{}.yml", b.cube_name);
+                        // The file of another cube of this model, renamed
+                        // since it was built there.
+                        let sibling = built.iter().zip(&found).find_map(|(other, row)| {
+                            row.filter(|row| row.path == path).map(|_| &other.cube_name)
+                        });
+                        if let Some(other) = sibling {
+                            return Err(WriteError::new(
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "O arquivo {path} é do cubo {other} deste model; renomeie um dos cubos"
+                                ),
+                            ));
+                        }
                         if files.iter().any(|f| f.path == path) {
                             return Err(WriteError::new(
                                 StatusCode::CONFLICT,

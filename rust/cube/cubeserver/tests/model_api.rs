@@ -1655,6 +1655,67 @@ build_test!(a_cube_named_like_a_foreign_cube_is_refused, |store, url| {
     }
 });
 
+build_test!(a_legacy_model_with_a_long_name_builds_and_saves, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let long = "Vendas Mensais Consolidadas Por Regiao E Por Cliente Do Ano Fiscal Corrente";
+    let cube = "vendas_mensais_consolidadas_por_regiao_e_por_cliente_do_ano_fiscal_corrente";
+    assert!(cube.len() > 63);
+    let id = new_model(&env, &token, on, long).await;
+
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    assert_eq!(built["cubes"][0]["cubeName"], cube);
+    assert_eq!(built["cubes"][0]["fileName"], format!("on/{cube}.yml"));
+    // Saved as it opens, converted: still valid, and it builds the same.
+    let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["definition"]["cubes"][0]["name"], cube, "{one}");
+    save_def(&env, &token, &id, one["definition"].clone(), 1).await;
+    let (status, again) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["cubes"][0]["content"], built["cubes"][0]["content"]);
+    assert_eq!(org_paths(&store, on).await, vec![format!("{cube}.yml")]);
+});
+
+build_test!(a_removed_cubes_name_on_a_new_cube_reuses_its_file, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let (file, _) = file_in(&built["detail"], "on/customers.yml");
+
+    // c2 removed, and a new cube c3 takes its name.
+    save_def(&env, &token, &id,
+        cubes_def(&[table_cube("c1", "orders", "orders"), table_cube("c3", "customers", "customers")]), 2).await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    assert_eq!(built["removed"], json!([]));
+    assert_eq!(built["cubes"][1]["fileName"], "on/customers.yml");
+    assert_eq!(file_in(&built["detail"], "on/customers.yml").0, file);
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+});
+
+build_test!(a_new_cube_on_a_renamed_cubes_file_is_refused, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    assert_eq!(build(&env, &token, &id, json!({})).await.0, StatusCode::OK);
+
+    // c1 renamed to sales stays in orders.yml; a new cube orders wants it.
+    save_def(&env, &token, &id, cubes_def(&[
+        table_cube("c1", "sales", "orders"),
+        table_cube("c2", "customers", "customers"),
+        table_cube("c3", "orders", "orders"),
+    ]), 2).await;
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "O arquivo orders.yml é do cubo sales deste model; renomeie um dos cubos");
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+});
+
 build_test!(an_old_build_record_moves_to_cube_model_cubes, |store, url| {
     shop_tables(&url).await;
     let (env, token, on) = models_env(&store).await;
