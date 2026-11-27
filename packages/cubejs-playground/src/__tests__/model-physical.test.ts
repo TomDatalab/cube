@@ -96,11 +96,33 @@ describe('physical', () => {
         ...base.cubes![0],
         source: { kind: 'joined', table: 'items', primaryKey: 'id' },
         dimensions: [{ name: 'sku', type: 'string', column: 'items.sku' }],
+      }, {
+        ...base.cubes![0],
+        id: 'c2',
+        name: 'orders',
+        // Reads items through a reference: a secondary table of the cube.
+        source: { kind: 'joined', table: 'orders', primaryKey: 'id' },
+        dimensions: [
+          { name: 'items_sku', type: 'string', column: 'items.sku' },
+          { name: 'orders_id', type: 'number', column: 'orders.id' },
+        ],
+        measures: [{ name: 'skus', type: 'count_distinct', column: 'items.sku' }],
+      }, {
+        ...base.cubes![0],
+        id: 'c3',
+        name: 'plain',
+        source: { kind: 'table', table: 'orders', primaryKey: 'id' },
+        dimensions: [{ name: 'id', type: 'number', column: 'id' }],
       }],
     };
     const renamed = renameColumn(renameColumn(def, 'items', 'sku', 'code'), 'items', 'id', 'key');
     expect(renamed.cubes![0].source.primaryKey).toBe('key');
     expect(renamed.cubes![0].dimensions[0].column).toBe('items.code');
+    expect(renamed.cubes![1].dimensions.map((d) => d.column)).toEqual(['items.code', 'orders.id']);
+    expect(renamed.cubes![1].measures[0].column).toBe('items.code');
+    // Not the key of a cube on another table, nor the plain column of a table cube on another table.
+    expect(renamed.cubes![1].source.primaryKey).toBe('id');
+    expect(renamed.cubes![2]).toEqual(def.cubes![2]);
     const removed = removeColumn(removeColumn(def, 'items', 'id'), 'items', 'sku');
     expect(removed.cubes![0].source).toEqual({ kind: 'joined', table: 'items' });
     expect(removed.cubes![0].dimensions).toEqual(def.cubes![0].dimensions);

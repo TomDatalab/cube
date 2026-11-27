@@ -109,20 +109,33 @@ export function renameColumn(def: ModelDefinition, alias: string, from: string, 
     columns: d.columns.map((c) => (c.name === from ? { ...c, name: to } : c)),
   }, rename));
   const end = (e: End): End => (e.alias === alias && e.column === from ? { ...e, column: to } : e);
-  // The cube key and the members of the column follow it.
-  const cubeColumn = (c: CubeNode) => {
-    const old = c.source.kind === 'joined' ? `${alias}.${from}` : from;
-    const renamed = c.source.kind === 'joined' ? `${alias}.${to}` : to;
-    const member = <M extends { column?: string }>(m: M): M => (m.column === old ? { ...m, column: renamed } : m);
+  // The cube key and the members of the column follow it: a `joined` cube
+  // names `alias.column` of any table it reaches, a `table` cube on `alias`
+  // the plain column.
+  const cubeColumn = (c: CubeNode): CubeNode => {
+    const own = c.source.kind !== 'sql' && c.source.table === alias;
+    let old: string | null = null;
+    let renamed = '';
+    if (c.source.kind === 'joined') {
+      old = `${alias}.${from}`;
+      renamed = `${alias}.${to}`;
+    } else if (own) {
+      old = from;
+      renamed = to;
+    }
+    const member = <M extends { column?: string }>(m: M): M => (old !== null && m.column === old
+      ? { ...m, column: renamed }
+      : m);
     return {
       ...c,
-      source: c.source.primaryKey === from ? { ...c.source, primaryKey: to } : c.source,
+      source: own && c.source.primaryKey === from ? { ...c.source, primaryKey: to } : c.source,
       dimensions: c.dimensions.map(member),
       measures: c.measures.map(member),
     };
   };
   return {
-    ...withCubesOn(next, alias, cubeColumn),
+    ...next,
+    ...(next.cubes ? { cubes: next.cubes.map(cubeColumn) } : {}),
     joins: next.joins.map((j) => ({
       ...j,
       from: end(j.from),
