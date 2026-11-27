@@ -1356,6 +1356,33 @@ mod tests {
         cube["sql"].as_str().unwrap().to_string()
     }
 
+    /// Today's build of [`orders_customers`], pinned before the build moved
+    /// to cubes: a converted model must build these bytes.
+    const GOLDEN_LEFT_JOIN: &str = "# Built from model Sales (00000000-0000-0000-0000-000000000000): Build cube rewrites this file\ncubes:\n- name: sales\n  sql: |-\n    SELECT \"orders\".\"id\" AS \"orders_id\", \"orders\".\"customer_id\" AS \"orders_customer_id\", \"orders\".\"Order ID\" AS \"orders_order_id\", \"orders\".\"order_id\" AS \"orders_order_id_2\", \"customers\".\"id\" AS \"customers_id\", \"customers\".\"region\" AS \"customers_region\"\n    FROM \"public\".\"orders\" AS \"orders\"\n    LEFT JOIN \"public\".\"customers\" AS \"customers\" ON \"orders\".\"customer_id\" = \"customers\".\"id\"\n  dimensions:\n  - name: orders_id\n    sql: '{CUBE}.\"orders_id\"'\n    type: number\n    primary_key: true\n  - name: orders_customer_id\n    sql: '{CUBE}.\"orders_customer_id\"'\n    type: number\n  - name: orders_order_id\n    sql: '{CUBE}.\"orders_order_id\"'\n    type: string\n  - name: orders_order_id_2\n    sql: '{CUBE}.\"orders_order_id_2\"'\n    type: number\n  - name: customers_id\n    sql: '{CUBE}.\"customers_id\"'\n    type: number\n  - name: customers_region\n    sql: '{CUBE}.\"customers_region\"'\n    type: string\n  measures:\n  - name: count\n    type: count\n";
+
+    /// Today's build of [`one_to_many`].
+    const GOLDEN_ONE_TO_MANY: &str = "# Built from model Sales (00000000-0000-0000-0000-000000000000): Build cube rewrites this file\ncubes:\n- name: sales\n  sql: |-\n    SELECT \"customers\".\"id\" AS \"customers_id\", \"customers\".\"region\" AS \"customers_region\", \"orders\".\"id\" AS \"orders_id\", \"orders\".\"customer_id\" AS \"orders_customer_id\", \"orders\".\"Order ID\" AS \"orders_order_id\", \"orders\".\"order_id\" AS \"orders_order_id_2\"\n    FROM \"public\".\"customers\" AS \"customers\"\n    LEFT JOIN \"public\".\"orders\" AS \"orders\" ON \"customers\".\"id\" = \"orders\".\"customer_id\"\n  dimensions:\n  - name: customers_id\n    sql: '{CUBE}.\"customers_id\"'\n    type: number\n    primary_key: true\n  - name: customers_region\n    sql: '{CUBE}.\"customers_region\"'\n    type: string\n  - name: orders_id\n    sql: '{CUBE}.\"orders_id\"'\n    type: number\n  - name: orders_customer_id\n    sql: '{CUBE}.\"orders_customer_id\"'\n    type: number\n  - name: orders_order_id\n    sql: '{CUBE}.\"orders_order_id\"'\n    type: string\n  - name: orders_order_id_2\n    sql: '{CUBE}.\"orders_order_id_2\"'\n    type: number\n  measures:\n  - name: count\n    type: count_distinct\n    sql: '{CUBE}.\"customers_id\"'\n";
+
+    /// customers (primary, pk id) one_to_many orders, left.
+    fn one_to_many() -> Definition {
+        Definition {
+            primary: Some("customers".into()),
+            joins: vec![join(
+                ("customers", "id"),
+                ("orders", "customer_id"),
+                "one_to_many",
+                "left",
+            )],
+            ..orders_customers()
+        }
+    }
+
+    #[test]
+    fn golden_yaml() {
+        assert_eq!(run(&orders_customers()).unwrap(), GOLDEN_LEFT_JOIN);
+        assert_eq!(run(&one_to_many()).unwrap(), GOLDEN_ONE_TO_MANY);
+    }
+
     #[test]
     fn builds_a_left_join_cube() {
         let yaml = run(&orders_customers()).unwrap();
