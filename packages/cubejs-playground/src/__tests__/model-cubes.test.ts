@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addCube, addCubeJoin, addMember, autoMembers, cubeKeyOf, cubeReads, cubeType, dimensionNames, generateMembers,
-  removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource, setCubeSourceLine,
+  moveCubeJoinEnd, removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource,
+  setCubeSourceLine, swapCubeJoin,
   setMember, snake,
 } from '../pages/Schema/models/cubes';
 import {
@@ -288,5 +289,43 @@ describe('cubes', () => {
     expect(next.cubes!.map((c) => c.id)).toEqual(['c2', 'c3']);
     expect(next.cubeJoins!.map((j) => j.id)).toEqual(['cj3']);
     expect(next.tables).toEqual(def.tables);
+  });
+});
+
+describe('changing a cube join', () => {
+  const def = {
+    dataSource: 'ds',
+    tables: [],
+    joins: [],
+    cubeJoins: [{
+      id: 'cj1',
+      from: 'c1',
+      to: 'c2',
+      relationship: 'many_to_one' as const,
+      on: [{ from: 'a', to: 'b' }],
+      points: [{ x: 1, y: 1 }, { x: 2, y: 2 }],
+      fromSide: 'left' as const,
+    }],
+  };
+
+  it('swapCubeJoin reads it the other way', () => {
+    expect(swapCubeJoin(def, 'cj1').cubeJoins![0]).toEqual({
+      id: 'cj1',
+      from: 'c2',
+      to: 'c1',
+      relationship: 'one_to_many',
+      on: [{ from: 'b', to: 'a' }],
+      points: [{ x: 2, y: 2 }, { x: 1, y: 1 }],
+      toSide: 'left',
+    });
+  });
+
+  it('moveCubeJoinEnd keeps the names the new cube has and drops the shape', () => {
+    const kept = moveCubeJoinEnd(def, 'cj1', 'to', 'c3', ['x', 'b']).cubeJoins![0];
+    expect(kept).toEqual(expect.objectContaining({ to: 'c3', on: [{ from: 'a', to: 'b' }], points: [] }));
+    expect(kept).not.toHaveProperty('fromSide', 'right');
+    const moved = moveCubeJoinEnd(def, 'cj1', 'from', 'c3', ['x']).cubeJoins![0];
+    expect(moved).toEqual(expect.objectContaining({ from: 'c3', on: [{ from: 'x', to: 'b' }] }));
+    expect(moved).not.toHaveProperty('fromSide');
   });
 });

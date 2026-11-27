@@ -167,7 +167,8 @@ export type ModelEditorProps = {
 
 type JoinEdit = { kind: 'new'; from: End; to: End } | { kind: 'edit'; index: number };
 // A cube join being made, between two cube ids.
-type CubeJoinAsk = { from: string; to: string };
+// A join to make between two cubes, or (`id`) one to change.
+type CubeJoinAsk = { from: string; to: string; id?: string };
 type TableEdit = { kind: 'new' } | { kind: 'edit'; alias: string };
 // The statements of a dry run, the version they were read at and the
 // error of a run.
@@ -994,6 +995,7 @@ function Editor({
         if (existing) {
           setSelection([]);
           setSelectedEdge(cubeJoinEdgeId(existing.id));
+          setCubeJoinAsk({ from: existing.from, to: existing.to, id: existing.id });
         } else {
           setCubeJoinAsk({ from: ends[0].id, to: ends[1].id });
         }
@@ -1019,6 +1021,18 @@ function Editor({
     const to = at && { ...at, alias: parseNodeId(at.alias).alias };
     if (to && to.alias !== from) {
       link({ alias: from, column: state.fromHandle.id }, to);
+    }
+  };
+
+  // Double-click a cube join to change it in its dialog.
+  const onEdgeDoubleClick: EdgeMouseHandler = (_event, edge) => {
+    const join = edge.id.startsWith(CUBE_JOIN)
+      ? (def.cubeJoins ?? []).find((j) => cubeJoinEdgeId(j.id) === edge.id)
+      : undefined;
+    if (join && !readOnly) {
+      setSelection([]);
+      setSelectedEdge(edge.id);
+      setCubeJoinAsk({ from: join.from, to: join.to, id: join.id });
     }
   };
 
@@ -1411,6 +1425,8 @@ function Editor({
     }
   };
   // The dimensions a cube join may pair, generated ones in auto mode.
+  // The join the cube join dialog changes, while it still exists.
+  const editedCubeJoin = cubeJoinAsk?.id ? (def.cubeJoins ?? []).find((j) => j.id === cubeJoinAsk.id) : undefined;
   const cubeDimensions = (id: string) => {
     const c = (def.cubes ?? []).find((x) => x.id === id);
     return c ? dimensionNames(def, c, columnsOf) : [];
@@ -1759,6 +1775,7 @@ function Editor({
             connectionMode={ConnectionMode.Loose}
             connectionRadius={30}
             onEdgeClick={onEdgeClick}
+            onEdgeDoubleClick={onEdgeDoubleClick}
             onEdgesChange={onEdgesChange}
             onNodeDoubleClick={onNodeDoubleClick}
             onNodeClick={onNodeClick}
@@ -1874,9 +1891,12 @@ function Editor({
         to={(def.cubes ?? []).find((c) => c.id === cubeJoinAsk?.to)?.name ?? ''}
         fromDimensions={cubeJoinAsk ? cubeDimensions(cubeJoinAsk.from) : []}
         toDimensions={cubeJoinAsk ? cubeDimensions(cubeJoinAsk.to) : []}
+        initial={editedCubeJoin ? { relationship: editedCubeJoin.relationship, on: editedCubeJoin.on } : undefined}
         onClose={() => setCubeJoinAsk(null)}
         onSave={(choice) => {
-          if (cubeJoinAsk) {
+          if (editedCubeJoin) {
+            change(setCubeJoin(def, editedCubeJoin.id, choice));
+          } else if (cubeJoinAsk) {
             // Joined meanwhile (an undo, a redo): keep the one join.
             const pair = [cubeJoinAsk.from, cubeJoinAsk.to];
             const existing = (def.cubeJoins ?? []).find((j) => pair.includes(j.from) && pair.includes(j.to));

@@ -2653,7 +2653,7 @@ describe('ModelEditor', () => {
       }]);
     });
 
-    it('tool 4 between two joined cubes selects their join', async () => {
+    it('tool 4 between two joined cubes opens their join to change it', async () => {
       api.model.mockResolvedValueOnce(view(joined()));
       await render();
       const connect = async (source: string, target: string) => {
@@ -2662,15 +2662,60 @@ describe('ModelEditor', () => {
         await act(async () => flow.props.onConnect({
           source, sourceHandle: 'join', target, targetHandle: 'join',
         }));
-        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+        expect(dialog.textContent).toContain('Edit cube join');
+        expect((dialog.querySelector('select[aria-label="Relationship"]') as HTMLSelectElement).value).toBe('many_to_one');
+        expect((dialog.querySelector('select[aria-label="Pair 1 from dimension"]') as HTMLSelectElement).value)
+          .toBe('customer_id');
         expect(flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1').selected).toBe(true);
-        expect(pane().textContent).toContain('Cube join properties');
+        await act(async () => [...dialog.querySelectorAll('button')].find((b) => b.textContent === 'Cancel')!.click());
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
       };
       await connect('cube:c1', 'cube:c2');
       await connect('cube:c2', 'cube:c1');
       // Nothing changed: still the one join, and nothing to save.
       expect(edgeIds().filter((e: string) => e.startsWith('cubejoin:'))).toEqual(['cubejoin:cj1']);
       expect(tool('Save changes').disabled).toBe(true);
+    });
+
+    it('double-clicking a cube join changes it in its dialog', async () => {
+      api.model.mockResolvedValueOnce(view(joined()));
+      await render();
+      const edge = flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1');
+      await act(async () => flow.props.onEdgeDoubleClick({}, edge));
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      expect(dialog.textContent).toContain('Edit cube join');
+      const inDialog = async (label: string, value: string) => act(async () => {
+        const el = dialog.querySelector(`select[aria-label="${label}"]`) as HTMLSelectElement;
+        el.value = value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await inDialog('Relationship', 'one_to_one');
+      await inDialog('Pair 1 from dimension', 'id');
+      await act(async () => [...dialog.querySelectorAll('button')].find((b) => b.textContent === 'Save')!.click());
+      const def = await savedDef();
+      expect(def.cubeJoins).toEqual([expect.objectContaining({
+        id: 'cj1', relationship: 'one_to_one', on: [{ from: 'id', to: 'id' }],
+      })]);
+    });
+
+    it('the panel moves an end of a cube join and swaps its direction', async () => {
+      const three = joined();
+      three.cubes = [...three.cubes!, { ...three.cubes![1], id: 'c3', name: 'other_cube', x: 900 }];
+      api.model.mockResolvedValueOnce(view(three));
+      await render();
+      await act(async () => (document.querySelector('[data-edge="cubejoin:cj1"]') as HTMLElement).click());
+      const to = pane().querySelector('select[aria-label="To cube"]') as HTMLSelectElement;
+      // The other end's cube cannot be picked.
+      expect([...to.options].find((o) => o.value === 'c1')!.disabled).toBe(true);
+      await pick('To cube', 'c3');
+      let def = await savedDef();
+      expect(def.cubeJoins[0]).toEqual(expect.objectContaining({ from: 'c1', to: 'c3', on: [{ from: 'customer_id', to: 'id' }] }));
+      await act(async () => [...pane().querySelectorAll('button')].find((b) => b.textContent === 'Swap direction')!.click());
+      def = await savedDef();
+      expect(def.cubeJoins[0]).toEqual(expect.objectContaining({
+        from: 'c3', to: 'c1', relationship: 'one_to_many', on: [{ from: 'id', to: 'customer_id' }],
+      }));
     });
 
     it('selects a cube join from its edge', async () => {

@@ -368,6 +368,48 @@ export function setCubeSourceLine(
   };
 }
 
+const INVERSE: Record<Relationship, Relationship> = {
+  one_to_one: 'one_to_one', one_to_many: 'many_to_one', many_to_one: 'one_to_many',
+};
+
+// The same join read the other way: its cubes, pairs, relationship, ends'
+// sides and corners all turned around.
+export function swapCubeJoin(def: ModelDefinition, id: string): ModelDefinition {
+  return {
+    ...def,
+    cubeJoins: joinsOf(def).map((j) => (j.id !== id ? j : merged(j, {
+      from: j.to,
+      to: j.from,
+      relationship: INVERSE[j.relationship],
+      on: j.on.map((p) => ({ from: p.to, to: p.from })),
+      points: [...j.points].reverse(),
+      fromSide: j.toSide,
+      toSide: j.fromSide,
+    }))),
+  };
+}
+
+// Moves one end of a join to another cube. Its pairs keep their dimension
+// on the end that stays; on the moved end a name the new cube lacks becomes
+// its first dimension. The line's shape is dropped: it joined other boxes.
+export function moveCubeJoinEnd(
+  def: ModelDefinition,
+  id: string,
+  end: 'from' | 'to',
+  cube: string,
+  dimensions: string[]
+): ModelDefinition {
+  return {
+    ...def,
+    cubeJoins: joinsOf(def).map((j) => (j.id !== id ? j : merged(j, {
+      [end]: cube,
+      on: j.on.map((p) => (dimensions.includes(p[end]) ? p : { ...p, [end]: dimensions[0] ?? p[end] })),
+      points: [],
+      [end === 'from' ? 'fromSide' : 'toSide']: undefined,
+    }))),
+  };
+}
+
 export function removeCubeJoin(def: ModelDefinition, id: string): ModelDefinition {
   return { ...def, cubeJoins: joinsOf(def).filter((j) => j.id !== id) };
 }

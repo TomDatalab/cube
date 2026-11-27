@@ -12,18 +12,22 @@ const ICON = 'tw:flex tw:size-6 tw:shrink-0 tw:cursor-pointer tw:items-center tw
 const RELATIONSHIPS: Relationship[] = ['one_to_one', 'one_to_many', 'many_to_one'];
 
 type Pair = { from: string; to: string };
+// A saved dimension the cube no longer has is still shown, to be changed.
+const withValue = (names: string[], value: string) => (names.includes(value) || !value ? names : [...names, value]);
 export type CubeJoinChoice = { relationship: Relationship; on: Pair[] };
 
-// A new join between two cubes: its relationship and the pairs of
-// dimensions it joins on, `from` of the cube the line starts at.
+// A join between two cubes, new or (with `initial`) one to change: its
+// relationship and the pairs of dimensions it joins on, `from` of the cube
+// the line starts at.
 export function CubeJoinDialog({
-  open, from, to, fromDimensions, toDimensions, onSave, onClose,
+  open, from, to, fromDimensions, toDimensions, initial, onSave, onClose,
 }: {
   open: boolean;
   from: string;
   to: string;
   fromDimensions: string[];
   toDimensions: string[];
+  initial?: CubeJoinChoice;
   onSave: (choice: CubeJoinChoice) => void;
   onClose: () => void;
 }) {
@@ -34,8 +38,12 @@ export function CubeJoinDialog({
 
   useEffect(() => {
     if (open) {
-      setRelationship('many_to_one');
-      setPairs(canPair ? [firstPair()] : []);
+      setRelationship(initial?.relationship ?? 'many_to_one');
+      if (initial?.on.length) {
+        setPairs(initial.on);
+      } else {
+        setPairs(canPair ? [firstPair()] : []);
+      }
     }
     // A new dialog starts again; the lists are read as it opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -44,13 +52,15 @@ export function CubeJoinDialog({
   return (
     <FormDialog
       open={open}
-      title="New cube join"
+      title={initial ? 'Edit cube join' : 'New cube join'}
       description={`${from} → ${to}`}
       onClose={onClose}
       footer={(
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={pairs.length === 0} onClick={() => onSave({ relationship, on: pairs })}>Create join</Button>
+          <Button disabled={pairs.length === 0} onClick={() => onSave({ relationship, on: pairs })}>
+            {initial ? 'Save' : 'Create join'}
+          </Button>
         </>
       )}
     >
@@ -80,7 +90,7 @@ export function CubeJoinDialog({
                 value={p.from}
                 onChange={(e) => setPairs(pairs.map((x, i) => (i === k ? { ...x, from: e.target.value } : x)))}
               >
-                {fromDimensions.map((d) => <option key={d} value={d}>{d}</option>)}
+                {withValue(fromDimensions, p.from).map((d) => <option key={d} value={d}>{d}</option>)}
               </select>
               <select
                 aria-label={`Pair ${k + 1} to dimension`}
@@ -88,7 +98,7 @@ export function CubeJoinDialog({
                 value={p.to}
                 onChange={(e) => setPairs(pairs.map((x, i) => (i === k ? { ...x, to: e.target.value } : x)))}
               >
-                {toDimensions.map((d) => <option key={d} value={d}>{d}</option>)}
+                {withValue(toDimensions, p.to).map((d) => <option key={d} value={d}>{d}</option>)}
               </select>
               {k > 0 ? (
                 <button

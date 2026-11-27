@@ -1,12 +1,14 @@
-import { X } from 'lucide-react';
+import { ArrowLeftRight, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/kit';
 
-import { dimensionNames, setCubeJoin } from './cubes';
+import {
+  dimensionNames, moveCubeJoinEnd, setCubeJoin, swapCubeJoin,
+} from './cubes';
 import { REL_LABEL } from './modelGraph';
 import type { ModelDefinition, ModelTable, Relationship } from './modelGraph';
-import { Section, Value } from './PanelParts';
+import { Section } from './PanelParts';
 import { IssuesSection } from './TableProperties';
 import type { Issue } from './validate';
 
@@ -25,7 +27,8 @@ export type CubeJoinPropertiesProps = {
 };
 
 // Redgate's reference properties for a join of two cubes: the cubes it
-// joins, its relationship and the dimensions it pairs, then its issues.
+// joins (either end can move to another cube, or the two swap), its
+// relationship and the dimensions it pairs, then its issues.
 export function CubeJoinProperties({
   def, id, columnsOf, issues, onChange,
 }: CubeJoinPropertiesProps) {
@@ -41,13 +44,46 @@ export function CubeJoinProperties({
   };
   const fromNames = from ? dimensionNames(def, from, lookup) : [];
   const toNames = to ? dimensionNames(def, to, lookup) : [];
+  const cubes = def.cubes ?? [];
+  // An end may go to any cube but the other end's, and not to one another
+  // join already joins to the other end.
+  const free = (end: 'from' | 'to', cubeId: string) => {
+    const other = end === 'from' ? join.to : join.from;
+    const pair = [cubeId, other];
+    return cubeId !== other
+      && !(def.cubeJoins ?? []).some((j) => j.id !== id && pair.includes(j.from) && pair.includes(j.to));
+  };
+  const moveEnd = (end: 'from' | 'to', cubeId: string) => {
+    const c = cubes.find((x) => x.id === cubeId);
+    onChange(moveCubeJoinEnd(def, id, end, cubeId, c ? dimensionNames(def, c, lookup) : []));
+  };
+  const cubePicker = (end: 'from' | 'to') => (
+    <select
+      id={`model-cube-join-${end}`}
+      aria-label={end === 'from' ? 'From cube' : 'To cube'}
+      className={SELECT}
+      value={join[end]}
+      onChange={(e) => moveEnd(end, e.target.value)}
+    >
+      {cubes.map((c) => (
+        <option key={c.id} value={c.id} disabled={c.id !== join[end] && !free(end, c.id)}>
+          {c.name}
+          {c.id !== join[end] && c.id !== join[end === 'from' ? 'to' : 'from'] && !free(end, c.id) ? ' (already joined)' : ''}
+        </option>
+      ))}
+    </select>
+  );
   const patchPairs = (on: typeof join.on) => onChange(setCubeJoin(def, id, { on }));
   const options = (names: string[], value: string) => (names.includes(value) || !value ? names : [...names, value]);
   return (
     <>
       <Section title="General">
-        <Value label="From">{from?.name ?? join.from}</Value>
-        <Value label="To">{to?.name ?? join.to}</Value>
+        <Field label="From" htmlFor="model-cube-join-from">{cubePicker('from')}</Field>
+        <Field label="To" htmlFor="model-cube-join-to">{cubePicker('to')}</Field>
+        <Button variant="outline" size="sm" onClick={() => onChange(swapCubeJoin(def, id))}>
+          <ArrowLeftRight />
+          Swap direction
+        </Button>
         <Field label="Relationship" htmlFor="model-cube-join-relationship">
           <select
             id="model-cube-join-relationship"
