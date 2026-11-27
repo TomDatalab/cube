@@ -14,6 +14,8 @@ import { ReferenceProperties } from './ReferenceProperties';
 import { NoteProperties } from './NoteProperties';
 import { AreaProperties } from './AreaProperties';
 import { ViewProperties } from './ViewProperties';
+import { CubeProperties } from './CubeProperties';
+import { CubeJoinProperties } from './CubeJoinProperties';
 
 import {
   ModelDefinition, ModelTable,
@@ -250,6 +252,25 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           onChange={props.onChange}
           focusKey={props.focusKey}
           onSqlPreview={props.onSqlPreview}
+        />
+      ) : null}
+      {selected.kind === 'cube' ? (
+        <CubeProperties
+          def={props.def}
+          id={selected.id}
+          columnsOf={props.columnsOf}
+          issues={props.issues.filter((i) => i.target.kind === 'cube' && i.target.id === selected.id)}
+          onChange={props.onChange}
+          focusKey={props.focusKey}
+        />
+      ) : null}
+      {selected.kind === 'cubeJoin' ? (
+        <CubeJoinProperties
+          def={props.def}
+          id={selected.id}
+          columnsOf={props.columnsOf}
+          issues={props.issues.filter((i) => i.target.kind === 'cubeJoin' && i.target.id === selected.id)}
+          onChange={props.onChange}
         />
       ) : null}
     </aside>

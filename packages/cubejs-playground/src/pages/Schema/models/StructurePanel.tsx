@@ -107,12 +107,15 @@ export type StructureTreeProps = {
   selectedEdge: number | null;
   onPickNode(id: string): void;
   onPickEdge(index: number): void;
+  // The selected cube join by id, and what a click on one picks.
+  selectedCubeJoin: string | null;
+  onPickCubeJoin(id: string): void;
 };
 
 // Redgate's model structure: Model › Tables (› columns), References, Text
 // notes, Views, Subject areas, and the cubes.
 function StructureTree({
-  def, columnsOf, selection, selectedEdge, onPickNode, onPickEdge,
+  def, columnsOf, selection, selectedEdge, onPickNode, onPickEdge, selectedCubeJoin, onPickCubeJoin,
 }: StructureTreeProps) {
   const [open, setOpen] = useState<Record<string, boolean>>({ tables: true, references: true });
   const [columnsOpen, setColumnsOpen] = useState<string[]>([]);
@@ -241,7 +244,40 @@ function StructureTree({
             </li>
           ))}
         </Group>
-        <Group icon={Box} label="Cubes" open={Boolean(open.cubes)} onToggle={() => toggle('cubes')} />
+        <Group icon={Box} label="Cubes" open={Boolean(open.cubes)} onToggle={() => toggle('cubes')}>
+          {(def.cubes ?? []).map((c) => (
+            <li key={c.id}>
+              <Item
+                id={nodeIdOf('cube', c.id)}
+                icon={Box}
+                label={c.name}
+                selected={selection.includes(nodeIdOf('cube', c.id))}
+                onPick={() => onPickNode(nodeIdOf('cube', c.id))}
+              />
+              <ul className="tw:m-0 tw:list-none tw:p-0 tw:pl-6 tw:text-muted-foreground">
+                {[...c.dimensions, ...c.measures, ...c.segments].map((m) => (
+                  <li key={m.name} className="tw:truncate tw:py-0.5">{m.name}</li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </Group>
+        <Group icon={Spline} label="Cube joins" open={Boolean(open.cubeJoins)} onToggle={() => toggle('cubeJoins')}>
+          {(def.cubeJoins ?? []).map((j) => {
+            const nameOf = (id: string) => (def.cubes ?? []).find((c) => c.id === id)?.name ?? id;
+            return (
+              <li key={j.id}>
+                <Item
+                  id={`cubejoin:${j.id}`}
+                  icon={Spline}
+                  label={`${nameOf(j.from)} → ${nameOf(j.to)}`}
+                  selected={selectedCubeJoin === j.id}
+                  onPick={() => onPickCubeJoin(j.id)}
+                />
+              </li>
+            );
+          })}
+        </Group>
       </ul>
     </div>
   );

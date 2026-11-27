@@ -1487,6 +1487,8 @@ function Editor({
             selectedEdge={edgeAt}
             onPickNode={pickNode}
             onPickEdge={pickEdge}
+            selectedCubeJoin={cubeJoinAt}
+            onPickCubeJoin={pickCubeJoin}
             issues={problemsFound}
             onPickIssue={(issue) => {
               if (issue.target.kind === 'table') {
