@@ -96,12 +96,17 @@ impl Restrictions {
     }
 }
 
-/// `cube.member`, each part made of `[A-Za-z0-9_]`.
+/// `cube.member`: the cube made of `[A-Za-z0-9_]`, the member of letters,
+/// digits, `_` and single inner spaces (a friendly name, `Quantidade Total`).
 fn validate_member(member: &str) -> Result<(), ApiError> {
     let ok = member.split_once('.').is_some_and(|(cube, name)| {
-        let part =
-            |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        part(cube) && part(name)
+        let cube_ok =
+            !cube.is_empty() && cube.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let name_ok = !name.is_empty()
+            && name.trim() == name
+            && !name.contains("  ")
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ');
+        cube_ok && name_ok
     });
     if ok {
         Ok(())
@@ -536,6 +541,15 @@ mod tests {
         Restrictions {
             row_filters: vec![f],
             blocked_members: vec![],
+        }
+    }
+
+    #[test]
+    fn a_member_may_have_a_friendly_name() {
+        assert!(validate_member("bossa.Quantidade Total").is_ok());
+        assert!(validate_member("bossa.Data de Fabricação").is_ok());
+        for bad in ["bossa", "bo ssa.x", "bossa. x", "bossa.x ", "bossa.a  b", "bossa.a-b", "bossa."] {
+            assert!(validate_member(bad).is_err(), "{bad}");
         }
     }
 

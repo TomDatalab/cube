@@ -1287,6 +1287,10 @@ struct Shaped {
     segments: Vec<Yaml>,
     /// What a cube join may name on this cube.
     dimension_names: HashSet<String>,
+    /// The SQL of each dimension renamed to its friendly name, by its name
+    /// in the model: a reference to it is written as that SQL, since a name
+    /// with spaces cannot be referenced.
+    renamed: HashMap<String, String>,
 }
 
 /// One YAML per cube of `def`, in `def.cubes` order, checked against the
@@ -1327,7 +1331,12 @@ pub fn build_all(
                     ));
                 }
             }
-            on.push(format!("{{CUBE.{}}} = {{{to_name}.{}}}", pair.from, pair.to));
+            let left = shaped[from].renamed.get(&pair.from).cloned().unwrap_or_else(|| format!("{{CUBE.{}}}", pair.from));
+            let right = match shaped[to].renamed.get(&pair.to) {
+                Some(sql) => sql.replace("{CUBE}", &format!("{{{to_name}}}")),
+                None => format!("{{{to_name}.{}}}", pair.to),
+            };
+            on.push(format!("{left} = {right}"));
         }
         let mut written = Mapping::new();
         written.insert("name".into(), to_name.into());
@@ -1488,6 +1497,7 @@ fn explicit(
         measures,
         segments: Vec::new(),
         dimension_names: cube.dimensions.iter().map(|d| d.name.clone()).collect(),
+        renamed: HashMap::new(),
     })
 }
 
@@ -1575,6 +1585,7 @@ fn shape(
                     measures: vec![count()],
                     segments: Vec::new(),
                     dimension_names,
+                    renamed: HashMap::new(),
                 }
             } else {
                 let mut shaped = explicit(cube, &|c| {
@@ -1592,7 +1603,135 @@ fn shape(
     };
     shaped.segments = segments(cube)?;
     titled(&mut shaped, &cube.member_titles);
+    named(&mut shaped, name)?;
     Ok(shaped)
+}
+
+/// A friendly name a member can be written under: words of letters, digits
+/// and `_`, one space between them (cubemodel's member names).
+fn friendly_name_ok(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c == '_' || c.is_alphabetic())
+        && name.trim() == name
+        && !name.contains("  ")
+        && name.chars().all(|c| c == '_' || c == ' ' || c.is_alphanumeric())
+}
+
+/// Each member with a friendly name (`title`) is written under it: its
+/// `name` is the friendly name, its SQL still reads the column. A name with
+/// spaces cannot be referenced in SQL, so `{CUBE.x}`, `{x}` and `{cube.x}`
+/// of a renamed dimension become its SQL; of a renamed measure, an error.
+fn named(shaped: &mut Shaped, cube: &str) -> Result<(), String> {
+    let text = |m: &Yaml, key: &str| m.get(key).and_then(Yaml::as_str).map(str::to_string);
+    let mut renamed_dims = HashMap::new();
+    let mut renamed_measures = HashMap::new();
+    let mut final_names = HashSet::new();
+    for (group, list) in [("dimensions", &shaped.dimensions), ("measures", &shaped.measures)] {
+        for m in list {
+            let Some(old) = text(m, "name") else { continue };
+            let new = text(m, "title").map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+            let new = match new {
+                Some(new) if new != old => {
+                    if !friendly_name_ok(&new) {
+                        return Err(format!(
+                            "O nome amigável \"{new}\" de {cube}.{old} não é válido: use letras, números, _ e espaços simples"
+                        ));
+                    }
+                    if group == "dimensions" {
+                        renamed_dims.insert(old.clone(), (new.clone(), text(m, "sql")));
+                    } else {
+                        renamed_measures.insert(old.clone(), new.clone());
+                    }
+                    new
+                }
+                _ => old,
+            };
+            if !final_names.insert(new.clone()) {
+                return Err(format!("O nome \"{new}\" se repete no cubo {cube}"));
+            }
+        }
+    }
+    if renamed_dims.is_empty() && renamed_measures.is_empty() {
+        return Ok(());
+    }
+    // What `{token}` of a renamed member is written as, if anything.
+    let replace = |token: &str| -> Result<Option<String>, String> {
+        let member = match token.split_once('.') {
+            Some((p, m)) if p == "CUBE" || p == cube => m,
+            Some(_) => return Ok(None),
+            None => token,
+        };
+        if let Some((_, sql)) = renamed_dims.get(member) {
+            return match sql {
+                Some(sql) => Ok(Some(format!("({sql})"))),
+                None => Err(format!("A dimensão {cube}.{member} não tem SQL para ser referenciada")),
+            };
+        }
+        if let Some(new) = renamed_measures.get(member) {
+            return Err(format!(
+                "A medida {cube}.{member} tem o nome amigável \"{new}\" e por isso não pode ser usada no SQL de outro membro"
+            ));
+        }
+        Ok(None)
+    };
+    for m in shaped
+        .dimensions
+        .iter_mut()
+        .chain(shaped.measures.iter_mut())
+        .chain(shaped.segments.iter_mut())
+    {
+        let Yaml::Mapping(m) = m else { continue };
+        if let Some(sql) = m.get("sql").and_then(Yaml::as_str) {
+            let mut sql = sql.to_string();
+            // An inlined SQL may reference another renamed dimension.
+            for _ in 0..8 {
+                let next = rewrite_refs(&sql, &replace)?;
+                if next == sql {
+                    break;
+                }
+                sql = next;
+            }
+            m.insert("sql".into(), sql.into());
+        }
+        let renamed = m
+            .get("name")
+            .and_then(Yaml::as_str)
+            .and_then(|n| renamed_dims.get(n).map(|(new, _)| new).or_else(|| renamed_measures.get(n)))
+            .cloned();
+        if let Some(new) = renamed {
+            m.insert("name".into(), new.into());
+        }
+    }
+    shaped.renamed = renamed_dims
+        .into_iter()
+        .filter_map(|(old, (_, sql))| sql.map(|sql| (old, format!("({sql})"))))
+        .collect();
+    Ok(())
+}
+
+/// `sql` with each `{token}` that `replace` maps written as its value.
+fn rewrite_refs(
+    sql: &str,
+    replace: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let token = &after[..close];
+        match replace(token)? {
+            Some(new) => out.push_str(&new),
+            None => out.push_str(&rest[open..open + close + 2]),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// Gives each member named in `titles` that title, unless it has one.
@@ -1787,6 +1926,7 @@ fn joined(
         measures: vec![Yaml::Mapping(count)],
         segments: Vec::new(),
         dimension_names,
+        renamed: HashMap::new(),
     })
 }
 
@@ -2046,14 +2186,91 @@ mod tests {
         .collect();
         let built = build_def(&def).unwrap();
         let orders = yaml_of(&built, "orders");
-        assert_eq!(member(&orders, "dimensions", "customer_id")["title"].as_str(), Some("Cliente"));
-        assert_eq!(member(&orders, "measures", "count")["title"].as_str(), Some("Quantidade de pedidos"));
+        // The friendly name is the member's name, as written; the SQL still
+        // reads the column.
+        let cliente = member(&orders, "dimensions", "Cliente");
+        assert_eq!(cliente["title"].as_str(), Some("Cliente"));
+        assert_eq!(cliente["sql"].as_str(), Some(r#"{CUBE}."customer_id""#));
+        assert_eq!(
+            member(&orders, "measures", "Quantidade de pedidos")["title"].as_str(),
+            Some("Quantidade de pedidos")
+        );
+        assert!(orders["dimensions"].as_sequence().unwrap().iter().all(|d| d["name"] != "customer_id"));
+        // A name with spaces cannot be referenced: the cube join reads the column.
+        assert_eq!(
+            orders["joins"][0]["sql"].as_str(),
+            Some(r#"({CUBE}."customer_id") = {customers.id}"#)
+        );
+        // What the server compiles: the model loads and a query plans.
+        let yaml = &built.iter().map(|b| b.content.clone()).collect::<Vec<_>>().join("\n---\n");
+        let model = cubeplanner::Model::from_yaml_documents(
+            built.iter().map(|b| (b.cube_name.as_str(), b.content.as_str())),
+        )
+        .unwrap_or_else(|e| panic!("{e}\n{yaml}"));
+        let query = cubeplanner::PlannerQuery::from_value(serde_json::json!({
+            "measures": ["orders.Quantidade de pedidos"],
+            "dimensions": ["orders.Cliente", "customers.region"],
+        }))
+        .unwrap();
+        let planned = cubeplanner::plan(&model, &query, &cubeplanner::PlanOptions::postgres()).unwrap();
+        assert!(planned.sql.contains(r#""orders___quantidade de pedidos""#), "{}", planned.sql);
+        let sources: Vec<_> = built.iter().map(|b| (format!("{}.yml", b.cube_name), b.content.clone())).collect();
+        cubemodel::ModelLoader::new().load_sources(&sources).unwrap_or_else(|e| panic!("{e}"));
         // A blank title is no title.
         assert!(member(&orders, "dimensions", "id")["title"].is_null());
         // Kept through a save.
         let json = serde_json::to_value(&def).unwrap();
         assert_eq!(json["cubes"][0]["memberTitles"]["customer_id"], "Cliente");
         assert!(serde_json::to_value(two_cubes()).unwrap()["cubes"][0].get("memberTitles").is_none());
+    }
+
+    #[test]
+    fn friendly_names_in_sql_and_their_errors() {
+        let mut def = two_cubes();
+        def.cube_joins.clear();
+        def.cubes.truncate(1);
+        def.tables.truncate(1);
+        let mut c = def.cubes[0].clone();
+        c.dimensions = vec![
+            CubeDimension { title: Some("Pedido".into()), ..dimension("order_id", "number", Some("order_id"), None) },
+            dimension("id", "number", Some("id"), None),
+        ];
+        c.measures = vec![
+            CubeMeasure { name: "n".into(), kind: "count".into(), title: Some("Quantidade".into()), ..Default::default() },
+        ];
+        c.segments = vec![CubeSegment {
+            name: "some".into(),
+            sql: "{CUBE.order_id} > 0 AND {orders.order_id} < 9 AND {id} > 0 AND {other.order_id} = 1".into(),
+            title: None,
+        }];
+        def.cubes = vec![c.clone()];
+        let orders = yaml_of(&build_def(&def).unwrap(), "orders");
+        // A renamed dimension is referenced by its SQL; the others as before.
+        assert_eq!(
+            orders["segments"][0]["sql"].as_str(),
+            Some(r#"({CUBE}."order_id") > 0 AND ({CUBE}."order_id") < 9 AND {id} > 0 AND {other.order_id} = 1"#)
+        );
+        assert!(member(&orders, "dimensions", "Pedido")["sql"].is_string());
+
+        // A renamed measure cannot be used in SQL.
+        let mut bad = c.clone();
+        bad.measures.push(CubeMeasure {
+            name: "avg".into(),
+            kind: "number".into(),
+            sql: Some("{n} / 2".into()),
+            ..Default::default()
+        });
+        def.cubes = vec![bad];
+        assert!(build_def(&def).unwrap_err().contains("não pode ser usada no SQL"));
+
+        // A friendly name that is not a name, or one taken twice.
+        for (title, err) in [("Total.", "não é válido"), ("Total!", "não é válido"), ("id", "se repete")] {
+            let mut bad = c.clone();
+            bad.dimensions[0].title = Some(title.into());
+            def.cubes = vec![bad];
+            let e = build_def(&def).unwrap_err();
+            assert!(e.contains(err), "{title}: {e}");
+        }
     }
 
     #[test]
@@ -2134,10 +2351,12 @@ mod tests {
         );
         assert_eq!(payments["title"].as_str(), Some("Pagamentos"));
         assert_eq!(payments["description"].as_str(), Some("Tudo que entrou"));
-        let id = member(&payments, "dimensions", "id");
+        // A friendly name is the member's name; the SQL still reads the column.
+        let id = member(&payments, "dimensions", "Código");
         assert_eq!(id["primary_key"].as_bool(), Some(true));
         assert_eq!(id["title"].as_str(), Some("Código"));
-        let total = member(&payments, "measures", "total");
+        assert_eq!(id["sql"].as_str(), Some(r#"{CUBE}."id""#));
+        let total = member(&payments, "measures", "Total");
         assert_eq!(total["type"].as_str(), Some("sum"));
         assert_eq!(total["sql"].as_str(), Some(r#"{CUBE}."amount""#));
         assert_eq!(total["format"].as_str(), Some("currency"));

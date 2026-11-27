@@ -101,6 +101,24 @@ fn is_identifier(name: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// A measure's or dimension's name: an identifier, or a friendly name made
+/// of words — letters (accented too), digits and `_`, single spaces between
+/// them (`Quantidade Total`). No `.`, braces or quotes, so `cube.member`
+/// still splits, and no space at either end.
+fn is_member_name(name: &str) -> bool {
+    if is_identifier(name) {
+        return true;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_alphabetic() => {}
+        _ => return false,
+    }
+    !name.ends_with(' ')
+        && !name.contains("  ")
+        && name.chars().all(|c| c == '_' || c == ' ' || c.is_alphanumeric())
+}
+
 /// Validates every cube and view in the model.
 pub fn validate_model(model: &DataModel, reporter: &mut ErrorReporter) {
     for cube in model.cube_list() {
@@ -210,7 +228,7 @@ fn validate_joins(cube: &CubeDef, model: &DataModel, reporter: &mut ErrorReporte
 fn validate_measures(cube: &CubeDef, reporter: &mut ErrorReporter) {
     for (name, measure) in cube.measures.iter() {
         let base = format!("measures.{name}");
-        if !is_identifier(name) {
+        if !is_member_name(name) {
             reporter.error(format!(
                 "({base}) with value \"{name}\" fails to match the identifier pattern"
             ));
@@ -250,7 +268,7 @@ fn validate_measures(cube: &CubeDef, reporter: &mut ErrorReporter) {
 fn validate_dimensions(cube: &CubeDef, reporter: &mut ErrorReporter) {
     for (name, dimension) in cube.dimensions.iter() {
         let base = format!("dimensions.{name}");
-        if !is_identifier(name) {
+        if !is_member_name(name) {
             reporter.error(format!(
                 "({base}) with value \"{name}\" fails to match the identifier pattern"
             ));
