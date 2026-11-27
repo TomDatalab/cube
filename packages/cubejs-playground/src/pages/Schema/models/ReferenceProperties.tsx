@@ -6,12 +6,14 @@ import { cn } from '@/lib/utils';
 
 import type { Issue } from './validate';
 import {
-  CARDINALITIES, Cardinality, ModelDefinition, ModelJoin, ModelTable, REF_ACTIONS, RefAction, joinLabel,
-  removeJoin, setJoin,
+  CARDINALITIES, Cardinality, JoinKind, ModelDefinition, ModelJoin, ModelTable, REF_ACTIONS, REL_LABEL, RefAction,
+  Relationship, joinLabel, removeJoin, setJoin,
 } from './modelGraph';
-import { referenceEnds, setReference, swapReference } from './physical';
 import {
-  Check, DraftText, Section, Value,
+  referenceEnds, setReference, setReferenceCubeJoin, swapReference,
+} from './physical';
+import {
+  Check, DraftText, Section,
 } from './PanelParts';
 
 type Columns = { name: string; type: string }[];
@@ -30,6 +32,9 @@ const ICON = 'tw:flex tw:size-6 tw:shrink-0 tw:cursor-pointer tw:items-center tw
 
 // The cardinality a reference shows when none was chosen: what its cube
 // join reads.
+// The cube join's relationships, read from `from` to `to`.
+const RELATIONSHIPS: Relationship[] = ['many_to_one', 'one_to_many', 'one_to_one'];
+
 function cardinalityOf(j: ModelJoin): Cardinality {
   return j.cardinality ?? (j.relationship === 'one_to_one' ? '0..1' : '0..*');
 }
@@ -208,7 +213,32 @@ export function ReferenceProperties({
         >
           Hidden on the canvas
         </Check>
-        <Value label="Cube join">{joinLabel(j)}</Value>
+        <Field label={`Cube join · ${joinLabel(j)}`} htmlFor="model-reference-cube-relationship">
+          <div className="tw:grid tw:grid-cols-2 tw:gap-2" data-slot="model-reference-cube-join">
+            <select
+              id="model-reference-cube-relationship"
+              aria-label="Cube join relationship"
+              title={`Read from ${j.from.alias} to ${j.to.alias}; moves the foreign key to the many side`}
+              className={SELECT}
+              value={j.relationship}
+              onChange={(e) => onChange(setReferenceCubeJoin(def, id, {
+                relationship: e.target.value as Relationship,
+              }))}
+            >
+              {RELATIONSHIPS.map((r) => <option key={r} value={r}>{`${REL_LABEL[r]} (${r})`}</option>)}
+            </select>
+            <select
+              aria-label="Cube join type"
+              title="INNER makes the reference mandatory"
+              className={SELECT}
+              value={j.join}
+              onChange={(e) => onChange(setReferenceCubeJoin(def, id, { join: e.target.value as JoinKind }))}
+            >
+              <option value="left">LEFT</option>
+              <option value="inner">INNER</option>
+            </select>
+          </div>
+        </Field>
         <Button
           variant="destructive"
           size="sm"

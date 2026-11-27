@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addColumn, addReference, ensureIds, moveColumn, referenceEnds, removeColumn, renameColumn, setColumn,
-  setIndexes, setReference, setUniqueKeys, swapReference,
+  setIndexes, setReference, setReferenceCubeJoin, setUniqueKeys, swapReference,
 } from '../pages/Schema/models/physical';
 import type { ModelDefinition, ModelTable } from '../pages/Schema/models/modelGraph';
 
@@ -189,6 +189,28 @@ describe('physical', () => {
     def = swapReference(def, 'r1');
     expect(referenceEnds(def.joins[0]).parent.alias).toBe('customers');
     expect(def.joins[0].from.alias).toBe('orders');
+  });
+
+  it('setReferenceCubeJoin changes the cube join and keeps the reference in step', () => {
+    const at = (d: ModelDefinition) => d.joins[0];
+    // N:1 -> 1:N: the foreign key moves to the other table.
+    let def = setReferenceCubeJoin(model(), 'r1', { relationship: 'one_to_many' });
+    expect(at(def).relationship).toBe('one_to_many');
+    expect(referenceEnds(at(def)).parent.alias).toBe('orders');
+    // -> 1:1: one to one, the cardinality says so.
+    def = setReferenceCubeJoin(def, 'r1', { relationship: 'one_to_one' });
+    expect(at(def)).toEqual(expect.objectContaining({ relationship: 'one_to_one', cardinality: '0..1' }));
+    // -> N:1 again, from a 1:1.
+    def = setReferenceCubeJoin(def, 'r1', { relationship: 'many_to_one' });
+    expect(at(def)).toEqual(expect.objectContaining({ relationship: 'many_to_one', cardinality: '0..*' }));
+    expect(at(def).from.alias).toBe(referenceEnds(at(def)).child.alias);
+    // INNER is mandatory, LEFT is not.
+    def = setReferenceCubeJoin(def, 'r1', { join: 'inner' });
+    expect(at(def)).toEqual(expect.objectContaining({ join: 'inner', mandatory: true }));
+    def = setReferenceCubeJoin(def, 'r1', { join: 'left' });
+    expect(at(def)).toEqual(expect.objectContaining({ join: 'left', mandatory: false }));
+    // Nothing asked, nothing changed.
+    expect(setReferenceCubeJoin(def, 'r1', { relationship: 'many_to_one' })).toEqual(def);
   });
 
   it('addReference adds the FK column to a draft child with the parent key\'s type', () => {

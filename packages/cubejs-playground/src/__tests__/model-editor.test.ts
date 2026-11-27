@@ -1395,6 +1395,21 @@ describe('ModelEditor', () => {
       expect((await savedJoin()).cardinality).toBe('1..1');
     });
 
+    it('the cube join is chosen directly: relationship and type', async () => {
+      await render();
+      await pick();
+      const mandatory = () => pane().querySelector('input[aria-label="Mandatory"]') as HTMLInputElement;
+      await pickOption('Cube join type', 'inner');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('N:1 · INNER');
+      expect(mandatory().checked).toBe(true);
+      await pickOption('Cube join relationship', 'one_to_one');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('1:1 · INNER');
+      expect((pane().querySelector('select[aria-label="Cardinality"]') as HTMLSelectElement).value).toBe('0..1');
+      await pickOption('Cube join relationship', 'one_to_many');
+      expect(document.querySelector('[data-edge]')!.textContent).toBe('1:N · INNER');
+      expect(await savedJoin()).toMatchObject({ relationship: 'one_to_many', join: 'inner', mandatory: true });
+    });
+
     it('checking and unchecking mandatory sets the join INNER and LEFT', async () => {
       await render();
       await pick();

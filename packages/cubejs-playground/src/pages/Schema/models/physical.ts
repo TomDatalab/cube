@@ -1,7 +1,8 @@
 import { cubeKeyOf } from './cubes';
 import type { Dialect } from './dialect';
 import type {
-  CubeNode, DraftColumn, DraftTable, End, ModelDefinition, ModelJoin, ModelTable, TableCheck, TableIndex, UniqueKey,
+  CubeNode, DraftColumn, DraftTable, End, JoinKind, ModelDefinition, ModelJoin, ModelTable, Relationship, TableCheck,
+  TableIndex, UniqueKey,
 } from './modelGraph';
 
 type Columns = { name: string; type: string }[];
@@ -272,6 +273,41 @@ export function swapReference(def: ModelDefinition, id: string): ModelDefinition
       return mirrored(j);
     }),
   };
+}
+
+// Sets the cube join a reference gives, keeping its physical side in step:
+// the relationship (read from `from` to `to`) moves the foreign key to the
+// many side, as Cardinality and Swap reference do, and keeps whether the
+// child is optional; INNER is Mandatory.
+export function setReferenceCubeJoin(
+  def: ModelDefinition,
+  id: string,
+  patch: { relationship?: Relationship; join?: JoinKind }
+): ModelDefinition {
+  let next = def;
+  const j = def.joins.find((x) => x.id === id);
+  if (!j) {
+    return def;
+  }
+  const { relationship } = patch;
+  if (relationship && relationship !== j.relationship) {
+    const optional = (j.cardinality ?? '0').startsWith('0');
+    if (relationship === 'one_to_one') {
+      next = setReference(next, id, { cardinality: optional ? '0..1' : '1..1' });
+    } else {
+      if (j.relationship === 'one_to_one') {
+        // Now many_to_one: `from` is the child.
+        next = setReference(next, id, { cardinality: optional ? '0..*' : '1..*' });
+      }
+      if (next.joins.find((x) => x.id === id)?.relationship !== relationship) {
+        next = swapReference(next, id);
+      }
+    }
+  }
+  if (patch.join && patch.join !== j.join) {
+    next = setReference(next, id, { mandatory: patch.join === 'inner' });
+  }
+  return next;
 }
 
 const nextId = (def: ModelDefinition) => firstFree('r', (n) => def.joins.some((j) => j.id === n));
