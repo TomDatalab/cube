@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addCube, addCubeJoin, addMember, autoMembers, cubeKeyOf, cubeReads, cubeType, dimensionNames, generateMembers,
-  removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource, setMember, snake,
+  removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource, setCubeSourceLine,
+  setMember, snake,
 } from '../pages/Schema/models/cubes';
 import {
   CubeNode, ModelDefinition, addTable, connect, emptyDefinition, removeTable, renameTable,
@@ -148,6 +149,16 @@ describe('cubes', () => {
     const set = setCubeJoin(j2.def, 'cj2', { hidden: true, relationship: 'one_to_many' });
     expect(set.cubeJoins![1]).toMatchObject({ hidden: true, relationship: 'one_to_many' });
     expect('hidden' in setCubeJoin(set, 'cj2', { hidden: undefined }).cubeJoins![1]).toBe(false);
+  });
+
+  it('setCubeSourceLine adds a cube\'s line to a table, then reshapes it', () => {
+    const { def, id } = addCube(model(), 0, 0);
+    const one = setCubeSourceLine(def, id, 'orders', { points: [{ x: 1, y: 2 }] });
+    expect(one.cubes![0].sourceLines).toEqual([{ table: 'orders', points: [{ x: 1, y: 2 }] }]);
+    const two = setCubeSourceLine(one, id, 'orders', { toSide: 'left' });
+    expect(two.cubes![0].sourceLines).toEqual([{ table: 'orders', points: [{ x: 1, y: 2 }], toSide: 'left' }]);
+    // Another cube is left as it was.
+    expect(setCubeSourceLine(two, 'c9', 'orders', { points: [] })).toEqual(two);
   });
 
   it('setCube, renameCube and members', () => {

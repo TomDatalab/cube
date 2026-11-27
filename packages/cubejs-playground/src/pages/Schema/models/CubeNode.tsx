@@ -6,7 +6,7 @@ import { Box } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 import { cubeReads } from './cubes';
-import type { DependencyFlowEdge } from './DependencyEdge';
+import type { CubeSourceEdgeData, CubeSourceFlowEdge } from './CubeJoinEdge';
 import type { CubeNode as CubeModel, ModelDefinition } from './modelGraph';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
@@ -113,19 +113,32 @@ export const CubeNode = memo(({ id, data, selected }: CubeNodeProps) => {
 });
 CubeNode.displayName = 'CubeNode';
 
-// The dashed lines from a cube to each table it reads: one per alias.
-export function cubeSourceEdges(def: ModelDefinition): DependencyFlowEdge[] {
+// The edge id of a cube's line to a table, kept in `selectedEdge`.
+export const CUBE_SOURCE = 'cubesrc:';
+export const cubeSourceEdgeId = (cubeId: string, alias: string) => `${CUBE_SOURCE}${cubeId}:${alias}`;
+
+type SourceLineHandlers = Pick<CubeSourceEdgeData, 'onSetPoints' | 'onSetSide'>;
+const NO_HANDLERS: SourceLineHandlers = { onSetPoints: () => undefined, onSetSide: () => undefined };
+
+// The dashed lines from a cube to each table it reads: one per alias, from
+// the cube's header to the table's, reshaped like references.
+export function cubeSourceEdges(
+  def: ModelDefinition,
+  selectedEdge: string | null = null,
+  handlers: SourceLineHandlers = NO_HANDLERS
+): CubeSourceFlowEdge[] {
   return (def.cubes ?? []).flatMap((c) => cubeReads(def, c)
     .filter((alias) => def.tables.some((t) => t.alias === alias))
     .map((alias) => ({
-      id: `dep-${c.id}-${alias}`,
+      id: cubeSourceEdgeId(c.id, alias),
       source: `cube:${c.id}`,
-      sourceHandle: 'node',
+      sourceHandle: 'join',
       target: alias,
-      targetHandle: 'node',
-      type: 'dependency' as const,
-      selectable: false,
-      focusable: false,
-      data: {},
+      targetHandle: 'band',
+      type: 'cubesource' as const,
+      selected: selectedEdge === cubeSourceEdgeId(c.id, alias),
+      data: {
+        cubeId: c.id, table: alias, line: c.sourceLines?.find((l) => l.table === alias), ...handlers,
+      },
     })));
 }

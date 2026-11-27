@@ -34,8 +34,12 @@ import { TableFlowNode, TableNode, columnAt } from './TableNode';
 import { NoteFlowNode, NoteNode } from './NoteNode';
 import { AreaFlowNode, AreaNode } from './AreaNode';
 import { ViewFlowNode, ViewNode } from './ViewNode';
-import { CubeJoinEdge, CubeJoinFlowEdge } from './CubeJoinEdge';
-import { CubeFlowNode, CubeNode, cubeSourceEdges } from './CubeNode';
+import {
+  CubeJoinEdge, CubeJoinFlowEdge, CubeSourceEdge, CubeSourceFlowEdge,
+} from './CubeJoinEdge';
+import {
+  CUBE_SOURCE, CubeFlowNode, CubeNode, cubeSourceEdges,
+} from './CubeNode';
 import { CubeJoinDialog } from './CubeJoinDialog';
 import { DependencyEdge, DependencyFlowEdge } from './DependencyEdge';
 import {
@@ -43,7 +47,7 @@ import {
   sendToBack,
 } from './objects';
 import {
-  addCube, addCubeJoin, autoMembers, cubeKeyOf, dimensionNames, removeCubeJoin, setCubeJoin,
+  addCube, addCubeJoin, autoMembers, cubeKeyOf, dimensionNames, removeCubeJoin, setCubeJoin, setCubeSourceLine,
 } from './cubes';
 import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
@@ -93,7 +97,9 @@ const EDITED = 'O cubo foi editado desde o último build';
 const NODE_TYPES = {
   table: TableNode, note: NoteNode, area: AreaNode, view: ViewNode, cube: CubeNode,
 };
-const EDGE_TYPES = { reference: ReferenceEdge, dependency: DependencyEdge, cubejoin: CubeJoinEdge };
+const EDGE_TYPES = {
+  reference: ReferenceEdge, dependency: DependencyEdge, cubejoin: CubeJoinEdge, cubesource: CubeSourceEdge,
+};
 // Areas are always behind everything else.
 const AREA_Z = -1000;
 // Where a paste lands from what was copied.
@@ -718,8 +724,18 @@ function Editor({
     edited();
   }, [setDef, edited]);
 
-  const cubeLines: (CubeJoinFlowEdge | DependencyFlowEdge)[] = useMemo(() => [
-    ...cubeSourceEdges(def),
+  const onSetCubeSourceSide = useCallback((cubeId: string, table: string, end: 'from' | 'to', side: Side) => {
+    setDef((d) => setCubeSourceLine(d, cubeId, table, end === 'from' ? { fromSide: side } : { toSide: side }));
+    edited();
+  }, [setDef, edited]);
+
+  const onSetCubeSourcePoints = useCallback((cubeId: string, table: string, points: Point[]) => {
+    setDef((d) => setCubeSourceLine(d, cubeId, table, { points }));
+    edited();
+  }, [setDef, edited]);
+
+  const cubeLines: (CubeJoinFlowEdge | CubeSourceFlowEdge)[] = useMemo(() => [
+    ...cubeSourceEdges(def, selectedEdge, { onSetPoints: onSetCubeSourcePoints, onSetSide: onSetCubeSourceSide }),
     ...(def.cubeJoins ?? []).filter((j) => !j.hidden).map((j): CubeJoinFlowEdge => ({
       id: cubeJoinEdgeId(j.id),
       source: nodeIdOf('cube', j.from),
@@ -733,8 +749,9 @@ function Editor({
     })),
     // cubeSourceEdges reads only the tables and the cubes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onSetCubeJoinPoints, onSetCubeJoinSide]);
-  const edges: (ReferenceFlowEdge | DependencyFlowEdge | CubeJoinFlowEdge)[] = useMemo(
+  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onSetCubeJoinPoints, onSetCubeJoinSide,
+    onSetCubeSourcePoints, onSetCubeSourceSide]);
+  const edges: (ReferenceFlowEdge | DependencyFlowEdge | CubeJoinFlowEdge | CubeSourceFlowEdge)[] = useMemo(
     () => [...references, ...dependencies, ...cubeLines],
     [references, dependencies, cubeLines]
   );
@@ -771,7 +788,7 @@ function Editor({
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     changes.forEach((c) => {
-      if (c.type === 'select' && c.id.startsWith(CUBE_JOIN)) {
+      if (c.type === 'select' && (c.id.startsWith(CUBE_JOIN) || c.id.startsWith(CUBE_SOURCE))) {
         if (c.selected) {
           setSelection([]);
           setSelectedEdge(c.id);
@@ -780,7 +797,8 @@ function Editor({
         }
         return;
       }
-      // Dependency lines are not selectable: only references and cube joins are.
+      // View dependency lines are not selectable: references, cube joins and
+      // cube source lines are.
       if (c.type !== 'select' || !c.id.startsWith('join-')) {
         return;
       }
@@ -1003,7 +1021,7 @@ function Editor({
   };
 
   const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
-    if (edge.id.startsWith(CUBE_JOIN)) {
+    if (edge.id.startsWith(CUBE_JOIN) || edge.id.startsWith(CUBE_SOURCE)) {
       setSelection([]);
       setSelectedEdge(edge.id);
       return;
@@ -1619,7 +1637,8 @@ function Editor({
         edit={{
           canCopy: selection.length > 0,
           canPaste,
-          canDelete: selection.length > 0 || selectedEdge !== null,
+          // A cube's line to its table goes with the cube, not on its own.
+          canDelete: selection.length > 0 || (selectedEdge !== null && !selectedEdge.startsWith(CUBE_SOURCE)),
           onCopy: copySelection,
           onPaste: pasteClip,
           onPasteShortcut: pasteShortcut,

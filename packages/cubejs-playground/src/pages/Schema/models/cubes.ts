@@ -1,6 +1,6 @@
 import {
-  CubeDimension, CubeJoin, CubeMeasure, CubeNode, CubeSegment, CubeSource, DimensionType, IDENTIFIER, MeasureType,
-  ModelDefinition, Relationship,
+  CubeDimension, CubeJoin, CubeMeasure, CubeNode, CubeSegment, CubeSource, CubeSourceLine, DimensionType, IDENTIFIER,
+  MeasureType, ModelDefinition, Relationship,
 } from './modelGraph';
 import { freeId, freeName, merged } from './objects';
 
@@ -345,6 +345,27 @@ export function addCubeJoin(
 
 export function setCubeJoin(def: ModelDefinition, id: string, patch: Partial<Omit<CubeJoin, 'id'>>): ModelDefinition {
   return { ...def, cubeJoins: joinsOf(def).map((j) => (j.id === id ? merged(j, patch) : j)) };
+}
+
+// Reshapes the line from cube `id` to the table `table`; the first change
+// adds it.
+export function setCubeSourceLine(
+  def: ModelDefinition,
+  id: string,
+  table: string,
+  patch: Partial<Omit<CubeSourceLine, 'table'>>
+): ModelDefinition {
+  return {
+    ...def,
+    cubes: cubesOf(def).map((c) => {
+      if (c.id !== id) {
+        return c;
+      }
+      const lines = c.sourceLines ?? [];
+      const was = lines.find((l) => l.table === table) ?? { table, points: [] };
+      return { ...c, sourceLines: [...lines.filter((l) => l.table !== table), { ...was, ...patch }] };
+    }),
+  };
 }
 
 export function removeCubeJoin(def: ModelDefinition, id: string): ModelDefinition {

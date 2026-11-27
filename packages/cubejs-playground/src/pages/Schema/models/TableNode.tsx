@@ -134,6 +134,8 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
         className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
         style={{ background: data.color ? `var(--model-${data.color})` : 'var(--muted)' }}
       >
+        {/* Where a cube's line to this table ends: the middle of the header. */}
+        <Handle type="target" position={Position.Left} id="band" style={HIDDEN_HANDLE_STYLE} isConnectable={false} />
         <button
           type="button"
           data-slot="model-table-toggle"

@@ -13,7 +13,7 @@ import { NoteNode } from '../pages/Schema/models/NoteNode';
 import { TableNode } from '../pages/Schema/models/TableNode';
 import { ViewNode } from '../pages/Schema/models/ViewNode';
 import { CubeNode, cubeSourceEdges } from '../pages/Schema/models/CubeNode';
-import { CubeJoinEdge } from '../pages/Schema/models/CubeJoinEdge';
+import { CubeJoinEdge, CubeSourceEdge } from '../pages/Schema/models/CubeJoinEdge';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
 
 // React Flow measures its nodes before it draws edges, which jsdom cannot do:
@@ -61,7 +61,7 @@ vi.mock('@xyflow/react', async () => {
     NodeResizer: () => h('span', { 'data-resizer': '' }),
     useUpdateNodeInternals: () => (id: string) => flow.updated.push(id),
     MiniMap: () => null,
-    BaseEdge: ({ id }: any) => h('path', { 'data-edge-path': id }),
+    BaseEdge: ({ id, style }: any) => h('path', { 'data-edge-path': id, 'data-dash': style?.strokeDasharray }),
     EdgeLabelRenderer: ({ children }: any) => h('div', null, children),
     useInternalNode: (id: string) => ({
       internals: { positionAbsolute: { x: id === 'cube:c1' ? 0 : 400, y: 0 } },
@@ -296,7 +296,7 @@ describe('ModelEditor', () => {
     expect(nodes[0].textContent).toContain('numeric');
     expect([...document.querySelectorAll('[data-edge^="join-"]')].map((e) => e.textContent)).toEqual(['N:1 · LEFT']);
     // The joined cube's source lines, to each table it reads.
-    expect(flow.props.edges.filter((e: any) => e.type === 'dependency').map((e: any) => e.target))
+    expect(flow.props.edges.filter((e: any) => e.type === 'cubesource').map((e: any) => e.target))
       .toEqual(['orders', 'customers']);
   });
 
@@ -529,7 +529,8 @@ describe('ModelEditor', () => {
 
   it('collapses a table to its header, keeping its links, and remembers it', async () => {
     await render();
-    expect(flow.props.edges.filter((e: any) => e.type !== 'dependency').every((e: any) => e.type === 'reference')).toBe(true);
+    expect(flow.props.edges.filter((e: any) => !['dependency', 'cubesource'].includes(e.type))
+      .every((e: any) => e.type === 'reference')).toBe(true);
     await act(async () => (document.querySelector('[aria-label="Collapse orders"]') as HTMLButtonElement).click());
     const orders = document.querySelector('[data-node="orders"]')!;
     expect(orders.querySelector('[data-column]')).toBeNull();
@@ -2375,16 +2376,55 @@ describe('ModelEditor', () => {
       left.unmount();
     });
 
-    it('source lines: one dashed dependency per table a cube reads', () => {
+    it('source lines: one per table a cube reads, header to header, with its saved shape', () => {
+      const line = { table: 'customers', points: [{ x: 5, y: 6 }], toSide: 'left' as const };
       const def = {
         ...saved(),
-        cubes: [cube({ source: { kind: 'sql', tables: ['orders', 'customers', 'ghost'] } })],
+        cubes: [cube({ source: { kind: 'sql', tables: ['orders', 'customers', 'ghost'] }, sourceLines: [line] })],
       } as ModelDefinition;
-      const edges = cubeSourceEdges(def);
-      expect(edges.map((e) => [e.source, e.target, e.type, e.selectable])).toEqual([
-        ['cube:c1', 'orders', 'dependency', false],
-        ['cube:c1', 'customers', 'dependency', false],
-      ]);
+      const edges = cubeSourceEdges(def, 'cubesrc:c1:orders');
+      expect(edges.map((e) => [e.id, e.source, e.sourceHandle, e.target, e.targetHandle, e.type, e.selected]))
+        .toEqual([
+          ['cubesrc:c1:orders', 'cube:c1', 'join', 'orders', 'band', 'cubesource', true],
+          ['cubesrc:c1:customers', 'cube:c1', 'join', 'customers', 'band', 'cubesource', false],
+        ]);
+      expect(edges[0].data!.line).toBeUndefined();
+      expect(edges[1].data!.line).toEqual(line);
+    });
+
+    it('a cube\'s line to its table is dashed, unmarked and reshaped like a reference', () => {
+      const onSetPoints = vi.fn();
+      const onSetSide = vi.fn();
+      const props = {
+        id: 'cubesrc:c1:orders',
+        source: 'cube:c1',
+        target: 'cube:c2',
+        sourceY: 10,
+        targetY: 80,
+        selected: true,
+        data: {
+          cubeId: 'c1', table: 'orders', onSetPoints, onSetSide,
+        },
+      };
+      const { host, unmount } = mount(createElement(CubeSourceEdge as any, props));
+      expect(host.querySelector('[data-slot="model-reference-label"]')).toBeNull();
+      expect(host.querySelector('[data-edge-path="cubesrc:c1:orders"]')!.getAttribute('data-dash')).toBe('6 4');
+      // No crow's foot or bar: the marks are their own path beside the line.
+      expect(host.querySelectorAll('path.react-flow__edge-path').length).toBe(0);
+      const drag = (el: Element, x0: number, y0: number, x: number, y: number) => act(() => {
+        el.dispatchEvent(new MouseEvent('pointerdown', {
+          bubbles: true, button: 0, clientX: x0, clientY: y0,
+        }));
+        window.dispatchEvent(new MouseEvent('pointermove', { clientX: x, clientY: y }));
+        window.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y }));
+      });
+      const corners = host.querySelectorAll('[data-slot="model-reference-point"]');
+      expect(corners.length).toBe(1);
+      drag(corners[0], 380, 10, 300, 10);
+      expect(onSetPoints).toHaveBeenLastCalledWith('c1', 'orders', [{ x: 300, y: 10 }, { x: 300, y: 80 }]);
+      drag(host.querySelector('[data-slot="model-reference-end"][data-end="from"]')!, 0, 0, 20, 0);
+      expect(onSetSide).toHaveBeenLastCalledWith('c1', 'orders', 'from', 'left');
+      unmount();
     });
   });
 

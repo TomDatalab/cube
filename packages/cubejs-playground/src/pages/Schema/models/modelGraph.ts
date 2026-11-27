@@ -235,6 +235,18 @@ export type CubeNode = {
   width?: number;
   height?: number;
   z?: number;
+  // The dashed lines to the tables it reads, where they were reshaped.
+  sourceLines?: CubeSourceLine[];
+};
+
+// The line from a cube to a table it reads (`table` is the alias): its
+// corners and the side of the cube (`from`) and of the table (`to`) each end
+// was dragged to.
+export type CubeSourceLine = {
+  table: string;
+  points: Point[];
+  fromSide?: 'left' | 'right';
+  toSide?: 'left' | 'right';
 };
 
 // A reference between two cubes (by id); `on` pairs dimensions of `from` and `to`.

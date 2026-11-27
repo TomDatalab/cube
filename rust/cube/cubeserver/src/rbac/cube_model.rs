@@ -79,6 +79,24 @@ pub struct CubeNode {
     pub height: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z: Option<i32>,
+    /// The shape of the dashed line to each table the cube reads, when it
+    /// was reshaped on the canvas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_lines: Vec<CubeSourceLine>,
+}
+
+/// The line from a cube to a table it reads (`table` is the alias): its
+/// corner points and the side of the cube (`from`) and of the table (`to`)
+/// each end was dragged to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubeSourceLine {
+    pub table: String,
+    pub points: Vec<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_side: Option<String>,
 }
 
 /// Where a cube reads from. `kind` is one of [`SOURCE_KINDS`].
@@ -1031,6 +1049,13 @@ fn validate_cubes(def: &Definition, aliases: &HashSet<&str>) -> Result<(), Strin
             if !COLORS.contains(&c.as_str()) {
                 return Err(format!("Cor inválida: {c}"));
             }
+        }
+        for line in &cube.source_lines {
+            let link = format!("{name} → {}", line.table);
+            if line.points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                return Err(format!("Ponto inválido na ligação {link}"));
+            }
+            check_sides(&line.from_side, &line.to_side, &link)?;
         }
         if !SOURCE_KINDS.contains(&cube.source.kind.as_str()) {
             return Err(format!(
@@ -3164,5 +3189,28 @@ mod tests {
         let def: Definition = serde_json::from_value(value.clone()).unwrap();
         validate(&def).unwrap();
         assert_eq!(serde_json::to_value(&def).unwrap()["cubeJoins"], value["cubeJoins"]);
+    }
+    #[test]
+    fn keeps_and_checks_cube_source_lines() {
+        let line = serde_json::json!([{
+            "table": "orders", "points": [{ "x": 10.0, "y": 20.0 }],
+            "fromSide": "left", "toSide": "right"
+        }]);
+        let mut value = cubes_json();
+        value["cubes"][0]["sourceLines"] = line.clone();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap()["cubes"][0]["sourceLines"], line);
+        let name = def.cubes[0].name.clone();
+
+        value["cubes"][0]["sourceLines"][0]["toSide"] = "top".into();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            validate(&def).unwrap_err(),
+            format!("Lado inválido na ligação {name} → orders: top")
+        );
+        value["cubes"][0]["sourceLines"][0]["toSide"] = "right".into();
+        value["cubes"][0]["sourceLines"][0]["extra"] = true.into();
+        assert!(serde_json::from_value::<Definition>(value).is_err());
     }
 }

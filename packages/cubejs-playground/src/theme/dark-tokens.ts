@@ -303,6 +303,8 @@ export const PG_LIGHT: Record<string, string> = {
   '--pg-model-view': '#e0f0ff',
   '--pg-model-view-border': '#60a5fa',
   '--pg-model-note': '#fef9c3',
+  // How much of its fill color a subject area shows over the card.
+  '--pg-model-area-tint': '12%',
   // atoms/Alert
   '--pg-alert-error-border': '#FFCCC7',
   '--pg-alert-error-bg': 'rgb(255, 100, 109, 0.05)',
@@ -383,6 +385,8 @@ export const PG_DARK: Record<string, string> = {
   '--pg-model-view': '#14304d',
   '--pg-model-view-border': '#2f6aa8',
   '--pg-model-note': '#4a4216',
+  // Dark areas show their color as a solid block, not a faint veil.
+  '--pg-model-area-tint': '35%',
   '--pg-alert-error-border': 'rgba(255, 100, 109, 0.45)',
   '--pg-alert-error-bg': 'rgba(255, 100, 109, 0.12)',
   '--pg-alert-error-text': '#ff8a93',

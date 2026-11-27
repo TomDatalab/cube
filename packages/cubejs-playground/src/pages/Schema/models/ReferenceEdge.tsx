@@ -22,8 +22,10 @@ export type ReferenceFlowEdge = Edge<ReferenceEdgeData, 'reference'>;
 export type ReferenceLineProps = Pick<EdgeProps, 'id' | 'source' | 'target' | 'sourceY' | 'targetY' | 'selected'> & {
   points: Point[];
   swapped: boolean;
-  ends: { from: EndMark; to: EndMark };
+  // No marks: a plain line (a cube's line to its table).
+  ends: { from: EndMark; to: EndMark } | null;
   label: string;
+  dashed?: boolean;
   // Each end's side when it was dragged there.
   sides: { from?: Side; to?: Side };
   onSetPoints: (points: Point[]) => void;
@@ -34,10 +36,11 @@ export type ReferenceLineProps = Pick<EdgeProps, 'id' | 'source' | 'target' | 's
 // points, a crow's foot or bar at each end, the label in the middle of the
 // longest segment. Selected, every corner can be dragged (double-click one
 // to remove it), every segment dragged across itself, and each end dragged
-// to the other side of its table. Shared by the table references and the
-// cube joins.
+// to the other side of its table. Shared by the table references, the cube
+// joins and the lines from a cube to its tables.
 export const ReferenceLine = memo(({
-  id, source, target, sourceY, targetY, selected, points: saved, swapped, sides, ends, label, onSetPoints, onSetSide,
+  id, source, target, sourceY, targetY, selected, points: saved, swapped, sides, ends, label, dashed, onSetPoints,
+  onSetSide,
 }: ReferenceLineProps) => {
   const from = useInternalNode(source);
   const to = useInternalNode(target);
@@ -132,22 +135,31 @@ export const ReferenceLine = memo(({
 
   return (
     <>
-      <BaseEdge id={id} path={path.d} style={{ stroke, strokeWidth: width }} interactionWidth={12} />
-      <path
-        d={`${markPath(sourcePoint, sourceSide, ends.from)} ${markPath(targetPoint, targetSide, ends.to)}`}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={width}
-        className="react-flow__edge-path"
+      <BaseEdge
+        id={id}
+        path={path.d}
+        style={{ stroke, strokeWidth: width, strokeDasharray: dashed ? '6 4' : undefined }}
+        interactionWidth={12}
       />
+      {ends ? (
+        <path
+          d={`${markPath(sourcePoint, sourceSide, ends.from)} ${markPath(targetPoint, targetSide, ends.to)}`}
+          fill="none"
+          stroke={stroke}
+          strokeWidth={width}
+          className="react-flow__edge-path"
+        />
+      ) : null}
       <EdgeLabelRenderer>
-        <div
-          data-slot="model-reference-label"
-          className="nodrag nopan tw:pointer-events-none tw:absolute tw:rounded-sm tw:bg-card tw:px-1 tw:text-[10px] tw:text-card-foreground"
-          style={{ transform: `translate(-50%, -50%) translate(${path.mid.x}px, ${path.mid.y}px)` }}
-        >
-          {label}
-        </div>
+        {label ? (
+          <div
+            data-slot="model-reference-label"
+            className="nodrag nopan tw:pointer-events-none tw:absolute tw:rounded-sm tw:bg-card tw:px-1 tw:text-[10px] tw:text-card-foreground"
+            style={{ transform: `translate(-50%, -50%) translate(${path.mid.x}px, ${path.mid.y}px)` }}
+          >
+            {label}
+          </div>
+        ) : null}
         {selected ? segments.map(({ i, p, q }) => {
           const across = p.y === q.y;
           return (
