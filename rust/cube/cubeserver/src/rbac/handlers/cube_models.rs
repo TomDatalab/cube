@@ -273,7 +273,7 @@ fn sha256_hex(content: &str) -> String {
         .collect()
 }
 
-/// Whether `content` starts with the header [`cube_model::build`] writes
+/// Whether `content` starts with the header [`cube_model::build_all`] writes
 /// for model `id` (the name in it may have changed since).
 fn built_from(content: &str, id: uuid::Uuid) -> bool {
     content.lines().next().is_some_and(|line| {
@@ -302,7 +302,7 @@ pub async fn build(
     };
     let rbac = super::rbac_of(&state)?;
     let org = model.organization_id;
-    let def: Definition = serde_json::from_value(model.definition.clone())
+    let mut def: Definition = serde_json::from_value(model.definition.clone())
         .map_err(|e| ApiError::bad_request(format!("Definição inválida: {e}")))?;
     let ds = def.data_source.as_str();
     let own = rbac
@@ -331,10 +331,15 @@ pub async fn build(
         .cube_name
         .clone()
         .unwrap_or_else(|| snake(&model.name));
-    let content = cube_model::build(&model.name, model.id, &cube_name, &def, &columns, db_type)
-        .map_err(ApiError::bad_request)?;
+    cube_model::upgrade(&mut def, &cube_name);
+    let first = cube_model::build_all(&model.name, model.id, &def, &columns, db_type)
+        .map_err(ApiError::bad_request)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::bad_request("Crie um cubo antes do build"))?;
+    let content = first.content;
 
-    let mut path = format!("{cube_name}.yml");
+    let mut path = format!("{}.yml", first.cube_name);
     writer
         .write(&actor, "build model", |rows| {
             let built = model

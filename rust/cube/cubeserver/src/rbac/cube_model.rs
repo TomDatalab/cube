@@ -1,6 +1,6 @@
-//! Models: tables on a canvas, linked by their columns, built into ONE cube
-//! whose `sql` JOINs them. Pure: [`validate`] checks the shape, [`build`]
-//! checks it against the connection's columns and writes the cube YAML.
+//! Models: tables on a canvas, linked by their columns, and cubes over them,
+//! each built into its own YAML. Pure: [`validate`] checks the shape, [`build_all`]
+//! checks it against the connection's columns and writes one YAML per cube.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -738,7 +738,7 @@ const JOINS: [&str; 2] = ["left", "inner"];
 /// The shape alone, valid while drafting: unique non-empty aliases, a
 /// `primary` among them, links between known aliases with known values, and
 /// no second path between two tables. A table not linked yet is fine here
-/// (the editor saves while one is being placed); [`build`] refuses it. A
+/// (the editor saves while one is being placed); a joined cube does not read it. A
 /// model with no tables is a valid draft.
 pub fn validate(def: &Definition) -> Result<(), String> {
     if let Some(v) = def.format_version {
@@ -1055,6 +1055,318 @@ fn validate_cubes(def: &Definition, aliases: &HashSet<&str>) -> Result<(), Strin
     Ok(())
 }
 
+/// One cube's file, built by [`build_all`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltCube {
+    pub cube_id: String,
+    pub cube_name: String,
+    /// The YAML, preceded by the header line.
+    pub content: String,
+}
+
+/// A cube's members, before its joins are known.
+struct Shaped {
+    /// `sql` or `sql_table`, and its value.
+    source: (&'static str, String),
+    dimensions: Vec<Yaml>,
+    measures: Vec<Yaml>,
+    segments: Vec<Yaml>,
+    /// What a cube join may name on this cube.
+    dimension_names: HashSet<String>,
+}
+
+/// One YAML per cube of `def`, in `def.cubes` order, checked against the
+/// connection's `columns` (keyed by plain schema name). A cube join is
+/// written on its `from` cube.
+pub fn build_all(
+    name: &str,
+    model_id: Uuid,
+    def: &Definition,
+    columns: &cubedriver::DatabaseStructure,
+    db_type: &str,
+) -> Result<Vec<BuiltCube>, String> {
+    validate(def)?;
+    let shaped = def
+        .cubes
+        .iter()
+        .map(|cube| shape(def, cube, columns, db_type))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let index: HashMap<&str, usize> = def
+        .cubes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id.as_str(), i))
+        .collect();
+    let mut joins: Vec<Vec<Yaml>> = vec![Vec::new(); def.cubes.len()];
+    for join in &def.cube_joins {
+        // validate: both ends are cubes of the model.
+        let (from, to) = (index[join.from.as_str()], index[join.to.as_str()]);
+        let to_name = def.cubes[to].name.as_str();
+        let mut on = Vec::new();
+        for pair in &join.on {
+            for (i, m) in [(from, &pair.from), (to, &pair.to)] {
+                if !shaped[i].dimension_names.contains(m.as_str()) {
+                    return Err(format!(
+                        "A ligação {} usa {}.{m}, que não é dimensão do cubo",
+                        join.id, def.cubes[i].name
+                    ));
+                }
+            }
+            on.push(format!("{{CUBE.{}}} = {{{to_name}.{}}}", pair.from, pair.to));
+        }
+        let mut written = Mapping::new();
+        written.insert("name".into(), to_name.into());
+        written.insert("relationship".into(), join.relationship.as_str().into());
+        written.insert("sql".into(), on.join(" AND ").into());
+        joins[from].push(Yaml::Mapping(written));
+    }
+
+    def.cubes
+        .iter()
+        .zip(shaped)
+        .zip(joins)
+        .map(|((cube, shaped), joins)| {
+            let mut out = Mapping::new();
+            out.insert("name".into(), cube.name.as_str().into());
+            if def.data_source != "default" {
+                out.insert("data_source".into(), def.data_source.as_str().into());
+            }
+            out.insert(shaped.source.0.into(), shaped.source.1.into());
+            for (key, text) in [("title", &cube.title), ("description", &cube.description)] {
+                if let Some(text) = text.as_deref().filter(|t| !t.is_empty()) {
+                    out.insert(key.into(), text.into());
+                }
+            }
+            for (key, list) in [
+                ("joins", joins),
+                ("dimensions", shaped.dimensions),
+                ("measures", shaped.measures),
+                ("segments", shaped.segments),
+            ] {
+                if !list.is_empty() {
+                    out.insert(key.into(), Yaml::Sequence(list));
+                }
+            }
+            let mut doc = Mapping::new();
+            doc.insert("cubes".into(), Yaml::Sequence(vec![Yaml::Mapping(out)]));
+            let yaml = serde_yaml::to_string(&doc).map_err(|e| e.to_string())?;
+            Ok(BuiltCube {
+                cube_id: cube.id.clone(),
+                cube_name: cube.name.clone(),
+                content: format!(
+                    "# Built from model {name} ({model_id}): Build cube rewrites this file\n{yaml}"
+                ),
+            })
+        })
+        .collect()
+}
+
+/// The columns of the tables a cube reads: a draft refuses the build, and a
+/// table missing from the connection too.
+fn read_tables<'a>(
+    def: &Definition,
+    tables: &[&'a ModelTable],
+    columns: &'a cubedriver::DatabaseStructure,
+) -> Result<Vec<&'a Vec<cubedriver::SchemaColumn>>, String> {
+    if let Some(t) = tables.iter().find(|t| t.draft.is_some()) {
+        return Err(format!(
+            "A tabela {}.{} ainda não existe no banco: use Criar no banco",
+            t.schema, t.table
+        ));
+    }
+    tables
+        .iter()
+        .map(|table| {
+            columns
+                .get(&table.schema)
+                .and_then(|t| t.get(&table.table))
+                .ok_or_else(|| {
+                    format!(
+                        "A tabela {}.{} não existe na conexão {}",
+                        table.schema, table.table, def.data_source
+                    )
+                })
+        })
+        .collect()
+}
+
+/// `base`, or `base_2`, `base_3`… when `taken` has it; the result is taken.
+fn unique(taken: &mut BTreeSet<String>, base: String) -> String {
+    let mut member = base.clone();
+    let mut n = 2;
+    while !taken.insert(member.clone()) {
+        member = format!("{base}_{n}");
+        n += 1;
+    }
+    member
+}
+
+fn auto_dimension(name: &str, sql: &str, kind: &str, primary_key: bool) -> Yaml {
+    let mut dimension = Mapping::new();
+    dimension.insert("name".into(), name.into());
+    dimension.insert("sql".into(), sql.into());
+    dimension.insert("type".into(), kind.into());
+    if primary_key {
+        dimension.insert("primary_key".into(), true.into());
+    }
+    Yaml::Mapping(dimension)
+}
+
+fn count() -> Yaml {
+    let mut count = Mapping::new();
+    count.insert("name".into(), "count".into());
+    count.insert("type".into(), "count".into());
+    Yaml::Mapping(count)
+}
+
+/// The dimensions, measures and segments a cube writes, with its own
+/// members (explicit mode). `column` turns a member's column into its SQL.
+fn explicit(
+    cube: &CubeNode,
+    column: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<Shaped, String> {
+    let sql_of = |c: &Option<String>, sql: &Option<String>| -> Result<Option<String>, String> {
+        match (c, sql) {
+            (Some(c), _) => column(c).map(Some),
+            (None, sql) => Ok(sql.clone()),
+        }
+    };
+    let text = |m: &mut Mapping, key: &str, v: &Option<String>| {
+        if let Some(v) = v {
+            m.insert(key.into(), v.as_str().into());
+        }
+    };
+    let mut dimensions = Vec::new();
+    for d in &cube.dimensions {
+        let mut m = Mapping::new();
+        m.insert("name".into(), d.name.as_str().into());
+        text(&mut m, "sql", &sql_of(&d.column, &d.sql)?);
+        m.insert("type".into(), d.kind.as_str().into());
+        if d.primary_key {
+            m.insert("primary_key".into(), true.into());
+        }
+        text(&mut m, "title", &d.title);
+        dimensions.push(Yaml::Mapping(m));
+    }
+    let mut measures = Vec::new();
+    for x in &cube.measures {
+        let mut m = Mapping::new();
+        m.insert("name".into(), x.name.as_str().into());
+        text(&mut m, "sql", &sql_of(&x.column, &x.sql)?);
+        m.insert("type".into(), x.kind.as_str().into());
+        text(&mut m, "title", &x.title);
+        text(&mut m, "format", &x.format);
+        measures.push(Yaml::Mapping(m));
+    }
+    Ok(Shaped {
+        source: ("", String::new()),
+        dimensions,
+        measures,
+        segments: Vec::new(),
+        dimension_names: cube.dimensions.iter().map(|d| d.name.clone()).collect(),
+    })
+}
+
+fn segments(cube: &CubeNode) -> Vec<Yaml> {
+    cube.segments
+        .iter()
+        .map(|s| {
+            let mut m = Mapping::new();
+            m.insert("name".into(), s.name.as_str().into());
+            m.insert("sql".into(), s.sql.as_str().into());
+            if let Some(title) = &s.title {
+                m.insert("title".into(), title.as_str().into());
+            }
+            Yaml::Mapping(m)
+        })
+        .collect()
+}
+
+fn shape(
+    def: &Definition,
+    cube: &CubeNode,
+    columns: &cubedriver::DatabaseStructure,
+    db_type: &str,
+) -> Result<Shaped, String> {
+    let name = cube.name.as_str();
+    let q = |ident: &str| quote(db_type, ident);
+    let auto = cube.dimensions.is_empty() && cube.measures.is_empty();
+    let missing = |c: &str| format!("A coluna {c} não existe no cubo {name}");
+    // validate: a cube's tables are aliases of the model.
+    let table_of = |alias: &str| def.tables.iter().find(|t| t.alias == alias).unwrap();
+    let primary = || {
+        cube.source
+            .table
+            .as_deref()
+            .ok_or_else(|| format!("Escolha a tabela principal do cubo {name}"))
+    };
+
+    let mut shaped = match cube.source.kind.as_str() {
+        "sql" => {
+            if auto {
+                return Err(format!("O cubo {name} não tem membros"));
+            }
+            let mut shaped = explicit(cube, &|c| Ok(format!("{{CUBE}}.{}", q(c))))?;
+            shaped.source = (
+                "sql",
+                cube.source.sql.as_deref().unwrap_or("").trim().to_string(),
+            );
+            shaped
+        }
+        "table" => {
+            let alias = primary()?;
+            let table = table_of(alias);
+            let cols = read_tables(def, &[table], columns)?[0];
+            let source = ("sql_table", format!("{}.{}", q(&table.schema), q(&table.table)));
+            if auto {
+                if let Some(key) = &cube.source.primary_key {
+                    let column = cols
+                        .iter()
+                        .find(|c| &c.name == key)
+                        .ok_or_else(|| format!("A coluna {alias}.{key} não existe"))?;
+                    if cube_type(&column.type_).is_none() {
+                        return Err(format!("A chave primária {key} não tem tipo no Cube"));
+                    }
+                }
+                let mut taken = BTreeSet::from(["count".to_string()]);
+                let mut dimensions = Vec::new();
+                let mut dimension_names = HashSet::new();
+                for column in cols {
+                    let Some(kind) = cube_type(&column.type_) else {
+                        continue;
+                    };
+                    let member = unique(&mut taken, snake(&column.name));
+                    let is_key = cube.source.primary_key.as_deref() == Some(&column.name);
+                    let sql = format!("{{CUBE}}.{}", q(&column.name));
+                    dimensions.push(auto_dimension(&member, &sql, kind, is_key));
+                    dimension_names.insert(member);
+                }
+                Shaped {
+                    source,
+                    dimensions,
+                    measures: vec![count()],
+                    segments: Vec::new(),
+                    dimension_names,
+                }
+            } else {
+                let mut shaped = explicit(cube, &|c| {
+                    if cols.iter().any(|col| col.name == c) {
+                        Ok(format!("{{CUBE}}.{}", q(c)))
+                    } else {
+                        Err(missing(c))
+                    }
+                })?;
+                shaped.source = source;
+                shaped
+            }
+        }
+        _ => joined(def, cube, columns, db_type, primary()?, auto)?,
+    };
+    shaped.segments = segments(cube);
+    Ok(shaped)
+}
+
 /// A join oriented from the primary: `from` is already in the tree.
 struct Step<'a> {
     from: &'a End,
@@ -1063,65 +1375,30 @@ struct Step<'a> {
     join: &'a str,
 }
 
-/// The cube YAML for `def`, checked against the connection's `columns`
-/// (keyed by plain schema name), preceded by the header line.
-pub fn build(
-    name: &str,
-    model_id: Uuid,
-    cube_name: &str,
+/// A `joined` cube: the tables `def.joins` reach from `primary`, walked
+/// breadth-first, in one SELECT of their typed columns.
+fn joined(
     def: &Definition,
+    cube: &CubeNode,
     columns: &cubedriver::DatabaseStructure,
     db_type: &str,
-) -> Result<String, String> {
-    if let Some(t) = def.tables.iter().find(|t| t.draft.is_some()) {
-        return Err(format!(
-            "A tabela {}.{} ainda não existe no banco: use Criar no banco",
-            t.schema, t.table
-        ));
-    }
-    validate(def)?;
-    let primary = def.primary.as_deref().ok_or("Escolha a tabela principal")?;
-    let primary_key = def
-        .primary_key
-        .as_deref()
-        .ok_or("Escolha a chave primária")?;
-
-    let mut tables = HashMap::new();
-    for table in &def.tables {
-        let cols = columns
-            .get(&table.schema)
-            .and_then(|t| t.get(&table.table))
-            .ok_or_else(|| {
-                format!(
-                    "A tabela {}.{} não existe na conexão {}",
-                    table.schema, table.table, def.data_source
-                )
-            })?;
-        tables.insert(table.alias.as_str(), (table, cols));
-    }
-    let column_of = |end: &End| {
-        tables[end.alias.as_str()]
-            .1
-            .iter()
-            .find(|c| c.name == end.column)
-            .ok_or_else(|| format!("A coluna {}.{} não existe", end.alias, end.column))
+    primary: &str,
+    auto: bool,
+) -> Result<Shaped, String> {
+    let name = cube.name.as_str();
+    let primary_key = if auto {
+        Some(
+            cube.source
+                .primary_key
+                .as_deref()
+                .ok_or_else(|| format!("Escolha a chave primária do cubo {name}"))?,
+        )
+    } else {
+        None
     };
-    for join in &def.joins {
-        column_of(&join.from)?;
-        column_of(&join.to)?;
-    }
-    let key = column_of(&End {
-        alias: primary.into(),
-        column: primary_key.into(),
-    })?;
-    if cube_type(&key.type_).is_none() {
-        return Err(format!(
-            "A chave primária {primary_key} não tem tipo no Cube"
-        ));
-    }
 
-    // Breadth-first from the primary; validate made the links a forest, and
-    // a table this walk does not reach is not linked to the primary.
+    // validate made the links a forest; a table this walk does not reach is
+    // not part of the cube.
     let mut order = vec![primary];
     let mut visited = HashSet::from([primary]);
     let mut steps = Vec::new();
@@ -1155,53 +1432,68 @@ pub fn build(
             steps.push(step);
         }
     }
-    if let Some(table) = def
-        .tables
+
+    let read: Vec<&ModelTable> = order
         .iter()
-        .find(|t| !visited.contains(t.alias.as_str()))
-    {
-        return Err(format!(
-            "A tabela {} não está ligada à principal",
-            table.alias
-        ));
+        .map(|alias| def.tables.iter().find(|t| t.alias == *alias).unwrap())
+        .collect();
+    let cols = read_tables(def, &read, columns)?;
+    let tables: HashMap<&str, (&ModelTable, &Vec<cubedriver::SchemaColumn>)> = order
+        .iter()
+        .zip(read.iter().zip(cols))
+        .map(|(alias, (table, cols))| (*alias, (*table, cols)))
+        .collect();
+    let column_of = |end: &End| {
+        tables[end.alias.as_str()]
+            .1
+            .iter()
+            .find(|c| c.name == end.column)
+            .ok_or_else(|| format!("A coluna {}.{} não existe", end.alias, end.column))
+    };
+    for step in &steps {
+        column_of(step.from)?;
+        column_of(step.to)?;
+    }
+    if let Some(primary_key) = primary_key {
+        let key = column_of(&End {
+            alias: primary.into(),
+            column: primary_key.into(),
+        })?;
+        if cube_type(&key.type_).is_none() {
+            return Err(format!(
+                "A chave primária {primary_key} não tem tipo no Cube"
+            ));
+        }
     }
     let multiplies = steps.iter().any(|s| s.relationship == "one_to_many");
 
     let q = |ident: &str| quote(db_type, ident);
-    let mut members = BTreeSet::from(["count".to_string()]);
+    let mut taken = BTreeSet::from(["count".to_string()]);
     let mut select = Vec::new();
+    // (alias, column) → its name in the SELECT.
+    let mut selected: HashMap<(&str, &str), String> = HashMap::new();
     let mut dimensions = Vec::new();
     let mut key_sql = String::new();
     for alias in &order {
         let (_, cols) = tables[alias];
         for column in cols {
-            let Some(cube_type) = cube_type(&column.type_) else {
+            let Some(kind) = cube_type(&column.type_) else {
                 continue;
             };
-            let base = format!("{}_{}", snake(alias), snake(&column.name));
-            let mut member = base.clone();
-            let mut n = 2;
-            while !members.insert(member.clone()) {
-                member = format!("{base}_{n}");
-                n += 1;
-            }
+            let member = unique(&mut taken, format!("{}_{}", snake(alias), snake(&column.name)));
             select.push(format!(
                 "{}.{} AS {}",
                 q(alias),
                 q(&column.name),
                 q(&member)
             ));
-
             let sql = format!("{{CUBE}}.{}", q(&member));
-            let mut dimension = Mapping::new();
-            dimension.insert("name".into(), member.into());
-            dimension.insert("sql".into(), sql.clone().into());
-            dimension.insert("type".into(), cube_type.into());
-            if *alias == primary && column.name == primary_key {
-                dimension.insert("primary_key".into(), true.into());
-                key_sql = sql;
+            let is_key = *alias == primary && primary_key == Some(column.name.as_str());
+            if is_key {
+                key_sql = sql.clone();
             }
-            dimensions.push(Yaml::Mapping(dimension));
+            dimensions.push(auto_dimension(&member, &sql, kind, is_key));
+            selected.insert((*alias, column.name.as_str()), member);
         }
     }
 
@@ -1224,14 +1516,20 @@ pub fn build(
             q(&step.to.column),
         ));
     }
+    let source = ("sql", sql.join("\n"));
 
-    let mut cube = Mapping::new();
-    cube.insert("name".into(), cube_name.into());
-    if def.data_source != "default" {
-        cube.insert("data_source".into(), def.data_source.as_str().into());
+    if !auto {
+        let mut shaped = explicit(cube, &|c| {
+            c.split_once('.')
+                .and_then(|(alias, column)| selected.get(&(alias, column)))
+                .map(|member| format!("{{CUBE}}.{}", q(member)))
+                .ok_or_else(|| format!("A coluna {c} não existe no cubo {name}"))
+        })?;
+        shaped.source = source;
+        return Ok(shaped);
     }
-    cube.insert("sql".into(), sql.join("\n").into());
-    cube.insert("dimensions".into(), Yaml::Sequence(dimensions));
+
+    let dimension_names = selected.into_values().collect();
     let mut count = Mapping::new();
     count.insert("name".into(), "count".into());
     if multiplies {
@@ -1241,17 +1539,13 @@ pub fn build(
     } else {
         count.insert("type".into(), "count".into());
     }
-    cube.insert(
-        "measures".into(),
-        Yaml::Sequence(vec![Yaml::Mapping(count)]),
-    );
-
-    let mut doc = Mapping::new();
-    doc.insert("cubes".into(), Yaml::Sequence(vec![Yaml::Mapping(cube)]));
-    let yaml = serde_yaml::to_string(&doc).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "# Built from model {name} ({model_id}): Build cube rewrites this file\n{yaml}"
-    ))
+    Ok(Shaped {
+        source,
+        dimensions,
+        measures: vec![Yaml::Mapping(count)],
+        segments: Vec::new(),
+        dimension_names,
+    })
 }
 
 #[cfg(test)]
@@ -1282,6 +1576,10 @@ mod tests {
         tables.insert(
             "customers".to_string(),
             vec![col("id", "int"), col("region", "text")],
+        );
+        tables.insert(
+            "payments".to_string(),
+            vec![col("id", "int"), col("amount", "numeric")],
         );
         let mut db = cubedriver::DatabaseStructure::new();
         db.insert("public".to_string(), tables);
@@ -1334,8 +1632,73 @@ mod tests {
         }
     }
 
+    fn build_def(def: &Definition) -> Result<Vec<BuiltCube>, String> {
+        build_all("Sales", Uuid::nil(), def, &columns(), "postgres")
+    }
+
+    /// A converted model: `def` upgraded into cube `sales`, then built.
     fn run(def: &Definition) -> Result<String, String> {
-        build("Sales", Uuid::nil(), "sales", def, &columns(), "postgres")
+        let mut def = def.clone();
+        upgrade(&mut def, "sales");
+        Ok(build_def(&def)?.remove(0).content)
+    }
+
+    fn cube_node(id: &str, name: &str, kind: &str, table: Option<&str>) -> CubeNode {
+        CubeNode {
+            id: id.into(),
+            name: name.into(),
+            source: CubeSource {
+                kind: kind.into(),
+                table: table.map(Into::into),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dimension(name: &str, kind: &str, column: Option<&str>, sql: Option<&str>) -> CubeDimension {
+        CubeDimension {
+            name: name.into(),
+            kind: kind.into(),
+            column: column.map(Into::into),
+            sql: sql.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    /// The YAML of the cube named `name` among `built`.
+    fn yaml_of(built: &[BuiltCube], name: &str) -> Yaml {
+        let b = built
+            .iter()
+            .find(|b| b.cube_name == name)
+            .unwrap_or_else(|| panic!("no cube {name}"));
+        cube(&b.content)
+    }
+
+    /// Cubes `orders` (c1) and `customers` (c2) on their tables, in auto
+    /// mode, with cube join cj1 orders.customer_id → customers.id.
+    fn two_cubes() -> Definition {
+        let mut orders = cube_node("c1", "orders", "table", Some("orders"));
+        orders.source.primary_key = Some("id".into());
+        let mut customers = cube_node("c2", "customers", "table", Some("customers"));
+        customers.source.primary_key = Some("id".into());
+        Definition {
+            data_source: "default".into(),
+            tables: vec![table("orders", "orders"), table("customers", "customers")],
+            cubes: vec![orders, customers],
+            cube_joins: vec![CubeJoin {
+                id: "cj1".into(),
+                from: "c1".into(),
+                to: "c2".into(),
+                relationship: "many_to_one".into(),
+                on: vec![ColumnPair {
+                    from: "customer_id".into(),
+                    to: "id".into(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
     }
 
     fn cube(yaml: &str) -> Yaml {
@@ -1378,9 +1741,279 @@ mod tests {
     }
 
     #[test]
-    fn golden_yaml() {
-        assert_eq!(run(&orders_customers()).unwrap(), GOLDEN_LEFT_JOIN);
-        assert_eq!(run(&one_to_many()).unwrap(), GOLDEN_ONE_TO_MANY);
+    fn converted_model_builds_the_golden_yaml() {
+        for (def, golden) in [
+            (orders_customers(), GOLDEN_LEFT_JOIN),
+            (one_to_many(), GOLDEN_ONE_TO_MANY),
+        ] {
+            let mut def = def;
+            upgrade(&mut def, "sales");
+            let built = build_def(&def).unwrap();
+            assert_eq!(built.len(), 1);
+            assert_eq!(built[0].cube_id, "c1");
+            assert_eq!(built[0].cube_name, "sales");
+            assert_eq!(built[0].content, golden);
+        }
+    }
+
+    #[test]
+    fn table_cube_auto_members() {
+        let built = build_def(&two_cubes()).unwrap();
+        assert_eq!(
+            built.iter().map(|b| b.cube_name.as_str()).collect::<Vec<_>>(),
+            ["orders", "customers"]
+        );
+        let orders = yaml_of(&built, "orders");
+        assert_eq!(orders["sql_table"].as_str(), Some(r#""public"."orders""#));
+        assert!(orders["sql"].is_null());
+        let names: Vec<_> = orders["dimensions"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["id", "customer_id", "order_id", "order_id_2"]);
+        let id = member(&orders, "dimensions", "id");
+        assert_eq!(id["primary_key"].as_bool(), Some(true));
+        assert_eq!(id["sql"].as_str(), Some(r#"{CUBE}."id""#));
+        assert_eq!(id["type"].as_str(), Some("number"));
+        assert_eq!(
+            member(&orders, "dimensions", "order_id")["sql"].as_str(),
+            Some(r#"{CUBE}."Order ID""#)
+        );
+        assert_eq!(
+            member(&orders, "dimensions", "customer_id")["primary_key"].as_bool(),
+            None
+        );
+        assert_eq!(
+            member(&orders, "measures", "count")["type"].as_str(),
+            Some("count")
+        );
+    }
+
+    #[test]
+    fn sql_cube_needs_members() {
+        let mut q = cube_node("c1", "q", "sql", None);
+        q.source.sql = Some("SELECT 1 AS x".into());
+        let def = Definition {
+            data_source: "default".into(),
+            cubes: vec![q],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "O cubo q não tem membros"
+        );
+    }
+
+    #[test]
+    fn explicit_members_on_each_source() {
+        let mut sales = cube_node("c1", "sales", "joined", Some("orders"));
+        sales.dimensions = vec![dimension("region", "string", Some("customers.region"), None)];
+        let mut payments = cube_node("c2", "payments", "table", Some("payments"));
+        payments.title = Some("Pagamentos".into());
+        payments.description = Some("Tudo que entrou".into());
+        payments.dimensions = vec![CubeDimension {
+            primary_key: true,
+            title: Some("Código".into()),
+            ..dimension("id", "number", Some("id"), None)
+        }];
+        payments.measures = vec![CubeMeasure {
+            name: "total".into(),
+            kind: "sum".into(),
+            column: Some("amount".into()),
+            format: Some("currency".into()),
+            title: Some("Total".into()),
+            ..Default::default()
+        }];
+        let mut q = cube_node("c3", "q", "sql", None);
+        q.source.sql = Some("  SELECT 1 AS x\n".into());
+        q.dimensions = vec![dimension("x", "number", None, Some("{CUBE}.x"))];
+        q.segments = vec![CubeSegment {
+            name: "positive".into(),
+            sql: "{CUBE}.x > 0".into(),
+            title: Some("Positivos".into()),
+        }];
+        let def = Definition {
+            cubes: vec![sales, payments, q],
+            tables: vec![
+                table("orders", "orders"),
+                table("customers", "customers"),
+                table("payments", "payments"),
+            ],
+            ..orders_customers()
+        };
+        let mut def = def;
+        def.primary = None;
+        def.primary_key = None;
+        let built = build_def(&def).unwrap();
+
+        let sales = yaml_of(&built, "sales");
+        assert!(sql(&sales).contains(r#"LEFT JOIN "public"."customers" AS "customers""#));
+        let region = member(&sales, "dimensions", "region");
+        assert_eq!(region["sql"].as_str(), Some(r#"{CUBE}."customers_region""#));
+        assert_eq!(region["type"].as_str(), Some("string"));
+        assert_eq!(sales["dimensions"].as_sequence().unwrap().len(), 1);
+        assert!(sales["measures"].is_null(), "{sales:?}");
+
+        let payments = yaml_of(&built, "payments");
+        let keys: Vec<_> = payments
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            ["name", "sql_table", "title", "description", "dimensions", "measures"]
+        );
+        assert_eq!(payments["title"].as_str(), Some("Pagamentos"));
+        assert_eq!(payments["description"].as_str(), Some("Tudo que entrou"));
+        let id = member(&payments, "dimensions", "id");
+        assert_eq!(id["primary_key"].as_bool(), Some(true));
+        assert_eq!(id["title"].as_str(), Some("Código"));
+        let total = member(&payments, "measures", "total");
+        assert_eq!(total["type"].as_str(), Some("sum"));
+        assert_eq!(total["sql"].as_str(), Some(r#"{CUBE}."amount""#));
+        assert_eq!(total["format"].as_str(), Some("currency"));
+        assert_eq!(total["title"].as_str(), Some("Total"));
+
+        let q = yaml_of(&built, "q");
+        assert_eq!(q["sql"].as_str(), Some("SELECT 1 AS x"));
+        assert_eq!(
+            member(&q, "dimensions", "x")["sql"].as_str(),
+            Some("{CUBE}.x")
+        );
+        let positive = member(&q, "segments", "positive");
+        assert_eq!(positive["sql"].as_str(), Some("{CUBE}.x > 0"));
+        assert_eq!(positive["title"].as_str(), Some("Positivos"));
+        assert!(q["measures"].is_null());
+    }
+
+    #[test]
+    fn cube_join_on_the_from_cube() {
+        let built = build_def(&two_cubes()).unwrap();
+        let orders = yaml_of(&built, "orders");
+        let expected: Yaml = serde_yaml::from_str(
+            r#"[{name: customers, relationship: many_to_one, sql: "{CUBE.customer_id} = {customers.id}"}]"#,
+        )
+        .unwrap();
+        assert_eq!(orders["joins"], expected);
+        assert!(yaml_of(&built, "customers")["joins"].is_null());
+
+        let mut two = two_cubes();
+        two.cube_joins[0].on.push(ColumnPair {
+            from: "id".into(),
+            to: "id".into(),
+        });
+        let built = build_def(&two).unwrap();
+        assert_eq!(
+            yaml_of(&built, "orders")["joins"][0]["sql"].as_str(),
+            Some("{CUBE.customer_id} = {customers.id} AND {CUBE.id} = {customers.id}")
+        );
+    }
+
+    #[test]
+    fn built_cubes_compile() {
+        let sources: Vec<(String, String)> = build_def(&two_cubes())
+            .unwrap()
+            .into_iter()
+            .map(|b| (format!("{}.yml", b.cube_name), b.content))
+            .collect();
+        let check = crate::rbac::model_validate::check(
+            &sources,
+            &cubemodel::TemplateContext::default(),
+            None,
+        );
+        assert!(check.problems.is_empty(), "{:?}", check.problems);
+    }
+
+    #[test]
+    fn unknown_join_member_is_refused() {
+        let mut def = two_cubes();
+        def.cube_joins[0].on[0].from = "nope".into();
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A ligação cj1 usa orders.nope, que não é dimensão do cubo"
+        );
+        let mut def = two_cubes();
+        def.cube_joins[0].on[0].to = "region_x".into();
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A ligação cj1 usa customers.region_x, que não é dimensão do cubo"
+        );
+        // A measure is not a dimension.
+        let mut def = two_cubes();
+        def.cube_joins[0].on[0].to = "count".into();
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A ligação cj1 usa customers.count, que não é dimensão do cubo"
+        );
+    }
+
+    #[test]
+    fn unknown_column_is_refused() {
+        let mut def = two_cubes();
+        def.cubes[0].dimensions = vec![dimension("x", "string", Some("nope"), None)];
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A coluna nope não existe no cubo orders"
+        );
+
+        let mut def = orders_customers();
+        upgrade(&mut def, "sales");
+        def.cubes[0].measures = vec![CubeMeasure {
+            name: "m".into(),
+            kind: "max".into(),
+            column: Some("customers.nope".into()),
+            ..Default::default()
+        }];
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A coluna customers.nope não existe no cubo sales"
+        );
+        // Not a reached table either.
+        def.cubes[0].measures[0].column = Some("region".into());
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A coluna region não existe no cubo sales"
+        );
+
+        // Not checked for a sql cube.
+        let mut q = cube_node("c1", "q", "sql", None);
+        q.source.sql = Some("SELECT 1 AS x".into());
+        q.dimensions = vec![dimension("x", "number", Some("whatever"), None)];
+        let def = Definition {
+            data_source: "default".into(),
+            cubes: vec![q],
+            ..Default::default()
+        };
+        let built = build_def(&def).unwrap();
+        assert_eq!(
+            member(&yaml_of(&built, "q"), "dimensions", "x")["sql"].as_str(),
+            Some(r#"{CUBE}."whatever""#)
+        );
+    }
+
+    #[test]
+    fn a_draft_table_only_blocks_the_cubes_that_read_it() {
+        let mut def = items_def();
+        def.data_source = "default".into();
+        def.tables.insert(0, table("orders", "orders"));
+        let mut orders = cube_node("c1", "orders", "table", Some("orders"));
+        orders.source.primary_key = Some("id".into());
+        def.cubes = vec![orders];
+        assert_eq!(build_def(&def).unwrap().len(), 1);
+
+        // A joined cube that does not reach the draft builds too.
+        def.cubes[0].source.kind = "joined".into();
+        assert_eq!(build_def(&def).unwrap().len(), 1);
+
+        def.cubes.push(cube_node("c2", "items", "table", Some("i")));
+        assert_eq!(
+            build_def(&def).unwrap_err(),
+            "A tabela public.items ainda não existe no banco: use Criar no banco"
+        );
     }
 
     #[test]
@@ -1621,12 +2254,19 @@ mod tests {
     #[test]
     fn build_requires_primary_and_key_and_existing_columns() {
         let mut no_primary = orders_customers();
-        no_primary.primary = None;
-        assert_eq!(run(&no_primary), Err("Escolha a tabela principal".into()));
+        upgrade(&mut no_primary, "sales");
+        no_primary.cubes[0].source.table = None;
+        assert_eq!(
+            build_def(&no_primary).unwrap_err(),
+            "Escolha a tabela principal do cubo sales"
+        );
 
         let mut no_key = orders_customers();
         no_key.primary_key = None;
-        assert_eq!(run(&no_key), Err("Escolha a chave primária".into()));
+        assert_eq!(
+            run(&no_key),
+            Err("Escolha a chave primária do cubo sales".into())
+        );
 
         let mut no_column = orders_customers();
         no_column.joins[0].to.column = "nope".into();
@@ -1642,12 +2282,10 @@ mod tests {
             Err("A coluna orders.nope não existe".into())
         );
 
+        // A table the walk does not reach is not part of the cube.
         let mut unlinked = orders_customers();
-        unlinked.tables.push(table("x", "customers"));
-        assert_eq!(
-            run(&unlinked),
-            Err("A tabela x não está ligada à principal".into())
-        );
+        unlinked.tables.push(table("x", "gone"));
+        assert_eq!(run(&unlinked), Ok(GOLDEN_LEFT_JOIN.to_string()));
 
         let mut no_table = orders_customers();
         no_table.tables[1].table = "gone".into();
@@ -1667,9 +2305,10 @@ mod tests {
             .push(col("tags", "text[]"));
         let mut def = orders_customers();
         def.primary_key = Some("tags".into());
+        upgrade(&mut def, "sales");
         assert_eq!(
-            build("Sales", Uuid::nil(), "sales", &def, &db, "postgres"),
-            Err("A chave primária tags não tem tipo no Cube".into())
+            build_all("Sales", Uuid::nil(), &def, &db, "postgres").unwrap_err(),
+            "A chave primária tags não tem tipo no Cube"
         );
     }
 
@@ -1781,7 +2420,9 @@ mod tests {
         def.tables.insert(0, table("o", "orders"));
         def.primary = Some("o".into());
         def.primary_key = Some("id".into());
-        let err = build("m", Uuid::nil(), "m", &def, &columns(), "postgres").unwrap_err();
+        def.joins = vec![join(("o", "id"), ("i", "id"), "many_to_one", "left")];
+        upgrade(&mut def, "m");
+        let err = build_all("m", Uuid::nil(), &def, &columns(), "postgres").unwrap_err();
         assert_eq!(
             err,
             "A tabela public.items ainda não existe no banco: use Criar no banco"
