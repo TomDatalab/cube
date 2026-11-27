@@ -83,6 +83,12 @@ vi.mock('@xyflow/react', async () => {
   };
 });
 
+const share = vi.hoisted(() => ({ platformAdmin: false, push: null as any }));
+vi.mock('../hooks', () => ({
+  useRbac: () => ({ session: { user: { platformAdmin: share.platformAdmin } } }),
+}));
+vi.mock('react-router-dom', () => ({ useHistory: () => ({ push: share.push }) }));
+
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 // The color popover measures its trigger.
 (globalThis as any).ResizeObserver ??= class {
@@ -2926,5 +2932,26 @@ describe('ModelEditor', () => {
       expect(document.body.textContent).not.toContain('Read-only mode');
       expect(tool('New note').disabled).toBe(true);
     });
+  });
+
+  it("share dialog explains the organization's access", async () => {
+    share.push = vi.fn();
+    share.platformAdmin = false;
+    await render();
+    await act(async () => tool('Share').click());
+    const text = () => document.querySelector('[role="dialog"]')!.textContent!;
+    expect(text()).toContain('Share model');
+    expect(text()).toContain('every owner of Acme can open and edit this model');
+    expect(text()).toContain('Ask a platform admin to add or remove owners.');
+    expect(button('Manage owners')).toBeUndefined();
+    await act(async () => button('Close').click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    share.platformAdmin = true;
+    await render();
+    await act(async () => tool('Share').click());
+    expect(text()).not.toContain('Ask a platform admin');
+    await act(async () => button('Manage owners').click());
+    expect(share.push).toHaveBeenCalledWith('/admin/organizations');
   });
 });

@@ -3,6 +3,7 @@ import {
   AlignCenterVertical, AlignVerticalDistributeCenter, BookOpen, Box, ClipboardPaste, Copy, DatabaseZap,
   FileCode, FileText, Forward, Image, Layers, Maximize, Network, PanelLeft, PanelRight, PanelTop,
   Redo2, Save, Scaling, Scissors, Spline, TableProperties, Trash2, Undo2, ZoomIn, ZoomOut,
+  Share2,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -76,6 +77,9 @@ export type ModelToolbarProps = {
   };
   // SQL over the model; it changes nothing, so it stays open read-only.
   explorer: { onOpen(): void };
+  // Share explains the organization's access; it changes nothing, so it
+  // stays open read-only.
+  share: { onOpen(): void };
   // The diagram as an image or a PDF; on read-only too. `busy` while a PDF
   // is being made.
   exports: { onImage(): void; onPdf(): void; onDocs(): void; busy: boolean };
@@ -181,7 +185,7 @@ function createHint(file: ModelToolbarProps['file']): string {
 // Redgate's toolbar: history | file | clipboard | arrange | zoom | panes,
 // then the search on the right.
 export function ModelToolbar({
-  history, file, edit, arrange, references, zoom, panes, explorer, exports, search, readOnly = false,
+  history, file, edit, arrange, references, zoom, panes, explorer, share, exports, search, readOnly = false,
 }: ModelToolbarProps) {
   const zoomOptions = ZOOM_CHOICES.includes(zoom.percent)
     ? ZOOM_CHOICES
@@ -224,6 +228,7 @@ export function ModelToolbar({
           <DatabaseZap />
         </Tool>
         <Tool label="Build cube" disabled={readOnly || !file.canBuild || file.busy} onClick={file.onBuild}><Box /></Tool>
+        <Tool label="Share" onClick={share.onOpen}><Share2 /></Tool>
         <Divider />
 
         <Tool label="Copy" hint="Copy (Ctrl + C)" disabled={!edit.canCopy} onClick={edit.onCopy}><Copy /></Tool>

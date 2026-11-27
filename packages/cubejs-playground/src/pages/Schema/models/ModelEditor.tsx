@@ -21,6 +21,7 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner, notify } from '@/components/kit';
 
 import { ApiError, CubeModelView, OrgNode, modelApi } from '../api';
+import { useRbac } from '../../../hooks';
 import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
@@ -51,6 +52,7 @@ import { useHistory } from './history';
 import { Dialect, convertDrafts } from './dialect';
 import { addReference, ensureIds } from './physical';
 import { issues } from './validate';
+import { ShareDialog } from './ShareDialog';
 import { SqlDialog, SqlOptions } from './SqlDialog';
 import { ExplorerDialog } from './explorer/ExplorerDialog';
 import { explorerTables } from './explorer/explorerTables';
@@ -252,7 +254,7 @@ function useCollapsedTables(modelId: string): [string[], (alias: string) => void
 }
 
 function Editor({
-  api, modelId, tables, onBuilt, onTablesCreated, onSaved, onDeleted, onDirtyChange,
+  api, org, modelId, tables, onBuilt, onTablesCreated, onSaved, onDeleted, onDirtyChange,
 }: ModelEditorProps) {
   const theme = useDocumentTheme();
   // Bumped on every edit: a save clears `dirty` only when nothing changed
@@ -290,6 +292,8 @@ function Editor({
   // The Generate SQL dialog: open with its limits, options and answer.
   const [sqlAsk, setSqlAsk] = useState<{ only?: string[] } | null>(null);
   const [explorerOpen, setExplorerOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const platformAdmin = Boolean(useRbac().session?.user.platformAdmin);
   const [imageOpen, setImageOpen] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [sqlOptions, setSqlOptions] = useState<SqlOptions>({ drop: false, onlyNew: false });
@@ -1640,6 +1644,7 @@ function Editor({
           onToggleTop: () => togglePane('top'),
         }}
         explorer={{ onOpen: () => setExplorerOpen(true) }}
+        share={{ onOpen: () => setShareOpen(true) }}
         exports={{ onImage: () => setImageOpen(true), onPdf: printPdf, onDocs: generateDocs, busy: pdfBusy }}
         search={(
           <SearchBox query={query} hits={hits} onQuery={setQuery} onPick={pickHit} inputRef={searchInput} />
@@ -1858,6 +1863,13 @@ function Editor({
         schemasOf={(ds) => Object.keys(tables?.[ds] ?? {})}
         onSave={saveTable}
         onClose={() => setTableEdit(null)}
+      />
+
+      <ShareDialog
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+        orgName={org.name}
+        platformAdmin={platformAdmin}
       />
 
       <SqlDialog
