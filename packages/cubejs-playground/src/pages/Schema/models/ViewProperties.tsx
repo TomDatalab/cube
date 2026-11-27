@@ -274,7 +274,14 @@ export function ViewProperties({
 
       <Section title="Format">
         <Field label="Color">
-          <Palette slot="model-view-palette" none value={view.color} onPick={(color) => patch({ color })} />
+          <Palette
+            slot="model-view-palette"
+            none
+            value={view.color}
+            onPick={(color) => patch({ color })}
+            transparency={view.colorTransparency}
+            onTransparency={(colorTransparency) => patch({ colorTransparency })}
+          />
         </Field>
       </Section>
 

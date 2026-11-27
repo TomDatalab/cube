@@ -8,6 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 
 import { TABLE_COLORS, TableColor } from './modelGraph';
+import { MAX_TRANSPARENCY } from './paint';
 
 // While someone else edits the model, the pane only shows: every field of a
 // section is off, but its header still opens and closes it.
@@ -119,11 +120,56 @@ export function Check({
   );
 }
 
+// How see-through a color is: a slider saved when let go (one undo step),
+// 0% saved as nothing.
+function Transparency({
+  slot, value, disabled, onCommit,
+}: { slot: string; value: number | undefined; disabled: boolean; onCommit(next: number | undefined): void }) {
+  const [draft, setDraft] = useState(value ?? 0);
+  useEffect(() => setDraft(value ?? 0), [value]);
+  const commit = () => {
+    if (draft !== (value ?? 0)) {
+      onCommit(draft === 0 ? undefined : draft);
+    }
+  };
+  return (
+    <div
+      data-slot={`${slot}-transparency`}
+      className={cn('tw:flex tw:w-full tw:items-center tw:gap-2 tw:text-xs tw:text-muted-foreground', disabled && 'tw:opacity-50')}
+    >
+      <span aria-hidden>Transparency</span>
+      <input
+        type="range"
+        aria-label="Transparency"
+        min={0}
+        max={MAX_TRANSPARENCY}
+        step={5}
+        value={draft}
+        disabled={disabled}
+        className="tw:min-w-0 tw:flex-1"
+        onChange={(e) => setDraft(Number(e.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+        onBlur={commit}
+      />
+      <span className="tw:w-8 tw:text-right tw:tabular-nums">{`${draft}%`}</span>
+    </div>
+  );
+}
+
 // The palette swatches of the table's Format, for one color of an object;
-// `none` adds a button that clears it.
+// `none` adds a button that clears it, `onTransparency` a slider for how
+// see-through the color is.
 export function Palette({
-  slot, value, onPick, none,
-}: { slot: string; value: TableColor | undefined; onPick(color: TableColor | undefined): void; none?: boolean }) {
+  slot, value, onPick, none, transparency, onTransparency,
+}: {
+  slot: string;
+  value: TableColor | undefined;
+  onPick(color: TableColor | undefined): void;
+  none?: boolean;
+  transparency?: number;
+  onTransparency?(next: number | undefined): void;
+}) {
   return (
     <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-1" data-slot={slot}>
       {TABLE_COLORS.map((color) => (
@@ -149,6 +195,9 @@ export function Palette({
         >
           <Ban className="tw:size-3.5" />
         </button>
+      ) : null}
+      {onTransparency ? (
+        <Transparency slot={slot} value={transparency} disabled={value === undefined} onCommit={onTransparency} />
       ) : null}
     </div>
   );

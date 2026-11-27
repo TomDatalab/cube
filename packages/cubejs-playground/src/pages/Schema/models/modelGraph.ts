@@ -69,6 +69,9 @@ export type ModelTable = {
   color?: TableColor;
   // The column rows' color; none is the card.
   bodyColor?: TableColor;
+  // How see-through those colors are, in percent (0 to MAX_TRANSPARENCY).
+  colorTransparency?: number;
+  bodyTransparency?: number;
   draft?: DraftTable;
   comment?: string;
   // A size fixed on the canvas; none follows the content.
@@ -158,6 +161,10 @@ export type NoteFormat = {
   textColor?: TableColor;
   borderColor?: TableColor;
   borderStyle?: (typeof NOTE_BORDERS)[number];
+  // How see-through the box, text and border colors are, in percent.
+  colorTransparency?: number;
+  textTransparency?: number;
+  borderTransparency?: number;
 };
 
 // A note's format: everything but its place, size, text and box color.
@@ -179,6 +186,8 @@ export type Area = {
   z?: number;
   fill?: TableColor;
   border?: TableColor;
+  fillTransparency?: number;
+  borderTransparency?: number;
 };
 
 export type ViewColumn = { name: string; type: string };
@@ -196,6 +205,7 @@ export type ModelView = {
   scriptAfter?: string;
   // The whole view's color; none is the view blue.
   color?: TableColor;
+  colorTransparency?: number;
   x: number;
   y: number;
   width?: number;
@@ -270,6 +280,7 @@ export type CubeNode = {
   width?: number;
   height?: number;
   z?: number;
+  colorTransparency?: number;
   // The dashed lines to the tables it reads, where they were reshaped.
   sourceLines?: CubeSourceLine[];
 };
@@ -616,6 +627,25 @@ export function setColor(
       }
       const { [part]: _drop, ...rest } = t;
       return color === undefined ? rest : { ...rest, [part]: color };
+    }),
+  };
+}
+
+// How see-through a table's header or rows are; undefined is opaque.
+export function setTableTransparency(
+  def: ModelDefinition,
+  alias: string,
+  part: 'colorTransparency' | 'bodyTransparency',
+  transparency: number | undefined
+): ModelDefinition {
+  return {
+    ...def,
+    tables: def.tables.map((t) => {
+      if (t.alias !== alias) {
+        return t;
+      }
+      const { [part]: _drop, ...rest } = t;
+      return transparency === undefined ? rest : { ...rest, [part]: transparency };
     }),
   };
 }

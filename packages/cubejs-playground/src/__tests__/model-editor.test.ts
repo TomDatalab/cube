@@ -2064,6 +2064,33 @@ describe('ModelEditor', () => {
       expect(def.views[0].color).toBe('teal');
     });
 
+    it('a color\'s transparency is saved when the slider is let go', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('orders');
+      const slider = () => pane().querySelector('[data-slot="model-body-palette-transparency"] input') as HTMLInputElement;
+      // No color, nothing to make see-through.
+      expect(slider().disabled).toBe(true);
+      await act(async () => (pane().querySelector('[data-slot="model-body-palette"] button[aria-label="amber"]') as HTMLButtonElement).click());
+      expect(slider().disabled).toBe(false);
+      const setTo = async (value: string) => act(async () => {
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        nativeSetter.call(slider(), value);
+        slider().dispatchEvent(new Event('input', { bubbles: true }));
+        slider().dispatchEvent(new Event('change', { bubbles: true }));
+        slider().dispatchEvent(new Event('pointerup', { bubbles: true }));
+      });
+      await setTo('40');
+      let def = await savedDef();
+      expect(def.tables[0]).toEqual(expect.objectContaining({ bodyColor: 'amber', bodyTransparency: 40 }));
+      expect(document.querySelector('[data-node="orders"] [data-slot="model-table-node"], [data-slot="model-table-node"]')!
+        .getAttribute('style')).toContain('60%, transparent');
+      // Back to 0%: nothing saved.
+      await setTo('0');
+      def = await savedDef();
+      expect(def.tables[0]).not.toHaveProperty('bodyTransparency');
+    });
+
     it('renames a view and the selection follows', async () => {
       api.model.mockResolvedValueOnce(view(withObjects()));
       await render();

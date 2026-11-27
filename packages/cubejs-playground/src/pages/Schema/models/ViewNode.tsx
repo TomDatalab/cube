@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 
 import type { TableColor, ViewColumn } from './modelGraph';
 import { ModelResizer } from './ModelResizer';
+import { inkOn, paint } from './paint';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type ViewNodeData = {
@@ -17,6 +18,7 @@ export type ViewNodeData = {
   showTypes: boolean;
   // The whole view's color; none is the view blue.
   color?: TableColor;
+  colorTransparency?: number;
   // Sized by hand: the box fills the node's fixed size.
   fixedSize: boolean;
   onResize: (nodeId: string, box: { x: number; y: number; width: number; height: number }) => void;
@@ -50,7 +52,11 @@ export const ViewNode = memo(({
         selected && 'tw:ring-2 tw:ring-ring'
       )}
       style={data.color
-        ? { background: `var(--model-${data.color})`, borderColor: line, color: 'var(--model-ink)' }
+        ? {
+          background: paint(data.color, data.colorTransparency),
+          borderColor: line,
+          color: inkOn(data.colorTransparency),
+        }
         : { background: 'var(--model-view)', borderColor: line }}
     >
       {data.readOnly ? null : (

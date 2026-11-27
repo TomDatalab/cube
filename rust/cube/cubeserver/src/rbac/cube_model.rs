@@ -79,6 +79,9 @@ pub struct CubeNode {
     pub height: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z: Option<i32>,
+    /// How transparent the cube's color is, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_transparency: Option<f64>,
     /// The shape of the dashed line to each table the cube reads, when it
     /// was reshaped on the canvas.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -256,6 +259,27 @@ pub struct Note {
     pub border_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_style: Option<String>,
+    /// How transparent the box, the text and the border colors are, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_transparency: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_transparency: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_transparency: Option<f64>,
+}
+
+/// How transparent a color may be made, in percent: 0 is the color as it
+/// is; it never goes fully clear.
+pub const TRANSPARENCY: std::ops::RangeInclusive<f64> = 0.0..=90.0;
+
+/// Every transparency of an object within [`TRANSPARENCY`].
+fn check_transparency(id: &str, values: &[Option<f64>]) -> Result<(), String> {
+    for t in values.iter().flatten() {
+        if !t.is_finite() || !TRANSPARENCY.contains(t) {
+            return Err(format!("Transparência inválida em {id}: {t}"));
+        }
+    }
+    Ok(())
 }
 
 /// A note's text size, in pixels.
@@ -283,6 +307,11 @@ pub struct Area {
     pub fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<String>,
+    /// How transparent the fill and the border are, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_transparency: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_transparency: Option<f64>,
 }
 
 /// A view designed on the canvas; its query is free text.
@@ -307,6 +336,9 @@ pub struct ModelView {
     /// The whole view's color, from [`COLORS`]; none means the view blue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// How transparent that color is, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_transparency: Option<f64>,
     pub x: f64,
     pub y: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -427,6 +459,12 @@ pub struct ModelTable {
     /// The column rows' color, from [`COLORS`]; none means the card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_color: Option<String>,
+    /// How transparent the header color is, in percent ([`TRANSPARENCY`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_transparency: Option<f64>,
+    /// How transparent the rows' color is, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_transparency: Option<f64>,
     /// The design of a table not in the database yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftTable>,
@@ -900,6 +938,7 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         if !aliases.insert(table.alias.as_str()) {
             return Err(format!("O alias {} se repete", table.alias));
         }
+        check_transparency(&table.alias, &[table.color_transparency, table.body_transparency])?;
         for color in [&table.color, &table.body_color].into_iter().flatten() {
             if !COLORS.contains(&color.as_str()) {
                 return Err(format!("Cor inválida: {color}"));
@@ -1016,6 +1055,10 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         color_ok(&note.color)?;
         color_ok(&note.text_color)?;
         color_ok(&note.border_color)?;
+        check_transparency(
+            &note.id,
+            &[note.color_transparency, note.text_transparency, note.border_transparency],
+        )?;
         if let Some(size) = note.font_size {
             if !size.is_finite() || !NOTE_FONT_SIZES.contains(&size) {
                 return Err(format!("Tamanho de fonte inválido em {}: {size}", note.id));
@@ -1042,12 +1085,14 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         size_ok(&area.id, &[Some(area.width), Some(area.height)])?;
         color_ok(&area.fill)?;
         color_ok(&area.border)?;
+        check_transparency(&area.id, &[area.fill_transparency, area.border_transparency])?;
     }
     let view_ids: HashSet<&str> = def.views.iter().map(|v| v.id.as_str()).collect();
     let mut seen = HashSet::new();
     let mut names = HashSet::new();
     for view in &def.views {
         color_ok(&view.color)?;
+        check_transparency(&view.id, &[view.color_transparency])?;
         if !seen.insert(view.id.as_str()) {
             return Err(format!("O objeto {} se repete", view.id));
         }
@@ -1111,6 +1156,7 @@ fn validate_cubes(def: &Definition, aliases: &HashSet<&str>) -> Result<(), Strin
                 return Err(format!("Cor inválida: {c}"));
             }
         }
+        check_transparency(name, &[cube.color_transparency])?;
         for line in &cube.source_lines {
             let link = format!("{name} → {}", line.table);
             if line.points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
@@ -3066,6 +3112,14 @@ mod tests {
         assert_eq!(e, "Cor inválida: navy");
         let e = bad(&|v| v["tables"][0]["bodyColor"] = "beige".into());
         assert_eq!(e, "Cor inválida: beige");
+        let e = bad(&|v| v["tables"][0]["bodyTransparency"] = 95.0.into());
+        assert!(e.starts_with("Transparência inválida em ") && e.ends_with(": 95"), "{e}");
+        let e = bad(&|v| v["areas"][0]["fillTransparency"] = (-5.0).into());
+        assert_eq!(e, "Transparência inválida em a1: -5");
+        let e = bad(&|v| v["notes"][0]["textTransparency"] = 91.0.into());
+        assert_eq!(e, "Transparência inválida em n1: 91");
+        let e = bad(&|v| v["views"][0]["colorTransparency"] = 100.0.into());
+        assert_eq!(e, "Transparência inválida em v1: 100");
         let e = bad(&|v| v["views"][0]["name"] = "1x".into());
         assert_eq!(e, "Nome de view inválido: 1x");
         let e = bad(&|v| v["views"][0]["schema"] = "a-b".into());

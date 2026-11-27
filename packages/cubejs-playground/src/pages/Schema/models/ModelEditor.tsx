@@ -542,7 +542,14 @@ function Editor({
           zIndex: AREA_Z + (a.z ?? 0),
           selected: selection.includes(id),
           data: {
-            id: a.id, name: a.name, fill: a.fill, border: a.border, onResize, readOnly,
+            id: a.id,
+            name: a.name,
+            fill: a.fill,
+            border: a.border,
+            fillTransparency: a.fillTransparency,
+            borderTransparency: a.borderTransparency,
+            onResize,
+            readOnly,
           },
         };
       });
@@ -562,6 +569,7 @@ function Editor({
             name: v.name,
             columns: v.columns,
             color: v.color,
+            colorTransparency: v.colorTransparency,
             showTypes,
             fixedSize: v.width !== undefined || v.height !== undefined,
             onResize,
@@ -612,6 +620,8 @@ function Editor({
           draft: Boolean(t.draft),
           color: t.color,
           bodyColor: t.bodyColor,
+          colorTransparency: t.colorTransparency,
+          bodyTransparency: t.bodyTransparency,
           keys,
           linked,
           fks,

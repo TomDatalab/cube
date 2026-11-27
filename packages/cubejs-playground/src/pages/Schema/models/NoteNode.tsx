@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 
 import type { NoteFormat, TableColor } from './modelGraph';
 import { ModelResizer } from './ModelResizer';
+import { inkOn, paint } from './paint';
 
 export type NoteNodeData = {
   // Someone else edits the model: no resizer.
@@ -34,16 +35,16 @@ export function noteStyle(color: TableColor | undefined, f: NoteFormat = {}): CS
   const decoration = [f.underline && 'underline', f.strike && 'line-through'].filter(Boolean).join(' ');
   let text = 'var(--foreground)';
   if (f.textColor) {
-    text = `var(--model-${f.textColor})`;
+    text = paint(f.textColor, f.textTransparency);
   } else if (color) {
-    text = 'var(--model-ink)';
+    text = inkOn(f.colorTransparency);
   }
   return {
-    background: color ? `var(--model-${color})` : 'var(--model-note)',
+    background: color ? paint(color, f.colorTransparency) : 'var(--model-note)',
     color: text,
     border: f.borderStyle === 'none'
       ? 'none'
-      : `1px ${f.borderStyle ?? 'solid'} ${f.borderColor ? `var(--model-${f.borderColor})` : 'color-mix(in oklch, var(--foreground) 30%, transparent)'}`,
+      : `1px ${f.borderStyle ?? 'solid'} ${f.borderColor ? paint(f.borderColor, f.borderTransparency) : 'color-mix(in oklch, var(--foreground) 30%, transparent)'}`,
     fontSize: f.fontSize ?? 12,
     fontFamily: FAMILY[f.fontFamily ?? 'sans'],
     fontWeight: f.bold ? 700 : undefined,

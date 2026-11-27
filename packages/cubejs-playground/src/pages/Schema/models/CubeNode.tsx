@@ -9,6 +9,7 @@ import { cubeReads } from './cubes';
 import type { CubeSourceEdgeData, CubeSourceFlowEdge } from './CubeJoinEdge';
 import type { CubeNode as CubeModel, ModelDefinition } from './modelGraph';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
+import { paint } from './paint';
 
 export type CubeNodeData = {
   // Someone else edits the model: no resizer.
@@ -96,7 +97,7 @@ export const CubeNode = memo(({
       <div
         data-slot="model-cube-band"
         className="tw:relative tw:flex tw:items-center tw:gap-1 tw:border-b tw:border-foreground/70 tw:px-1.5 tw:py-1"
-        style={{ background: `var(--model-${cube.color ?? 'violet'})` }}
+        style={{ background: paint(cube.color ?? 'violet', cube.colorTransparency) }}
       >
         <Box aria-hidden className="tw:size-3 tw:shrink-0" />
         <div data-slot="model-cube-name" className="tw:min-w-0 tw:flex-1 tw:truncate tw:text-center tw:font-bold">

@@ -5,6 +5,7 @@ import type { Node, NodeProps } from '@xyflow/react';
 import { cn } from '@/lib/utils';
 
 import type { TableColor } from './modelGraph';
+import { paint } from './paint';
 
 export type AreaNodeData = {
   // Someone else edits the model: no resizer.
@@ -13,6 +14,8 @@ export type AreaNodeData = {
   name: string;
   fill?: TableColor;
   border?: TableColor;
+  fillTransparency?: number;
+  borderTransparency?: number;
   onResize: (nodeId: string, box: { x: number; y: number; width: number; height: number }) => void;
 };
 
@@ -32,8 +35,8 @@ export const AreaNode = memo(({ id, data, selected }: AreaNodeProps) => (
     )}
     style={{
       // The color as picked, solid: mixed with the page it no longer matches.
-      background: `var(--model-${data.fill ?? 'slate'})`,
-      border: `1.5px dashed var(--model-${data.border ?? 'slate'})`,
+      background: paint(data.fill ?? 'slate', data.fillTransparency),
+      border: `1.5px dashed ${paint(data.border ?? 'slate', data.borderTransparency)}`,
     }}
   >
     {data.readOnly ? null : (

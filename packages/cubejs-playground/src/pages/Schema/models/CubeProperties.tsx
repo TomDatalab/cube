@@ -397,7 +397,13 @@ export function CubeProperties({
       {rows('segments')}
 
       <Section title="Format">
-        <Palette slot="model-cube-color" value={cube.color ?? 'violet'} onPick={(color) => patch({ color })} />
+        <Palette
+          slot="model-cube-color"
+          value={cube.color ?? 'violet'}
+          onPick={(color) => patch({ color })}
+          transparency={cube.colorTransparency}
+          onTransparency={(colorTransparency) => patch({ colorTransparency })}
+        />
       </Section>
 
       <IssuesSection issues={issues} heading="Issues" />

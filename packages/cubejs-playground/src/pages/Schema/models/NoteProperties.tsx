@@ -136,10 +136,24 @@ export function NoteProperties({
           </select>
         </Field>
         <Field label="Text color">
-          <Palette slot="model-note-text-color" none value={note.textColor} onPick={(textColor) => patch({ textColor })} />
+          <Palette
+            slot="model-note-text-color"
+            none
+            value={note.textColor}
+            onPick={(textColor) => patch({ textColor })}
+            transparency={note.textTransparency}
+            onTransparency={(textTransparency) => patch({ textTransparency })}
+          />
         </Field>
         <Field label="Box color">
-          <Palette slot="model-color-palette" none value={note.color} onPick={(color) => patch({ color })} />
+          <Palette
+            slot="model-color-palette"
+            none
+            value={note.color}
+            onPick={(color) => patch({ color })}
+            transparency={note.colorTransparency}
+            onTransparency={(colorTransparency) => patch({ colorTransparency })}
+          />
         </Field>
         <Field label="Border">
           <div className="tw:flex tw:flex-col tw:gap-1">
@@ -151,7 +165,14 @@ export function NoteProperties({
             >
               {NOTE_BORDERS.map((b) => <option key={b} value={b}>{BORDER_LABEL[b]}</option>)}
             </select>
-            <Palette slot="model-note-border-color" none value={note.borderColor} onPick={(borderColor) => patch({ borderColor })} />
+            <Palette
+              slot="model-note-border-color"
+              none
+              value={note.borderColor}
+              onPick={(borderColor) => patch({ borderColor })}
+              transparency={note.borderTransparency}
+              onTransparency={(borderTransparency) => patch({ borderTransparency })}
+            />
           </div>
         </Field>
       </Section>

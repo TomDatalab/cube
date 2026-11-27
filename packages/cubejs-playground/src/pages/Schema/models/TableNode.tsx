@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils';
 
 import type { TableColor } from './modelGraph';
 import { ModelResizer } from './ModelResizer';
+import { inkOn, paint } from './paint';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type TableNodeData = {
@@ -25,6 +26,9 @@ export type TableNodeData = {
   color?: TableColor;
   // The column rows' color; none is the card.
   bodyColor?: TableColor;
+  // How see-through those colors are, in percent.
+  colorTransparency?: number;
+  bodyTransparency?: number;
   // The columns shown with a key: the primary key a cube gives the table
   // (cubeKeyOf), a draft's own primary key columns.
   keys: string[];
@@ -131,7 +135,9 @@ export const TableNode = memo(({
         (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
-      style={data.bodyColor ? { background: `var(--model-${data.bodyColor})`, color: 'var(--model-ink)' } : undefined}
+      style={data.bodyColor
+        ? { background: paint(data.bodyColor, data.bodyTransparency), color: inkOn(data.bodyTransparency) }
+        : undefined}
     >
       {data.readOnly ? null : (
         <ModelResizer
@@ -147,7 +153,7 @@ export const TableNode = memo(({
         data-slot="model-table-band"
         className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
         style={data.color
-          ? { background: `var(--model-${data.color})`, color: 'var(--model-ink)' }
+          ? { background: paint(data.color, data.colorTransparency), color: inkOn(data.colorTransparency) }
           : { background: 'var(--muted)', color: 'var(--card-foreground)' }}
       >
         {/* Where a cube's line to this table ends: the middle of the header. */}

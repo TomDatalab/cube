@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 import { Dialect, PORTABLE, TYPES } from './dialect';
 import type { Issue } from './validate';
 import {
-  DraftColumn, ModelDefinition, ModelTable, renameTable, setColor, setTableComment,
+  DraftColumn, ModelDefinition, ModelTable, renameTable, setColor, setTableTransparency, setTableComment,
 } from './modelGraph';
 import {
   addColumn, moveColumn, removeColumn, renameColumn, setChecks, setColumn, setIndexes, setPrimaryKeyName,
@@ -502,7 +502,14 @@ export function TableProperties({
 
       <Section title="Format">
         <Field label="Header color">
-          <Palette slot="model-color-palette" none value={table.color} onPick={(c) => onChange(setColor(def, alias, c))} />
+          <Palette
+            slot="model-color-palette"
+            none
+            value={table.color}
+            onPick={(c) => onChange(setColor(def, alias, c))}
+            transparency={table.colorTransparency}
+            onTransparency={(t) => onChange(setTableTransparency(def, alias, 'colorTransparency', t))}
+          />
         </Field>
         <Field label="Body color">
           <Palette
@@ -510,6 +517,8 @@ export function TableProperties({
             none
             value={table.bodyColor}
             onPick={(c) => onChange(setColor(def, alias, c, 'bodyColor'))}
+            transparency={table.bodyTransparency}
+            onTransparency={(t) => onChange(setTableTransparency(def, alias, 'bodyTransparency', t))}
           />
         </Field>
       </Section>

@@ -42,10 +42,22 @@ export function AreaProperties({ def, id, onChange }: AreaPropertiesProps) {
       </Section>
       <Section title="Format">
         <Field label="Fill color">
-          <Palette slot="model-area-fill" value={area.fill ?? 'slate'} onPick={(fill) => onChange(setArea(def, id, { fill }))} />
+          <Palette
+            slot="model-area-fill"
+            value={area.fill ?? 'slate'}
+            onPick={(fill) => onChange(setArea(def, id, { fill }))}
+            transparency={area.fillTransparency}
+            onTransparency={(fillTransparency) => onChange(setArea(def, id, { fillTransparency }))}
+          />
         </Field>
         <Field label="Border color">
-          <Palette slot="model-area-border" value={area.border ?? 'slate'} onPick={(border) => onChange(setArea(def, id, { border }))} />
+          <Palette
+            slot="model-area-border"
+            value={area.border ?? 'slate'}
+            onPick={(border) => onChange(setArea(def, id, { border }))}
+            transparency={area.borderTransparency}
+            onTransparency={(borderTransparency) => onChange(setArea(def, id, { borderTransparency }))}
+          />
         </Field>
       </Section>
     </>
