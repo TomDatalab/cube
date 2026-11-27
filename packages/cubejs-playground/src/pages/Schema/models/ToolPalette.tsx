@@ -36,7 +36,7 @@ export const TOOLS: {
     tool: 'area', label: 'New area', hint: '(7) Add new area', icon: Square,
   },
   {
-    tool: 'cube', label: 'New cube', hint: '(8) Add new cube', icon: Box, soon: true,
+    tool: 'cube', label: 'New cube', hint: '(8) Add new cube', icon: Box,
   },
 ];
 

@@ -35,7 +35,7 @@ import { useCollapsed } from './useCollapsed';
 import { PanelToggle } from './PanelToggle';
 import { useResizable } from './useResizable';
 import { ResizeHandle } from './ResizeHandle';
-import { ModelEditor } from './models/ModelEditor';
+import { Built, ModelEditor, builtMessage } from './models/ModelEditor';
 import { emptyDefinition } from './models/modelGraph';
 import { NameDialog } from '../Admin/NameDialog';
 import {
@@ -655,17 +655,19 @@ export function SchemaPage({ history }: RouterProps) {
     });
   };
 
-  // The build answers with the organization's refreshed detail; `cubeName`
-  // is its first cube (none when the model has no cubes).
-  const afterBuild = (slug: string, cubeName: string, detail: OrgDetail) => {
+  // The build answers with what it built and removed and the
+  // organization's refreshed detail; Open cube opens the first cube built.
+  const afterBuild = (slug: string, built: Built, detail: OrgDetail) => {
     setDetails((current) => ({ ...current, [slug]: detail }));
     refreshOrgs();
-    if (!cubeName) {
+    const text = builtMessage(built);
+    if (!text) {
       return;
     }
-    toast.success(`Cube ${cubeName} built`, {
-      action: { label: 'Open cube', onClick: () => openUnder(slug, 'cubes', `cube:${slug}:${cubeName}`) },
-    });
+    const [first] = built.cubes;
+    toast.success(text, first ? {
+      action: { label: 'Open cube', onClick: () => openUnder(slug, 'cubes', `cube:${slug}:${first}`) },
+    } : undefined);
   };
 
   const afterFileChange = (slug: string, others: string[] = []) => {
@@ -787,7 +789,7 @@ export function SchemaPage({ history }: RouterProps) {
           org={org}
           modelId={selected.rest}
           tables={detail.tables || {}}
-          onBuilt={(cubeName, built) => afterBuild(selected.slug, cubeName, built)}
+          onBuilt={(built, refreshed) => afterBuild(selected.slug, built, refreshed)}
           onTablesCreated={(created) => setDetails((current) => ({ ...current, [selected.slug]: created }))}
           onSaved={(saved) => afterModelSave(selected.slug, saved)}
           onDeleted={() => afterModelDelete(selected.slug)}

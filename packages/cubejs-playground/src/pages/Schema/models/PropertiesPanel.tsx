@@ -25,7 +25,9 @@ type ModelSelected = { kind: 'model' };
 type TableSelected = { kind: 'table'; alias: string };
 type ReferenceSelected = { kind: 'reference'; index: number };
 type ObjectSelected = { kind: 'note' | 'area' | 'view'; id: string };
-export type Selected = ModelSelected | TableSelected | ReferenceSelected | ObjectSelected;
+// A cube by its id, a cube join by its id.
+type CubeSelected = { kind: 'cube' | 'cubeJoin'; id: string };
+export type Selected = ModelSelected | TableSelected | ReferenceSelected | ObjectSelected | CubeSelected;
 
 export type PropertiesPanelProps = {
   def: ModelDefinition;
@@ -56,6 +58,8 @@ const TITLE: Record<Selected['kind'], string> = {
   note: 'Text note properties',
   area: 'Subject area properties',
   view: 'View properties',
+  cube: 'Cube properties',
+  cubeJoin: 'Cube join properties',
 };
 
 // `1 table, 2 views, 1 note`: zero counts are left out, except tables.

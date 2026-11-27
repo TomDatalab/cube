@@ -7,7 +7,7 @@ import {
 
 import { notify } from '@/components/kit';
 import { ApiError, CubeModelView } from '../pages/Schema/api';
-import { ModelEditor, ModelEditorProps } from '../pages/Schema/models/ModelEditor';
+import { ModelEditor, ModelEditorProps, builtMessage } from '../pages/Schema/models/ModelEditor';
 import { AreaNode } from '../pages/Schema/models/AreaNode';
 import { NoteNode } from '../pages/Schema/models/NoteNode';
 import { TableNode } from '../pages/Schema/models/TableNode';
@@ -167,7 +167,7 @@ const built = {
 describe('ModelEditor', () => {
   let root: ReturnType<typeof createRoot>;
   let api: Record<string, ReturnType<typeof vi.fn>>;
-  let onBuilt: Mock<(cubeName: string, detail: any) => void>;
+  let onBuilt: Mock<(built: any, detail: any) => void>;
   let onDeleted: Mock<() => void>;
   let onTablesCreated: Mock<(detail: any) => void>;
 
@@ -189,7 +189,7 @@ describe('ModelEditor', () => {
       createTables: vi.fn(async () => ({})),
       modelSql: vi.fn(async () => ({ script: 'CREATE TABLE "public"."orders" ();\n' })),
     };
-    onBuilt = vi.fn<(cubeName: string, detail: any) => void>();
+    onBuilt = vi.fn<(built: any, detail: any) => void>();
     onDeleted = vi.fn<() => void>();
     onTablesCreated = vi.fn<(detail: any) => void>();
     const host = document.createElement('div');
@@ -270,7 +270,7 @@ describe('ModelEditor', () => {
     await render();
     expect(api.model).toHaveBeenCalledWith('m1');
     const nodes = [...document.querySelectorAll('[data-node]')];
-    expect(nodes.map((n) => n.getAttribute('data-node'))).toEqual(['orders', 'customers']);
+    expect(nodes.map((n) => n.getAttribute('data-node'))).toEqual(['orders', 'customers', 'cube:c1']);
     // The cube on orders gives it its key.
     expect(nodes[0].querySelector('[data-handle="source"][data-id="id"]')!.parentElement!.textContent).toContain('PK');
     expect(nodes[0].textContent).not.toContain('principal');
@@ -278,7 +278,10 @@ describe('ModelEditor', () => {
     expect(nodes[0].querySelectorAll('[data-handle="source"][data-id="customer_id"]').length).toBe(1);
     expect(nodes[0].querySelectorAll('[data-handle="target"][data-id="customer_id"]').length).toBe(1);
     expect(nodes[0].textContent).toContain('numeric');
-    expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent)).toEqual(['N:1 · LEFT']);
+    expect([...document.querySelectorAll('[data-edge^="join-"]')].map((e) => e.textContent)).toEqual(['N:1 · LEFT']);
+    // The joined cube's source lines, to each table it reads.
+    expect(flow.props.edges.filter((e: any) => e.type === 'dependency').map((e: any) => e.target))
+      .toEqual(['orders', 'customers']);
   });
 
   it('builds a saved model and hands back the cube name', async () => {
@@ -288,7 +291,7 @@ describe('ModelEditor', () => {
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(api.buildModel.mock.calls[0][0]).toBe('m1');
     expect(api.buildModel.mock.calls[0][1]).toBeFalsy();
-    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
+    expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
   });
 
   it('asks before overwriting a cube edited by hand, then builds with force', async () => {
@@ -300,7 +303,7 @@ describe('ModelEditor', () => {
     await act(async () => button('Overwrite').click());
     expect(api.buildModel).toHaveBeenCalledTimes(2);
     expect(api.buildModel.mock.calls[1]).toEqual(['m1', true]);
-    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
+    expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
   });
 
   it('shows the server reason for a duplicate name, not the stale hint', async () => {
@@ -340,7 +343,7 @@ describe('ModelEditor', () => {
     expect(document.body.textContent).not.toContain('Not linked');
     await act(async () => tool('Build cube').click());
     expect(api.buildModel).toHaveBeenCalledWith('m1');
-    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
+    expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
   });
 
   it('does not retry a build whose path belongs to another file', async () => {
@@ -398,7 +401,7 @@ describe('ModelEditor', () => {
     drop.clientY = 60;
     await act(async () => document.querySelector('[data-testid="flow"]')!.dispatchEvent(drop));
     expect([...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node')))
-      .toEqual(['orders', 'customers', 'products']);
+      .toEqual(['orders', 'customers', 'products', 'cube:c1']);
     expect(document.body.textContent).toContain('Unsaved changes');
   });
 
@@ -416,7 +419,7 @@ describe('ModelEditor', () => {
     expect(document.body.textContent).toContain('INNER keeps only rows with a match on both sides');
     expect(document.body.textContent).toContain('LEFT keeps every row of the principal table');
     await act(async () => button('Link').click());
-    expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent))
+    expect([...document.querySelectorAll('[data-edge^="join-"]')].map((e) => e.textContent))
       .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
 
     await act(async () => tool('Build cube').click());
@@ -427,7 +430,7 @@ describe('ModelEditor', () => {
     expect(change.definition.joins).toHaveLength(2);
     expect(api.buildModel).toHaveBeenCalledTimes(1);
     expect(api.saveModel.mock.invocationCallOrder[0]).toBeLessThan(api.buildModel.mock.invocationCallOrder[0]);
-    expect(onBuilt).toHaveBeenCalledWith('sales', built.detail);
+    expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
   });
 
   it('links a column dropped on the row of another table, away from its handle', async () => {
@@ -451,7 +454,7 @@ describe('ModelEditor', () => {
       delete (document as any).elementFromPoint;
     }
     await act(async () => button('Link').click());
-    expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent))
+    expect([...document.querySelectorAll('[data-edge^="join-"]')].map((e) => e.textContent))
       .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
   });
 
@@ -491,7 +494,7 @@ describe('ModelEditor', () => {
     await act(async () => name('products', 'id').click());
     expect(document.querySelector('[data-slot="model-link-hint"]')).toBeNull();
     await act(async () => button('Link').click());
-    expect([...document.querySelectorAll('[data-edge]')].map((e) => e.textContent))
+    expect([...document.querySelectorAll('[data-edge^="join-"]')].map((e) => e.textContent))
       .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
   });
 
@@ -510,12 +513,12 @@ describe('ModelEditor', () => {
 
   it('collapses a table to its header, keeping its links, and remembers it', async () => {
     await render();
-    expect(flow.props.edges.every((e: any) => e.type === 'reference')).toBe(true);
+    expect(flow.props.edges.filter((e: any) => e.type !== 'dependency').every((e: any) => e.type === 'reference')).toBe(true);
     await act(async () => (document.querySelector('[aria-label="Collapse orders"]') as HTMLButtonElement).click());
     const orders = document.querySelector('[data-node="orders"]')!;
     expect(orders.querySelector('[data-column]')).toBeNull();
     expect(orders.querySelectorAll('[data-handle]').length).toBeGreaterThan(0);
-    expect(document.querySelectorAll('[data-edge]').length).toBe(1);
+    expect(document.querySelectorAll('[data-edge^="join-"]').length).toBe(1);
     expect(JSON.parse(window.localStorage.getItem('cubePlayground.modelCollapsed.m1')!)).toEqual(['orders']);
     await act(async () => (document.querySelector('[aria-label="Expand orders"]') as HTMLButtonElement).click());
     expect(orders.querySelector('[data-column]')).not.toBeNull();
@@ -536,7 +539,7 @@ describe('ModelEditor', () => {
     expect(pane.textContent).toContain('Reference properties');
     expect(pane.textContent).toContain('N:1 · LEFT');
     await act(async () => button('Delete reference').click());
-    expect(document.querySelectorAll('[data-edge]').length).toBe(0);
+    expect(document.querySelectorAll('[data-edge^="join-"]').length).toBe(0);
     expect(document.querySelector('[data-slot="model-properties"]')!.textContent).toContain('Model properties');
   });
 
@@ -619,7 +622,7 @@ describe('ModelEditor', () => {
     await act(async () => button('Delete model').click());
     await act(async () => button('Delete').click());
     expect(onDeleted).not.toHaveBeenCalled();
-    expect(document.querySelectorAll('[data-node]').length).toBe(2);
+    expect(document.querySelectorAll('[data-node]').length).toBe(3);
   });
 
   it('follows the page theme on the canvas', async () => {
@@ -660,7 +663,9 @@ describe('ModelEditor', () => {
       });
     };
     const positionOf = (id: string) => flow.props.nodes.find((n: any) => n.id === id)?.position;
-    const ids = () => [...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'));
+    // The tables and their shortcuts.
+    const ids = () => [...document.querySelectorAll('[data-node]:not([data-node^="cube:"])')]
+      .map((n) => n.getAttribute('data-node'));
 
     it('undoes and redoes a table move with Ctrl+Z and Ctrl+Y', async () => {
       await render();
@@ -853,7 +858,9 @@ describe('ModelEditor', () => {
         target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...opts }));
       });
     };
-    const ids = () => [...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'));
+    // The tables and their shortcuts.
+    const ids = () => [...document.querySelectorAll('[data-node]:not([data-node^="cube:"])')]
+      .map((n) => n.getAttribute('data-node'));
 
     it('takes selection only from the user\'s changes, never from React Flow echoing it', async () => {
       await render();
@@ -1057,13 +1064,12 @@ describe('ModelEditor', () => {
       expect(flow.props.nodes.find((n: any) => n.id === 'orders').selected).toBe(true);
     });
 
-    it('the palette\'s table tool opens the new-table dialog; only the cube tool is disabled', async () => {
+    it('the palette\'s table tool opens the new-table dialog; every tool is enabled', async () => {
       await render();
       const palette = document.querySelector('[data-slot="model-tool-palette"]')!;
       const labels = [...palette.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'));
       expect(labels).toEqual(['Select', 'Select area', 'New table', 'New reference', 'New view', 'New note', 'New area', 'New cube']);
-      expect(tool('New cube').disabled).toBe(true);
-      ['New view', 'New note', 'New area'].forEach((l) => expect(tool(l).disabled, l).toBe(false));
+      ['New view', 'New note', 'New area', 'New cube'].forEach((l) => expect(tool(l).disabled, l).toBe(false));
       await act(async () => tool('New table').click());
       expect(document.body.textContent).toContain('New table');
       expect(document.querySelector('input[aria-label="Table name"]')).not.toBeNull();
@@ -1113,8 +1119,8 @@ describe('ModelEditor', () => {
       await render();
       await select('customers');
       await act(async () => tool('Delete').click());
-      expect([...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'))).toEqual(['orders']);
-      expect(document.querySelectorAll('[data-edge]').length).toBe(0);
+      expect([...document.querySelectorAll('[data-node]')].map((n) => n.getAttribute('data-node'))).toEqual(['orders', 'cube:c1']);
+      expect(document.querySelectorAll('[data-edge^="join-"]').length).toBe(0);
       expect(tool('Delete').disabled).toBe(true);
     });
 
@@ -1149,7 +1155,8 @@ describe('ModelEditor', () => {
       // The fit must see the canvas with the new positions, not the old ones.
       let seen: number[][] = [];
       flow.fitView.mockImplementation(() => {
-        seen = flow.props.nodes.map((n: any) => [n.position.x, n.position.y]);
+        // Arrange lays out the tables only.
+        seen = flow.props.nodes.filter((n: any) => n.type === 'table').map((n: any) => [n.position.x, n.position.y]);
       });
       await act(async () => {
         tool('Arrange').click();
@@ -1827,7 +1834,7 @@ describe('ModelEditor', () => {
       await select('view:v1');
       await key('Delete');
       expect(flowNode('view:v1')).toBeUndefined();
-      expect(flow.props.edges.some((e: any) => e.id.startsWith('dep-'))).toBe(false);
+      expect(flow.props.edges.some((e: any) => e.id.startsWith('dep-v1-'))).toBe(false);
       expect((await savedDef()).views).toEqual([]);
     });
 
@@ -1859,7 +1866,7 @@ describe('ModelEditor', () => {
       expect(pane().textContent).toContain('Model properties');
     });
 
-    it('keys 5, 6, 7 choose the view, note and area tools, and 8 does nothing', async () => {
+    it('keys 5, 6, 7 choose the view, note and area tools, and 8 the cube tool', async () => {
       await render();
       const press = async (d: string) => act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key: d, code: `Digit${d}`, bubbles: true }));
@@ -1873,7 +1880,7 @@ describe('ModelEditor', () => {
       await press('7');
       expect(pressed()).toEqual(['New area']);
       await press('8');
-      expect(pressed()).toEqual(['New area']);
+      expect(pressed()).toEqual(['New cube']);
     });
 
     it('a double click on a note selects it', async () => {
@@ -2272,6 +2279,182 @@ describe('ModelEditor', () => {
         ['cube:c1', 'orders', 'dependency', false],
         ['cube:c1', 'customers', 'dependency', false],
       ]);
+    });
+  });
+
+  describe('cubes in the editor', () => {
+    const key = async (k: string, opts: KeyboardEventInit = {}) => {
+      await act(async () => {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...opts }));
+      });
+    };
+    const flowNode = (id: string) => flow.props.nodes.find((n: any) => n.id === id);
+    const edgeIds = () => flow.props.edges.map((e: any) => e.id);
+    const selectedIds = () => flow.props.nodes.filter((n: any) => n.selected).map((n: any) => n.id);
+    const pane = () => document.querySelector('[data-slot="model-properties"]') as HTMLElement;
+    const savedDef = async () => {
+      await act(async () => tool('Save changes').click());
+      return api.saveModel.mock.calls[api.saveModel.mock.calls.length - 1][1].definition;
+    };
+    const twoCubes = (): ModelDefinition => ({
+      ...saved(),
+      cubes: [
+        {
+          id: 'c1',
+          name: 'orders_cube',
+          source: { kind: 'table', table: 'orders' },
+          dimensions: [
+            { name: 'id', type: 'number', column: 'id', primaryKey: true },
+            { name: 'customer_id', type: 'number', column: 'customer_id' },
+          ],
+          measures: [{ name: 'count', type: 'count' }],
+          segments: [],
+          x: 0,
+          y: 300,
+        },
+        {
+          id: 'c2',
+          name: 'customers_cube',
+          source: { kind: 'table', table: 'customers', primaryKey: 'id' },
+          dimensions: [],
+          measures: [],
+          segments: [],
+          x: 400,
+          y: 300,
+        },
+      ],
+    });
+    const joined = (): ModelDefinition => ({
+      ...twoCubes(),
+      cubeJoins: [{
+        id: 'cj1', from: 'c1', to: 'c2', relationship: 'many_to_one', on: [{ from: 'customer_id', to: 'id' }], points: [],
+      }],
+    });
+    const pick = async (label: string, value: string) => {
+      const el = document.querySelector(`select[aria-label="${label}"]`) as HTMLSelectElement;
+      await act(async () => {
+        el.value = value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    };
+
+    it('tool 8 places a cube', async () => {
+      await render();
+      expect(tool('New cube').disabled).toBe(false);
+      await key('8');
+      expect(tool('New cube').getAttribute('aria-pressed')).toBe('true');
+      await act(async () => flow.props.onPaneClick({ clientX: 200.4, clientY: 450.6 }));
+      expect(flowNode('cube:c2').position).toEqual({ x: 200, y: 451 });
+      expect(flowNode('cube:c2').type).toBe('cube');
+      expect(selectedIds()).toEqual(['cube:c2']);
+      expect(tool('Select').getAttribute('aria-pressed')).toBe('true');
+      expect(pane().textContent).toContain('Cube properties');
+      const def = await savedDef();
+      expect(def.cubes.map((c: any) => [c.id, c.name, c.x, c.y])).toEqual([['c1', 'sales', 620, 0], ['c2', 'cube_1', 200, 451]]);
+    });
+
+    it('tool 4 between two cubes creates a join after the dialog', async () => {
+      api.model.mockResolvedValueOnce(view(twoCubes()));
+      await render();
+      // A cube and a table: nothing.
+      await act(async () => flow.props.onConnect({
+        source: 'cube:c1', sourceHandle: 'join', target: 'orders', targetHandle: 'id',
+      }));
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      await act(async () => flow.props.onConnect({
+        source: 'cube:c1', sourceHandle: 'join', target: 'cube:c2', targetHandle: 'join',
+      }));
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      expect(dialog.textContent).toContain('orders_cube → customers_cube');
+      expect((dialog.querySelector('select[aria-label="Relationship"]') as HTMLSelectElement).value).toBe('many_to_one');
+      // The auto cube offers its generated dimensions.
+      const toOptions = [...dialog.querySelectorAll('select[aria-label="Pair 1 to dimension"] option')].map((o) => o.textContent);
+      expect(toOptions).toEqual(['id', 'name']);
+      await pick('Pair 1 from dimension', 'customer_id');
+      await pick('Pair 1 to dimension', 'id');
+      await act(async () => button('Create join').click());
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(edgeIds()).toContain('cubejoin:cj1');
+      const def = await savedDef();
+      expect(def.cubeJoins).toEqual([{
+        id: 'cj1', from: 'c1', to: 'c2', relationship: 'many_to_one', on: [{ from: 'customer_id', to: 'id' }], points: [],
+      }]);
+    });
+
+    it('selects a cube join from its edge', async () => {
+      api.model.mockResolvedValueOnce(view(joined()));
+      await render();
+      await act(async () => (document.querySelector('[data-edge="cubejoin:cj1"]') as HTMLElement).click());
+      expect(pane().textContent).toContain('Cube join properties');
+      expect(flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1').selected).toBe(true);
+    });
+
+    it('picking a cube join issue selects its edge', async () => {
+      api.model.mockResolvedValueOnce(view({ ...joined(), cubeJoins: [{ ...joined().cubeJoins![0], on: [] }] }));
+      await render();
+      const left = document.querySelector('[data-slot="model-left-pane"]') as HTMLElement;
+      await act(async () => (left.querySelector('button[aria-label="Issues"]') as HTMLButtonElement).click());
+      const list = left.querySelector('[data-slot="model-issues"]') as HTMLElement;
+      const item = [...list.querySelectorAll('button')].find((b) => b.textContent!.includes('no dimensions to join on'))!;
+      await act(async () => item.click());
+      expect(flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1').selected).toBe(true);
+      expect(pane().textContent).toContain('Cube join properties');
+    });
+
+    it('deleting a cube removes it and its joins, and one undo brings both back', async () => {
+      api.model.mockResolvedValueOnce(view(joined()));
+      await render();
+      await select('cube:c1');
+      expect(pane().textContent).toContain('Cube properties');
+      await key('Delete');
+      expect(flowNode('cube:c1')).toBeUndefined();
+      expect(edgeIds()).not.toContain('cubejoin:cj1');
+      await key('z', { ctrlKey: true });
+      expect(flowNode('cube:c1')).toBeDefined();
+      expect(edgeIds()).toContain('cubejoin:cj1');
+    });
+
+    it('deletes a selected cube join', async () => {
+      api.model.mockResolvedValueOnce(view(joined()));
+      await render();
+      await act(async () => (document.querySelector('[data-edge="cubejoin:cj1"]') as HTMLElement).click());
+      await key('Delete');
+      expect(edgeIds()).not.toContain('cubejoin:cj1');
+      expect(flowNode('cube:c1')).toBeDefined();
+    });
+
+    it('build shows the built cubes', async () => {
+      api.buildModel.mockResolvedValueOnce({
+        cubes: [
+          { cubeName: 'a', fileName: 'model/a.yml', content: '' },
+          { cubeName: 'b', fileName: 'model/b.yml', content: '' },
+        ],
+        removed: ['model/x.yml'],
+        detail: built.detail,
+      });
+      await render();
+      await act(async () => tool('Build cube').click());
+      expect(onBuilt).toHaveBeenCalledWith({ cubes: ['a', 'b'], removed: ['x.yml'] }, built.detail);
+      expect(builtMessage({ cubes: ['a', 'b'], removed: ['x.yml'] })).toBe('Built cubes a, b; removed x.yml');
+      expect(builtMessage({ cubes: ['a', 'b'], removed: [] })).toBe('Built cubes a, b');
+      expect(builtMessage({ cubes: [], removed: ['x.yml'] })).toBe('Removed x.yml');
+    });
+
+    it('builds a model whose last cube was removed, to remove its file', async () => {
+      api.model.mockResolvedValueOnce({ ...view({ ...saved(), cubes: [] }), cubeNames: ['sales'] });
+      await render();
+      expect(tool('Build cube').disabled).toBe(false);
+    });
+
+    it('the overwrite question still appears on the edit 409', async () => {
+      api.buildModel.mockRejectedValueOnce(new ApiError('O cubo foi editado desde o último build', 409));
+      api.model.mockResolvedValueOnce(view(twoCubes()));
+      await render();
+      await act(async () => tool('Build cube').click());
+      expect(document.body.textContent).toContain('Overwrite?');
+      await act(async () => button('Overwrite').click());
+      expect(api.buildModel.mock.calls[1]).toEqual(['m1', true]);
+      expect(onBuilt).toHaveBeenCalledWith({ cubes: ['sales'], removed: [] }, built.detail);
     });
   });
 });

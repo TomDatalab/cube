@@ -25,7 +25,7 @@ import { problemLines } from '../editor';
 import type { OrgDetail } from '../tree';
 import { JoinChoice, JoinDialog } from './JoinDialog';
 import {
-  End, ModelDefinition, Place, Point, addDraftTable, addTable, canConnect, connect, drafts,
+  End, ModelDefinition, Place, Point, REL_LABEL, addDraftTable, addTable, canConnect, connect, drafts,
   emptyDefinition, joinLabel, layout, removeJoin, removeTable, setJoin, showAllJoins,
   updateDraftTable, updateJoin, withFormat,
 } from './modelGraph';
@@ -33,14 +33,17 @@ import { TableFlowNode, TableNode, columnAt } from './TableNode';
 import { NoteFlowNode, NoteNode } from './NoteNode';
 import { AreaFlowNode, AreaNode } from './AreaNode';
 import { ViewFlowNode, ViewNode } from './ViewNode';
-import { CubeJoinEdge } from './CubeJoinEdge';
-import { CubeNode } from './CubeNode';
+import { CubeJoinEdge, CubeJoinFlowEdge } from './CubeJoinEdge';
+import { CubeFlowNode, CubeNode, cubeSourceEdges } from './CubeNode';
+import { CubeJoinDialog } from './CubeJoinDialog';
 import { DependencyEdge, DependencyFlowEdge } from './DependencyEdge';
 import {
   addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, previewIdOf,
   sendToBack,
 } from './objects';
-import { cubeKeyOf } from './cubes';
+import {
+  addCube, addCubeJoin, autoMembers, cubeKeyOf, dimensionNames, removeCubeJoin, setCubeJoin,
+} from './cubes';
 import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from './clipboard';
@@ -97,18 +100,38 @@ const FLOW_STYLE = {
 } as CSSProperties;
 
 type ModelApi = ReturnType<typeof modelApi>;
-type CanvasNode = TableFlowNode | NoteFlowNode | AreaFlowNode | ViewFlowNode;
+type CanvasNode = TableFlowNode | NoteFlowNode | AreaFlowNode | ViewFlowNode | CubeFlowNode;
 // A dragged area and what lies entirely within it, where each started.
 type AreaDrag = { area: string; from: Point; members: { id: string; from: Point }[] };
 type Columns = { name: string; type: string }[];
+
+// What a build wrote: the cubes by name and the files it removed, by base name.
+export type Built = { cubes: string[]; removed: string[] };
+
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+// The toast after a build: `Built cubes a, b; removed x.yml`, or `Removed
+// x.yml` when no cube was built; empty when the build did nothing.
+export function builtMessage({ cubes, removed }: Built): string {
+  const files = removed.join(', ');
+  if (!cubes.length) {
+    return files ? `Removed ${files}` : '';
+  }
+  return `Built cubes ${cubes.join(', ')}${files ? `; removed ${files}` : ''}`;
+}
+
+// The edge id of a cube join, kept in `selectedEdge` beside reference ids.
+const CUBE_JOIN = 'cubejoin:';
+const cubeJoinEdgeId = (id: string) => `${CUBE_JOIN}${id}`;
 
 export type ModelEditorProps = {
   api: ModelApi;
   org: OrgNode;
   modelId: string;
   tables: OrgDetail['tables'];
-  // After a build: the cube's name and the organization's refreshed detail.
-  onBuilt(cubeName: string, detail: OrgDetail): void;
+  // After a build: what it built and removed, and the organization's
+  // refreshed detail.
+  onBuilt(built: Built, detail: OrgDetail): void;
   // After new tables were created in the database: the organization's
   // refreshed detail.
   onTablesCreated?(detail: OrgDetail): void;
@@ -121,6 +144,8 @@ export type ModelEditorProps = {
 };
 
 type JoinEdit = { kind: 'new'; from: End; to: End } | { kind: 'edit'; index: number };
+// A cube join being made, between two cube ids.
+type CubeJoinAsk = { from: string; to: string };
 type TableEdit = { kind: 'new' } | { kind: 'edit'; alias: string };
 // The statements of a dry run, the version they were read at and the
 // error of a run.
@@ -258,6 +283,10 @@ function Editor({
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'save' | 'build' | 'delete' | 'create' | null>(null);
   const [joinEdit, setJoinEdit] = useState<JoinEdit | null>(null);
+  const [cubeJoinAsk, setCubeJoinAsk] = useState<CubeJoinAsk | null>(null);
+  // The cubes the last build wrote: a model without cubes still builds to
+  // remove their files.
+  const [builtNames, setBuiltNames] = useState<string[]>([]);
   const [tableEdit, setTableEdit] = useState<TableEdit | null>(null);
   const [createAsk, setCreateAsk] = useState<CreateAsk | null>(null);
   // The nodes selected on the canvas (tables and shortcuts) and the
@@ -269,6 +298,10 @@ function Editor({
   joinsRef.current = def.joins;
   const foundEdge = selectedEdge === null ? -1 : def.joins.findIndex((j) => j.id === selectedEdge);
   const edgeAt: number | null = foundEdge < 0 ? null : foundEdge;
+  // The selected cube join, by id, while it exists.
+  const cubeJoinAt = selectedEdge?.startsWith(CUBE_JOIN)
+    ? (def.cubeJoins ?? []).find((j) => cubeJoinEdgeId(j.id) === selectedEdge)?.id ?? null
+    : null;
   const first = selection.length ? objectOf(selection[0]) : null;
   // The selected table, for what only tables have.
   const selected = first?.kind === 'table' ? first.id : null;
@@ -293,6 +326,7 @@ function Editor({
         }
         setName(m.name);
         setVersion(m.version);
+        setBuiltNames(m.cubeNames ?? []);
         const known = m.dialects ?? {};
         setDialects(known);
         const read = definitionOf(m.definition);
@@ -346,6 +380,14 @@ function Editor({
   const missing = def.tables
     .filter((t) => !t.draft && !columnsOf(t.schema, t.table))
     .map((t) => `${t.schema}.${t.table}`);
+
+  const columnsOfTable = (t: ModelDefinition['tables'][number]) => (t.draft
+    ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
+    : columnsOf(t.schema, t.table) ?? []);
+  const dialect: Dialect = dialects[def.dataSource] ?? null;
+  // The same definition, the same problems: validation runs once per edit.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const problemsFound = useMemo(() => issues(def, columnsOfTable, dialect), [def, dialect, tables]);
 
   const [collapsedTables, toggleTable] = useCollapsedTables(modelId);
   // The column picked by a click to start a link; a click on a column of
@@ -498,9 +540,32 @@ function Editor({
           ...(t.shortcuts ?? []).map((sc) => at(shortcutNodeId(t.alias, sc.id), sc.x, sc.y, sc.id)),
         ];
       });
-      return [...areas, ...tableNodes, ...views, ...notes];
+      const cubes = (def.cubes ?? []).map((c): CubeFlowNode => {
+        const id = nodeIdOf('cube', c.id);
+        const auto = c.dimensions.length === 0 && c.measures.length === 0;
+        const shown = auto ? autoMembers(def, c, columnsOf) : c;
+        return {
+          ...(kept(id) as CubeFlowNode | undefined),
+          id,
+          type: 'cube',
+          position: { x: c.x, y: c.y },
+          width: c.width,
+          height: c.height,
+          zIndex: c.z ?? 0,
+          selected: selection.includes(id),
+          data: {
+            cube: c,
+            dimensions: shown.dimensions.map((d) => d.name),
+            measures: shown.measures.map((m) => m.name),
+            issues: problemsFound.filter((i) => i.target.kind === 'cube' && i.target.id === c.id).length,
+            fixedSize: c.width !== undefined || c.height !== undefined,
+            onResize,
+          },
+        };
+      });
+      return [...areas, ...tableNodes, ...views, ...cubes, ...notes];
     });
-  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection]);
+  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound]);
 
   const onMovePoint = useCallback((index: number, pointIndex: number, to: Point) => {
     setDef((d) => {
@@ -544,9 +609,35 @@ function Editor({
       data: {},
     })));
   }, [def.views, def.tables]);
-  const edges: (ReferenceFlowEdge | DependencyFlowEdge)[] = useMemo(
-    () => [...references, ...dependencies],
-    [references, dependencies]
+  const onMoveCubeJoinPoint = useCallback((id: string, pointIndex: number, to: Point) => {
+    setDef((d) => {
+      const points = [...((d.cubeJoins ?? []).find((j) => j.id === id)?.points ?? [])];
+      points[pointIndex] = to;
+      return setCubeJoin(d, id, { points });
+    });
+    revision.current += 1;
+    setDirty(true);
+  }, [setDef]);
+
+  const cubeLines: (CubeJoinFlowEdge | DependencyFlowEdge)[] = useMemo(() => [
+    ...cubeSourceEdges(def),
+    ...(def.cubeJoins ?? []).filter((j) => !j.hidden).map((j): CubeJoinFlowEdge => ({
+      id: cubeJoinEdgeId(j.id),
+      source: nodeIdOf('cube', j.from),
+      sourceHandle: 'join',
+      target: nodeIdOf('cube', j.to),
+      targetHandle: 'join',
+      label: REL_LABEL[j.relationship],
+      type: 'cubejoin',
+      selected: selectedEdge === cubeJoinEdgeId(j.id),
+      data: { join: j, onMovePoint: onMoveCubeJoinPoint },
+    })),
+    // cubeSourceEdges reads only the tables and the cubes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onMoveCubeJoinPoint]);
+  const edges: (ReferenceFlowEdge | DependencyFlowEdge | CubeJoinFlowEdge)[] = useMemo(
+    () => [...references, ...dependencies, ...cubeLines],
+    [references, dependencies, cubeLines]
   );
 
   // The selection follows only what the user does (React Flow's `select`
@@ -578,7 +669,16 @@ function Editor({
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     changes.forEach((c) => {
-      // Dependency lines are not selectable: only references are.
+      if (c.type === 'select' && c.id.startsWith(CUBE_JOIN)) {
+        if (c.selected) {
+          setSelection([]);
+          setSelectedEdge(c.id);
+        } else {
+          setSelectedEdge((was) => (was === c.id ? null : was));
+        }
+        return;
+      }
+      // Dependency lines are not selectable: only references and cube joins are.
       if (c.type !== 'select' || !c.id.startsWith('join-')) {
         return;
       }
@@ -674,7 +774,9 @@ function Editor({
     }
   };
 
-  const canPaste = Boolean(clip && (clip.tables.length || clip.notes.length || clip.areas.length || clip.views.length));
+  const canPaste = Boolean(clip && (
+    clip.tables.length || clip.notes.length || clip.areas.length || clip.views.length || clip.cubes.length
+  ));
   const pasteClip = () => {
     if (!clip || !canPaste) {
       return;
@@ -713,6 +815,9 @@ function Editor({
     } else if (edgeAt !== null) {
       change(removeJoin(def, edgeAt));
       setSelectedEdge(null);
+    } else if (cubeJoinAt !== null) {
+      change(removeCubeJoin(def, cubeJoinAt));
+      setSelectedEdge(null);
     }
   };
 
@@ -750,7 +855,15 @@ function Editor({
     link(picked, { alias, column });
   };
 
+  // Two cubes join through the dialog; a cube and a table do not link.
   const onConnect = (c: Connection) => {
+    const ends = [c.source, c.target].map((id) => objectOf(id ?? ''));
+    if (ends.some((e) => e.kind === 'cube')) {
+      if (ends[0].kind === 'cube' && ends[1].kind === 'cube' && ends[0].id !== ends[1].id) {
+        setCubeJoinAsk({ from: ends[0].id, to: ends[1].id });
+      }
+      return;
+    }
     if (c.source && c.target && c.sourceHandle && c.targetHandle) {
       link(
         { alias: parseNodeId(c.source).alias, column: c.sourceHandle },
@@ -761,7 +874,7 @@ function Editor({
 
   // A link dropped on a column's row, away from its handle.
   const onConnectEnd: OnConnectEnd = (event, state) => {
-    if (state.isValid || !state.fromNode || !state.fromHandle?.id) {
+    if (state.isValid || !state.fromNode || !state.fromHandle?.id || objectOf(state.fromNode.id).kind === 'cube') {
       return;
     }
     const point = 'changedTouches' in event ? event.changedTouches[0] : event;
@@ -774,6 +887,11 @@ function Editor({
   };
 
   const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
+    if (edge.id.startsWith(CUBE_JOIN)) {
+      setSelection([]);
+      setSelectedEdge(edge.id);
+      return;
+    }
     if (!edge.id.startsWith('join-')) {
       return;
     }
@@ -823,6 +941,7 @@ function Editor({
       if (revision.current === sent) {
         setDirty(false);
       }
+      setBuiltNames(saved.cubeNames ?? []);
       onSaved?.(saved);
       return saved;
     } catch (e: any) {
@@ -875,8 +994,9 @@ function Editor({
     setProblems([]);
     try {
       const result = force ? await api.buildModel(modelId, true) : await api.buildModel(modelId);
-      // Task 7 shows every cube built and the files removed.
-      onBuilt(result.cubes[0]?.cubeName ?? '', result.detail);
+      const names = result.cubes.map((c) => c.cubeName);
+      setBuiltNames(names);
+      onBuilt({ cubes: names, removed: (result.removed ?? []).map(baseName) }, result.detail);
     } catch (e: any) {
       if (e instanceof ApiError && e.status === 409 && e.message === EDITED) {
         setAsk('overwrite');
@@ -1093,14 +1213,12 @@ function Editor({
     }
   };
 
-  const columnsOfTable = (t: ModelDefinition['tables'][number]) => (t.draft
-    ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
-    : columnsOf(t.schema, t.table) ?? []);
   const hits = searchModel(def, columnsOfTable, query);
-  const dialect: Dialect = dialects[def.dataSource] ?? null;
-  // The same definition, the same problems: validation runs once per edit.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const problemsFound = useMemo(() => issues(def, columnsOfTable, dialect), [def, dialect, tables]);
+  // The dimensions a cube join may pair, generated ones in auto mode.
+  const cubeDimensions = (id: string) => {
+    const c = (def.cubes ?? []).find((x) => x.id === id);
+    return c ? dimensionNames(def, c, columnsOf) : [];
+  };
 
   const centerOn = (nodeId: string) => {
     const n = nodes.find((x) => x.id === nodeId);
@@ -1123,6 +1241,15 @@ function Editor({
     const j = def.joins[index];
     if (j) {
       centerOn(j.from.alias);
+    }
+  };
+
+  const pickCubeJoin = (id: string) => {
+    const j = (def.cubeJoins ?? []).find((x) => x.id === id);
+    if (j) {
+      setSelection([]);
+      setSelectedEdge(cubeJoinEdgeId(id));
+      centerOn(nodeIdOf('cube', j.from));
     }
   };
 
@@ -1169,7 +1296,7 @@ function Editor({
   const onPaneClick = (e: { clientX: number; clientY: number }) => {
     setPicked(null);
     setSelectedEdge(null);
-    if (tool !== 'note' && tool !== 'area' && tool !== 'view') {
+    if (tool !== 'note' && tool !== 'area' && tool !== 'view' && tool !== 'cube') {
       return;
     }
     const p = screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -1178,6 +1305,8 @@ function Editor({
       result = addNote(def, p.x, p.y);
     } else if (tool === 'area') {
       result = addArea(def, p.x, p.y);
+    } else if (tool === 'cube') {
+      result = addCube(def, p.x, p.y);
     } else {
       result = addView(def, p.x, p.y, def.tables[0]?.schema ?? 'public');
     }
@@ -1211,7 +1340,7 @@ function Editor({
     'mod+x': cutSelection,
     'mod+a': () => setSelection(nodeIdsOf(def)),
     delete: deleteSelection,
-  }, loaded && !loadError && !joinEdit && !tableEdit && !createAsk && !ask && !sqlAsk);
+  }, loaded && !loadError && !joinEdit && !cubeJoinAsk && !tableEdit && !createAsk && !ask && !sqlAsk);
 
   if (loadError) {
     return (
@@ -1244,9 +1373,11 @@ function Editor({
   let propertiesOf: Selected = { kind: 'model' };
   if (edgeAt !== null) {
     propertiesOf = { kind: 'reference', index: edgeAt };
+  } else if (cubeJoinAt !== null) {
+    propertiesOf = { kind: 'cubeJoin', id: cubeJoinAt };
   } else if (selected && def.tables.some((t) => t.alias === selected)) {
     propertiesOf = { kind: 'table', alias: selected };
-  } else if (first && first.kind !== 'table' && first.kind !== 'cube' && nodeIdsOf(def).includes(selection[0])) {
+  } else if (first && first.kind !== 'table' && nodeIdsOf(def).includes(selection[0])) {
     propertiesOf = { kind: first.kind, id: first.id };
   }
   const editing = joinEdit?.kind === 'edit' ? def.joins[joinEdit.index] : undefined;
@@ -1291,7 +1422,7 @@ function Editor({
           dirty,
           busy: busy !== null,
           hasDrafts: drafts(def).length > 0,
-          canBuild: def.tables.length > 0,
+          canBuild: (def.cubes?.length ?? 0) > 0 || builtNames.length > 0,
           onSave: () => save(),
           onCreate: openCreate,
           onBuild: () => runBuild(),
@@ -1364,6 +1495,8 @@ function Editor({
                 pickNode(nodeIdOf('view', issue.target.id));
               } else if (issue.target.kind === 'cube') {
                 pickNode(nodeIdOf('cube', issue.target.id));
+              } else if (issue.target.kind === 'cubeJoin') {
+                pickCubeJoin(issue.target.id);
               } else if (issue.target.kind === 'reference') {
                 const { id } = issue.target;
                 const at = def.joins.findIndex((j) => j.id === id);
@@ -1509,6 +1642,24 @@ function Editor({
           change(removeJoin(def, joinEdit.index));
           setJoinEdit(null);
         } : undefined}
+      />
+
+      <CubeJoinDialog
+        open={cubeJoinAsk !== null}
+        from={(def.cubes ?? []).find((c) => c.id === cubeJoinAsk?.from)?.name ?? ''}
+        to={(def.cubes ?? []).find((c) => c.id === cubeJoinAsk?.to)?.name ?? ''}
+        fromDimensions={cubeJoinAsk ? cubeDimensions(cubeJoinAsk.from) : []}
+        toDimensions={cubeJoinAsk ? cubeDimensions(cubeJoinAsk.to) : []}
+        onClose={() => setCubeJoinAsk(null)}
+        onSave={(choice) => {
+          if (cubeJoinAsk) {
+            const result = addCubeJoin(def, cubeJoinAsk.from, cubeJoinAsk.to, choice.relationship, choice.on);
+            change(result.def);
+            setSelection([]);
+            setSelectedEdge(cubeJoinEdgeId(result.id));
+          }
+          setCubeJoinAsk(null);
+        }}
       />
 
       <TableDialog
