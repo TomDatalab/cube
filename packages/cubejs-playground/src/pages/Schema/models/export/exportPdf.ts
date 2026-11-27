@@ -4,6 +4,9 @@ import {
 import { renderDiagram, token } from './renderDiagram';
 
 const RATIO = 2;
+// html-to-image scales a canvas down past 16384 px a side; asking for less
+// keeps big diagrams sharp and whole.
+const MAX_SIDE = 16384;
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -22,11 +25,16 @@ export async function exportPdf(
   print: PrintSettings | undefined,
   fileName: string
 ): Promise<void> {
+  const ratio = Math.min(RATIO, MAX_SIDE / Math.max(bounds.width, bounds.height));
   const [{ jsPDF: Pdf }, png] = await Promise.all([
     import('jspdf'),
-    renderDiagram(viewportEl, bounds, 'png', RATIO),
+    renderDiagram(viewportEl, bounds, 'png', ratio),
   ]);
   const image = await loadImage(png);
+  // Image pixels per canvas unit, from the image itself: the renderer may
+  // have scaled it down.
+  const sx = image.naturalWidth / bounds.width;
+  const sy = image.naturalHeight / bounds.height;
   const page = pageSizeMm(print);
   const margin = marginMm(print);
   const orientation = page.width > page.height ? 'landscape' : 'portrait';
@@ -35,8 +43,8 @@ export async function exportPdf(
   const background = token('--background');
   pageGrid(bounds, print).forEach((slice, i) => {
     const canvas = document.createElement('canvas');
-    canvas.width = Math.ceil(slice.width * RATIO);
-    canvas.height = Math.ceil(slice.height * RATIO);
+    canvas.width = Math.ceil(slice.width * sx);
+    canvas.height = Math.ceil(slice.height * sy);
     const context = canvas.getContext('2d');
     if (!context) {
       throw new Error('The diagram could not be drawn');
@@ -45,8 +53,8 @@ export async function exportPdf(
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(
       image,
-      (slice.x - bounds.x) * RATIO,
-      (slice.y - bounds.y) * RATIO,
+      (slice.x - bounds.x) * sx,
+      (slice.y - bounds.y) * sy,
       canvas.width,
       canvas.height,
       0,
