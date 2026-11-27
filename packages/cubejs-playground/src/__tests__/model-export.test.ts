@@ -226,6 +226,20 @@ describe('model export', () => {
   const section = (title: string) => [...document.querySelectorAll('[data-slot="model-properties"] section > button')]
     .find((b) => b.textContent!.trim() === title) as HTMLButtonElement;
 
+  it('the toolbar button downloads {modelName}-documentation.html', async () => {
+    await render();
+    const clicked = anchors();
+    const blobs: Blob[] = [];
+    URL.createObjectURL = ((b: Blob) => { blobs.push(b); return 'blob:docs'; }) as any;
+    URL.revokeObjectURL = (() => undefined) as any;
+    await act(async () => tool('Generate model documentation').click());
+    expect(clicked.map((a) => a.download)).toEqual(['Sales-documentation.html']);
+    expect(blobs[0].type).toBe('text/html');
+    expect(vi.mocked(renderDiagram).mock.calls[0][2]).toBe('svg');
+    expect(tool('Undo').disabled).toBe(true);
+    expect(api.saveModel).not.toHaveBeenCalled();
+  });
+
   it('export dialog: format, scope and download', async () => {
     await render();
     await act(async () => tool('Export model to image').click());

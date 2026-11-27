@@ -982,8 +982,8 @@ describe('ModelEditor', () => {
         'Size', 'Align', 'Distribution', 'Order', 'References', 'Arrange', 'Zoom out', '1:1', 'Zoom in', 'Fit view',
         'Toggle navigation pane', 'Toggle properties pane', 'Toggle top bar', 'Create in database', 'Build cube'];
       labels.forEach((l) => expect(tool(l), l).toBeTruthy());
-      ['Generate model documentation', 'Order'].forEach((l) => expect(tool(l).disabled, l).toBe(true));
-      ['Export model to image', 'Export model to PDF file'].forEach((l) => expect(tool(l).disabled, l).toBe(false));
+      expect(tool('Order').disabled).toBe(true);
+      ['Export model to image', 'Export model to PDF file', 'Generate model documentation'].forEach((l) => expect(tool(l).disabled, l).toBe(false));
       expect(tool('Size').disabled).toBe(true);
       expect(tool('Delete').disabled).toBe(true);
       await select('orders');

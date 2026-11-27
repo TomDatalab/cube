@@ -15,7 +15,6 @@ import {
 import type { AlignMode, DistributeMode } from './arrange';
 
 export const ZOOM_CHOICES = [25, 50, 75, 100, 200, 400];
-const SOON = 'Coming soon';
 
 export type ModelToolbarProps = {
   history: { canUndo: boolean; canRedo: boolean; onUndo(): void; onRedo(): void };
@@ -79,7 +78,7 @@ export type ModelToolbarProps = {
   explorer: { onOpen(): void };
   // The diagram as an image or a PDF; on read-only too. `busy` while a PDF
   // is being made.
-  exports: { onImage(): void; onPdf(): void; busy: boolean };
+  exports: { onImage(): void; onPdf(): void; onDocs(): void; busy: boolean };
   search: ReactNode;
   // Someone else edits the model: what changes it is off; exports, SQL,
   // copy, zoom, panes and search stay.
@@ -204,6 +203,7 @@ export function ModelToolbar({
         </Tool>
         <Tool label="Export model to image" disabled={exports.busy} onClick={exports.onImage}><Image /></Tool>
         <Tool label="Export model to PDF file" disabled={exports.busy} onClick={exports.onPdf}><FileText /></Tool>
+        <Tool label="Generate model documentation" disabled={exports.busy} onClick={exports.onDocs}><BookOpen /></Tool>
         <Tool
           label="Generate SQL script"
           hint={file.canSql ? 'Generate SQL script (Ctrl + G)' : 'Only for Postgres and MySQL connections'}
@@ -212,7 +212,6 @@ export function ModelToolbar({
         >
           <FileCode />
         </Tool>
-        <Tool label="Generate model documentation" hint={SOON} disabled><BookOpen /></Tool>
         <Tool label="Model explorer" hint="Model explorer: SQL over the model" onClick={explorer.onOpen}>
           <TableProperties />
         </Tool>

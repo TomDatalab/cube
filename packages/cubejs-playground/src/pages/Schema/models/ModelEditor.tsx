@@ -57,6 +57,9 @@ import { explorerTables } from './explorer/explorerTables';
 import { ExportImageDialog } from './export/ExportImageDialog';
 import { PageBreaks } from './export/PageBreaks';
 import { exportPdf } from './export/exportPdf';
+import { documentationHtml } from './export/documentation';
+import { download } from './export/download';
+import { renderDiagram } from './export/renderDiagram';
 import { diagramBounds, pageGrid } from './export/pages';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
@@ -1333,6 +1336,39 @@ function Editor({
       setPdfBusy(false);
     }
   };
+  // The documentation: one HTML file, with the diagram when it can be drawn.
+  const generateDocs = async () => {
+    setPdfBusy(true);
+    try {
+      let diagram: string | null = null;
+      const bounds = diagramBounds(nodes, 'all');
+      if (canvas.current && bounds) {
+        try {
+          diagram = await renderDiagram(canvas.current, bounds, 'svg');
+        } catch {
+          diagram = null;
+        }
+      }
+      const style = getComputedStyle(document.documentElement);
+      const colors = Object.fromEntries(
+        ['--background', '--foreground', '--muted', '--border'].map((k) => [k, style.getPropertyValue(k).trim()])
+      );
+      const html = documentationHtml({
+        name: name || 'model',
+        description: def.description,
+        def,
+        columnsOf: columnsOfTable,
+        diagram,
+        colors,
+        generatedAt: new Date().toISOString(),
+      });
+      download(new Blob([html], { type: 'text/html' }), `${name || 'model'}-documentation.html`);
+    } catch (e: any) {
+      notify.error(e?.message ?? 'The documentation could not be made');
+    } finally {
+      setPdfBusy(false);
+    }
+  };
   // The dimensions a cube join may pair, generated ones in auto mode.
   const cubeDimensions = (id: string) => {
     const c = (def.cubes ?? []).find((x) => x.id === id);
@@ -1604,7 +1640,7 @@ function Editor({
           onToggleTop: () => togglePane('top'),
         }}
         explorer={{ onOpen: () => setExplorerOpen(true) }}
-        exports={{ onImage: () => setImageOpen(true), onPdf: printPdf, busy: pdfBusy }}
+        exports={{ onImage: () => setImageOpen(true), onPdf: printPdf, onDocs: generateDocs, busy: pdfBusy }}
         search={(
           <SearchBox query={query} hits={hits} onQuery={setQuery} onPick={pickHit} inputRef={searchInput} />
         )}
