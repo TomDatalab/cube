@@ -20,15 +20,16 @@ describe('useEditLock', () => {
     releaseModelLock: ReturnType<typeof vi.fn<(id: string, token: string) => Promise<void>>>;
   };
   let onLost: ReturnType<typeof vi.fn<(holder: string) => void>>;
+  let onFreed: ReturnType<typeof vi.fn<() => void>>;
   let lock: Lock;
 
-  function Probe() {
-    lock = useEditLock(api, 'm1', onLost);
+  function Probe({ enabled = true }: { enabled?: boolean }) {
+    lock = useEditLock(api, 'm1', onLost, { enabled, onFreed });
     return null;
   }
 
-  const mount = async () => {
-    await act(async () => root.render(createElement(Probe)));
+  const mount = async (enabled = true) => {
+    await act(async () => root.render(createElement(Probe, { enabled })));
   };
   // Lets the renewal's answer land.
   const tick = async (ms: number) => {
@@ -45,6 +46,7 @@ describe('useEditLock', () => {
       releaseModelLock: vi.fn(async () => undefined),
     };
     onLost = vi.fn<(holder: string) => void>();
+    onFreed = vi.fn<() => void>();
     root = createRoot(document.createElement('div'));
   });
 
@@ -161,5 +163,69 @@ describe('useEditLock', () => {
     await mount();
     await act(async () => window.dispatchEvent(new Event('pagehide')));
     expect(api.releaseModelLock).toHaveBeenCalledWith('m1', lock.token);
+  });
+  it('a first claim that fails is an error, retried after 5 s and then 10 s', async () => {
+    api.lockModel.mockRejectedValue(new Error('offline'));
+    await mount();
+    expect(lock.status).toBe('error');
+    await tick(4_999);
+    expect(api.lockModel).toHaveBeenCalledTimes(1);
+    await tick(1);
+    expect(api.lockModel).toHaveBeenCalledTimes(2);
+    expect(lock.status).toBe('error');
+    await tick(9_999);
+    expect(api.lockModel).toHaveBeenCalledTimes(2);
+    api.lockModel.mockResolvedValue({ held: true, holder: 'me' });
+    await tick(1);
+    expect(api.lockModel).toHaveBeenCalledTimes(3);
+    expect(lock.status).toBe('editing');
+    expect(onFreed).not.toHaveBeenCalled();
+  });
+
+  it('retry() claims at once after a failed first claim', async () => {
+    api.lockModel.mockRejectedValueOnce(new Error('offline'));
+    await mount();
+    expect(lock.status).toBe('error');
+    await act(async () => lock.retry());
+    expect(api.lockModel).toHaveBeenCalledTimes(2);
+    expect(lock.status).toBe('editing');
+  });
+
+  it('a failed renewal after an answer is not an error', async () => {
+    api.lockModel.mockResolvedValueOnce({ held: false, holder: 'bob' });
+    await mount();
+    api.lockModel.mockRejectedValue(new Error('offline'));
+    await tick(30_000);
+    expect(lock.status).toBe('readOnly');
+  });
+
+  it('calls onFreed when a renewal claims a lock that was freed, not on take()', async () => {
+    api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+    await mount();
+    api.lockModel.mockResolvedValue({ held: true, holder: 'me' });
+    await tick(30_000);
+    expect(lock.status).toBe('editing');
+    expect(onFreed).toHaveBeenCalledTimes(1);
+    await tick(30_000);
+    expect(onFreed).toHaveBeenCalledTimes(1);
+
+    api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+    await tick(30_000);
+    await act(async () => lock.take());
+    expect(onFreed).toHaveBeenCalledTimes(1);
+  });
+
+  it('claims nothing while disabled, and releases when disabled', async () => {
+    await mount(false);
+    await tick(60_000);
+    expect(api.lockModel).not.toHaveBeenCalled();
+    expect(lock.status).toBe('pending');
+    await mount(true);
+    expect(api.lockModel).toHaveBeenCalledTimes(1);
+    expect(lock.status).toBe('editing');
+    await mount(false);
+    expect(api.releaseModelLock).toHaveBeenCalledWith('m1', lock.token);
+    await tick(60_000);
+    expect(api.lockModel).toHaveBeenCalledTimes(1);
   });
 });

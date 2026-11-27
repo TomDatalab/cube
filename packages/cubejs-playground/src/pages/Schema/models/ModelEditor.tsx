@@ -80,7 +80,7 @@ import { ModelToolbar } from './ModelToolbar';
 import { TableDialog, TableDraft } from './TableDialog';
 import { CreateTablesDialog } from './CreateTablesDialog';
 import { useEditLock } from './useEditLock';
-import { ReadOnlyBanner } from './ReadOnlyBanner';
+import { LockErrorBanner, ReadOnlyBanner } from './ReadOnlyBanner';
 import { ReadOnlyContext } from './PanelParts';
 
 export { TABLE_MIME };
@@ -381,10 +381,17 @@ function Editor({
     setAsk(null);
     setTool('select');
     setRefFrom(null);
-    reload();
-    notify.info(`${holder} took control. Your unsaved changes were discarded.`);
+    // A reload that fails says why; the changes are still on the canvas.
+    api.model(modelId).then((m) => {
+      showModel(m);
+      notify.info(`${holder} took control. Your unsaved changes were discarded.`);
+    }, (e: Error) => notify.error(e.message));
   };
-  const lock = useEditLock(api, modelId, onLost);
+  // Nothing is claimed for a model that could not be opened.
+  const lock = useEditLock(api, modelId, onLost, {
+    enabled: loaded && !loadError,
+    onFreed: () => notify.info('You can edit this model now.'),
+  });
   // Back in control after reading (Take control, or an expired lock
   // claimed): the model may have changed meanwhile, so it stays read-only
   // until the reload lands. Set while rendering, so no render unlocks first.
@@ -392,7 +399,7 @@ function Editor({
   const [regaining, setRegaining] = useState(false);
   if (lock.status !== lastStatus) {
     setLastStatus(lock.status);
-    if (lock.status === 'editing' && lastStatus === 'readOnly') {
+    if (lock.status === 'editing' && (lastStatus === 'readOnly' || lastStatus === 'error')) {
       setRegaining(true);
     }
   }
@@ -1653,6 +1660,7 @@ function Editor({
       />
 
       {lock.status === 'readOnly' ? <ReadOnlyBanner holder={lock.holder} onTake={take} /> : null}
+      {lock.status === 'error' ? <LockErrorBanner onRetry={() => lock.retry()} /> : null}
 
       <div className="tw:flex tw:min-h-0 tw:flex-1 tw:overflow-hidden tw:rounded-md tw:border">
         {panes.left ? (

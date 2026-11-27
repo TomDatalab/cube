@@ -2948,6 +2948,60 @@ describe('ModelEditor', () => {
       expect(onBuilt).not.toHaveBeenCalled();
     });
 
+    it('a first claim that fails says so, and Retry claims again', async () => {
+      api.lockModel.mockRejectedValueOnce(new Error('offline'));
+      await render();
+      expect(document.body.textContent).toContain('Could not get edit control.');
+      expect(document.body.textContent).not.toContain('Read-only mode');
+      expect(tool('New note').disabled).toBe(true);
+      await act(async () => button('Retry').click());
+      expect(api.lockModel).toHaveBeenCalledTimes(2);
+      expect(document.body.textContent).not.toContain('Could not get edit control.');
+      expect(tool('New note').disabled).toBe(false);
+    });
+
+    it('claims nothing while the model could not be opened', async () => {
+      api.model.mockRejectedValueOnce(new Error('gone'));
+      await render();
+      expect(document.body.textContent).toContain('Could not open the model');
+      expect(api.lockModel).not.toHaveBeenCalled();
+    });
+
+    it('says so when a renewal claims the lock someone left', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      const info = vi.spyOn(notify, 'info');
+      try {
+        api.lockModel.mockResolvedValue({ held: false, holder: 'bob' });
+        await render();
+        expect(document.body.textContent).toContain(BANNER);
+        api.lockModel.mockResolvedValue({ held: true, holder: 'me' });
+        await act(async () => {
+          vi.advanceTimersByTime(30_000);
+        });
+        expect(document.body.textContent).not.toContain('Read-only mode');
+        expect(info).toHaveBeenCalledWith('You can edit this model now.');
+        expect(tool('New note').disabled).toBe(false);
+      } finally {
+        info.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('a failed reload after losing control shows its error, not the discard', async () => {
+      const info = vi.spyOn(notify, 'info');
+      const error = vi.spyOn(notify, 'error');
+      await render();
+      await rename('Sales 3');
+      api.model.mockRejectedValueOnce(new Error('Could not reach the server'));
+      api.saveModel.mockRejectedValueOnce(new ApiError('O model está sendo editado por bob', 423));
+      await act(async () => tool('Save changes').click());
+      expect(document.body.textContent).toContain(BANNER);
+      expect(info).not.toHaveBeenCalledWith('bob took control. Your unsaved changes were discarded.');
+      expect(error).toHaveBeenCalledWith('Could not reach the server');
+      info.mockRestore();
+      error.mockRestore();
+    });
+
     it('shows no banner before the lock answers, but edits nothing', async () => {
       api.lockModel.mockImplementation(() => new Promise(() => {}));
       await render();
