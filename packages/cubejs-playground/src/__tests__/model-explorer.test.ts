@@ -37,6 +37,7 @@ vi.mock('@xyflow/react', async () => {
     ReactFlowProvider: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
     NodeResizer: () => null,
+    NodeResizeControl: () => null,
     useUpdateNodeInternals: () => () => undefined,
     MiniMap: () => null,
     BaseEdge: ({ id }: any) => h('path', { 'data-edge-path': id }),

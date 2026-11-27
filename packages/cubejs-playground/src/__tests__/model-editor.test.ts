@@ -59,6 +59,7 @@ vi.mock('@xyflow/react', async () => {
     ViewportPortal: ({ children }: any) => children,
     Handle: ({ type, id }: any) => h('span', { 'data-handle': type, 'data-id': id }),
     NodeResizer: () => h('span', { 'data-resizer': '' }),
+    NodeResizeControl: ({ position }: any) => h('span', { 'data-resize-grip': position }),
     useUpdateNodeInternals: () => (id: string) => flow.updated.push(id),
     MiniMap: () => null,
     BaseEdge: ({ id, style }: any) => h('path', { 'data-edge-path': id, 'data-dash': style?.strokeDasharray }),
@@ -1987,6 +1988,23 @@ describe('ModelEditor', () => {
       }));
     });
 
+    it('colors a table\'s header and its rows apart, and a whole view', async () => {
+      api.model.mockResolvedValueOnce(view(withObjects()));
+      await render();
+      await select('orders');
+      await act(async () => (pane().querySelector('[data-slot="model-color-palette"] button[aria-label="blue"]') as HTMLButtonElement).click());
+      await act(async () => (pane().querySelector('[data-slot="model-body-palette"] button[aria-label="amber"]') as HTMLButtonElement).click());
+      let def = await savedDef();
+      expect(def.tables[0]).toEqual(expect.objectContaining({ color: 'blue', bodyColor: 'amber' }));
+      await act(async () => (pane().querySelector('[data-slot="model-body-palette"] button[aria-label="none"]') as HTMLButtonElement).click());
+      def = await savedDef();
+      expect('bodyColor' in def.tables[0]).toBe(false);
+      await select('view:v1');
+      await act(async () => (pane().querySelector('[data-slot="model-view-palette"] button[aria-label="teal"]') as HTMLButtonElement).click());
+      def = await savedDef();
+      expect(def.views[0].color).toBe('teal');
+    });
+
     it('renames a view and the selection follows', async () => {
       api.model.mockResolvedValueOnce(view(withObjects()));
       await render();
@@ -2134,6 +2152,12 @@ describe('ModelEditor', () => {
       expect(host.querySelector('[data-handle="target"][data-id="node"]')).not.toBeNull();
       act(() => own.render(createElement(ViewNode as any, { id: 'view:v1', data: { ...data, showTypes: false } })));
       expect(host.querySelector('[data-column="total"]')!.textContent).not.toContain('numeric');
+      const box = () => host.querySelector('[data-slot="model-view-node"]')!.getAttribute('style') ?? '';
+      expect(box()).toContain('var(--model-view)');
+      // One color fills the whole view.
+      act(() => own.render(createElement(ViewNode as any, { id: 'view:v1', data: { ...data, color: 'pink' } })));
+      expect(box()).toContain('var(--model-pink)');
+      expect(host.querySelector('[data-slot="model-view-band"]')!.getAttribute('style') ?? '').not.toContain('background');
       act(() => own.unmount());
     });
   });
@@ -2201,6 +2225,16 @@ describe('ModelEditor', () => {
       expect(host.querySelector('[aria-label="shortcut"]')).not.toBeNull();
       act(() => own.render(createElement(TableNode as any, { id: 'orders', data })));
       expect(host.querySelector('[aria-label="shortcut"]')).toBeNull();
+      // The rows take the body color, the header its own.
+      act(() => own.render(createElement(TableNode as any, {
+        id: 'orders', data: { ...data, color: 'blue', bodyColor: 'amber' },
+      })));
+      expect(host.querySelector('[data-slot="model-table-node"]')!.getAttribute('style')).toContain('var(--model-amber)');
+      expect(host.querySelector('[data-slot="model-table-band"]')!.getAttribute('style')).toContain('var(--model-blue)');
+      // Selected, a grip in the middle of each side too, as in Redgate.
+      act(() => own.render(createElement(TableNode as any, { id: 'orders', selected: true, data })));
+      expect([...host.querySelectorAll('[data-resize-grip]')].map((e) => e.getAttribute('data-resize-grip')))
+        .toEqual(['top', 'right', 'bottom', 'left']);
       act(() => own.unmount());
     });
 

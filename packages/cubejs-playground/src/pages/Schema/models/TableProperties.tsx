@@ -2,7 +2,7 @@ import {
   DragEvent, KeyboardEvent, useEffect, useRef, useState,
 } from 'react';
 import {
-  Ban, ChevronDown, ChevronRight, CircleAlert, Code, GripVertical, Plus, TriangleAlert, X,
+  ChevronDown, ChevronRight, CircleAlert, Code, GripVertical, Plus, TriangleAlert, X,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -13,14 +13,14 @@ import { cn } from '@/lib/utils';
 import { Dialect, PORTABLE, TYPES } from './dialect';
 import type { Issue } from './validate';
 import {
-  DraftColumn, ModelDefinition, ModelTable, TABLE_COLORS, renameTable, setColor, setTableComment,
+  DraftColumn, ModelDefinition, ModelTable, renameTable, setColor, setTableComment,
 } from './modelGraph';
 import {
   addColumn, moveColumn, removeColumn, renameColumn, setChecks, setColumn, setIndexes, setPrimaryKeyName,
   setTableScripts, setUniqueKeys,
 } from './physical';
 import {
-  Check, DraftText, Section, Value,
+  Check, DraftText, Palette, Section, Value,
 } from './PanelParts';
 
 type Columns = { name: string; type: string }[];
@@ -501,29 +501,17 @@ export function TableProperties({
       ) : null}
 
       <Section title="Format">
-        <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-1" data-slot="model-color-palette">
-          {TABLE_COLORS.map((color) => (
-            <button
-              key={color}
-              type="button"
-              aria-label={color}
-              aria-pressed={table.color === color}
-              title={color}
-              className="tw:size-6 tw:cursor-pointer tw:rounded-full tw:border-2 tw:border-transparent tw:p-0 tw:aria-pressed:border-foreground"
-              style={{ background: `var(--model-${color})` }}
-              onClick={() => onChange(setColor(def, alias, color))}
-            />
-          ))}
-          <button
-            type="button"
-            aria-label="No color"
-            title="No color"
-            className="tw:flex tw:size-6 tw:cursor-pointer tw:items-center tw:justify-center tw:rounded-full tw:border tw:bg-transparent tw:p-0 tw:text-muted-foreground tw:hover:bg-accent"
-            onClick={() => onChange(setColor(def, alias, undefined))}
-          >
-            <Ban className="tw:size-3.5" />
-          </button>
-        </div>
+        <Field label="Header color">
+          <Palette slot="model-color-palette" none value={table.color} onPick={(c) => onChange(setColor(def, alias, c))} />
+        </Field>
+        <Field label="Body color">
+          <Palette
+            slot="model-body-palette"
+            none
+            value={table.bodyColor}
+            onPick={(c) => onChange(setColor(def, alias, c, 'bodyColor'))}
+          />
+        </Field>
       </Section>
 
       <IssuesSection issues={issues} />

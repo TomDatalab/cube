@@ -1,10 +1,11 @@
 import { memo } from 'react';
-import { Handle, NodeResizer, Position } from '@xyflow/react';
+import { Handle, Position } from '@xyflow/react';
 import type { Node, NodeProps } from '@xyflow/react';
 
 import { cn } from '@/lib/utils';
 
-import type { ViewColumn } from './modelGraph';
+import type { TableColor, ViewColumn } from './modelGraph';
+import { ModelResizer } from './ModelResizer';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type ViewNodeData = {
@@ -14,6 +15,8 @@ export type ViewNodeData = {
   name: string;
   columns: ViewColumn[];
   showTypes: boolean;
+  // The whole view's color; none is the view blue.
+  color?: TableColor;
   // Sized by hand: the box fills the node's fixed size.
   fixedSize: boolean;
   onResize: (nodeId: string, box: { x: number; y: number; width: number; height: number }) => void;
@@ -23,47 +26,53 @@ export type ViewFlowNode = Node<ViewNodeData, 'view'>;
 
 type ViewNodeProps = Pick<NodeProps<ViewFlowNode>, 'data'> & { id?: string; selected?: boolean };
 
-// A view on the canvas: a rounded box, its name centred in bold, then one
-// row per column with its name and type, like a table.
-export const ViewNode = memo(({ id, data, selected }: ViewNodeProps) => (
-  <div
-    data-slot="model-view-node"
-    data-selected={selected || undefined}
-    className={cn(
-      'tw:flex tw:min-w-40 tw:flex-col tw:rounded-md tw:border tw:text-xs tw:text-foreground',
-      data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
-      selected && 'tw:ring-2 tw:ring-ring'
-    )}
-    style={{ background: 'var(--model-view)', borderColor: 'var(--model-view-border)' }}
-  >
-    {data.readOnly ? null : (
-      <NodeResizer
-        isVisible={Boolean(selected)}
-        minWidth={160}
-        minHeight={28}
-        color="var(--ring)"
-        onResizeEnd={(_event, box) => data.onResize(id ?? `view:${data.id}`, box)}
-      />
-    )}
-    <Handle type="target" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
-    <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
+// A view on the canvas as Redgate draws it: a table's box with round
+// corners, its name centred in bold on a header, then one row per column
+// with its name and type. One color fills the whole view.
+export const ViewNode = memo(({ id, data, selected }: ViewNodeProps) => {
+  const line = data.color ? 'color-mix(in oklch, var(--foreground) 70%, transparent)' : 'var(--model-view-border)';
+  return (
     <div
-      data-slot="model-view-band"
-      className="tw:px-1.5 tw:py-1 tw:text-center"
-      style={{ borderBottom: data.columns.length ? '1px solid var(--model-view-border)' : undefined }}
+      data-slot="model-view-node"
+      data-selected={selected || undefined}
+      data-color={data.color}
+      className={cn(
+        'tw:flex tw:min-w-40 tw:flex-col tw:rounded-md tw:border tw:text-xs tw:text-foreground',
+        data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
+        selected && 'tw:ring-2 tw:ring-ring'
+      )}
+      style={data.color
+        ? { background: `var(--model-${data.color})`, borderColor: line, color: 'var(--model-ink)' }
+        : { background: 'var(--model-view)', borderColor: line }}
     >
-      <div data-slot="model-view-name" className="tw:truncate tw:font-bold">{data.name}</div>
+      {data.readOnly ? null : (
+        <ModelResizer
+          visible={Boolean(selected)}
+          minWidth={160}
+          minHeight={28}
+          onResizeEnd={(_event, box) => data.onResize(id ?? `view:${data.id}`, box)}
+        />
+      )}
+      <Handle type="target" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
+      <Handle type="source" position={Position.Top} id="node" style={NODE_HANDLE_STYLE} isConnectable={false} />
+      <div
+        data-slot="model-view-band"
+        className="tw:px-1.5 tw:py-1 tw:text-center"
+        style={{ borderBottom: data.columns.length ? `1px solid ${line}` : undefined }}
+      >
+        <div data-slot="model-view-name" className="tw:truncate tw:font-bold">{data.name}</div>
+      </div>
+      <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
+        {data.columns.map((c, i) => (
+          // Names may repeat until validation has them fixed.
+          // eslint-disable-next-line react/no-array-index-key
+          <li key={i} data-column={c.name} className="tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4">
+            <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
+            {data.showTypes ? <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span> : null}
+          </li>
+        ))}
+      </ul>
     </div>
-    <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
-      {data.columns.map((c, i) => (
-        // Names may repeat until validation has them fixed.
-        // eslint-disable-next-line react/no-array-index-key
-        <li key={i} data-column={c.name} className="tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4">
-          <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
-          {data.showTypes ? <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span> : null}
-        </li>
-      ))}
-    </ul>
-  </div>
-));
+  );
+});
 ViewNode.displayName = 'ViewNode';

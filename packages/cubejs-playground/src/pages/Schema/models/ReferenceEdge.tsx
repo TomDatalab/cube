@@ -60,8 +60,15 @@ export const ReferenceLine = memo(({
   const b = box(to);
   const fixed = endDraft ? { ...sides, [endDraft.end]: endDraft.side } : sides;
   const [sourceSide, targetSide] = endSides(a, b, swapped, fixed);
-  const sourcePoint = { x: sourceSide === 'right' ? a.x + a.width : a.x, y: sourceY };
-  const targetPoint = { x: targetSide === 'right' ? b.x + b.width : b.x, y: targetY };
+  // A column hidden by a table sized smaller than its rows: its end stays on
+  // the box's edge instead of hanging below it.
+  const inside = (n: typeof from, y: number) => {
+    const top = n.internals.positionAbsolute.y;
+    const height = n.measured.height ?? n.height;
+    return height ? Math.min(Math.max(y, top), top + height) : y;
+  };
+  const sourcePoint = { x: sourceSide === 'right' ? a.x + a.width : a.x, y: inside(from, sourceY) };
+  const targetPoint = { x: targetSide === 'right' ? b.x + b.width : b.x, y: inside(to, targetY) };
   const points = draft ?? saved;
   const path = orthogonalPath(sourcePoint, sourceSide, targetPoint, targetSide, points);
   const route = routeOf(sourcePoint, sourceSide, targetPoint, targetSide, points);

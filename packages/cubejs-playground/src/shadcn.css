@@ -87,6 +87,8 @@
   --model-view: var(--pg-model-view, #e0f0ff);
   --model-view-border: var(--pg-model-view-border, #60a5fa);
   --model-note: var(--pg-model-note, #fef9c3);
+  /* Text on a palette color: dark in both themes, the palette being light in dark mode. */
+  --model-ink: var(--pg-model-ink, #111827);
 }
 
 /* The dark accent is light: text on it is the dark page color. */

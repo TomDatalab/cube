@@ -303,6 +303,8 @@ export const PG_LIGHT: Record<string, string> = {
   '--pg-model-view': '#e0f0ff',
   '--pg-model-view-border': '#60a5fa',
   '--pg-model-note': '#fef9c3',
+  // Text on a palette color (a colored header, body or view).
+  '--pg-model-ink': '#111827',
   // atoms/Alert
   '--pg-alert-error-border': '#FFCCC7',
   '--pg-alert-error-bg': 'rgb(255, 100, 109, 0.05)',
@@ -383,6 +385,8 @@ export const PG_DARK: Record<string, string> = {
   '--pg-model-view': '#14304d',
   '--pg-model-view-border': '#2f6aa8',
   '--pg-model-note': '#4a4216',
+  // The dark palette is light: its text stays dark.
+  '--pg-model-ink': '#111827',
   '--pg-alert-error-border': 'rgba(255, 100, 109, 0.45)',
   '--pg-alert-error-bg': 'rgba(255, 100, 109, 0.12)',
   '--pg-alert-error-text': '#ff8a93',

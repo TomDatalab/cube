@@ -11,7 +11,7 @@ import type { ModelDefinition, ViewColumn } from './modelGraph';
 import {
   nodeIdOf, renameView, setView, setViewColumnType, setViewSchema,
 } from './objects';
-import { Check, DraftText, Section } from './PanelParts';
+import { Check, DraftText, Palette, Section } from './PanelParts';
 import { IssuesSection } from './TableProperties';
 import type { Issue } from './validate';
 
@@ -269,6 +269,12 @@ export function ViewProperties({
         </Field>
         <Field label="After the CREATE VIEW" htmlFor="model-view-after">
           <DraftText key={`${id}:a`} id="model-view-after" label="Script after the view" value={view.scriptAfter ?? ''} onCommit={(t) => patch({ scriptAfter: t || undefined })} />
+        </Field>
+      </Section>
+
+      <Section title="Format">
+        <Field label="Color">
+          <Palette slot="model-view-palette" none value={view.color} onPick={(color) => patch({ color })} />
         </Field>
       </Section>
 

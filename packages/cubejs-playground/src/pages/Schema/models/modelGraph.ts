@@ -65,7 +65,10 @@ export type ModelTable = {
   table: string;
   x: number;
   y: number;
+  // The header's color; none is the neutral.
   color?: TableColor;
+  // The column rows' color; none is the card.
+  bodyColor?: TableColor;
   draft?: DraftTable;
   comment?: string;
   // A size fixed on the canvas; none follows the content.
@@ -161,6 +164,8 @@ export type ModelView = {
   dependsOnViews: string[];
   scriptBefore?: string;
   scriptAfter?: string;
+  // The whole view's color; none is the view blue.
+  color?: TableColor;
   x: number;
   y: number;
   width?: number;
@@ -565,10 +570,13 @@ export function updateDraftTable(
   };
 }
 
+// Colors a table's header (`color`) or its column rows (`bodyColor`);
+// undefined takes the color away.
 export function setColor(
   def: ModelDefinition,
   alias: string,
-  color: TableColor | undefined
+  color: TableColor | undefined,
+  part: 'color' | 'bodyColor' = 'color'
 ): ModelDefinition {
   return {
     ...def,
@@ -576,12 +584,8 @@ export function setColor(
       if (t.alias !== alias) {
         return t;
       }
-      if (color === undefined) {
-        const { color: _drop, ...rest } = t;
-
-        return rest;
-      }
-      return { ...t, color };
+      const { [part]: _drop, ...rest } = t;
+      return color === undefined ? rest : { ...rest, [part]: color };
     }),
   };
 }

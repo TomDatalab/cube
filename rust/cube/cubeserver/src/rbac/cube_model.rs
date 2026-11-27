@@ -270,6 +270,9 @@ pub struct ModelView {
     pub script_before: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_after: Option<String>,
+    /// The whole view's color, from [`COLORS`]; none means the view blue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     pub x: f64,
     pub y: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -383,9 +386,13 @@ pub struct ModelTable {
     pub table: String,
     pub x: f64,
     pub y: f64,
-    /// A palette name from [`COLORS`]; none means the neutral.
+    /// The header's color, a palette name from [`COLORS`]; none means the
+    /// neutral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The column rows' color, from [`COLORS`]; none means the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_color: Option<String>,
     /// The design of a table not in the database yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftTable>,
@@ -859,7 +866,7 @@ pub fn validate(def: &Definition) -> Result<(), String> {
         if !aliases.insert(table.alias.as_str()) {
             return Err(format!("O alias {} se repete", table.alias));
         }
-        if let Some(color) = &table.color {
+        for color in [&table.color, &table.body_color].into_iter().flatten() {
             if !COLORS.contains(&color.as_str()) {
                 return Err(format!("Cor inválida: {color}"));
             }
@@ -987,6 +994,7 @@ pub fn validate(def: &Definition) -> Result<(), String> {
     let mut seen = HashSet::new();
     let mut names = HashSet::new();
     for view in &def.views {
+        color_ok(&view.color)?;
         if !seen.insert(view.id.as_str()) {
             return Err(format!("O objeto {} se repete", view.id));
         }
@@ -2987,6 +2995,10 @@ mod tests {
         assert_eq!(e, "Cor inválida: #fff");
         let e = bad(&|v| v["notes"][0]["color"] = "nope".into());
         assert_eq!(e, "Cor inválida: nope");
+        let e = bad(&|v| v["views"][0]["color"] = "navy".into());
+        assert_eq!(e, "Cor inválida: navy");
+        let e = bad(&|v| v["tables"][0]["bodyColor"] = "beige".into());
+        assert_eq!(e, "Cor inválida: beige");
         let e = bad(&|v| v["views"][0]["name"] = "1x".into());
         assert_eq!(e, "Nome de view inválido: 1x");
         let e = bad(&|v| v["views"][0]["schema"] = "a-b".into());

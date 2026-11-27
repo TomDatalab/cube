@@ -1,7 +1,5 @@
 import { memo, useEffect } from 'react';
-import {
-  Handle, NodeResizer, Position, useUpdateNodeInternals,
-} from '@xyflow/react';
+import { Handle, Position, useUpdateNodeInternals } from '@xyflow/react';
 import type { Node, NodeProps } from '@xyflow/react';
 import {
   ChevronDown, ChevronRight, Forward, X,
@@ -10,6 +8,7 @@ import {
 import { cn } from '@/lib/utils';
 
 import type { TableColor } from './modelGraph';
+import { ModelResizer } from './ModelResizer';
 import { NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type TableNodeData = {
@@ -24,6 +23,8 @@ export type TableNodeData = {
   // Designed in the model, not in the database yet.
   draft: boolean;
   color?: TableColor;
+  // The column rows' color; none is the card.
+  bodyColor?: TableColor;
   // The columns shown with a key: the primary key a cube gives the table
   // (cubeKeyOf), a draft's own primary key columns.
   keys: string[];
@@ -117,13 +118,13 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
         data.fixedSize && 'tw:h-full tw:w-full tw:overflow-hidden',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
+      style={data.bodyColor ? { background: `var(--model-${data.bodyColor})`, color: 'var(--model-ink)' } : undefined}
     >
       {data.readOnly ? null : (
-        <NodeResizer
-          isVisible={Boolean(selected)}
+        <ModelResizer
+          visible={Boolean(selected)}
           minWidth={160}
           minHeight={28}
-          color="var(--ring)"
           onResizeEnd={(_event, box) => data.onResize(id ?? data.alias, box)}
         />
       )}
@@ -132,7 +133,9 @@ export const TableNode = memo(({ id, data, selected }: TableNodeProps) => {
       <div
         data-slot="model-table-band"
         className={cn('tw:relative tw:flex tw:items-center tw:gap-1 tw:px-1.5 tw:py-1', !data.collapsed && 'tw:border-b tw:border-foreground/70')}
-        style={{ background: data.color ? `var(--model-${data.color})` : 'var(--muted)' }}
+        style={data.color
+          ? { background: `var(--model-${data.color})`, color: 'var(--model-ink)' }
+          : { background: 'var(--muted)', color: 'var(--card-foreground)' }}
       >
         {/* Where a cube's line to this table ends: the middle of the header. */}
         <Handle type="target" position={Position.Left} id="band" style={HIDDEN_HANDLE_STYLE} isConnectable={false} />

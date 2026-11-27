@@ -184,6 +184,12 @@ describe('draft tables', () => {
     expect(def.tables[0].color).toBe('teal');
     def = setColor(def, 'a', undefined);
     expect('color' in def.tables[0]).toBe(false);
+    // The rows have a color of their own.
+    def = setColor(setColor(def, 'a', 'blue'), 'a', 'amber', 'bodyColor');
+    expect(def.tables[0]).toEqual(expect.objectContaining({ color: 'blue', bodyColor: 'amber' }));
+    def = setColor(def, 'a', undefined, 'bodyColor');
+    expect('bodyColor' in def.tables[0]).toBe(false);
+    expect(def.tables[0].color).toBe('blue');
   });
 
   it('lays tables out in layers from the principal', () => {
