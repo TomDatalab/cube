@@ -52,6 +52,8 @@ import { Dialect, convertDrafts } from './dialect';
 import { addReference, ensureIds } from './physical';
 import { issues } from './validate';
 import { SqlDialog, SqlOptions } from './SqlDialog';
+import { ExplorerDialog } from './explorer/ExplorerDialog';
+import { explorerTables } from './explorer/explorerTables';
 import { useEditorShortcuts } from './useEditorShortcuts';
 import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
 import {
@@ -280,6 +282,7 @@ function Editor({
   const [focusKey, setFocusKey] = useState(0);
   // The Generate SQL dialog: open with its limits, options and answer.
   const [sqlAsk, setSqlAsk] = useState<{ only?: string[] } | null>(null);
+  const [explorerOpen, setExplorerOpen] = useState(false);
   const [sqlOptions, setSqlOptions] = useState<SqlOptions>({ drop: false, onlyNew: false });
   const [sqlScript, setSqlScript] = useState<{ script: string | null; error: string | null; loading: boolean }>(
     { script: null, error: null, loading: false }
@@ -1573,6 +1576,7 @@ function Editor({
           onToggleRight: () => togglePane('right'),
           onToggleTop: () => togglePane('top'),
         }}
+        explorer={{ onOpen: () => setExplorerOpen(true) }}
         search={(
           <SearchBox query={query} hits={hits} onQuery={setQuery} onPick={pickHit} inputRef={searchInput} />
         )}
@@ -1801,6 +1805,14 @@ function Editor({
         options={sqlOptions}
         onOptions={setSqlOptions}
         onClose={() => setSqlAsk(null)}
+      />
+
+      <ExplorerDialog
+        open={explorerOpen}
+        name={name}
+        tables={() => explorerTables(def, columnsOfTable)}
+        onFind={pickNode}
+        onClose={() => setExplorerOpen(false)}
       />
 
       <CreateTablesDialog

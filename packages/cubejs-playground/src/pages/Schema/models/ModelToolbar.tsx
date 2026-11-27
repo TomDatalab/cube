@@ -2,7 +2,7 @@ import { ReactElement, ReactNode, useState } from 'react';
 import {
   AlignCenterVertical, AlignVerticalDistributeCenter, BookOpen, Box, ClipboardPaste, Copy, DatabaseZap,
   FileCode, FileText, Forward, Image, Layers, Maximize, Network, PanelLeft, PanelRight, PanelTop,
-  Redo2, Save, Scaling, Scissors, Spline, Trash2, Undo2, ZoomIn, ZoomOut,
+  Redo2, Save, Scaling, Scissors, Spline, TableProperties, Trash2, Undo2, ZoomIn, ZoomOut,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -75,6 +75,8 @@ export type ModelToolbarProps = {
     onToggleRight(): void;
     onToggleTop(): void;
   };
+  // SQL over the model; it changes nothing, so it stays open read-only.
+  explorer: { onOpen(): void };
   search: ReactNode;
   // Someone else edits the model: what changes it is off; exports, SQL,
   // copy, zoom, panes and search stay.
@@ -177,7 +179,7 @@ function createHint(file: ModelToolbarProps['file']): string {
 // Redgate's toolbar: history | file | clipboard | arrange | zoom | panes,
 // then the search on the right.
 export function ModelToolbar({
-  history, file, edit, arrange, references, zoom, panes, search, readOnly = false,
+  history, file, edit, arrange, references, zoom, panes, explorer, search, readOnly = false,
 }: ModelToolbarProps) {
   const zoomOptions = ZOOM_CHOICES.includes(zoom.percent)
     ? ZOOM_CHOICES
@@ -208,6 +210,9 @@ export function ModelToolbar({
           <FileCode />
         </Tool>
         <Tool label="Generate model documentation" hint={SOON} disabled><BookOpen /></Tool>
+        <Tool label="Model explorer" hint="Model explorer: SQL over the model" onClick={explorer.onOpen}>
+          <TableProperties />
+        </Tool>
         <Tool
           label="Create in database"
           hint={createHint(file)}
