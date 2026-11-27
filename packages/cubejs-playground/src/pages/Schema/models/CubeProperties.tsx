@@ -6,8 +6,8 @@ import { Input } from '@/components/ui/input';
 import { Field } from '@/components/kit';
 
 import {
-  addMember, autoMembers, cubeReads, generateMembers, memberAliases, memberTitles, removeMember, renameCube,
-  renameMember, setCube, setCubeSource, setMember, setMemberTitle,
+  addMember, autoMembers, cubeReads, generateMembers, memberTitles, removeMember, renameCube, renameMember, setCube,
+  setCubeSource, setMember, setMemberTitle,
 } from './cubes';
 import type { MemberGroup } from './cubes';
 import {
@@ -191,8 +191,6 @@ export function CubeProperties({
   const titles = memberTitles(cube);
   const friendly = (['dimensions', 'measures'] as const).flatMap((group) => shown[group]
     .map((m) => ({ group, name: m.name })));
-  // The name each one is built under: its friendly name, as an identifier.
-  const aliases = memberAliases(friendly.map((m) => m.name), titles, cube.segments.map((s) => s.name));
 
   const rows = (group: MemberGroup) => {
     const { one } = GROUP_LABEL[group];
@@ -324,20 +322,8 @@ export function CubeProperties({
             <span className="tw:text-[11px] tw:font-semibold tw:text-muted-foreground">Friendly name</span>
             {friendly.map(({ group, name }) => (
               <div key={`${id}:${group}:${name}`} className="tw:contents">
-                <span
-                  className="tw:flex tw:min-w-0 tw:flex-col tw:font-mono tw:text-xs"
-                  title={`${group === 'dimensions' ? 'Dimension' : 'Measure'} ${name}`}
-                >
-                  <span className="tw:truncate">{name}</span>
-                  {aliases[name] && aliases[name] !== name ? (
-                    <span
-                      className="tw:truncate tw:text-[10px] tw:text-muted-foreground"
-                      data-slot="model-cube-alias"
-                      title={`Built in the cube as ${aliases[name]}`}
-                    >
-                      → {aliases[name]}
-                    </span>
-                  ) : null}
+                <span className="tw:truncate tw:font-mono tw:text-xs" title={`${group === 'dimensions' ? 'Dimension' : 'Measure'} ${name}`}>
+                  {name}
                 </span>
                 <DraftText
                   key={`${id}:${group}:${name}:${titles[name] ?? ''}`}

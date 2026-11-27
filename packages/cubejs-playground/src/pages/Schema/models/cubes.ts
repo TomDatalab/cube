@@ -224,37 +224,6 @@ export function snake(name: string): string {
   return out[0] >= '0' && out[0] <= '9' ? `c_${out}` : out;
 }
 
-// The Cube name a friendly name gives a member (cube_model::alias_of):
-// accents stripped, snake case. Undefined without a letter or digit.
-export function aliasOf(title: string): string | undefined {
-  if (!/[\p{L}\p{N}]/u.test(title)) {
-    return undefined;
-  }
-  const folded = title.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  const slug = folded.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63).replace(/-+$/, '');
-  return snake(slug || 'org');
-}
-
-// The name each titled member is built under (cube_model::aliased): its
-// alias, or `_2`, `_3`… when another member has that name. `names` are the
-// cube's members in build order; `others` the names nothing renames.
-export function memberAliases(
-  names: string[],
-  titles: Record<string, string>,
-  others: string[] = []
-): Record<string, string> {
-  const aliasFor = (n: string) => (titles[n]?.trim() ? aliasOf(titles[n].trim()) : undefined);
-  const taken = new Set([...names, ...others].filter((n) => !aliasFor(n)));
-  const out: Record<string, string> = {};
-  for (const name of names) {
-    const base = aliasFor(name);
-    if (base) {
-      out[name] = unique(taken, base);
-    }
-  }
-  return out;
-}
-
 const NUMERIC = [
   'int', 'uint', 'integer', 'smallint', 'bigint', 'tinyint', 'mediumint', 'float', 'double', 'decimal', 'numeric',
   'real', 'number', 'money', 'serial', 'bigserial',
