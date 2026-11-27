@@ -150,6 +150,8 @@ export function CubeProperties({
     const list = cube[group] as {
       name: string; title?: string; column?: string; sql?: string; primaryKey?: boolean; type?: string; format?: string;
     }[];
+    // The server wants SQL or a column: all but a `count` measure have one.
+    const needsSql = (m: { type?: string }) => group === 'dimensions' || (group === 'measures' && m.type !== 'count');
     const edit = (k: number, change: Parameters<typeof setMember>[4]) => onChange(setMember(def, id, group, k, change));
     return (
       <Section title={GROUP_LABEL[group].title}>
@@ -192,7 +194,9 @@ export function CubeProperties({
                     value={m.column ?? ''}
                     options={columns}
                     blank="(SQL)"
-                    onPick={(column) => edit(k, column ? { column, sql: undefined } : { column: undefined })}
+                    onPick={(column) => edit(k, column
+                      ? { column, sql: undefined }
+                      : { column: undefined, sql: needsSql(m) ? '' : undefined })}
                   />
                 ) : null}
                 {group === 'segments' || !m.column ? (
@@ -201,7 +205,9 @@ export function CubeProperties({
                     multiline={false}
                     placeholder="SQL"
                     value={m.sql ?? ''}
-                    onCommit={(sql) => edit(k, sql ? { sql, column: undefined } : { sql: undefined })}
+                    onCommit={(sql) => edit(k, sql
+                      ? { sql, column: undefined }
+                      : { sql: needsSql(m) ? '' : undefined })}
                   />
                 ) : null}
                 <DraftText

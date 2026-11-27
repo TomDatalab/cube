@@ -2533,13 +2533,32 @@ describe('ModelEditor', () => {
         api.model.mockResolvedValueOnce(view(twoCubes()));
         await render();
         await select('cube:c1');
+        // Focus outside a field: Delete removes the selected cube.
+        await key('Delete');
+        expect(flowNode('cube:c1')).toBeUndefined();
+        await key('z', { ctrlKey: true });
+        expect(flowNode('cube:c1')).toBeDefined();
+        await select('cube:c1');
         const input = pane().querySelector('input[aria-label="Dimension 1 name"]') as HTMLInputElement;
         await act(async () => {
           input.focus();
           input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
-          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
         });
         expect(flowNode('cube:c1')).toBeDefined();
+      });
+
+      it('a member without a column keeps an empty SQL, a count keeps neither', async () => {
+        api.model.mockResolvedValueOnce(view(twoCubes()));
+        await render();
+        await select('cube:c1');
+        await pick('Dimension 2 column', '');
+        expect((await savedDef()).cubes[0].dimensions[1]).toEqual({ name: 'customer_id', type: 'number', sql: '' });
+        await fill('input[aria-label="Dimension 2 SQL"]', 'x + 1');
+        await blur('input[aria-label="Dimension 2 SQL"]');
+        expect((await savedDef()).cubes[0].dimensions[1].sql).toBe('x + 1');
+        await fill('input[aria-label="Dimension 2 SQL"]', '');
+        await blur('input[aria-label="Dimension 2 SQL"]');
+        expect((await savedDef()).cubes[0].dimensions[1]).toEqual({ name: 'customer_id', type: 'number', sql: '' });
       });
 
       it('edits the pairs of a cube join', async () => {
