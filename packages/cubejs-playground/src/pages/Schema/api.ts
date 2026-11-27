@@ -4,6 +4,7 @@ import {
 } from '../../shared/auth';
 import { playgroundFetch } from '../../shared/helpers';
 import type { OrgDetail, OrgSummary } from './tree';
+import type { DialectSpec } from './models/dialect';
 
 export const PAGE_SIZE = 50;
 
@@ -73,8 +74,10 @@ export type CubeModelView = {
   version: number;
   updatedAt: string;
   updatedBy: string | null;
-  // On a GET: the dialect each connection designs tables in.
-  dialects?: Record<string, 'postgres' | 'mysql' | null>;
+  // On a GET: the dialect each connection designs tables in, and what each
+  // of those dialects has.
+  dialects?: Record<string, string | null>;
+  dialectSpecs?: Record<string, DialectSpec>;
 };
 
 export function modelApi(rbac: Rbac, basePath = '/cube') {
@@ -248,6 +251,8 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
       lock?: string
     ): Promise<{
       statements?: string[];
+      // What the database leaves out of the tables, said once.
+      notes?: string[];
       model?: CubeModelView;
       created?: string[];
       error?: string;

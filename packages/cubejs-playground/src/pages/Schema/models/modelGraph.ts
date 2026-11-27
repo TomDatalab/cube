@@ -1,4 +1,4 @@
-import { validType } from './dialect';
+import { validInAnyDialect } from './dialect';
 
 export type Relationship = 'one_to_one' | 'one_to_many' | 'many_to_one';
 export type JoinKind = 'left' | 'inner';
@@ -529,7 +529,7 @@ export function draftProblem(
     if (badIdentifier(c.name)) {
       return `Invalid column name: ${c.name}`;
     }
-    if (!validType('postgres', c.type) && !validType('mysql', c.type)) {
+    if (!validInAnyDialect(c.type)) {
       return `Invalid type for ${c.name}: ${c.type}`;
     }
     if (seen.has(c.name.toLowerCase())) {

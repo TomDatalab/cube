@@ -54,7 +54,7 @@ import {
   Clip, addShortcut, copy, cut, parseNodeId, paste, removeShortcut, shortcutNodeId,
 } from './clipboard';
 import { useHistory } from './history';
-import { Dialect, convertDrafts } from './dialect';
+import { Dialect, convertDrafts, dialectSpec, registerDialects } from './dialect';
 import { addReference, ensureIds } from './physical';
 import { issues } from './validate';
 import { ShareDialog } from './ShareDialog';
@@ -175,6 +175,8 @@ type TableEdit = { kind: 'new' } | { kind: 'edit'; alias: string };
 // error of a run.
 type CreateAsk = {
   statements: string[];
+  // What the connection's database leaves out.
+  notes?: string[];
   version: number;
   error: string | null;
   created?: string[];
@@ -369,6 +371,7 @@ function Editor({
     setVersion(m.version);
     setBuiltNames(m.cubeNames ?? []);
     const known = m.dialects ?? {};
+    registerDialects(m.dialectSpecs);
     setDialects(known);
     const read = definitionOf(m.definition);
     // Old models' portable types as the connection's dialect writes them;
@@ -488,6 +491,11 @@ function Editor({
     ? t.draft.columns.map((c) => ({ name: c.name, type: c.type }))
     : columnsOf(t.schema, t.table) ?? []);
   const dialect: Dialect = dialects[def.dataSource] ?? null;
+  // What the connection's database takes: Generate SQL and Create in database.
+  const spec = dialectSpec(dialect);
+  const canSql = Boolean(spec?.canSql);
+  const canCreate = Boolean(spec?.canCreate);
+  const sqlReason = spec ? spec.reason ?? null : 'This connection has no SQL dialect for tables';
   // The same definition, the same problems: validation runs once per edit.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const problemsFound = useMemo(() => issues(def, columnsOfTable, dialect), [def, dialect, tables]);
@@ -1252,7 +1260,7 @@ function Editor({
     setBusy('create');
     try {
       const result = await api.createTables(modelId, current, true, lock.token);
-      setCreateAsk({ statements: result.statements ?? [], version: current, error: null });
+      setCreateAsk({ statements: result.statements ?? [], notes: result.notes, version: current, error: null });
     } catch (e: any) {
       if (!refused(e)) {
         notify.error(conflict(e));
@@ -1545,7 +1553,7 @@ function Editor({
   const shortcuts: Record<string, (e: KeyboardEvent) => void> = {
     ...toolKeys,
     'mod+f': () => searchInput.current?.focus(),
-    'mod+g': () => dialect && openSql({}),
+    'mod+g': () => canSql && openSql({}),
     'mod+alt+n': () => togglePane('left'),
     'mod+alt+p': () => togglePane('right'),
     'mod+alt+b': () => togglePane('top'),
@@ -1661,7 +1669,9 @@ function Editor({
           onSave: () => save(),
           onCreate: openCreate,
           onBuild: () => runBuild(),
-          canSql: dialect !== null,
+          canSql,
+          canCreate,
+          reason: sqlReason,
           onSql: () => openSql({}),
         }}
         edit={{
@@ -1855,7 +1865,7 @@ function Editor({
               issues={problemsFound}
               focusKey={focusKey}
               // A table by its alias, a view by its id.
-              onSqlPreview={dialect ? (nodeId) => {
+              onSqlPreview={canSql ? (nodeId) => {
                 const only = previewIdOf(nodeId);
                 if (only) {
                   openSql({ only: [only] });
@@ -1976,6 +1986,7 @@ function Editor({
         open={createAsk !== null}
         dataSource={def.dataSource}
         statements={createAsk?.statements ?? []}
+        notes={createAsk?.notes}
         error={createAsk?.error}
         created={createAsk?.created}
         running={busy === 'create'}

@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Field } from '@/components/kit';
 
 import { CodeEditor } from '../NumberedCode';
-import { Dialect, PORTABLE, TYPES } from './dialect';
+import { Dialect, dialectSpec, typesOf } from './dialect';
 import type { ModelDefinition, ViewColumn } from './modelGraph';
 import {
   nodeIdOf, renameView, setView, setViewColumnType, setViewSchema,
@@ -140,7 +140,7 @@ export function ViewProperties({
   if (!view) {
     return null;
   }
-  const typeList = dialect ? TYPES[dialect] : PORTABLE;
+  const typeList = typesOf(dialect);
   const patch = (next: Parameters<typeof setView>[2]) => onChange(setView(def, id, next));
   const editColumn = (k: number, change: Partial<ViewColumn>) => patch({
     columns: view.columns.map((c, j) => (j === k ? { ...c, ...change } : c)),
@@ -152,7 +152,7 @@ export function ViewProperties({
     <>
       <Section
         title="General"
-        action={dialect && onSqlPreview ? (
+        action={dialectSpec(dialect)?.canSql && onSqlPreview ? (
           <Button variant="link" size="sm" className="tw:self-end tw:p-0" onClick={() => onSqlPreview(nodeIdOf('view', id))}>
             <Code />
             SQL preview

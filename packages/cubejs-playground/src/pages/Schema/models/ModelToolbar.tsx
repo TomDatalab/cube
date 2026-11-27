@@ -24,8 +24,11 @@ export type ModelToolbarProps = {
     busy: boolean;
     hasDrafts: boolean;
     canBuild: boolean;
-    // A Postgres or MySQL connection: Generate SQL and Create in database.
+    // The connection's database takes the model's SQL, and runs it.
     canSql: boolean;
+    canCreate: boolean;
+    // Why it does not, when it does not.
+    reason?: string | null;
     onSql(): void;
     onSave(): void;
     onCreate(): void;
@@ -176,8 +179,8 @@ function Menu({
 }
 
 function createHint(file: ModelToolbarProps['file']): string {
-  if (!file.canSql) {
-    return 'Only for Postgres and MySQL connections';
+  if (!file.canCreate) {
+    return file.reason || 'Not available for this connection';
   }
   return file.hasDrafts ? 'Create the new tables in the database' : 'No new table to create';
 }
@@ -210,7 +213,7 @@ export function ModelToolbar({
         <Tool label="Generate model documentation" disabled={exports.busy} onClick={exports.onDocs}><BookOpen /></Tool>
         <Tool
           label="Generate SQL script"
-          hint={file.canSql ? 'Generate SQL script (Ctrl + G)' : 'Only for Postgres and MySQL connections'}
+          hint={file.canSql ? 'Generate SQL script (Ctrl + G)' : file.reason || 'Not available for this connection'}
           disabled={!file.canSql}
           onClick={file.onSql}
         >
@@ -222,7 +225,7 @@ export function ModelToolbar({
         <Tool
           label="Create in database"
           hint={createHint(file)}
-          disabled={readOnly || !file.canSql || !file.hasDrafts || file.busy}
+          disabled={readOnly || !file.canCreate || !file.hasDrafts || file.busy}
           onClick={file.onCreate}
         >
           <DatabaseZap />

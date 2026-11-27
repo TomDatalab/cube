@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Field } from '@/components/kit';
 import { cn } from '@/lib/utils';
 
-import { Dialect, PORTABLE, TYPES } from './dialect';
+import { Dialect, dialectSpec, typesOf } from './dialect';
 import type { Issue } from './validate';
 import {
   DraftColumn, ModelDefinition, ModelTable, renameTable, setColor, setTableTransparency, setTableComment,
@@ -194,7 +194,7 @@ function ColumnRow({
           <DraftText multiline={false} label={`Column ${n} default value`} placeholder="Default value" value={column.default ?? ''} onCommit={(v) => onPatch({ default: v })} />
           <DraftText multiline={false} label={`Column ${n} check expression`} placeholder="Check expression" value={column.check ?? ''} onCommit={(check) => onPatch({ check })} />
           <Check label={`Column ${n} auto increment`} checked={Boolean(column.autoIncrement)} onChange={(v) => onPatch({ autoIncrement: v })}>Auto increment</Check>
-          {dialect === 'mysql' ? (
+          {dialectSpec(dialect)?.features.unsigned ? (
             <>
               <Check label={`Column ${n} unsigned`} checked={Boolean(column.unsigned)} onChange={(v) => onPatch({ unsigned: v })}>Unsigned</Check>
               <Check label={`Column ${n} zerofill`} checked={Boolean(column.zerofill)} onChange={(v) => onPatch({ zerofill: v })}>Zerofill</Check>
@@ -248,7 +248,7 @@ export function TableProperties({
   }
   const { draft } = table;
   const names = draft ? draft.columns.map((c) => c.name) : columnsOf(table).map((c) => c.name);
-  const typeList = dialect ? TYPES[dialect] : PORTABLE;
+  const typeList = typesOf(dialect);
   const keys = draft?.uniqueKeys ?? [];
   const indexes = draft?.indexes ?? [];
   const checks = draft?.checks ?? [];

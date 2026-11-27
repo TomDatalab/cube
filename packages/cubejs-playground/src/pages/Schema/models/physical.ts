@@ -1,5 +1,5 @@
 import { cubeKeyOf } from './cubes';
-import type { Dialect } from './dialect';
+import { type Dialect, dialectSpec } from './dialect';
 import type {
   CubeNode, DraftColumn, DraftTable, End, JoinKind, ModelDefinition, ModelJoin, ModelTable, Relationship, TableCheck,
   TableIndex, UniqueKey,
@@ -65,7 +65,7 @@ export function addColumn(def: ModelDefinition, alias: string, dialect: Dialect)
     ...d,
     columns: [...d.columns, {
       name: firstFree('column_', (n) => d.columns.some((c) => c.name === n)),
-      type: dialect === 'mysql' ? 'varchar(255)' : 'text',
+      type: dialectSpec(dialect)?.text ?? 'text',
       nullable: true,
       primaryKey: false,
     }],
@@ -360,17 +360,20 @@ const RAW_TYPES: Record<string, string> = {
   int8: 'bigint',
 };
 
+// The portable types a key may come in, written as the dialect does
+// (MySQL's `int` and `datetime`, ClickHouse's `Int32`…).
+const KEY_PORTABLE = ['integer', 'bigint', 'text', 'date', 'timestamp'] as const;
+
 export function keyType(raw: string, dialect: Dialect): string {
   const t = raw.trim().toLowerCase();
-  if (dialect === 'mysql') {
-    if (t === 'integer') {
-      return 'int';
-    }
-    if (t === 'timestamp without time zone') {
-      return 'datetime';
-    }
+  const plain = RAW_TYPES[t] ?? t;
+  const spec = dialectSpec(dialect);
+  const portable = KEY_PORTABLE.find((p) => p === plain);
+  if (spec && portable) {
+    return spec.portable[portable];
   }
-  return RAW_TYPES[t] ?? t;
+  // A native type the database reported, as it reported it.
+  return RAW_TYPES[t] ?? (spec ? raw.trim() : t);
 }
 
 // `customers` → `customer`, `categories` → `category`.

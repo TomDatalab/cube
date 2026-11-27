@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  TYPES, convertDrafts, toDialect, validType,
+  convertDrafts, portableAs, registerDialects, toDialect, typesOf, validInAnyDialect, validType,
 } from '../pages/Schema/models/dialect';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
+
+const CH_FEATURES = Object.fromEntries(
+  ['primaryKey', 'check', 'index', 'comments', 'notNull', 'default', 'views'].map((k) => [k, true])
+) as any;
 
 describe('dialect', () => {
   it('toDialect maps portable types and leaves others', () => {
@@ -27,8 +31,8 @@ describe('dialect', () => {
     expect(validType('mysql', 'jsonb')).toBe(false);
     expect(validType(null, 'integer')).toBe(true);
     expect(validType(null, 'jsonb')).toBe(false);
-    expect(TYPES.postgres).toContain('double precision');
-    expect(TYPES.mysql).toContain('varbinary');
+    expect(typesOf('postgres')).toContain('double precision');
+    expect(typesOf('mysql')).toContain('varbinary');
   });
 
   it('convertDrafts changes only portable draft types', () => {
@@ -60,5 +64,31 @@ describe('dialect', () => {
     expect(next.tables[1]).toBe(def.tables[1]);
     expect(convertDrafts(def, null)).toBe(def);
     expect(convertDrafts(next, 'mysql')).toBe(next);
+  });
+
+  it('takes the dialects the server sends', () => {
+    expect(validType('clickhouse', 'String')).toBe(false);
+    registerDialects({
+      clickhouse: {
+        id: 'clickhouse',
+        label: 'ClickHouse',
+        types: [['String', 'none'], ['Int64', 'none'], ['Nullable', 'type'], ['DateTime64', 'free'], ['Decimal', 'precision']],
+        portable: portableAs('String', 'Int32', 'Int64', 'Decimal(18,4)', 'Bool', 'Date', 'DateTime64(3)'),
+        text: 'String',
+        canCreate: true,
+        canSql: true,
+        features: CH_FEATURES,
+      },
+    });
+    expect(validType('clickhouse', 'String')).toBe(true);
+    expect(validType('clickhouse', 'string')).toBe(true);
+    expect(validType('clickhouse', 'Nullable(Int64)')).toBe(true);
+    expect(validType('clickhouse', 'Nullable(Nope)')).toBe(false);
+    expect(validType('clickhouse', "DateTime64(3, 'UTC')")).toBe(true);
+    expect(validType('clickhouse', 'Decimal(18,4)')).toBe(true);
+    expect(validType('clickhouse', 'text')).toBe(true);
+    expect(validInAnyDialect('Int64')).toBe(true);
+    expect(toDialect('clickhouse', 'timestamp')).toBe('DateTime64(3)');
+    expect(typesOf('clickhouse')).toContain('Nullable');
   });
 });

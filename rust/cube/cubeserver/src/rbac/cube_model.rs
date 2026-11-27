@@ -620,7 +620,7 @@ fn validate_draft(table: &ModelTable, draft: &DraftTable) -> Result<(), String> 
         if !valid_ident(&column.name) {
             return Err(format!("Nome de coluna inválido: {}", column.name));
         }
-        if !valid_type(Some("postgres"), &column.kind) && !valid_type(Some("mysql"), &column.kind) {
+        if !super::dialects::DIALECTS.iter().any(|d| d.valid_type(&column.kind)) {
             return Err(format!("Tipo inválido: {}", column.kind));
         }
         if !seen.insert(column.name.to_ascii_lowercase()) {
@@ -668,118 +668,18 @@ fn validate_draft(table: &ModelTable, draft: &DraftTable) -> Result<(), String> 
     Ok(())
 }
 
-/// `postgres` or `mysql` for a connection type the model designs for.
+/// The dialect id of a connection type the model designs tables for (see
+/// [`super::dialects`]), or none.
 pub fn dialect(db_type: &str) -> Option<&'static str> {
-    match db_type {
-        "postgres" => Some("postgres"),
-        "mysql" => Some("mysql"),
-        _ => None,
-    }
+    super::dialects::of(db_type).map(|d| d.id)
 }
 
-/// What a type takes in parentheses: nothing, a size, or a precision with
-/// an optional scale; `required` when it cannot go without.
-#[derive(Clone, Copy)]
-enum Param {
-    None,
-    Size { required: bool },
-    Precision,
-}
-
-const POSTGRES_TYPES: &[(&str, Param)] = &[
-    ("smallint", Param::None),
-    ("integer", Param::None),
-    ("bigint", Param::None),
-    ("serial", Param::None),
-    ("bigserial", Param::None),
-    ("numeric", Param::Precision),
-    ("decimal", Param::Precision),
-    ("real", Param::None),
-    ("double precision", Param::None),
-    ("boolean", Param::None),
-    ("char", Param::Size { required: false }),
-    ("varchar", Param::Size { required: false }),
-    ("text", Param::None),
-    ("date", Param::None),
-    ("time", Param::None),
-    ("timestamp", Param::None),
-    ("timestamptz", Param::None),
-    ("interval", Param::None),
-    ("uuid", Param::None),
-    ("json", Param::None),
-    ("jsonb", Param::None),
-    ("bytea", Param::None),
-];
-
-const MYSQL_TYPES: &[(&str, Param)] = &[
-    ("tinyint", Param::Size { required: false }),
-    ("smallint", Param::Size { required: false }),
-    ("mediumint", Param::Size { required: false }),
-    ("int", Param::Size { required: false }),
-    ("bigint", Param::Size { required: false }),
-    ("decimal", Param::Precision),
-    ("float", Param::None),
-    ("double", Param::None),
-    ("boolean", Param::None),
-    ("bit", Param::Size { required: false }),
-    ("char", Param::Size { required: false }),
-    ("varchar", Param::Size { required: true }),
-    ("tinytext", Param::None),
-    ("text", Param::None),
-    ("mediumtext", Param::None),
-    ("longtext", Param::None),
-    ("date", Param::None),
-    ("time", Param::None),
-    ("datetime", Param::None),
-    ("timestamp", Param::None),
-    ("year", Param::None),
-    ("json", Param::None),
-    ("blob", Param::None),
-    ("binary", Param::Size { required: false }),
-    ("varbinary", Param::Size { required: true }),
-];
-
-/// A type of the dialect's closed list, its size or precision checked; the
-/// 7 portable [`TYPES`] are valid everywhere (models before dialects).
+/// A type of the dialect's list, its size or precision checked; the 7
+/// portable [`TYPES`] are valid everywhere (models before dialects).
 pub fn valid_type(dialect: Option<&str>, ty: &str) -> bool {
-    let t = ty.trim().to_ascii_lowercase();
-    if TYPES.contains(&t.as_str()) {
-        return true;
-    }
-    let list = match dialect {
-        Some("postgres") => POSTGRES_TYPES,
-        Some("mysql") => MYSQL_TYPES,
-        _ => return false,
-    };
-    let (base, params) = match t.find('(') {
-        Some(at) => {
-            let Some(inner) = t[at + 1..].strip_suffix(')') else {
-                return false;
-            };
-            (t[..at].trim(), Some(inner))
-        }
-        None => (t.as_str(), None),
-    };
-    let Some((_, param)) = list.iter().find(|(name, _)| *name == base) else {
-        return false;
-    };
-    // Each number of the parentheses; a part that is not one fails.
-    let numbers: Option<Option<Vec<u32>>> = params.map(|p| {
-        p.split(',')
-            .map(|n| n.trim().parse::<u32>().ok())
-            .collect()
-    });
-    match (param, numbers) {
-        (Param::None, None) => true,
-        (Param::Size { required }, None) => !required,
-        (Param::Precision, None) => true,
-        (_, Some(None)) | (Param::None, Some(_)) => false,
-        (Param::Size { .. }, Some(Some(n))) => n.len() == 1 && n[0] >= 1,
-        (Param::Precision, Some(Some(n))) => match n.as_slice() {
-            [p] => *p >= 1,
-            [p, s] => *p >= 1 && s <= p,
-            _ => false,
-        },
+    match dialect.and_then(super::dialects::by_id) {
+        Some(d) => d.valid_type(ty),
+        None => TYPES.contains(&ty.trim().to_ascii_lowercase().as_str()),
     }
 }
 
@@ -3002,9 +2902,13 @@ mod tests {
     #[test]
     fn unsupported_db_type() {
         assert_eq!(
-            create_statements(&items_def(), "bigquery").unwrap_err(),
-            "Criar tabelas não é suportado para bigquery"
+            create_statements(&items_def(), "nope").unwrap_err(),
+            "Criar tabelas não é suportado para nope"
         );
+        // A database that takes no DDL says why.
+        assert!(create_statements(&items_def(), "druid").unwrap_err().contains("ingestão"));
+        // One whose tables need what the model cannot know runs nothing.
+        assert!(create_statements(&items_def(), "athena").unwrap_err().contains("LOCATION"));
     }
 
     #[test]
@@ -3225,7 +3129,9 @@ mod tests {
     fn dialect_types() {
         assert_eq!(dialect("postgres"), Some("postgres"));
         assert_eq!(dialect("mysql"), Some("mysql"));
-        assert_eq!(dialect("clickhouse"), None);
+        assert_eq!(dialect("clickhouse"), Some("clickhouse"));
+        assert_eq!(dialect("mysqlauroraserverless"), Some("mysql"));
+        assert_eq!(dialect("nope"), None);
         for ok in ["varchar(64)", "numeric(18,4)", "numeric", "double precision", "timestamptz", "integer"] {
             assert!(valid_type(Some("postgres"), ok), "{ok}");
         }

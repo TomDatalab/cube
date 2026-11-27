@@ -12,6 +12,7 @@ import { AreaNode } from '../pages/Schema/models/AreaNode';
 import { NoteNode } from '../pages/Schema/models/NoteNode';
 import { TableNode } from '../pages/Schema/models/TableNode';
 import { ViewNode } from '../pages/Schema/models/ViewNode';
+import { portableAs } from '../pages/Schema/models/dialect';
 import { CubeNode, cubeSourceEdges } from '../pages/Schema/models/CubeNode';
 import { CubeJoinEdge, CubeSourceEdge } from '../pages/Schema/models/CubeJoinEdge';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
@@ -1607,6 +1608,45 @@ describe('ModelEditor', () => {
 
     it('Generate SQL and Create are disabled for a non-Postgres/MySQL connection', async () => {
       api.model.mockResolvedValueOnce(withDialects(withDraft(), null));
+      await render();
+      expect(tool('Generate SQL script').disabled).toBe(true);
+      expect(tool('Create in database').disabled).toBe(true);
+    });
+
+    it('a connection of any connector uses its dialect from the server', async () => {
+      const features: any = Object.fromEntries(['primaryKey', 'check', 'index', 'notNull'].map((k) => [k, true]));
+      const ch = {
+        id: 'clickhouse',
+        label: 'ClickHouse',
+        types: [['String', 'none'], ['Int32', 'none']] as [string, 'none'][],
+        portable: portableAs('String', 'Int32', 'Int64', 'Decimal(18,4)', 'Bool', 'Date', 'DateTime64(3)'),
+        text: 'String',
+        canCreate: true,
+        canSql: true,
+        features,
+      };
+      api.model.mockResolvedValueOnce({ ...view(withDraft()), dialects: { warehouse: 'clickhouse' }, dialectSpecs: { clickhouse: ch } });
+      await render();
+      expect(tool('Generate SQL script').disabled).toBe(false);
+      expect(tool('Create in database').disabled).toBe(false);
+      // Portable draft types are written as ClickHouse writes them.
+      expect(node('items').querySelector('[data-column="id"]')!.textContent).toContain('Int32');
+    });
+
+    it('a database that takes no DDL says why', async () => {
+      const features: any = {};
+      const druid = {
+        id: 'druid',
+        label: 'Apache Druid',
+        types: [['VARCHAR', 'none']] as [string, 'none'][],
+        portable: portableAs(),
+        text: 'text',
+        canCreate: false,
+        canSql: false,
+        reason: 'O Druid não cria tabelas por SQL',
+        features,
+      };
+      api.model.mockResolvedValueOnce({ ...view(withDraft()), dialects: { warehouse: 'druid' }, dialectSpecs: { druid } });
       await render();
       expect(tool('Generate SQL script').disabled).toBe(true);
       expect(tool('Create in database').disabled).toBe(true);

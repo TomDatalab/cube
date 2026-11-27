@@ -370,14 +370,23 @@ pub async fn get(
 ) -> Result<Json<Value>, ApiError> {
     let (model, _, _) = visible_model(&state, &ctx, &id).await?;
     let mut body = view_of(&super::rbac_of(&state)?.store, &model).await?;
-    // The dialect each connection designs tables in, for the editor's types.
+    // The dialect each connection designs tables in, for the editor's types,
+    // and what each of those dialects has.
     let dialects: serde_json::Map<String, Value> = state
         .config
         .data_sources
         .iter()
         .map(|(name, db_type)| (name.clone(), json!(cube_model::dialect(db_type))))
         .collect();
+    let specs: serde_json::Map<String, Value> = state
+        .config
+        .data_sources
+        .iter()
+        .filter_map(|(_, db_type)| crate::rbac::dialects::of(db_type))
+        .map(|d| (d.id.to_string(), d.to_json()))
+        .collect();
     body["dialects"] = Value::Object(dialects);
+    body["dialectSpecs"] = Value::Object(specs);
     Ok(Json(body))
 }
 
@@ -765,13 +774,14 @@ pub async fn create_tables(
         .find(|(n, _)| n == ds)
         .map(|(_, t)| t.as_str())
         .unwrap_or("");
-    let statements = cube_model::create_statements(&def, db_type).map_err(ApiError::bad_request)?;
+    let (statements, notes) =
+        crate::rbac::ddl::create_plan(&def, db_type).map_err(ApiError::bad_request)?;
     if statements.is_empty() {
         return Err(ApiError::bad_request("Não há tabelas novas para criar"));
     }
     if request.dry_run {
         let sql: Vec<&str> = statements.iter().map(|s| s.sql.as_str()).collect();
-        return Ok(Json(json!({ "statements": sql })));
+        return Ok(Json(json!({ "statements": sql, "notes": notes })));
     }
     crate::rbac::enforce::authorize_execute(&state, &ctx, Some(ds)).await?;
 
@@ -911,7 +921,12 @@ pub async fn create_tables(
         }
     }
     let detail = detail_of(&state, &scope).await?;
-    let mut out = json!({ "model": view_of(&rbac.store, &model).await?, "created": created, "detail": detail });
+    let mut out = json!({
+        "model": view_of(&rbac.store, &model).await?,
+        "created": created,
+        "detail": detail,
+        "notes": notes,
+    });
     if let Some(error) = error {
         out["error"] = json!(error);
     }
@@ -984,10 +999,17 @@ pub async fn sql(
         )));
     }
     let db_type = db_type_of(&state, ds);
-    if cube_model::dialect(db_type).is_none() {
-        return Err(ApiError::bad_request(
-            "Gerar SQL só para conexões Postgres ou MySQL",
-        ));
+    match crate::rbac::dialects::of(db_type) {
+        None => {
+            return Err(ApiError::bad_request(format!(
+                "Gerar SQL não é suportado para conexões {db_type}"
+            )))
+        }
+        Some(d) => {
+            if let Some(why) = d.no_sql {
+                return Err(ApiError::bad_request(why));
+            }
+        }
     }
     cube_model::validate_types(&def, db_type).map_err(ApiError::bad_request)?;
     let columns = crate::handlers::playground::data_source_schema(ds).await?;
