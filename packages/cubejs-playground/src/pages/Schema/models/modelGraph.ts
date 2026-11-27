@@ -417,7 +417,7 @@ export function removeJoin(def: ModelDefinition, index: number): ModelDefinition
   return { ...def, joins: def.joins.filter((_, i) => i !== index) };
 }
 
-const REL_LABEL: Record<Relationship, string> = {
+export const REL_LABEL: Record<Relationship, string> = {
   one_to_one: '1:1',
   one_to_many: '1:N',
   many_to_one: 'N:1',

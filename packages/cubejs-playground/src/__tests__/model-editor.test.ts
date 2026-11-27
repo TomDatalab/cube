@@ -12,6 +12,8 @@ import { AreaNode } from '../pages/Schema/models/AreaNode';
 import { NoteNode } from '../pages/Schema/models/NoteNode';
 import { TableNode } from '../pages/Schema/models/TableNode';
 import { ViewNode } from '../pages/Schema/models/ViewNode';
+import { CubeNode, cubeSourceEdges } from '../pages/Schema/models/CubeNode';
+import { CubeJoinEdge } from '../pages/Schema/models/CubeJoinEdge';
 import type { ModelDefinition } from '../pages/Schema/models/modelGraph';
 
 // React Flow measures its nodes before it draws edges, which jsdom cannot do:
@@ -56,8 +58,12 @@ vi.mock('@xyflow/react', async () => {
     NodeResizer: () => null,
     useUpdateNodeInternals: () => (id: string) => flow.updated.push(id),
     MiniMap: () => null,
-    BaseEdge: () => null,
-    EdgeLabelRenderer: () => null,
+    BaseEdge: ({ id }: any) => h('path', { 'data-edge-path': id }),
+    EdgeLabelRenderer: ({ children }: any) => h('div', null, children),
+    useInternalNode: (id: string) => ({
+      internals: { positionAbsolute: { x: id === 'cube:c1' ? 0 : 400, y: 0 } },
+      measured: { width: 160 },
+    }),
     ConnectionMode: { Strict: 'strict', Loose: 'loose' },
     Position: { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' },
     Background: () => null,
@@ -2190,6 +2196,82 @@ describe('ModelEditor', () => {
       const band = (alias: string) => node(alias).querySelector('[data-slot="model-table-band"]')!.getAttribute('style');
       expect(band('orders')).toContain('var(--model-teal)');
       expect(band('customers')).toContain('var(--muted)');
+    });
+  });
+
+  describe('cube canvas', () => {
+    const cube = (over: any = {}) => ({
+      id: 'c1',
+      name: 'orders_cube',
+      color: 'teal',
+      source: { kind: 'table', table: 'orders' },
+      dimensions: [{ name: 'status', type: 'string', sql: 'status' }],
+      measures: [{ name: 'count', type: 'count' }],
+      segments: [],
+      x: 0,
+      y: 0,
+      ...over,
+    });
+    const mount = (el: any) => {
+      const host = document.createElement('div');
+      const own = createRoot(host);
+      act(() => own.render(el));
+      return { host, unmount: () => act(() => own.unmount()) };
+    };
+
+    it('a cube renders its dimensions and measures', () => {
+      const data = {
+        cube: cube(), dimensions: ['status'], measures: ['count'], issues: 0, onResize: () => {},
+      };
+      const { host, unmount } = mount(createElement(CubeNode as any, { id: 'cube:c1', data }));
+      expect(host.querySelector('[data-slot="model-cube-name"]')!.textContent).toBe('orders_cube');
+      expect(host.querySelector('[data-slot="model-cube-band"]')!.getAttribute('style')).toContain('var(--model-teal)');
+      expect(host.querySelector('[data-slot="model-cube-dimensions"] [data-member="status"]')).not.toBeNull();
+      expect(host.querySelector('[data-slot="model-cube-measures"] [data-member="count"]')).not.toBeNull();
+      expect(host.querySelector('[data-member="status"]')!.className).not.toContain('italic');
+      expect(host.querySelectorAll('[data-handle][data-id="node"]').length).toBe(2);
+      unmount();
+    });
+
+    it('an auto cube shows generated members in italic', () => {
+      const data = {
+        cube: cube({ dimensions: [], measures: [] }), dimensions: ['id', 'amount'], measures: ['count'], issues: 0, onResize: () => {},
+      };
+      const { host, unmount } = mount(createElement(CubeNode as any, { id: 'cube:c1', data }));
+      const row = host.querySelector('[data-member="amount"]')!;
+      expect(row.className).toContain('italic');
+      expect(row.getAttribute('title')).toBe('generated at build');
+      unmount();
+    });
+
+    it('a cube join is drawn with its label', () => {
+      const join = {
+        id: 'cj1', from: 'c1', to: 'c2', relationship: 'many_to_one', on: [], points: [],
+      };
+      const { host, unmount } = mount(createElement(CubeJoinEdge as any, {
+        id: 'cubejoin:cj1',
+        source: 'cube:c1',
+        target: 'cube:c2',
+        sourceY: 10,
+        targetY: 10,
+        selected: false,
+        data: { join, onMovePoint: () => {} },
+      }));
+      expect(host.querySelector('[data-slot="model-reference-label"]')!.textContent).toBe('N:1');
+      expect(host.querySelector('[data-edge-path="cubejoin:cj1"]')).not.toBeNull();
+      unmount();
+    });
+
+    it('source lines: one dashed dependency per table a cube reads', () => {
+      const def = {
+        ...saved(),
+        cubes: [cube({ source: { kind: 'sql', tables: ['orders', 'customers', 'ghost'] } })],
+      } as ModelDefinition;
+      const edges = cubeSourceEdges(def);
+      expect(edges.map((e) => [e.source, e.target, e.type, e.selectable])).toEqual([
+        ['cube:c1', 'orders', 'dependency', false],
+        ['cube:c1', 'customers', 'dependency', false],
+      ]);
     });
   });
 });

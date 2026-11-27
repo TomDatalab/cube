@@ -33,6 +33,8 @@ import { TableFlowNode, TableNode, columnAt } from './TableNode';
 import { NoteFlowNode, NoteNode } from './NoteNode';
 import { AreaFlowNode, AreaNode } from './AreaNode';
 import { ViewFlowNode, ViewNode } from './ViewNode';
+import { CubeJoinEdge } from './CubeJoinEdge';
+import { CubeNode } from './CubeNode';
 import { DependencyEdge, DependencyFlowEdge } from './DependencyEdge';
 import {
   addArea, addNote, addView, bringToFront, insideArea, nodeIdOf, nodeIdsOf, objectOf, placeObjects, previewIdOf,
@@ -70,9 +72,9 @@ export { TABLE_MIME };
 const EDITED = 'O cubo foi editado desde o último build';
 
 const NODE_TYPES = {
-  table: TableNode, note: NoteNode, area: AreaNode, view: ViewNode,
+  table: TableNode, note: NoteNode, area: AreaNode, view: ViewNode, cube: CubeNode,
 };
-const EDGE_TYPES = { reference: ReferenceEdge, dependency: DependencyEdge };
+const EDGE_TYPES = { reference: ReferenceEdge, dependency: DependencyEdge, cubejoin: CubeJoinEdge };
 // Areas are always behind everything else.
 const AREA_Z = -1000;
 // Where a paste lands from what was copied.
