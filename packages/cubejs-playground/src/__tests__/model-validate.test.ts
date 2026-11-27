@@ -183,3 +183,170 @@ describe('validate', () => {
     expect(issues({ ...model(), views: [view()] }, columnsOf, 'postgres').filter((i) => i.target.kind === 'view')).toEqual([]);
   });
 });
+
+describe('cube issues', () => {
+  const cube = (over = {}) => ({
+    id: 'c2',
+    name: 'orders_cube',
+    source: { kind: 'table' as const, table: 'orders', primaryKey: 'id' },
+    dimensions: [],
+    measures: [],
+    segments: [],
+    x: 0,
+    y: 0,
+    ...over,
+  });
+  const withCubes = (...cubes: ReturnType<typeof cube>[]) => {
+    const base = model();
+    return { ...base, cubes: [...(base.cubes ?? []), ...cubes] } as ModelDefinition;
+  };
+  const rulesOf = (def: ModelDefinition, kind = 'cube') => issues(def, columnsOf, 'postgres')
+    .filter((i) => i.target.kind === kind)
+    .map((i) => i.rule)
+    .sort();
+
+  it('a clean auto cube has no issue', () => {
+    expect(rulesOf(withCubes(cube()))).toEqual([]);
+  });
+
+  it('flags names: empty, invalid, long, repeated', () => {
+    expect(rulesOf(withCubes(cube({ name: ' ' })))).toEqual(['cube.emptyName']);
+    expect(rulesOf(withCubes(cube({ name: '1a' })))).toEqual(['cube.invalidName']);
+    expect(rulesOf(withCubes(cube({ name: 'a'.repeat(64) })))).toEqual(['cube.nameLength']);
+    expect(rulesOf(withCubes(cube({ name: 'customers' })))).toEqual(['cube.uniqueName']);
+  });
+
+  it('flags a cube with no table, a table outside the model and a draft table', () => {
+    expect(rulesOf(withCubes(cube({ source: { kind: 'table' } })))).toEqual(['cube.noTable']);
+    expect(rulesOf(withCubes(cube({ source: { kind: 'table', table: 'gone' } })))).toEqual(['cube.unknownTable']);
+    expect(rulesOf(withCubes(cube({ source: { kind: 'table', table: 'items', primaryKey: 'id' } })))).toEqual(['cube.draftTable']);
+  });
+
+  it('flags a sql cube with no query and no members, but not one with members', () => {
+    const sql = (over = {}) => cube({ source: { kind: 'sql', sql: 'select 1', tables: ['orders'] }, ...over });
+    expect(rulesOf(withCubes(sql()))).toEqual(['cube.noMembers']);
+    expect(rulesOf(withCubes(sql({ source: { kind: 'sql', sql: ' ' }, measures: [{ name: 'n', type: 'count' }] })))).toEqual(['cube.noSql']);
+    expect(rulesOf(withCubes(sql({ measures: [{ name: 'n', type: 'count' }] })))).toEqual([]);
+    expect(rulesOf(withCubes(sql({ source: { kind: 'sql', sql: 'x', tables: ['gone'] }, measures: [{ name: 'n', type: 'count' }] })))).toEqual(['cube.unknownTable']);
+  });
+
+  it('flags an auto cube with no primary key, and a key that is not a column', () => {
+    expect(rulesOf(withCubes(cube({ source: { kind: 'table', table: 'orders' } })))).toEqual(['cube.primaryKey']);
+    expect(rulesOf(withCubes(cube({ source: { kind: 'joined', table: 'orders' } })))).toEqual(['cube.primaryKey']);
+    expect(rulesOf(withCubes(cube({ source: { kind: 'table', table: 'orders', primaryKey: 'nope' } })))).toEqual(['cube.primaryKey']);
+    expect(rulesOf(withCubes(cube({
+      source: { kind: 'table', table: 'orders' }, measures: [{ name: 'n', type: 'count' }],
+    })))).toEqual([]);
+  });
+
+  it('flags member names, types, sql-or-column and formats', () => {
+    const def = withCubes(cube({
+      dimensions: [
+        { name: 'a', type: 'string', column: 'id' },
+        { name: 'a', type: 'bogus', column: 'id' },
+        { name: '', type: 'string', sql: 'x' },
+        { name: 'b c', type: 'string' },
+        { name: 'd', type: 'string', sql: 'x', column: 'id' },
+      ],
+      measures: [
+        { name: 'm', type: 'sum' },
+        { name: 'n', type: 'count', format: 'weird' },
+        { name: 'k', type: 'nope', sql: 'x' },
+      ],
+      segments: [{ name: 'a', sql: '1=1' }],
+    }));
+    const found = rulesOf(def);
+    expect(found.filter((r) => r === 'cubeMember.uniqueName')).toHaveLength(2);
+    expect(found).toContain('cubeMember.emptyName');
+    expect(found).toContain('cubeMember.invalidName');
+    expect(found.filter((r) => r === 'cubeMember.type')).toHaveLength(2);
+    expect(found.filter((r) => r === 'cubeMember.sqlOrColumn')).toHaveLength(3);
+    expect(found).toContain('cubeMember.format');
+  });
+
+  it('a count measure needs neither sql nor column', () => {
+    expect(rulesOf(withCubes(cube({ measures: [{ name: 'n', type: 'count' }] })))).toEqual([]);
+  });
+
+  it('flags a column that is not in the table the cube reads', () => {
+    const def = withCubes(cube({ dimensions: [{ name: 'a', type: 'string', column: 'nope' }] }));
+    expect(rulesOf(def)).toEqual(['cubeMember.unknownColumn']);
+    expect(rulesOf(withCubes(cube({ dimensions: [{ name: 'a', type: 'string', column: 'id' }] })))).toEqual([]);
+  });
+
+  it('a joined cube takes alias.column over the tables it reaches', () => {
+    const source = { kind: 'joined' as const, table: 'orders', primaryKey: 'id' };
+    const ok = cube({ source, dimensions: [{ name: 'a', type: 'string', column: 'customers.email' }] });
+    expect(rulesOf(withCubes(ok))).toEqual([]);
+    const bad = cube({
+      source,
+      dimensions: [{ name: 'a', type: 'string', column: 'email' }, { name: 'b', type: 'string', column: 'customers.zip' }],
+    });
+    expect(rulesOf(withCubes(bad))).toEqual(['cubeMember.unknownColumn', 'cubeMember.unknownColumn']);
+  });
+
+  it('a joined cube flags a column whose type Cube cannot hold', () => {
+    const odd = { ...COLUMNS, orders: [...COLUMNS.orders, { name: 'tags', type: 'text[]' }] };
+    const cols = (t: ModelTable) => (odd[t.table] ?? columnsOf(t));
+    const source = { kind: 'joined' as const, table: 'orders', primaryKey: 'id' };
+    const def = withCubes(cube({ source, dimensions: [{ name: 'a', type: 'string', column: 'orders.tags' }] }));
+    const found = issues(def, cols, 'postgres').filter((i) => i.target.kind === 'cube').map((i) => i.rule);
+    expect(found).toEqual(['cubeMember.unknownColumn']);
+  });
+
+  it('a sql cube does not check columns', () => {
+    const def = withCubes(cube({
+      source: { kind: 'sql', sql: 'select 1', tables: ['orders'] },
+      dimensions: [{ name: 'a', type: 'string', column: 'whatever' }],
+    }));
+    expect(rulesOf(def)).toEqual([]);
+  });
+
+  it('a disabled cube rule gives no issue', () => {
+    const def = { ...withCubes(cube({ source: { kind: 'sql', sql: '' } })), settings: { validation: { 'cube.noSql': false } } };
+    expect(rulesOf(def as ModelDefinition)).toEqual(['cube.noMembers']);
+  });
+
+  describe('cube joins', () => {
+    const base = () => withCubes(cube({ dimensions: [{ name: 'customer_id', type: 'number', column: 'customer_id' }] }));
+    const join = (over = {}) => ({
+      id: 'cj1', from: 'c2', to: 'c1', relationship: 'many_to_one' as const, on: [{ from: 'customer_id', to: 'customers_id' }], points: [], ...over,
+    });
+    const withJoins = (...joins: ReturnType<typeof join>[]) => ({ ...base(), cubeJoins: joins }) as ModelDefinition;
+
+    it('a good join has no issue', () => {
+      expect(rulesOf(withJoins(join()), 'cubeJoin')).toEqual([]);
+    });
+
+    it('flags ends that are not cubes, a self join, a bad relationship and no pairs', () => {
+      expect(rulesOf(withJoins(join({ to: 'c9' })), 'cubeJoin')).toEqual(['cubeJoin.cubes']);
+      expect(rulesOf(withJoins(join({ to: 'c2' })), 'cubeJoin')).toContain('cubeJoin.cubes');
+      expect(rulesOf(withJoins(join({ relationship: 'x' as never })), 'cubeJoin')).toEqual(['cubeJoin.relationship']);
+      expect(rulesOf(withJoins(join({ on: [] })), 'cubeJoin')).toEqual(['cubeJoin.noPairs']);
+    });
+
+    it('flags a pair that is not a dimension of its cube', () => {
+      expect(rulesOf(withJoins(join({ on: [{ from: 'nope', to: 'customers_id' }] })), 'cubeJoin')).toEqual(['cubeJoin.dimension']);
+      expect(rulesOf(withJoins(join({ on: [{ from: 'customer_id', to: 'nope' }] })), 'cubeJoin')).toEqual(['cubeJoin.dimension']);
+    });
+
+    it('flags the second join between the same two cubes, in either direction', () => {
+      const found = issues(withJoins(join(), join({ id: 'cj2', from: 'c1', to: 'c2', on: [{ from: 'customers_id', to: 'customer_id' }] })), columnsOf, 'postgres')
+        .filter((i) => i.rule === 'cubeJoin.duplicate');
+      expect(found.map((i) => (i.target as { id: string }).id)).toEqual(['cj2']);
+    });
+
+    it('a dimension of an auto cube counts, under the name auto mode gives it', () => {
+      const def = { ...model(), cubeJoins: [join()] };
+      def.cubes = [...def.cubes!, cube()];
+      expect(rulesOf(def as ModelDefinition, 'cubeJoin')).toEqual([]);
+    });
+  });
+
+  it('every cube rule is listed', () => {
+    const ids = RULES.map((r) => r.id);
+    for (const id of ['cube.noSql', 'cube.primaryKey', 'cubeMember.unknownColumn', 'cubeJoin.duplicate']) {
+      expect(ids).toContain(id);
+    }
+  });
+});

@@ -1,5 +1,5 @@
 import {
-  CubeDimension, CubeJoin, CubeMeasure, CubeNode, CubeSource, DimensionType, IDENTIFIER, ModelDefinition,
+  CubeDimension, CubeJoin, CubeMeasure, CubeNode, CubeSegment, CubeSource, DimensionType, IDENTIFIER, ModelDefinition,
   Relationship,
 } from './modelGraph';
 import { freeId, freeName, merged } from './objects';
@@ -102,7 +102,7 @@ export function setMember(
   id: string,
   group: MemberGroup,
   index: number,
-  patch: Record<string, unknown>
+  patch: Partial<CubeDimension & CubeMeasure & CubeSegment>
 ): ModelDefinition {
   return mapCube(def, id, (c) => ({
     ...c,

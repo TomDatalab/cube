@@ -1360,7 +1360,9 @@ function Editor({
                 pickNode(issue.target.alias);
               } else if (issue.target.kind === 'view') {
                 pickNode(nodeIdOf('view', issue.target.id));
-              } else {
+              } else if (issue.target.kind === 'cube') {
+                pickNode(nodeIdOf('cube', issue.target.id));
+              } else if (issue.target.kind === 'reference') {
                 const { id } = issue.target;
                 const at = def.joins.findIndex((j) => j.id === id);
                 if (at >= 0) {

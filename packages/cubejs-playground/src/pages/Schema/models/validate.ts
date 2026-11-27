@@ -1,14 +1,23 @@
-import { cubeKeyOf } from './cubes';
+import {
+  ColumnsOf, cubeKeyOf, cubeReads, cubeType, dimensionNames,
+} from './cubes';
 import { Dialect, validType } from './dialect';
-import { IDENTIFIER, ModelDefinition, ModelJoin, ModelTable } from './modelGraph';
+import {
+  DIMENSION_TYPES, IDENTIFIER, MEASURE_FORMATS, MEASURE_TYPES, ModelDefinition, ModelJoin, ModelTable,
+} from './modelGraph';
 import { referenceEnds } from './physical';
 
 // What a problem is about: a table (its columns, keys, indexes and checks
-// included), a reference or a view (its columns included).
-export type IssueTarget = { kind: 'table'; alias: string } | { kind: 'reference'; id: string } | { kind: 'view'; id: string };
+// included), a reference, a view (its columns included), a cube (its source
+// and members included) or a cube join.
+export type IssueTarget = { kind: 'table'; alias: string }
+  | { kind: 'reference'; id: string }
+  | { kind: 'view'; id: string }
+  | { kind: 'cube'; id: string }
+  | { kind: 'cubeJoin'; id: string };
 export type Issue = { rule: string; severity: 'error' | 'warning'; target: IssueTarget; message: string };
 
-type Group = 'Table' | 'Table column' | 'Table alternate key' | 'Table check' | 'Table index' | 'Reference' | 'View' | 'View column';
+type Group = 'Table' | 'Table column' | 'Table alternate key' | 'Table check' | 'Table index' | 'Reference' | 'View' | 'View column' | 'Cube' | 'Cube member' | 'Cube join';
 export type Rule = { id: string; group: Group; label: string; severity: 'error' | 'warning'; dialect?: true };
 
 // Redgate's model validation rules for the objects this model has, in its
@@ -142,6 +151,75 @@ export const RULES: Rule[] = [
   },
   {
     id: 'viewColumn.supportedType', group: 'View column', label: 'Supported database type', severity: 'warning', dialect: true,
+  },
+  {
+    id: 'cube.emptyName', group: 'Cube', label: "Name can't be empty", severity: 'error',
+  },
+  {
+    id: 'cube.invalidName', group: 'Cube', label: 'Invalid name', severity: 'error',
+  },
+  {
+    id: 'cube.nameLength', group: 'Cube', label: 'Name length', severity: 'error',
+  },
+  {
+    id: 'cube.uniqueName', group: 'Cube', label: 'Unique name', severity: 'error',
+  },
+  {
+    id: 'cube.noTable', group: 'Cube', label: 'Choose the table', severity: 'error',
+  },
+  {
+    id: 'cube.unknownTable', group: 'Cube', label: 'Table is in the model', severity: 'error',
+  },
+  {
+    id: 'cube.draftTable', group: 'Cube', label: 'Table exists in the database', severity: 'error',
+  },
+  {
+    id: 'cube.noSql', group: 'Cube', label: "SQL query can't be empty", severity: 'error',
+  },
+  {
+    id: 'cube.noMembers', group: 'Cube', label: 'SQL cube has members', severity: 'error',
+  },
+  {
+    id: 'cube.primaryKey', group: 'Cube', label: 'Primary key of an auto cube', severity: 'error',
+  },
+  {
+    id: 'cubeMember.emptyName', group: 'Cube member', label: "Name can't be empty", severity: 'error',
+  },
+  {
+    id: 'cubeMember.invalidName', group: 'Cube member', label: 'Invalid name', severity: 'error',
+  },
+  {
+    id: 'cubeMember.nameLength', group: 'Cube member', label: 'Name length', severity: 'error',
+  },
+  {
+    id: 'cubeMember.uniqueName', group: 'Cube member', label: 'Unique name', severity: 'error',
+  },
+  {
+    id: 'cubeMember.type', group: 'Cube member', label: 'Known type', severity: 'error',
+  },
+  {
+    id: 'cubeMember.sqlOrColumn', group: 'Cube member', label: 'SQL or column, not both', severity: 'error',
+  },
+  {
+    id: 'cubeMember.format', group: 'Cube member', label: 'Known format', severity: 'error',
+  },
+  {
+    id: 'cubeMember.unknownColumn', group: 'Cube member', label: 'Column exists in the tables read', severity: 'error',
+  },
+  {
+    id: 'cubeJoin.cubes', group: 'Cube join', label: 'Joins two cubes of the model', severity: 'error',
+  },
+  {
+    id: 'cubeJoin.relationship', group: 'Cube join', label: 'Known relationship', severity: 'error',
+  },
+  {
+    id: 'cubeJoin.noPairs', group: 'Cube join', label: 'At least one pair', severity: 'error',
+  },
+  {
+    id: 'cubeJoin.dimension', group: 'Cube join', label: 'Pairs are dimensions', severity: 'error',
+  },
+  {
+    id: 'cubeJoin.duplicate', group: 'Cube join', label: 'Cubes joined once', severity: 'error',
   },
 ];
 
@@ -372,6 +450,159 @@ export function issues(
         add('viewColumn.emptyType', target, `${col} has no type`);
       } else if (!validType(dialect, c.type)) {
         add('viewColumn.supportedType', target, `${col}: ${c.type} is not a ${dialect} type`);
+      }
+    }
+  }
+
+  const cubes = def.cubes ?? [];
+  const cubeNames = new Set<string>();
+  const columnsAt: ColumnsOf = (schema, table) => {
+    const t = def.tables.find((x) => x.schema === schema && x.table === table);
+    return t ? columnsOf(t) : undefined;
+  };
+  for (const cube of cubes) {
+    const target: IssueTarget = { kind: 'cube', id: cube.id };
+    const what = `Cube ${cube.name || cube.id}`;
+    if (!cube.name.trim()) {
+      add('cube.emptyName', target, `Cube ${cube.id} has an empty name`);
+    } else {
+      if (!IDENTIFIER.test(cube.name)) {
+        add('cube.invalidName', target, `${what} has an invalid name`);
+      }
+      if (cube.name.length > MAX_NAME) {
+        add('cube.nameLength', target, `${what}'s name is longer than ${MAX_NAME} characters`);
+      }
+      if (cubeNames.has(cube.name)) {
+        add('cube.uniqueName', target, `${what} is used by another cube`);
+      }
+      cubeNames.add(cube.name);
+    }
+
+    const { kind, table, tables, primaryKey } = cube.source;
+    const auto = cube.dimensions.length === 0 && cube.measures.length === 0;
+    if (kind !== 'sql' && !table) {
+      add('cube.noTable', target, `Choose the primary table of ${what}`);
+    }
+    for (const alias of [...(table ? [table] : []), ...(tables ?? [])]) {
+      const t = def.tables.find((x) => x.alias === alias);
+      if (!t) {
+        add('cube.unknownTable', target, `${what} reads ${alias}, which is not in the model`);
+      } else if (t.draft && kind !== 'sql') {
+        add('cube.draftTable', target, `${what} reads ${alias}, which is not in the database yet`);
+      }
+    }
+    if (kind === 'sql') {
+      if (!cube.source.sql?.trim()) {
+        add('cube.noSql', target, `${what} has no SQL query`);
+      }
+      if (auto) {
+        add('cube.noMembers', target, `${what} has no members`);
+      }
+    }
+    const reads = cubeReads(def, cube)
+      .map((alias) => def.tables.find((x) => x.alias === alias))
+      .filter((t): t is ModelTable => !!t);
+    const primary = def.tables.find((x) => x.alias === table);
+    if (kind !== 'sql' && primary && (auto || kind === 'joined')) {
+      const key = primaryKey ? columnsOf(primary).find((c) => c.name === primaryKey) : undefined;
+      if (!primaryKey && auto) {
+        add('cube.primaryKey', target, `Choose the primary key of ${what}`);
+      } else if (primaryKey && (!key || !cubeType(key.type))) {
+        add('cube.primaryKey', target, `${what}: ${primary.alias}.${primaryKey} is not a column with a Cube type`);
+      }
+    }
+
+    // Member names are shared by dimensions, measures and segments.
+    const members = [
+      ...cube.dimensions.map((m) => ({ ...m, group: 'dimension' as const })),
+      ...cube.measures.map((m) => ({ ...m, group: 'measure' as const })),
+      ...cube.segments.map((m) => ({ ...m, group: 'segment' as const })),
+    ];
+    const seen = new Set<string>();
+    for (const m of members) {
+      const label = `${m.group[0].toUpperCase()}${m.group.slice(1)} ${cube.name}.${m.name}`;
+      if (!m.name.trim()) {
+        add('cubeMember.emptyName', target, `A member of ${what} has an empty name`);
+      } else {
+        if (!IDENTIFIER.test(m.name)) {
+          add('cubeMember.invalidName', target, `${label} has an invalid name`);
+        }
+        if (m.name.length > MAX_NAME) {
+          add('cubeMember.nameLength', target, `${label}'s name is longer than ${MAX_NAME} characters`);
+        }
+        if (seen.has(m.name)) {
+          add('cubeMember.uniqueName', target, `${label} is repeated`);
+        }
+        seen.add(m.name);
+      }
+    }
+    for (const m of members.filter((x) => x.group !== 'segment')) {
+      const label = `${m.group[0].toUpperCase()}${m.group.slice(1)} ${cube.name}.${m.name}`;
+      const types: readonly string[] = m.group === 'dimension' ? DIMENSION_TYPES : MEASURE_TYPES;
+      if (!types.includes(m.type)) {
+        add('cubeMember.type', target, `${label} has an unknown type: ${m.type}`);
+      }
+      if (m.group === 'measure' && m.format && !(MEASURE_FORMATS as readonly string[]).includes(m.format)) {
+        add('cubeMember.format', target, `${label} has an unknown format: ${m.format}`);
+      }
+      const hasSql = !!m.sql?.trim();
+      const hasColumn = !!m.column?.trim();
+      const free = m.group === 'measure' && m.type === 'count';
+      if ((hasSql && hasColumn) || (!hasSql && !hasColumn && !free)) {
+        add('cubeMember.sqlOrColumn', target, `${label} needs SQL or a column, not both`);
+      }
+      if (hasColumn && kind !== 'sql') {
+        const column = m.column as string;
+        let found: { name: string; type: string } | undefined;
+        if (kind === 'table') {
+          found = reads[0] ? columnsOf(reads[0]).find((c) => c.name === column) : undefined;
+        } else {
+          const [alias, name] = column.split('.', 2) as [string, string | undefined];
+          const owner = reads.find((t) => t.alias === alias);
+          found = owner ? columnsOf(owner).find((c) => c.name === name) : undefined;
+          // A joined cube selects only the columns Cube can hold.
+          if (found && !cubeType(found.type)) {
+            found = undefined;
+          }
+        }
+        if (!found && (reads.length > 0 || kind === 'joined')) {
+          add('cubeMember.unknownColumn', target, `${label}: column ${column} is not in the tables ${what} reads`);
+        }
+      }
+    }
+  }
+
+  const byId = new Map(cubes.map((c) => [c.id, c]));
+  const linked = new Set<string>();
+  for (const j of def.cubeJoins ?? []) {
+    const target: IssueTarget = { kind: 'cubeJoin', id: j.id };
+    const from = byId.get(j.from);
+    const to = byId.get(j.to);
+    const what = `Cube join ${j.id}`;
+    const joinsCubes = !!from && !!to && from !== to;
+    if (!joinsCubes) {
+      add('cubeJoin.cubes', target, `${what} does not join two cubes of the model`);
+    }
+    if (!['one_to_one', 'one_to_many', 'many_to_one'].includes(j.relationship)) {
+      add('cubeJoin.relationship', target, `${what} has an unknown relationship: ${j.relationship}`);
+    }
+    if (j.on.length === 0) {
+      add('cubeJoin.noPairs', target, `${what} has no dimensions to join on`);
+    }
+    if (from && to && joinsCubes) {
+      const link = [j.from, j.to].sort().join('|');
+      if (linked.has(link)) {
+        add('cubeJoin.duplicate', target, `${what}: ${from.name} and ${to.name} are already joined`);
+      }
+      linked.add(link);
+      const fromNames = dimensionNames(def, from, columnsAt);
+      const toNames = dimensionNames(def, to, columnsAt);
+      for (const p of j.on) {
+        for (const [cube, names, dimension] of [[from, fromNames, p.from], [to, toNames, p.to]] as const) {
+          if (!names.includes(dimension)) {
+            add('cubeJoin.dimension', target, `${what} uses ${cube.name}.${dimension}, which is not a dimension of the cube`);
+          }
+        }
       }
     }
   }

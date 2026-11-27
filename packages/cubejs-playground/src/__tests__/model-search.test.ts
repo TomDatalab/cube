@@ -57,3 +57,31 @@ describe('searchModel', () => {
     ]);
   });
 });
+
+describe('searchModel cubes', () => {
+  const withCube = () => ({
+    ...model(),
+    cubes: [{
+      id: 'c1',
+      name: 'sales_cube',
+      title: 'Sales overview',
+      source: { kind: 'table' as const, table: 'orders' },
+      dimensions: [{ name: 'region', type: 'string' as const, column: 'id' }],
+      measures: [{ name: 'revenue', type: 'sum' as const, column: 'id', title: 'Total revenue' }],
+      segments: [{ name: 'big', sql: '1 = 1' }],
+      x: 0,
+      y: 0,
+    }],
+  });
+
+  it('finds a cube by name or title and selects it', () => {
+    expect(searchModel(withCube(), columnsOf, 'sales_c')).toEqual([{ kind: 'cube', label: 'sales_cube', nodeId: 'cube:c1' }]);
+    expect(searchModel(withCube(), columnsOf, 'overview')).toEqual([{ kind: 'cube', label: 'sales_cube', nodeId: 'cube:c1' }]);
+  });
+
+  it('finds members by name or title, labelled with their cube', () => {
+    expect(searchModel(withCube(), columnsOf, 'region')).toEqual([{ kind: 'cube', label: 'sales_cube.region', nodeId: 'cube:c1' }]);
+    expect(searchModel(withCube(), columnsOf, 'big').map((h) => h.label)).toEqual(['sales_cube.big']);
+    expect(searchModel(withCube(), columnsOf, 'total rev').map((h) => h.label)).toEqual(['sales_cube.revenue']);
+  });
+});
