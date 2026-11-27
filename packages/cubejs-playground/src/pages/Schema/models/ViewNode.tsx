@@ -70,13 +70,21 @@ export const ViewNode = memo(({
       >
         <div data-slot="model-view-name" className="tw:truncate tw:font-bold">{data.name}</div>
       </div>
-      <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
+      {/* One grid for all the rows, as in a table. */}
+      <ul
+        className="tw:m-0 tw:grid tw:min-h-0 tw:list-none tw:gap-x-3 tw:p-0 tw:py-0.5"
+        style={{ gridTemplateColumns: data.showTypes ? 'minmax(0, auto) minmax(0, auto)' : 'minmax(0, auto)' }}
+      >
         {data.columns.map((c, i) => (
-          // Names may repeat until validation has them fixed.
-          // eslint-disable-next-line react/no-array-index-key
-          <li key={i} data-column={c.name} className="tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4">
-            <span className="tw:min-w-0 tw:flex-1 tw:truncate">{c.name}</span>
-            {data.showTypes ? <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span> : null}
+          <li
+            // Names may repeat until validation has them fixed.
+            // eslint-disable-next-line react/no-array-index-key
+            key={i}
+            data-column={c.name}
+            className="tw:col-span-full tw:grid tw:grid-cols-subgrid tw:items-center tw:px-1.5 tw:leading-4"
+          >
+            <span className="tw:min-w-0 tw:truncate">{c.name}</span>
+            {data.showTypes ? <span className="tw:min-w-0 tw:truncate">{c.type}</span> : null}
           </li>
         ))}
       </ul>

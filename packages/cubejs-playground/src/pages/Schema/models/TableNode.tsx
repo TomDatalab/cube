@@ -64,6 +64,11 @@ const HANDLE_STYLE = {
 
 // The handles of a collapsed table: kept, so its links stay drawn, but out
 // of sight in the middle of its header.
+// The rows' tracks: name and type take their text's width and share what a
+// resize adds or takes away; the key marks keep theirs.
+const COLUMNS = 'minmax(0, auto) minmax(0, auto) auto';
+const COLUMNS_NO_TYPE = 'minmax(0, auto) auto';
+
 const HIDDEN_HANDLE_STYLE = { ...HANDLE_STYLE, opacity: 0, pointerEvents: 'none' as const };
 
 // The table and column of a row under the pointer, so a link dropped
@@ -191,14 +196,19 @@ export const TableNode = memo(({
         <p className="tw:m-0 tw:px-2 tw:py-1 tw:text-destructive">Not in the connection</p>
       ) : null}
       {!data.collapsed && !data.missing ? (
-        <ul className="tw:m-0 tw:min-h-0 tw:list-none tw:p-0 tw:py-0.5">
+        // One grid for all the rows: the types line up, and a resize shares
+        // the width between the names and the types.
+        <ul
+          className="tw:m-0 tw:grid tw:min-h-0 tw:list-none tw:gap-x-3 tw:p-0 tw:py-0.5"
+          style={{ gridTemplateColumns: data.showTypes === false ? COLUMNS_NO_TYPE : COLUMNS }}
+        >
           {data.columns.map((c) => (
             <li
               key={c.name}
               data-column={c.name}
               data-picked={data.picked === c.name || undefined}
               className={cn(
-                'tw:relative tw:flex tw:items-center tw:gap-3 tw:px-1.5 tw:leading-4 tw:hover:bg-accent',
+                'tw:relative tw:col-span-full tw:grid tw:grid-cols-subgrid tw:items-center tw:px-1.5 tw:leading-4 tw:hover:bg-accent',
                 data.picked === c.name && 'tw:bg-accent tw:ring-2 tw:ring-inset tw:ring-primary'
               )}
             >
@@ -207,13 +217,13 @@ export const TableNode = memo(({
                 type="button"
                 data-slot="model-column-name"
                 title="Click, then click a column of another table to link them"
-                className="nodrag tw:min-w-0 tw:flex-1 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
+                className="nodrag tw:min-w-0 tw:cursor-pointer tw:truncate tw:border-0 tw:bg-transparent tw:p-0 tw:text-left tw:text-inherit tw:[font:inherit] tw:hover:underline"
                 onClick={() => data.onPick(data.alias, c.name)}
               >
                 {c.name}
               </button>
-              {data.showTypes === false ? null : <span className="tw:w-20 tw:shrink-0 tw:truncate">{c.type}</span>}
-              <span className="tw:w-9 tw:shrink-0 tw:text-right">{marks(data, c.name)}</span>
+              {data.showTypes === false ? null : <span className="tw:min-w-0 tw:truncate">{c.type}</span>}
+              <span className="tw:w-9 tw:text-right">{marks(data, c.name)}</span>
               <Handle type="source" position={Position.Right} id={c.name} style={HANDLE_STYLE} />
             </li>
           ))}
