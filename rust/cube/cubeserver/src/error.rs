@@ -46,6 +46,10 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
+    pub fn locked(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::LOCKED, message)
+    }
+
     /// `CubejsHandlerError(403, 'Authorization', ...)` in Node.js.
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, message)

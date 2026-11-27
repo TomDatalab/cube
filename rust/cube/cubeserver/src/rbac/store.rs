@@ -478,6 +478,13 @@ const CUBE_MODEL_COLS: &str = "id, organization_id, name, definition, cube_name,
      version, created_at, updated_at, created_by, updated_by";
 
 /// What the last build of a model wrote for one of its cubes.
+/// Who holds a model's edit lock, and the token that proves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelLock {
+    pub user_name: String,
+    pub token: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltRecord {
     pub cube_id: String,
@@ -2102,6 +2109,81 @@ impl Store {
             )
             .await?;
         Ok(rows.iter().map(built_record_from).collect())
+    }
+
+    /// Claims the edit lock of model `model_id` for `user`/`token`: when
+    /// `take` is set, or the lock is missing, older than `ttl_secs` or
+    /// already holds `token`, it is (re)written with a fresh heartbeat.
+    /// Returns the live lock afterwards: ours when claimed, the other
+    /// holder's otherwise.
+    pub async fn claim_cube_model_lock(
+        &self,
+        model_id: Uuid,
+        user: &str,
+        token: &str,
+        take: bool,
+        ttl_secs: i64,
+    ) -> Result<Option<ModelLock>, StoreError> {
+        let ttl = ttl_secs as f64;
+        let mut c = self.conn().await?;
+        let tx = c.transaction().await?;
+        tx.query_opt(
+            "SELECT 1 FROM cube_model_locks WHERE model_id = $1 FOR UPDATE",
+            &[&model_id],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO cube_model_locks (model_id, user_name, token, heartbeat_at) \
+             VALUES ($1, $2, $3, now()) \
+             ON CONFLICT (model_id) DO UPDATE \
+             SET user_name = EXCLUDED.user_name, token = EXCLUDED.token, heartbeat_at = now() \
+             WHERE $4 OR cube_model_locks.token = EXCLUDED.token \
+                OR cube_model_locks.heartbeat_at < now() - make_interval(secs => $5)",
+            &[&model_id, &user, &token, &take, &ttl],
+        )
+        .await?;
+        let row = tx
+            .query_opt(
+                "SELECT user_name, token FROM cube_model_locks \
+                 WHERE model_id = $1 AND heartbeat_at >= now() - make_interval(secs => $2)",
+                &[&model_id, &ttl],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| ModelLock { user_name: r.get(0), token: r.get(1) }))
+    }
+
+    /// Drops the lock of model `model_id` when it holds `token`.
+    pub async fn release_cube_model_lock(
+        &self,
+        model_id: Uuid,
+        token: &str,
+    ) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        c.execute(
+            "DELETE FROM cube_model_locks WHERE model_id = $1 AND token = $2",
+            &[&model_id, &token],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The lock of model `model_id` when its last heartbeat is within
+    /// `ttl_secs`.
+    pub async fn live_cube_model_lock(
+        &self,
+        model_id: Uuid,
+        ttl_secs: i64,
+    ) -> Result<Option<ModelLock>, StoreError> {
+        let c = self.conn().await?;
+        let row = c
+            .query_opt(
+                "SELECT user_name, token FROM cube_model_locks \
+                 WHERE model_id = $1 AND heartbeat_at >= now() - make_interval(secs => $2)",
+                &[&model_id, &(ttl_secs as f64)],
+            )
+            .await?;
+        Ok(row.map(|r| ModelLock { user_name: r.get(0), token: r.get(1) }))
     }
 
     /// The build records of every model of the organization, as

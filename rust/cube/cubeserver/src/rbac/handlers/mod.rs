@@ -192,6 +192,14 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
                 .delete(cube_models::delete),
         )
         .route(
+            &format!("{base}/v1/cube-models/:id/lock"),
+            post(cube_models::lock).delete(cube_models::release_lock),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/lock/take"),
+            post(cube_models::take_lock),
+        )
+        .route(
             &format!("{base}/v1/cube-models/:id/build"),
             post(cube_models::build),
         )

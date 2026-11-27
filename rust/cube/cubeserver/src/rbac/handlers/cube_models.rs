@@ -9,7 +9,7 @@
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ use crate::rbac::cube_model::{self, Definition};
 use crate::rbac::model_snapshot::source_path;
 use crate::rbac::model_store::{ModelChange, ModelFile};
 use crate::rbac::model_writer::WriteError;
-use crate::rbac::store::{BuiltRecord, CubeModel, Store, StoreError};
+use crate::rbac::store::{BuiltRecord, CubeModel, ModelLock, Store, StoreError};
 use crate::services::RequestContext;
 use std::collections::HashMap;
 
@@ -221,6 +221,105 @@ async fn visible_model(
     Ok((model, scope, actor))
 }
 
+/// Seconds without a heartbeat after which an edit lock is free.
+pub const LOCK_TTL_SECS: i64 = 120;
+
+/// The header that carries the caller's lock token.
+const LOCK_HEADER: &str = "X-Model-Lock";
+
+/// 423 when a live lock of the model is not the one in `X-Model-Lock`
+/// (or the header is missing); free when nobody holds the model.
+async fn check_lock(store: &Store, model_id: uuid::Uuid, headers: &HeaderMap) -> Result<(), ApiError> {
+    let live = store
+        .live_cube_model_lock(model_id, LOCK_TTL_SECS)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let Some(live) = live else { return Ok(()) };
+    let token = headers.get(LOCK_HEADER).and_then(|v| v.to_str().ok());
+    if token == Some(live.token.as_str()) {
+        Ok(())
+    } else {
+        Err(ApiError::locked(format!(
+            "O model está sendo editado por {}",
+            live.user_name
+        )))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LockBody {
+    token: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseParams {
+    token: Option<String>,
+}
+
+fn lock_view(lock: Option<ModelLock>, token: &str) -> Json<Value> {
+    Json(json!({
+        "held": lock.as_ref().is_some_and(|l| l.token == token),
+        "holder": lock.map(|l| l.user_name),
+    }))
+}
+
+async fn claim(
+    state: AppState,
+    ctx: RequestContext,
+    id: String,
+    request: Result<Json<LockBody>, JsonRejection>,
+    take: bool,
+) -> Result<Json<Value>, ApiError> {
+    let (model, _, actor) = visible_model(&state, &ctx, &id).await?;
+    let request = body(request)?;
+    let lock = super::rbac_of(&state)?
+        .store
+        .claim_cube_model_lock(model.id, &actor, &request.token, take, LOCK_TTL_SECS)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    Ok(lock_view(lock, &request.token))
+}
+
+/// `{token}` → `{held, holder}`: claims the model's edit lock, or renews it
+/// when `token` holds it. `admin` on the organization.
+pub async fn lock(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    request: Result<Json<LockBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    claim(state, ctx, id, request, false).await
+}
+
+/// `{token}` → `{held, holder}`: takes the lock over from its holder.
+pub async fn take_lock(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    request: Result<Json<LockBody>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    claim(state, ctx, id, request, true).await
+}
+
+/// `?token=` → 204: frees the lock when `token` holds it.
+pub async fn release_lock(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+    Query(params): Query<ReleaseParams>,
+) -> Result<StatusCode, ApiError> {
+    let (model, _, _) = visible_model(&state, &ctx, &id).await?;
+    let token = params
+        .token
+        .ok_or_else(|| ApiError::bad_request("Informe o token (?token=)"))?;
+    super::rbac_of(&state)?
+        .store
+        .release_cube_model_lock(model.id, &token)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// → `{models: [...]}`, by name: `admin` on the organization.
 pub async fn list(
     State(state): State<AppState>,
@@ -288,9 +387,11 @@ pub async fn update(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<ModelUpdate>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let (model, _, actor) = visible_model(&state, &ctx, &id).await?;
+    check_lock(&super::rbac_of(&state)?.store, model.id, &headers).await?;
     let rbac = super::rbac_of(&state)?;
     let request = body(request)?;
     let name = request.name.as_deref().map(model_name).transpose()?;
@@ -317,9 +418,11 @@ pub async fn delete(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<DeleteParams>,
 ) -> Result<StatusCode, ApiError> {
     let (model, _, _) = visible_model(&state, &ctx, &id).await?;
+    check_lock(&super::rbac_of(&state)?.store, model.id, &headers).await?;
     let version = params
         .version
         .ok_or_else(|| ApiError::bad_request("Informe a versão do model (?version=)"))?;
@@ -361,9 +464,11 @@ pub async fn build(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<BuildBody>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let (model, scope, actor) = visible_model(&state, &ctx, &id).await?;
+    check_lock(&super::rbac_of(&state)?.store, model.id, &headers).await?;
     let force = match request {
         Err(JsonRejection::MissingJsonContentType(_)) => false,
         request => body(request)?.force,
@@ -629,9 +734,11 @@ pub async fn create_tables(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<CreateTablesBody>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let (model, scope, actor) = visible_model(&state, &ctx, &id).await?;
+    check_lock(&super::rbac_of(&state)?.store, model.id, &headers).await?;
     let request = body(request)?;
     let rbac = super::rbac_of(&state)?;
     let mut def: Definition = serde_json::from_value(model.definition.clone())

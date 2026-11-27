@@ -280,3 +280,11 @@ INSERT INTO cube_model_cubes (model_id, cube_id, cube_name, file_id, built_hash)
     WHERE cube_name IS NOT NULL AND cube_file_id IS NOT NULL AND cube_built_hash IS NOT NULL
     ON CONFLICT DO NOTHING;
 UPDATE cube_models SET cube_file_id = NULL, cube_built_hash = NULL WHERE cube_file_id IS NOT NULL;
+
+-- Who is editing a model: one live lock per model (see handlers::cube_models).
+CREATE TABLE IF NOT EXISTS cube_model_locks (
+    model_id uuid PRIMARY KEY REFERENCES cube_models (id) ON DELETE CASCADE,
+    user_name text NOT NULL,
+    token text NOT NULL,
+    heartbeat_at timestamptz NOT NULL DEFAULT now()
+);

@@ -1897,3 +1897,85 @@ build_test!(create_tables_partial_failure_keeps_the_first, |store, url| {
     assert!(table_exists(&url, "items").await);
     db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
 });
+
+/// Like `call`, with extra headers.
+async fn call_h(env: &Env, method: Method, token: &str, path: &str, body: Option<Value>, lock: Option<&str>) -> (StatusCode, Value) {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::HOST, "localhost:4000")
+        .header(
+            cubeserver::handlers::playground::PLAYGROUND_KEY_HEADER,
+            cubeserver::handlers::playground::playground_key(),
+        )
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    if let Some(lock) = lock {
+        request = request.header("X-Model-Lock", lock);
+    }
+    let request = match body {
+        Some(body) => request.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .unwrap();
+    let response = env.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+api_test!(model_edit_lock, |store| {
+    let (env, token_a, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    store
+        .create_user(&cubeserver::rbac::store::NewUser {
+            username: "bia".into(),
+            name: None,
+            email: None,
+            password_hash: cubeserver::rbac::identity::hash_password("owner-password-1").unwrap(),
+        })
+        .await
+        .unwrap();
+    let (status, body) = call(&env, Method::PUT, &admin, &format!("/cube/v1/organizations/{on}/owners/bia"), None).await;
+    assert!(status.is_success(), "{body}");
+    let token_b = login(&env, "bia", "owner-password-1").await;
+    let id = new_model(&env, &token_a, on, "Vendas").await;
+    let one = format!("/cube/v1/cube-models/{id}");
+    let lock = format!("{one}/lock");
+    let (status, body) = call(&env, Method::POST, &token_a, &lock, Some(json!({ "token": "a1" }))).await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "held": true, "holder": "olga" })));
+    let (status, body) = call(&env, Method::POST, &token_b, &lock, Some(json!({ "token": "b1" }))).await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "held": false, "holder": "olga" })));
+
+    let msg = "O model está sendo editado por olga";
+    let upd = |v: i64| Some(json!({ "name": "X", "version": v }));
+    let (status, body) = call_h(&env, Method::PUT, &token_b, &one, upd(1), Some("b1")).await;
+    assert_eq!(status, StatusCode::LOCKED, "{body}");
+    assert_eq!(body["error"], msg);
+    let (status, _) = call_h(&env, Method::PUT, &token_b, &one, upd(1), None).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, body) = call_h(&env, Method::PUT, &token_a, &one, upd(1), Some("a1")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = call(&env, Method::POST, &token_b, &format!("{lock}/take"), Some(json!({ "token": "b1" }))).await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "held": true, "holder": "bia" })));
+    let (status, _) = call_h(&env, Method::PUT, &token_a, &one, upd(2), Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, body) = call_h(&env, Method::PUT, &token_b, &one, upd(2), Some("b1")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A, no longer the holder, is refused by build and create-tables.
+    let (status, _) = call_h(&env, Method::POST, &token_a, &format!("{one}/build"), Some(json!({})), Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, _) = call_h(&env, Method::POST, &token_a, &format!("{one}/create-tables"),
+        Some(json!({ "version": 3, "dryRun": true })), Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED);
+
+    let (status, _) = call(&env, Method::DELETE, &token_b, &format!("{lock}?token=b1"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = call_h(&env, Method::PUT, &token_a, &one, upd(3), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+});
