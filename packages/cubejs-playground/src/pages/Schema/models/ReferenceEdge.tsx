@@ -6,14 +6,14 @@ import type { Edge, EdgeProps } from '@xyflow/react';
 
 import type { ModelJoin, Point } from './modelGraph';
 import {
-  EndMark, endMarks, endSides, markPath, orthogonalPath,
+  EndMark, endMarks, endSides, markPath, moveCorner, moveSegment, orthogonalPath, removeCorner, routeOf,
 } from './referencePath';
 
 export type ReferenceEdgeData = {
   index: number;
   join: ModelJoin;
   label: string;
-  onMovePoint: (index: number, pointIndex: number, to: Point) => void;
+  onSetPoints: (index: number, points: Point[]) => void;
 };
 export type ReferenceFlowEdge = Edge<ReferenceEdgeData, 'reference'>;
 
@@ -22,20 +22,22 @@ export type ReferenceLineProps = Pick<EdgeProps, 'id' | 'source' | 'target' | 's
   swapped: boolean;
   ends: { from: EndMark; to: EndMark };
   label: string;
-  onMovePoint: (pointIndex: number, to: Point) => void;
+  onSetPoints: (points: Point[]) => void;
 };
 
 // A reference as Redgate draws it: square corners through its reference
 // points, a crow's foot or bar at each end, the label in the middle of the
-// longest segment. Selected, its points can be dragged. Shared by the table
-// references and the cube joins.
+// longest segment. Selected, every corner can be dragged (double-click one
+// to remove it) and every segment dragged across itself. Shared by the
+// table references and the cube joins.
 export const ReferenceLine = memo(({
-  id, source, target, sourceY, targetY, selected, points: saved, swapped, ends, label, onMovePoint,
+  id, source, target, sourceY, targetY, selected, points: saved, swapped, ends, label, onSetPoints,
 }: ReferenceLineProps) => {
   const from = useInternalNode(source);
   const to = useInternalNode(target);
   const { screenToFlowPosition } = useReactFlow();
-  const [dragging, setDragging] = useState<{ i: number; at: Point } | null>(null);
+  // The points while a drag is under way.
+  const [draft, setDraft] = useState<Point[] | null>(null);
   if (!from || !to) {
     return null;
   }
@@ -48,27 +50,50 @@ export const ReferenceLine = memo(({
   const [sourceSide, targetSide] = endSides(a, b, swapped);
   const sourcePoint = { x: sourceSide === 'right' ? a.x + a.width : a.x, y: sourceY };
   const targetPoint = { x: targetSide === 'right' ? b.x + b.width : b.x, y: targetY };
-  const points = saved.map((p, i) => (dragging?.i === i ? dragging.at : p));
+  const points = draft ?? saved;
   const path = orthogonalPath(sourcePoint, sourceSide, targetPoint, targetSide, points);
+  const route = routeOf(sourcePoint, sourceSide, targetPoint, targetSide, points);
   const stroke = selected ? 'var(--ring)' : 'var(--foreground)';
   const width = selected ? 2 : 1;
 
-  const startDrag = (i: number) => (e: ReactPointerEvent) => {
+  // Drag from the route as it is now; `edit` gives the points for a pointer
+  // position. Nothing is saved unless the pointer moved.
+  const startDrag = (edit: (at: Point) => Point[]) => (e: ReactPointerEvent) => {
+    if (e.button !== 0) {
+      return;
+    }
     e.stopPropagation();
+    e.preventDefault();
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    let moved = false;
+    let last: Point[] | null = null;
+    const at = (ev: PointerEvent) => screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
     const move = (ev: PointerEvent) => {
-      const at = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-      setDragging({ i, at: { x: Math.round(at.x), y: Math.round(at.y) } });
+      if (!moved && Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) < 3) {
+        return;
+      }
+      moved = true;
+      last = edit(at(ev));
+      setDraft(last);
     };
-    const up = (ev: PointerEvent) => {
+    const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      const at = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-      setDragging(null);
-      onMovePoint(i, { x: Math.round(at.x), y: Math.round(at.y) });
+      setDraft(null);
+      if (moved && last) {
+        onSetPoints(last);
+      }
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
+
+  const full = [route.start, ...route.corners, route.end];
+  const segments = full.slice(1).map((q, i) => [full[i], q] as const)
+    .map(([p, q], i) => ({ i, p, q }))
+    // A handle only where there is room to grab the segment.
+    .filter(({ p, q }) => Math.abs(q.x - p.x) + Math.abs(q.y - p.y) >= 16);
 
   return (
     <>
@@ -88,17 +113,44 @@ export const ReferenceLine = memo(({
         >
           {label}
         </div>
-        {selected ? points.map((p, i) => (
+        {selected ? segments.map(({ i, p, q }) => {
+          const across = p.y === q.y;
+          return (
+            // A pointer handle; the keyboard reshapes a line with Add point and
+            // Reduce point.
+            // eslint-disable-next-line jsx-a11y/interactive-supports-focus
+            <div
+              key={`s${i}`}
+              role="button"
+              aria-label={`Reference segment ${i + 1}`}
+              title="Drag to move this segment"
+              data-slot="model-reference-segment"
+              className={`nodrag nopan tw:pointer-events-auto tw:absolute tw:rounded-full tw:border tw:border-ring tw:bg-card ${
+                across ? 'tw:h-1.5 tw:w-3 tw:cursor-ns-resize' : 'tw:h-3 tw:w-1.5 tw:cursor-ew-resize'
+              }`}
+              style={{ transform: `translate(-50%, -50%) translate(${(p.x + q.x) / 2}px, ${(p.y + q.y) / 2}px)` }}
+              onPointerDown={startDrag((at) => moveSegment(route.start, route.corners, route.end, i, at))}
+            />
+          );
+        }) : null}
+        {selected ? route.corners.map((p, k) => (
+          // A pointer handle, like the segment ones.
+          // eslint-disable-next-line jsx-a11y/interactive-supports-focus
           <div
-            // Points have no identity but their order.
+            // Corners have no identity but their order.
             // eslint-disable-next-line react/no-array-index-key
-            key={i}
+            key={`c${k}`}
             role="button"
-            aria-label={`Reference point ${i + 1}`}
+            aria-label={`Reference point ${k + 1}`}
+            title="Drag to move this corner; double-click to remove it"
             data-slot="model-reference-point"
             className="nodrag nopan tw:pointer-events-auto tw:absolute tw:size-2 tw:cursor-move tw:border tw:border-ring tw:bg-card"
             style={{ transform: `translate(-50%, -50%) translate(${p.x}px, ${p.y}px)` }}
-            onPointerDown={startDrag(i)}
+            onPointerDown={startDrag((at) => moveCorner(route.start, route.corners, route.end, k, at))}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              onSetPoints(removeCorner(route.start, route.corners, route.end, k));
+            }}
           />
         )) : null}
       </EdgeLabelRenderer>
@@ -124,7 +176,7 @@ export const ReferenceEdge = memo((props: EdgeProps<ReferenceFlowEdge>) => {
       swapped={Boolean(data.join.swapped)}
       ends={endMarks(data.join)}
       label={data.label}
-      onMovePoint={(pointIndex, to) => data.onMovePoint(data.index, pointIndex, to)}
+      onSetPoints={(points) => data.onSetPoints(data.index, points)}
     />
   );
 });

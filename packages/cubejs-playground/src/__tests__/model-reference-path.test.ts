@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  addPoint, endMarks, endSides, markPath, orthogonalPath, reducePoint,
+  addPoint, endMarks, endSides, markPath, moveCorner, moveSegment, orthogonalPath, reducePoint,
+  removeCorner, routeOf,
 } from '../pages/Schema/models/referencePath';
 import type { ModelJoin } from '../pages/Schema/models/modelGraph';
 
@@ -110,6 +111,63 @@ describe('referencePath', () => {
     expect(endMarks(flipped)).toEqual({
       from: { many: false, optional: false },
       to: { many: true, optional: false },
+    });
+  });
+
+  describe('editing the line', () => {
+    const source = { x: 0, y: 0 };
+    const target = { x: 300, y: 120 };
+    const route = (points: { x: number; y: number }[] = []) => routeOf(source, 'right', target, 'left', points);
+
+    it('routeOf lists the corners an unedited line turns at', () => {
+      // Out 20 to the right, across to the target's stub, down, in.
+      expect(route()).toEqual({
+        start: { x: 20, y: 0 },
+        corners: [{ x: 280, y: 0 }],
+        end: { x: 280, y: 120 },
+      });
+    });
+
+    it('moveCorner moves a corner the line made by itself', () => {
+      const { start, corners, end } = route();
+      const points = moveCorner(start, corners, end, 0, { x: 150, y: 0 });
+      // Turns down at x 150, then across at y 120.
+      expect(points).toEqual([{ x: 150, y: 0 }, { x: 150, y: 120 }]);
+      const path = orthogonalPath(source, 'right', target, 'left', points);
+      expect(straight(path.segments)).toBe(true);
+      expect(path.segments.some(([p, q]) => p.x === 150 && q.x === 150)).toBe(true);
+    });
+
+    it('moveSegment drags a vertical segment sideways and keeps square corners', () => {
+      const { start, corners, end } = route();
+      // Segments: start→(280,0), (280,0)→end. The second is vertical.
+      const points = moveSegment(start, corners, end, 1, { x: 100, y: 60 });
+      expect(points).toEqual([{ x: 100, y: 0 }, { x: 100, y: 120 }]);
+      expect(straight(orthogonalPath(source, 'right', target, 'left', points).segments)).toBe(true);
+    });
+
+    it('moveSegment drags the first horizontal segment down with a new corner at the stub', () => {
+      const { start, corners, end } = route();
+      const points = moveSegment(start, corners, end, 0, { x: 150, y: 40 });
+      expect(points).toEqual([{ x: 20, y: 40 }, { x: 280, y: 40 }]);
+      const path = orthogonalPath(source, 'right', target, 'left', points);
+      expect(straight(path.segments)).toBe(true);
+      expect(path.segments.some(([p, q]) => p.y === 40 && q.y === 40)).toBe(true);
+    });
+
+    it('a corner dragged into line with its neighbours goes away', () => {
+      const { start, corners, end } = route([{ x: 150, y: 0 }, { x: 150, y: 120 }]);
+      expect(corners).toEqual([{ x: 150, y: 0 }, { x: 150, y: 120 }]);
+      // Move the second corner back up onto y 0: the dent is gone and the
+      // line turns where it would by itself.
+      expect(moveCorner(start, corners, end, 1, { x: 150, y: 0 })).toEqual([{ x: 280, y: 0 }]);
+    });
+
+    it('removeCorner drops a corner and straightens the rest', () => {
+      const { start, corners, end } = route([{ x: 150, y: 0 }, { x: 150, y: 120 }]);
+      const points = removeCorner(start, corners, end, 1);
+      expect(points).toEqual([{ x: 150, y: 0 }]);
+      expect(straight(orthogonalPath(source, 'right', target, 'left', points).segments)).toBe(true);
     });
   });
 });

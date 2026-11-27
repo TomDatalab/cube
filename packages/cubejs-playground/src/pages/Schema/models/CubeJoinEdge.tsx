@@ -8,7 +8,7 @@ import { endMarks } from './referencePath';
 
 export type CubeJoinEdgeData = {
   join: CubeJoin;
-  onMovePoint: (id: string, pointIndex: number, to: Point) => void;
+  onSetPoints: (id: string, points: Point[]) => void;
 };
 export type CubeJoinFlowEdge = Edge<CubeJoinEdgeData, 'cubejoin'>;
 
@@ -38,7 +38,7 @@ export const CubeJoinEdge = memo((props: EdgeProps<CubeJoinFlowEdge>) => {
       swapped={false}
       ends={endMarks(asReference)}
       label={REL_LABEL[join.relationship]}
-      onMovePoint={(pointIndex, to) => data.onMovePoint(join.id, pointIndex, to)}
+      onSetPoints={(points) => data.onSetPoints(join.id, points)}
     />
   );
 });

@@ -567,12 +567,8 @@ function Editor({
     });
   }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound]);
 
-  const onMovePoint = useCallback((index: number, pointIndex: number, to: Point) => {
-    setDef((d) => {
-      const points = [...(d.joins[index]?.points ?? [])];
-      points[pointIndex] = to;
-      return setJoin(d, index, { points });
-    });
+  const onSetPoints = useCallback((index: number, points: Point[]) => {
+    setDef((d) => setJoin(d, index, { points }));
     revision.current += 1;
     setDirty(true);
   }, [setDef]);
@@ -587,9 +583,9 @@ function Editor({
     type: 'reference' as const,
     selected: Boolean(j.id) && selectedEdge === j.id,
     data: {
-      index, join: j, label: joinLabel(j), onMovePoint,
+      index, join: j, label: joinLabel(j), onSetPoints,
     },
-  }])), [def.joins, selectedEdge, onMovePoint]);
+  }])), [def.joins, selectedEdge, onSetPoints]);
 
   // A line from each view to every table or view it depends on that exists.
   const dependencies: DependencyFlowEdge[] = useMemo(() => {
@@ -609,12 +605,8 @@ function Editor({
       data: {},
     })));
   }, [def.views, def.tables]);
-  const onMoveCubeJoinPoint = useCallback((id: string, pointIndex: number, to: Point) => {
-    setDef((d) => {
-      const points = [...((d.cubeJoins ?? []).find((j) => j.id === id)?.points ?? [])];
-      points[pointIndex] = to;
-      return setCubeJoin(d, id, { points });
-    });
+  const onSetCubeJoinPoints = useCallback((id: string, points: Point[]) => {
+    setDef((d) => setCubeJoin(d, id, { points }));
     revision.current += 1;
     setDirty(true);
   }, [setDef]);
@@ -630,11 +622,11 @@ function Editor({
       label: REL_LABEL[j.relationship],
       type: 'cubejoin',
       selected: selectedEdge === cubeJoinEdgeId(j.id),
-      data: { join: j, onMovePoint: onMoveCubeJoinPoint },
+      data: { join: j, onSetPoints: onSetCubeJoinPoints },
     })),
     // cubeSourceEdges reads only the tables and the cubes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onMoveCubeJoinPoint]);
+  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onSetCubeJoinPoints]);
   const edges: (ReferenceFlowEdge | DependencyFlowEdge | CubeJoinFlowEdge)[] = useMemo(
     () => [...references, ...dependencies, ...cubeLines],
     [references, dependencies, cubeLines]

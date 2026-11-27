@@ -2262,11 +2262,63 @@ describe('ModelEditor', () => {
         sourceY: 10,
         targetY: 10,
         selected: false,
-        data: { join, onMovePoint: () => {} },
+        data: { join, onSetPoints: () => {} },
       }));
       expect(host.querySelector('[data-slot="model-reference-label"]')!.textContent).toBe('N:1');
       expect(host.querySelector('[data-edge-path="cubejoin:cj1"]')).not.toBeNull();
       unmount();
+    });
+
+    it('a selected line can be reshaped at any corner or segment, Redgate style', () => {
+      const join = {
+        id: 'cj1', from: 'c1', to: 'c2', relationship: 'many_to_one', on: [], points: [],
+      };
+      const onSetPoints = vi.fn();
+      const props = {
+        id: 'cubejoin:cj1',
+        source: 'cube:c1',
+        target: 'cube:c2',
+        sourceY: 10,
+        targetY: 80,
+        selected: true,
+        data: { join, onSetPoints },
+      };
+      const { host, unmount } = mount(createElement(CubeJoinEdge as any, props));
+      const drag = (el: Element, x0: number, y0: number, x: number, y: number) => act(() => {
+        el.dispatchEvent(new MouseEvent('pointerdown', {
+          bubbles: true, button: 0, clientX: x0, clientY: y0,
+        }));
+        window.dispatchEvent(new MouseEvent('pointermove', { clientX: x, clientY: y }));
+        window.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y }));
+      });
+      // No saved points, yet the corner the line makes by itself is a handle.
+      const corners = host.querySelectorAll('[data-slot="model-reference-point"]');
+      expect(corners.length).toBe(1);
+      expect(host.querySelectorAll('[data-slot="model-reference-segment"]').length).toBe(2);
+      drag(corners[0], 380, 10, 300, 10);
+      expect(onSetPoints).toHaveBeenLastCalledWith('cj1', [{ x: 300, y: 10 }, { x: 300, y: 80 }]);
+      // The vertical segment moves sideways.
+      drag(host.querySelectorAll('[data-slot="model-reference-segment"]')[1], 380, 45, 250, 45);
+      expect(onSetPoints).toHaveBeenLastCalledWith('cj1', [{ x: 250, y: 10 }, { x: 250, y: 80 }]);
+      // A press without a move saves nothing.
+      const calls = onSetPoints.mock.calls.length;
+      act(() => {
+        corners[0].dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        window.dispatchEvent(new MouseEvent('pointerup', {}));
+      });
+      expect(onSetPoints.mock.calls.length).toBe(calls);
+      unmount();
+      // Double-click removes a corner.
+      const two = mount(createElement(CubeJoinEdge as any, {
+        ...props, data: { join: { ...join, points: [{ x: 300, y: 10 }, { x: 300, y: 80 }] }, onSetPoints },
+      }));
+      const saved2 = two.host.querySelectorAll('[data-slot="model-reference-point"]');
+      expect(saved2.length).toBe(2);
+      act(() => {
+        saved2[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      });
+      expect(onSetPoints).toHaveBeenLastCalledWith('cj1', [{ x: 300, y: 80 }]);
+      two.unmount();
     });
 
     it('source lines: one dashed dependency per table a cube reads', () => {

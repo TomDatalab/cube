@@ -109,6 +109,100 @@ export function addPoint(points: Point[], path: ReferencePath): Point[] {
   return next;
 }
 
+// Where an edited line turns. `start` and `end` are the ends of its stubs,
+// which stay put; `corners` are every turn in between, the ones the line
+// made by itself included, so each can be dragged.
+export type Route = { start: Point; corners: Point[]; end: Point };
+
+export function routeOf(
+  source: Point,
+  sourceSide: Side,
+  target: Point,
+  targetSide: Side,
+  points: Point[] = []
+): Route {
+  const path = orthogonalPath(source, sourceSide, target, targetSide, points);
+  const vertices = [source, ...path.segments.map(([, q]) => q)];
+  if (vertices.length < 4) {
+    return { start: vertices[1] ?? source, corners: [], end: vertices[1] ?? target };
+  }
+  return { start: vertices[1], corners: vertices.slice(2, -2), end: vertices[vertices.length - 2] };
+}
+
+const aligned = (p: Point, q: Point) => p.x === q.x || p.y === q.y;
+
+// The reference points for a run of turns: repeated points and turns in the
+// middle of a straight run are dropped.
+function simplify(full: Point[]): Point[] {
+  const kept: Point[] = [];
+  full.forEach((p) => {
+    if (!kept.length || !same(kept[kept.length - 1], p)) {
+      kept.push(p);
+    }
+  });
+  for (let i = kept.length - 2; i >= 1; i--) {
+    const [a, b, c] = [kept[i - 1], kept[i], kept[i + 1]];
+    if ((a.x === b.x && b.x === c.x) || (a.y === b.y && b.y === c.y)) {
+      kept.splice(i, 1);
+    }
+  }
+  return kept.slice(1, -1);
+}
+
+const round = (p: Point) => ({ x: Math.round(p.x), y: Math.round(p.y) });
+
+// Drag corner `k` to `to`. The segments on either side keep their direction:
+// a new turn is added where they no longer meet square.
+export function moveCorner(start: Point, corners: Point[], end: Point, k: number, to: Point): Point[] {
+  const full = [start, ...corners, end];
+  const i = k + 1;
+  const c = full[i];
+  const moved = round(to);
+  const prev = full[i - 1];
+  const next = full[i + 1];
+  const before: Point[] = [];
+  const after: Point[] = [];
+  if (!aligned(prev, moved)) {
+    // Arrive the way the segment did: across into a horizontal one.
+    before.push(prev.y === c.y ? { x: prev.x, y: moved.y } : { x: moved.x, y: prev.y });
+  }
+  if (!aligned(moved, next)) {
+    // Leave the way the segment did: down first for a vertical one.
+    after.push(c.x === next.x ? { x: moved.x, y: next.y } : { x: next.x, y: moved.y });
+  }
+  return simplify([...full.slice(0, i), ...before, moved, ...after, ...full.slice(i + 1)]);
+}
+
+// Drag segment `i` (from turn i to turn i + 1, the stub ends counted) across
+// itself to `to`: a horizontal one up or down, a vertical one sideways. An
+// end that is a stub stays and gets a new turn.
+export function moveSegment(start: Point, corners: Point[], end: Point, i: number, to: Point): Point[] {
+  const full = [start, ...corners, end];
+  const a = full[i];
+  const b = full[i + 1];
+  if (!a || !b) {
+    return corners;
+  }
+  const at = round(to);
+  const shift = (p: Point) => (a.y === b.y ? { x: p.x, y: at.y } : { x: at.x, y: p.y });
+  const next = [...full];
+  if (i + 1 === full.length - 1) {
+    next.splice(i + 1, 0, shift(b));
+  } else {
+    next[i + 1] = shift(b);
+  }
+  if (i === 0) {
+    next.splice(1, 0, shift(a));
+  } else {
+    next[i] = shift(a);
+  }
+  return simplify(next);
+}
+
+export function removeCorner(start: Point, corners: Point[], end: Point, k: number): Point[] {
+  return simplify([start, ...corners.filter((_, i) => i !== k), end]);
+}
+
 export function reducePoint(points: Point[]): Point[] {
   return points.slice(0, -1);
 }
