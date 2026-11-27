@@ -417,7 +417,7 @@ describe('ModelEditor', () => {
       source: 'orders', sourceHandle: 'id', target: 'products', targetHandle: 'id',
     }));
     expect(document.body.textContent).toContain('INNER keeps only rows with a match on both sides');
-    expect(document.body.textContent).toContain('LEFT keeps every row of the principal table');
+    expect(document.body.textContent).toContain('LEFT keeps rows with no match on the other table');
     await act(async () => button('Link').click());
     expect([...document.querySelectorAll('[data-edge^="join-"]')].map((e) => e.textContent))
       .toEqual(['N:1 · LEFT', 'N:1 · LEFT']);
@@ -609,7 +609,7 @@ describe('ModelEditor', () => {
   it('deletes the model after asking, with the version it read', async () => {
     await render();
     await act(async () => button('Delete model').click());
-    expect(document.body.textContent).toContain('Delete model Sales? The cube it built stays in Cubes.');
+    expect(document.body.textContent).toContain('Delete model Sales? The cubes it built stay in Cubes.');
     expect(api.deleteModel).not.toHaveBeenCalled();
     await act(async () => button('Delete').click());
     expect(api.deleteModel).toHaveBeenCalledWith('m1', 3);
@@ -2665,6 +2665,25 @@ describe('ModelEditor', () => {
         const def = await savedDef();
         expect(def.cubes[0].dimensions[1].name).toBe('customer');
         expect(serverProblems(def)).toEqual([]);
+      });
+
+      it('typing Delete in the cube SQL and a segment SQL does not delete the cube', async () => {
+        api.model.mockResolvedValueOnce(view(twoCubes()));
+        await render();
+        await select('cube:c1');
+        await pick('Source kind', 'sql');
+        await act(async () => button(/Add segment/).click());
+        const typeDelete = async (selector: string) => {
+          const field = pane().querySelector(selector) as HTMLElement;
+          expect(field).not.toBeNull();
+          await act(async () => {
+            field.focus();
+            field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+          });
+          expect(flowNode('cube:c1')).toBeDefined();
+        };
+        await typeDelete('textarea[aria-label="Cube SQL"]');
+        await typeDelete('input[aria-label="Segment 1 SQL"]');
       });
 
       it('a member without a column keeps an empty SQL, a count keeps neither', async () => {

@@ -1373,7 +1373,7 @@ function Editor({
     },
     delete: {
       title: 'Delete model?',
-      text: `Delete model ${name}? The cube it built stays in Cubes.`,
+      text: `Delete model ${name}? The cubes it built stay in Cubes.`,
       ok: 'Delete',
     },
   }[asked];

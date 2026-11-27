@@ -15,7 +15,7 @@ const RELATIONSHIPS: { value: Relationship; label: string; hint: (a: string, b: 
 ];
 
 const JOINS: { value: JoinKind; label: string; hint: string }[] = [
-  { value: 'left', label: 'LEFT', hint: 'LEFT keeps every row of the principal table' },
+  { value: 'left', label: 'LEFT', hint: 'LEFT keeps rows with no match on the other table' },
   { value: 'inner', label: 'INNER', hint: 'INNER keeps only rows with a match on both sides' },
 ];
 

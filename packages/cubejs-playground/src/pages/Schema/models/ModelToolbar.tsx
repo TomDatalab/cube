@@ -290,7 +290,7 @@ export function ModelToolbar({
         >
           <Spline />
         </Menu>
-        <Tool label="Arrange" hint="Arrange the tables in layers from the principal" onClick={arrange.onArrange}>
+        <Tool label="Arrange" hint="Arrange the tables in layers, starting from the first cube's source table" onClick={arrange.onArrange}>
           <Network />
         </Tool>
         <Divider />
