@@ -6,7 +6,7 @@ import {
 } from 'vitest';
 
 import type { LockState } from '../pages/Schema/api';
-import { useEditLock } from '../pages/Schema/models/useEditLock';
+import { newToken, useEditLock } from '../pages/Schema/models/useEditLock';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -227,5 +227,19 @@ describe('useEditLock', () => {
     expect(api.releaseModelLock).toHaveBeenCalledWith('m1', lock.token);
     await tick(60_000);
     expect(api.lockModel).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('newToken', () => {
+  it('makes a v4 UUID without crypto.randomUUID (plain HTTP)', () => {
+    const real = crypto.randomUUID;
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true });
+    try {
+      const a = newToken();
+      expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(newToken()).not.toBe(a);
+    } finally {
+      Object.defineProperty(crypto, 'randomUUID', { value: real, configurable: true });
+    }
   });
 });

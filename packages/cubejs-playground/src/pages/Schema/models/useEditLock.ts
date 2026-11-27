@@ -33,6 +33,18 @@ export type EditLockOptions = {
   onFreed?(): void;
 };
 
+// A random v4 UUID. crypto.randomUUID exists only in secure contexts (HTTPS
+// or localhost), and the Playground is also opened over plain HTTP on the
+// LAN; getRandomValues works in both.
+export function newToken(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = 0x40 + (b[6] % 16); // version 4
+  b[8] = 0x80 + (b[8] % 64); // RFC 4122 variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 // One editor at a time: claims the model's lock on mount, renews it, and
 // releases it when the editor goes away or the page is left.
 export function useEditLock(
@@ -41,7 +53,7 @@ export function useEditLock(
   onLost: (holder: string) => void,
   { enabled = true, onFreed }: EditLockOptions = {}
 ): EditLock {
-  const [token] = useState(() => crypto.randomUUID());
+  const [token] = useState(newToken);
   const [state, setState] = useState<Pick<EditLock, 'status' | 'holder'>>({ status: 'pending', holder: null });
   // Whether the last answer gave us the lock: losing it is news only then.
   const held = useRef(false);
