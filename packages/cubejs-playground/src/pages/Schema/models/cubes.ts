@@ -1,6 +1,6 @@
 import {
-  CubeDimension, CubeJoin, CubeMeasure, CubeNode, CubeSegment, CubeSource, DimensionType, IDENTIFIER, ModelDefinition,
-  Relationship,
+  CubeDimension, CubeJoin, CubeMeasure, CubeNode, CubeSegment, CubeSource, DimensionType, IDENTIFIER, MeasureType,
+  ModelDefinition, Relationship,
 } from './modelGraph';
 import { freeId, freeName, merged } from './objects';
 
@@ -97,17 +97,61 @@ export function addMember(
   return { name, def: mapCube(def, id, () => next) };
 }
 
+type AnyMember = Partial<Omit<CubeDimension & CubeMeasure & CubeSegment, 'type'>> & { type?: DimensionType | MeasureType };
+
+// What the server needs of a member after an edit: a segment always has
+// SQL; a measure that stops being a count gets an empty SQL when it has
+// neither, and one that becomes a count drops a blank SQL.
+function kept(group: MemberGroup, m: AnyMember, patch: AnyMember): AnyMember {
+  if (group === 'segments') {
+    return { ...m, sql: m.sql ?? '' };
+  }
+  if (group !== 'measures' || patch.type === undefined || m.column !== undefined) {
+    return m;
+  }
+  if (m.type !== 'count' && m.sql === undefined) {
+    return { ...m, sql: '' };
+  }
+  if (m.type === 'count' && m.sql !== undefined && !m.sql.trim()) {
+    return merged(m, { sql: undefined });
+  }
+  return m;
+}
+
 export function setMember(
   def: ModelDefinition,
   id: string,
   group: MemberGroup,
   index: number,
-  patch: Partial<CubeDimension & CubeMeasure & CubeSegment>
+  patch: AnyMember
 ): ModelDefinition {
   return mapCube(def, id, (c) => ({
     ...c,
-    [group]: (c[group] as object[]).map((m, i) => (i === index ? merged(m, patch) : m)),
+    [group]: (c[group] as AnyMember[]).map((m, i) => (i === index ? kept(group, merged(m, patch), patch) : m)),
   }));
+}
+
+// A member renamed, unless the name is not an identifier of at most 63
+// characters or another member of the cube has it.
+export function renameMember(
+  def: ModelDefinition,
+  id: string,
+  group: MemberGroup,
+  index: number,
+  next: string
+): { def: ModelDefinition; error?: string } {
+  const cube = cubesOf(def).find((c) => c.id === id);
+  const current = cube?.[group][index];
+  if (!cube || !current || current.name === next) {
+    return { def };
+  }
+  if (!IDENTIFIER.test(next) || next.length > MAX_IDENTIFIER) {
+    return { def, error: `Invalid name: ${next}` };
+  }
+  if (memberNames(cube).includes(next)) {
+    return { def, error: `${next} is already in this cube` };
+  }
+  return { def: setMember(def, id, group, index, { name: next }) };
 }
 
 export function removeMember(def: ModelDefinition, id: string, group: MemberGroup, index: number): ModelDefinition {

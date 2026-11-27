@@ -860,7 +860,15 @@ function Editor({
     const ends = [c.source, c.target].map((id) => objectOf(id ?? ''));
     if (ends.some((e) => e.kind === 'cube')) {
       if (ends[0].kind === 'cube' && ends[1].kind === 'cube' && ends[0].id !== ends[1].id) {
-        setCubeJoinAsk({ from: ends[0].id, to: ends[1].id });
+        // Two cubes already joined, either way: their join, not a second one.
+        const pair = [ends[0].id, ends[1].id];
+        const existing = (def.cubeJoins ?? []).find((j) => pair.includes(j.from) && pair.includes(j.to));
+        if (existing) {
+          setSelection([]);
+          setSelectedEdge(cubeJoinEdgeId(existing.id));
+        } else {
+          setCubeJoinAsk({ from: ends[0].id, to: ends[1].id });
+        }
       }
       return;
     }
@@ -1655,10 +1663,17 @@ function Editor({
         onClose={() => setCubeJoinAsk(null)}
         onSave={(choice) => {
           if (cubeJoinAsk) {
-            const result = addCubeJoin(def, cubeJoinAsk.from, cubeJoinAsk.to, choice.relationship, choice.on);
-            change(result.def);
+            // Joined meanwhile (an undo, a redo): keep the one join.
+            const pair = [cubeJoinAsk.from, cubeJoinAsk.to];
+            const existing = (def.cubeJoins ?? []).find((j) => pair.includes(j.from) && pair.includes(j.to));
+            let joinId = existing?.id;
+            if (!joinId) {
+              const result = addCubeJoin(def, cubeJoinAsk.from, cubeJoinAsk.to, choice.relationship, choice.on);
+              change(result.def);
+              joinId = result.id;
+            }
             setSelection([]);
-            setSelectedEdge(cubeJoinEdgeId(result.id));
+            setSelectedEdge(cubeJoinEdgeId(joinId));
           }
           setCubeJoinAsk(null);
         }}

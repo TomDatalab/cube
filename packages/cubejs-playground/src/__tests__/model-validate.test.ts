@@ -209,10 +209,11 @@ describe('cube issues', () => {
     expect(rulesOf(withCubes(cube()))).toEqual([]);
   });
 
-  it('flags names: empty, invalid, long, repeated', () => {
+  it('flags names: empty, invalid, repeated, not long', () => {
     expect(rulesOf(withCubes(cube({ name: ' ' })))).toEqual(['cube.emptyName']);
     expect(rulesOf(withCubes(cube({ name: '1a' })))).toEqual(['cube.invalidName']);
-    expect(rulesOf(withCubes(cube({ name: 'a'.repeat(64) })))).toEqual(['cube.nameLength']);
+    // A converted model's cube may have a long name: Cube has no cap.
+    expect(rulesOf(withCubes(cube({ name: 'a'.repeat(64) })))).toEqual([]);
     expect(rulesOf(withCubes(cube({ name: 'customers' })))).toEqual(['cube.uniqueName']);
   });
 

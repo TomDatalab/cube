@@ -86,7 +86,10 @@ export function CubeJoinProperties({
               <button
                 type="button"
                 aria-label={`Remove pair ${k + 1}`}
-                className={ICON}
+                // A join needs a pair: the last one stays.
+                disabled={join.on.length === 1}
+                title={join.on.length === 1 ? 'A cube join needs a pair' : undefined}
+                className={`${ICON} tw:disabled:cursor-not-allowed tw:disabled:opacity-40`}
                 onClick={() => patchPairs(join.on.filter((_, i) => i !== k))}
               >
                 <X className="tw:size-3.5" />

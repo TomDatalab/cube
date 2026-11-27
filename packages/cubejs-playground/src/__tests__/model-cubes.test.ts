@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addCube, addCubeJoin, addMember, autoMembers, cubeKeyOf, cubeReads, cubeType, dimensionNames, generateMembers,
-  removeCubeJoin, removeMember, renameCube, setCube, setCubeJoin, setCubeSource, setMember, snake,
+  removeCubeJoin, removeMember, renameCube, renameMember, setCube, setCubeJoin, setCubeSource, setMember, snake,
 } from '../pages/Schema/models/cubes';
 import {
   CubeNode, ModelDefinition, addTable, connect, emptyDefinition, removeTable, renameTable,
@@ -176,6 +176,51 @@ describe('cubes', () => {
     expect(def.cubes![0].dimensions[0]).toEqual({ name: 'dimension_1', type: 'number', column: 'id' });
     def = removeMember(def, id, 'measures', 0);
     expect(def.cubes![0].measures).toEqual([]);
+  });
+
+  it('renameCube caps a new name at 63 characters', () => {
+    const { def, id } = addCube(model(), 0, 0);
+    expect(renameCube(def, id, 'a'.repeat(64)).error).toBe(`Invalid name: ${'a'.repeat(64)}`);
+    expect(renameCube(def, id, 'a'.repeat(63)).def.cubes![0].name).toBe('a'.repeat(63));
+  });
+
+  it('renameMember checks the name against every member of the cube', () => {
+    let { def, id } = addCube(model(), 0, 0);
+    def = addMember(def, id, 'dimensions').def;
+    def = addMember(def, id, 'measures').def;
+    def = addMember(def, id, 'segments').def;
+    expect(renameMember(def, id, 'dimensions', 0, 'dimension_1').def).toBe(def);
+    expect(renameMember(def, id, 'dimensions', 0, '1x')).toEqual({ def, error: 'Invalid name: 1x' });
+    expect(renameMember(def, id, 'dimensions', 0, 'a-b').error).toBe('Invalid name: a-b');
+    expect(renameMember(def, id, 'dimensions', 0, 'a'.repeat(64)).error).toBe(`Invalid name: ${'a'.repeat(64)}`);
+    expect(renameMember(def, id, 'dimensions', 0, 'measure_1').error).toBe('measure_1 is already in this cube');
+    expect(renameMember(def, id, 'measures', 0, 'segment_1').error).toBe('segment_1 is already in this cube');
+    expect(renameMember(def, id, 'segments', 0, 'dimension_1').error).toBe('dimension_1 is already in this cube');
+    const renamed = renameMember(def, id, 'measures', 0, 'total');
+    expect(renamed.error).toBeUndefined();
+    expect(renamed.def.cubes![0].measures[0].name).toBe('total');
+  });
+
+  it('setMember keeps what the server needs on a type change and a segment', () => {
+    let { def, id } = addCube(model(), 0, 0);
+    def = addMember(def, id, 'measures').def;
+    // A count with neither SQL nor column becomes a sum: it gets an empty SQL.
+    def = setMember(def, id, 'measures', 0, { type: 'sum' });
+    expect(def.cubes![0].measures[0]).toEqual({ name: 'measure_1', type: 'sum', sql: '' });
+    // Back to a count, the blank SQL goes.
+    def = setMember(def, id, 'measures', 0, { type: 'count' });
+    expect(def.cubes![0].measures[0]).toEqual({ name: 'measure_1', type: 'count' });
+    def = setMember(def, id, 'measures', 0, { type: 'sum', column: 'amount' });
+    expect(def.cubes![0].measures[0]).toEqual({ name: 'measure_1', type: 'sum', column: 'amount' });
+    def = setMember(def, id, 'measures', 0, { type: 'count' });
+    expect(def.cubes![0].measures[0]).toEqual({ name: 'measure_1', type: 'count', column: 'amount' });
+    def = setMember(def, id, 'measures', 0, { type: 'sum', column: undefined, sql: 'x' });
+    def = setMember(def, id, 'measures', 0, { type: 'count' });
+    expect(def.cubes![0].measures[0]).toEqual({ name: 'measure_1', type: 'count', sql: 'x' });
+    // A segment always keeps its SQL.
+    def = addMember(def, id, 'segments').def;
+    def = setMember(def, id, 'segments', 0, { sql: undefined });
+    expect(def.cubes![0].segments[0]).toEqual({ name: 'segment_1', sql: '' });
   });
 
   it('changing the source keeps members that no longer resolve', () => {

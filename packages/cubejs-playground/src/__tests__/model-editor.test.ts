@@ -2338,6 +2338,54 @@ describe('ModelEditor', () => {
       });
     };
 
+    // The server's cube rules (validate_cubes and the definition's shape),
+    // so a saved definition is one the next save and build accept.
+    const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    const serverProblems = (def: ModelDefinition): string[] => {
+      const out: string[] = [];
+      for (const c of def.cubes ?? []) {
+        const names = new Set<string>();
+        for (const m of [...c.dimensions, ...c.measures, ...c.segments]) {
+          if (!IDENT.test(m.name) || m.name.length > 63) {
+            out.push(`invalid ${m.name}`);
+          }
+          if (names.has(m.name)) {
+            out.push(`repeated ${m.name}`);
+          }
+          names.add(m.name);
+        }
+        for (const d of c.dimensions) {
+          if ((d.sql === undefined) === (d.column === undefined)) {
+            out.push(`sql or column ${d.name}`);
+          }
+        }
+        for (const m of c.measures) {
+          const both = m.sql !== undefined && m.column !== undefined;
+          const neither = m.sql === undefined && m.column === undefined && m.type !== 'count';
+          if (both || neither) {
+            out.push(`sql or column ${m.name}`);
+          }
+        }
+        for (const seg of c.segments) {
+          if (typeof seg.sql !== 'string') {
+            out.push(`segment sql ${seg.name}`);
+          }
+        }
+      }
+      const pairs = new Set<string>();
+      for (const j of def.cubeJoins ?? []) {
+        if (j.on.length === 0) {
+          out.push(`no pairs ${j.id}`);
+        }
+        const link = [j.from, j.to].sort().join('|');
+        if (pairs.has(link)) {
+          out.push(`already joined ${j.id}`);
+        }
+        pairs.add(link);
+      }
+      return out;
+    };
+
     it('tool 8 places a cube', async () => {
       await render();
       expect(tool('New cube').disabled).toBe(false);
@@ -2379,6 +2427,26 @@ describe('ModelEditor', () => {
       expect(def.cubeJoins).toEqual([{
         id: 'cj1', from: 'c1', to: 'c2', relationship: 'many_to_one', on: [{ from: 'customer_id', to: 'id' }], points: [],
       }]);
+    });
+
+    it('tool 4 between two joined cubes selects their join', async () => {
+      api.model.mockResolvedValueOnce(view(joined()));
+      await render();
+      const connect = async (source: string, target: string) => {
+        await act(async () => flow.props.onPaneClick({ clientX: 5000, clientY: 5000 }));
+        expect(flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1').selected).toBeFalsy();
+        await act(async () => flow.props.onConnect({
+          source, sourceHandle: 'join', target, targetHandle: 'join',
+        }));
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        expect(flow.props.edges.find((e: any) => e.id === 'cubejoin:cj1').selected).toBe(true);
+        expect(pane().textContent).toContain('Cube join properties');
+      };
+      await connect('cube:c1', 'cube:c2');
+      await connect('cube:c2', 'cube:c1');
+      // Nothing changed: still the one join, and nothing to save.
+      expect(edgeIds().filter((e: string) => e.startsWith('cubejoin:'))).toEqual(['cubejoin:cj1']);
+      expect(tool('Save changes').disabled).toBe(true);
     });
 
     it('selects a cube join from its edge', async () => {
@@ -2547,6 +2615,58 @@ describe('ModelEditor', () => {
         expect(flowNode('cube:c1')).toBeDefined();
       });
 
+      it('a new measure turned into a sum gets an empty SQL', async () => {
+        api.model.mockResolvedValueOnce(view(twoCubes()));
+        await render();
+        await select('cube:c1');
+        await act(async () => button(/Add measure/).click());
+        await pick('Measure 2 type', 'sum');
+        let def = await savedDef();
+        expect(def.cubes[0].measures[1]).toEqual({ name: 'measure_1', type: 'sum', sql: '' });
+        expect(serverProblems(def)).toEqual([]);
+        // Back to a count: the blank SQL goes.
+        await pick('Measure 2 type', 'count');
+        def = await savedDef();
+        expect(def.cubes[0].measures[1]).toEqual({ name: 'measure_1', type: 'count' });
+        expect(serverProblems(def)).toEqual([]);
+      });
+
+      it('a cleared segment SQL stays an empty SQL', async () => {
+        api.model.mockResolvedValueOnce(view(twoCubes()));
+        await render();
+        await select('cube:c1');
+        await act(async () => button(/Add segment/).click());
+        await fill('input[aria-label="Segment 1 SQL"]', '');
+        await blur('input[aria-label="Segment 1 SQL"]');
+        const def = await savedDef();
+        expect(def.cubes[0].segments[0]).toEqual({ name: 'segment_1', sql: '' });
+        expect(serverProblems(def)).toEqual([]);
+      });
+
+      it('a member name is checked before it is kept', async () => {
+        api.model.mockResolvedValueOnce(view(twoCubes()));
+        await render();
+        await select('cube:c1');
+        const name = 'input[aria-label="Dimension 2 name"]';
+        const refused = async (typed: string, error: string) => {
+          await fill(name, typed);
+          await blur(name);
+          expect(pane().querySelector('[role="alert"]')!.textContent).toBe(error);
+          // Not kept: the definition is unchanged.
+          expect(tool('Save changes').disabled).toBe(true);
+        };
+        await refused('1x', 'Invalid name: 1x');
+        await refused('a'.repeat(64), `Invalid name: ${'a'.repeat(64)}`);
+        await refused('count', 'count is already in this cube');
+        await refused('id', 'id is already in this cube');
+        await fill(name, 'customer');
+        await blur(name);
+        expect(pane().querySelector('[role="alert"]')).toBeNull();
+        const def = await savedDef();
+        expect(def.cubes[0].dimensions[1].name).toBe('customer');
+        expect(serverProblems(def)).toEqual([]);
+      });
+
       it('a member without a column keeps an empty SQL, a count keeps neither', async () => {
         api.model.mockResolvedValueOnce(view(twoCubes()));
         await render();
@@ -2572,6 +2692,13 @@ describe('ModelEditor', () => {
         expect((await savedDef()).cubeJoins[0].on.length).toBe(2);
         await act(async () => (pane().querySelector('button[aria-label="Remove pair 2"]') as HTMLButtonElement).click());
         expect((await savedDef()).cubeJoins[0].on).toEqual([{ from: 'customer_id', to: 'id' }]);
+        // The last pair stays: a join needs one.
+        const last = pane().querySelector('button[aria-label="Remove pair 1"]') as HTMLButtonElement;
+        expect(last.disabled).toBe(true);
+        await act(async () => last.click());
+        const def = await savedDef();
+        expect(def.cubeJoins[0].on).toEqual([{ from: 'customer_id', to: 'id' }]);
+        expect(serverProblems(def)).toEqual([]);
       });
 
       it('the structure tree lists cubes and cube joins and selects on click', async () => {

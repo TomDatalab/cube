@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Field } from '@/components/kit';
 
 import {
-  addMember, cubeReads, generateMembers, removeMember, renameCube, setCube, setCubeSource,
+  addMember, cubeReads, generateMembers, removeMember, renameCube, renameMember, setCube, setCubeSource,
   setMember,
 } from './cubes';
 import type { MemberGroup } from './cubes';
@@ -94,6 +94,45 @@ function CubeName({ def, id, onChange }: Pick<CubePropertiesProps, 'def' | 'id' 
   );
 }
 
+// A member's name, kept as typed until Enter or leaving the field, and only
+// committed when the server would take it.
+function MemberName({
+  def, id, group, index, label, onChange,
+}: Pick<CubePropertiesProps, 'def' | 'id' | 'onChange'> & { group: MemberGroup; index: number; label: string }) {
+  const name = def.cubes?.find((c) => c.id === id)?.[group][index]?.name ?? '';
+  const [value, setValue] = useState(name);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setValue(name);
+    setError(null);
+  }, [id, name]);
+  const commit = () => {
+    const result = renameMember(def, id, group, index, value.trim());
+    setError(result.error ?? null);
+    if (!result.error && result.def !== def) {
+      onChange(result.def);
+    }
+  };
+  return (
+    <div className="tw:flex tw:min-w-0 tw:flex-1 tw:flex-col tw:gap-1">
+      <Input
+        aria-label={label}
+        value={value}
+        aria-invalid={error ? true : undefined}
+        className="tw:h-7 tw:px-2 tw:text-xs"
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            commit();
+          }
+        }}
+      />
+      {error ? <p role="alert" className="tw:m-0 tw:text-xs tw:text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
 const GROUP_LABEL: Record<MemberGroup, { title: string; one: string }> = {
   dimensions: { title: 'Dimensions', one: 'Dimension' },
   measures: { title: 'Measures', one: 'Measure' },
@@ -163,7 +202,7 @@ export function CubeProperties({
               // eslint-disable-next-line react/no-array-index-key
               <li key={`${id}:${group}:${k}`} data-slot="model-cube-member" className="tw:flex tw:flex-col tw:gap-1 tw:rounded-md tw:border tw:p-1.5">
                 <div className="tw:flex tw:items-center tw:gap-1">
-                  <DraftText label={`${label} name`} multiline={false} value={m.name} onCommit={(name) => edit(k, { name })} />
+                  <MemberName def={def} id={id} group={group} index={k} label={`${label} name`} onChange={onChange} />
                   <button
                     type="button"
                     aria-label={`Remove ${one.toLowerCase()} ${k + 1}`}
@@ -207,7 +246,7 @@ export function CubeProperties({
                     value={m.sql ?? ''}
                     onCommit={(sql) => edit(k, sql
                       ? { sql, column: undefined }
-                      : { sql: needsSql(m) ? '' : undefined })}
+                      : { sql: group === 'segments' || needsSql(m) ? '' : undefined })}
                   />
                 ) : null}
                 <DraftText

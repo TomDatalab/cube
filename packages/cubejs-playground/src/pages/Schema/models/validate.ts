@@ -159,9 +159,6 @@ export const RULES: Rule[] = [
     id: 'cube.invalidName', group: 'Cube', label: 'Invalid name', severity: 'error',
   },
   {
-    id: 'cube.nameLength', group: 'Cube', label: 'Name length', severity: 'error',
-  },
-  {
     id: 'cube.uniqueName', group: 'Cube', label: 'Unique name', severity: 'error',
   },
   {
@@ -469,9 +466,8 @@ export function issues(
       if (!IDENTIFIER.test(cube.name)) {
         add('cube.invalidName', target, `${what} has an invalid name`);
       }
-      if (cube.name.length > MAX_NAME) {
-        add('cube.nameLength', target, `${what}'s name is longer than ${MAX_NAME} characters`);
-      }
+      // No length cap: Cube has none, and a converted model's name may be
+      // long. New names are capped where they are typed (renameCube).
       if (cubeNames.has(cube.name)) {
         add('cube.uniqueName', target, `${what} is used by another cube`);
       }
