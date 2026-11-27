@@ -48,7 +48,9 @@ export const ViewNode = memo(({
       className={cn(
         'tw:flex tw:min-w-40 tw:flex-col tw:rounded-md tw:border tw:text-xs tw:text-foreground',
         // The content follows the frame while it is dragged, not on release.
-        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
+        // Rows that do not fit are cut off below; the link dots still stick out
+        // at the sides.
+        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-x-visible tw:overflow-y-clip',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
       style={data.color

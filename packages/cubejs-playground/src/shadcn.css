@@ -161,3 +161,11 @@ table[data-col-resized] > tbody > tr > td {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* The Models canvas: a link dot grows under the pointer, easier to grab. */
+[data-slot='model-canvas'] .react-flow__handle.connectable {
+  transition: scale 120ms ease-out;
+}
+[data-slot='model-canvas'] .react-flow__handle.connectable:hover {
+  scale: 1.35;
+}

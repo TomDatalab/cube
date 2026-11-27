@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 import type { TableColor } from './modelGraph';
 import { ModelResizer } from './ModelResizer';
 import { inkOn, paint } from './paint';
-import { NODE_HANDLE_STYLE } from './nodeHandle';
+import { LINK_HANDLE_STYLE, NODE_HANDLE_STYLE } from './nodeHandle';
 
 export type TableNodeData = {
   // Someone else edits the model: no resizer, no Remove.
@@ -57,14 +57,8 @@ export type TableNodeData = {
 
 export type TableFlowNode = Node<TableNodeData, 'table'>;
 
-// React Flow's 6px dot is hard to grab; its stylesheet is unlayered, so it
-// would win over Tailwind classes, hence the inline style.
-const HANDLE_STYLE = {
-  width: 12,
-  height: 12,
-  background: 'var(--primary)',
-  border: '2px solid var(--card)',
-};
+// React Flow's 6px dot is hard to grab.
+const HANDLE_STYLE = LINK_HANDLE_STYLE;
 
 // The handles of a collapsed table: kept, so its links stay drawn, but out
 // of sight in the middle of its header.
@@ -132,7 +126,9 @@ export const TableNode = memo(({
       className={cn(
         'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
         // The content follows the frame while it is dragged, not on release.
-        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
+        // Rows that do not fit are cut off below; the link dots still stick out
+        // at the sides.
+        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-x-visible tw:overflow-y-clip',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
       style={data.bodyColor

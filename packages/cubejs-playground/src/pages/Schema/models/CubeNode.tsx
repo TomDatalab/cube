@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils';
 import { cubeReads } from './cubes';
 import type { CubeSourceEdgeData, CubeSourceFlowEdge } from './CubeJoinEdge';
 import type { CubeNode as CubeModel, ModelDefinition } from './modelGraph';
-import { NODE_HANDLE_STYLE } from './nodeHandle';
+import { LINK_HANDLE_STYLE, NODE_HANDLE_STYLE } from './nodeHandle';
 import { paint } from './paint';
 
 export type CubeNodeData = {
@@ -26,13 +26,8 @@ export type CubeNodeData = {
 
 export type CubeFlowNode = Node<CubeNodeData, 'cube'>;
 
-// Same as a table's links: React Flow's stylesheet is unlayered.
-const HANDLE_STYLE = {
-  width: 12,
-  height: 12,
-  background: 'var(--primary)',
-  border: '2px solid var(--card)',
-};
+// Same as a table's links.
+const HANDLE_STYLE = LINK_HANDLE_STYLE;
 
 type CubeNodeProps = Pick<NodeProps<CubeFlowNode>, 'data'> & {
   id?: string;
@@ -79,7 +74,9 @@ export const CubeNode = memo(({
       className={cn(
         'tw:flex tw:min-w-40 tw:flex-col tw:border tw:border-foreground/70 tw:bg-card tw:text-xs tw:text-card-foreground',
         // The content follows the frame while it is dragged, not on release.
-        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-hidden',
+        // Rows that do not fit are cut off below; the link dots still stick out
+        // at the sides.
+        (data.fixedSize || width !== undefined) && 'tw:h-full tw:w-full tw:overflow-x-visible tw:overflow-y-clip',
         selected && 'tw:ring-2 tw:ring-ring'
       )}
     >
