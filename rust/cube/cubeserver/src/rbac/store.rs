@@ -477,7 +477,6 @@ fn group_from(r: &Row) -> Group {
 const CUBE_MODEL_COLS: &str = "id, organization_id, name, definition, cube_name, \
      version, created_at, updated_at, created_by, updated_by";
 
-/// What the last build of a model wrote for one of its cubes.
 /// Who holds a model's edit lock, and the token that proves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelLock {
@@ -485,6 +484,7 @@ pub struct ModelLock {
     pub token: String,
 }
 
+/// What the last build of a model wrote for one of its cubes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltRecord {
     pub cube_id: String,

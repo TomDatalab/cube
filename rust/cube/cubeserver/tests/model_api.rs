@@ -1973,6 +1973,10 @@ api_test!(model_edit_lock, |store| {
     let (status, _) = call_h(&env, Method::POST, &token_a, &format!("{one}/create-tables"),
         Some(json!({ "version": 3, "dryRun": true })), Some("a1")).await;
     assert_eq!(status, StatusCode::LOCKED);
+    // Nor may A delete it.
+    let (status, body) = call_h(&env, Method::DELETE, &token_a, &format!("{one}?version=3"), None, Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED, "{body}");
+    assert_eq!(body["error"], "O model está sendo editado por bia");
 
     let (status, _) = call(&env, Method::DELETE, &token_b, &format!("{lock}?token=b1"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
