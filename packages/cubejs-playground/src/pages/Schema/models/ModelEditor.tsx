@@ -661,7 +661,10 @@ function Editor({
       });
       return [...areas, ...tableNodes, ...views, ...cubes, ...notes];
     });
-  }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound, readOnly]);
+  }, [
+    def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound,
+    readOnly,
+  ]);
 
   const onSetSide = useCallback((index: number, end: 'from' | 'to', side: Side) => {
     setDef((d) => setJoin(d, index, end === 'from' ? { fromSide: side } : { toSide: side }));
