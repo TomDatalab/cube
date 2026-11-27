@@ -155,6 +155,13 @@ pub struct CubeJoin {
     pub points: Vec<Point>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// The side of its table or cube each end leaves from, `left` or
+    /// `right`, when the end was dragged there; otherwise the side towards
+    /// the other end (flipped by `swapped`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_side: Option<String>,
 }
 
 /// Turns the old single-cube shape into a cube on the canvas: a set
@@ -672,6 +679,16 @@ pub fn create_statements(
     super::ddl::create_statements(def, db_type)
 }
 
+/// An end's side is `left` or `right` when set.
+fn check_sides(from: &Option<String>, to: &Option<String>, link: &str) -> Result<(), String> {
+    for side in [from, to].into_iter().flatten() {
+        if side != "left" && side != "right" {
+            return Err(format!("Lado inválido na ligação {link}: {side}"));
+        }
+    }
+    Ok(())
+}
+
 /// A draft's shape checked before its DDL is written.
 pub(crate) fn validate_draft_for_ddl(table: &ModelTable, draft: &DraftTable) -> Result<(), String> {
     validate_draft(table, draft)
@@ -692,6 +709,13 @@ pub struct ModelJoin {
     /// The line leaves its tables on the other side.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub swapped: bool,
+    /// The side of its table or cube each end leaves from, `left` or
+    /// `right`, when the end was dragged there; otherwise the side towards
+    /// the other end (flipped by `swapped`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_side: Option<String>,
     /// Not drawn on the canvas; still a link.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
@@ -849,6 +873,11 @@ pub fn validate(def: &Definition) -> Result<(), String> {
                 join.from.alias, join.to.alias
             ));
         }
+        check_sides(
+            &join.from_side,
+            &join.to_side,
+            &format!("{} → {}", join.from.alias, join.to.alias),
+        )?;
         let (a, b) = (
             root(&parent, &join.from.alias),
             root(&parent, &join.to.alias),
@@ -1046,6 +1075,7 @@ fn validate_cubes(def: &Definition, aliases: &HashSet<&str>) -> Result<(), Strin
         if join.points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
             return Err(format!("Ponto inválido na ligação {}", join.id));
         }
+        check_sides(&join.from_side, &join.to_side, &join.id)?;
         let key = if join.from < join.to {
             (join.from.as_str(), join.to.as_str())
         } else {
@@ -2617,7 +2647,8 @@ mod tests {
                 "from": { "alias": "orders", "column": "customer_id" },
                 "to": { "alias": "customers", "column": "id" },
                 "relationship": "many_to_one", "join": "left",
-                "points": [{ "x": 250.0, "y": 40.0 }], "swapped": true, "hidden": true
+                "points": [{ "x": 250.0, "y": 40.0 }], "swapped": true, "hidden": true,
+                "fromSide": "left", "toSide": "left"
             }]
         })
     }
@@ -2648,6 +2679,8 @@ mod tests {
             v["tables"][1]["shortcuts"] = serde_json::json!([{ "id": "s1", "x": 1.0, "y": 1.0 }])
         });
         assert!(e.contains("O atalho s1 se repete"), "{e}");
+        let e = bad(&|v| v["joins"][0]["toSide"] = "top".into());
+        assert!(e.contains("Lado inválido na ligação orders → customers: top"), "{e}");
         let mut def: Definition = serde_json::from_value(v2_json()).unwrap();
         def.joins[0].points[0].x = f64::INFINITY;
         let e = validate(&def).unwrap_err();
@@ -3039,5 +3072,15 @@ mod tests {
             }))),
             "Os cubos recent e sales já estão ligados"
         );
+        assert_eq!(
+            bad(&|v| v["cubeJoins"][0]["fromSide"] = "up".into()),
+            "Lado inválido na ligação cj1: up"
+        );
+        let mut value = cubes_json();
+        value["cubeJoins"][0]["fromSide"] = "left".into();
+        value["cubeJoins"][0]["toSide"] = "right".into();
+        let def: Definition = serde_json::from_value(value.clone()).unwrap();
+        validate(&def).unwrap();
+        assert_eq!(serde_json::to_value(&def).unwrap()["cubeJoins"], value["cubeJoins"]);
     }
 }

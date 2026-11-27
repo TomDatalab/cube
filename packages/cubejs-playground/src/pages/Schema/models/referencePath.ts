@@ -37,14 +37,29 @@ const out = (side: Side) => (side === 'right' ? 1 : -1);
 
 // The sides a reference leaves its two tables from: towards the other
 // table, or the other way when it is swapped.
+// An end dragged to a side stays there.
 export function endSides(
   source: { x: number; width: number },
   target: { x: number; width: number },
-  swapped: boolean
+  swapped: boolean,
+  fixed: { from?: Side; to?: Side } = {}
 ): [Side, Side] {
   const rightward = source.x + source.width / 2 <= target.x + target.width / 2;
   const [s, t]: [Side, Side] = rightward ? ['right', 'left'] : ['left', 'right'];
-  return swapped ? [t, s] : [s, t];
+  const [a, b] = swapped ? [t, s] : [s, t];
+  return [fixed.from ?? a, fixed.to ?? b];
+}
+
+// The side of a box nearer to a pointer at `x`.
+export function sideAt(box: { x: number; width: number }, x: number): Side {
+  return x < box.x + box.width / 2 ? 'left' : 'right';
+}
+
+const flip = (side?: Side): Side | undefined => (side && (side === 'left' ? 'right' : 'left'));
+
+// What Swap does to a line's dragged ends: each goes to its other side.
+export function swappedSides(fixed: { fromSide?: Side; toSide?: Side }): { fromSide?: Side; toSide?: Side } {
+  return { fromSide: flip(fixed.fromSide), toSide: flip(fixed.toSide) };
 }
 const same = (p: Point, q: Point) => p.x === q.x && p.y === q.y;
 

@@ -2321,6 +2321,44 @@ describe('ModelEditor', () => {
       two.unmount();
     });
 
+    it('a selected line\'s end can be dragged to the other side of its cube', () => {
+      const join = {
+        id: 'cj1', from: 'c1', to: 'c2', relationship: 'many_to_one', on: [], points: [],
+      };
+      const onSetSide = vi.fn();
+      const props = {
+        id: 'cubejoin:cj1',
+        source: 'cube:c1',
+        target: 'cube:c2',
+        sourceY: 10,
+        targetY: 80,
+        selected: true,
+        data: { join, onSetPoints: vi.fn(), onSetSide },
+      };
+      const { host, unmount } = mount(createElement(CubeJoinEdge as any, props));
+      const start = host.querySelector('[data-slot="model-reference-end"][data-end="from"]')!;
+      // c1 spans x 0..160: the start leaves from its right side.
+      expect(start.getAttribute('style')).toContain('translate(160px, 10px)');
+      const drag = (el: Element, x: number) => act(() => {
+        el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+        window.dispatchEvent(new MouseEvent('pointermove', { clientX: x, clientY: 10 }));
+        window.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: 10 }));
+      });
+      // Still on the right half: nothing changes.
+      drag(start, 120);
+      expect(onSetSide).not.toHaveBeenCalled();
+      drag(start, 20);
+      expect(onSetSide).toHaveBeenLastCalledWith('cj1', 'from', 'left');
+      unmount();
+      // Saved on the left, the line leaves from there.
+      const left = mount(createElement(CubeJoinEdge as any, {
+        ...props, data: { ...props.data, join: { ...join, fromSide: 'left' } },
+      }));
+      expect(left.host.querySelector('[data-slot="model-reference-end"][data-end="from"]')!
+        .getAttribute('style')).toContain('translate(0px, 10px)');
+      left.unmount();
+    });
+
     it('source lines: one dashed dependency per table a cube reads', () => {
       const def = {
         ...saved(),

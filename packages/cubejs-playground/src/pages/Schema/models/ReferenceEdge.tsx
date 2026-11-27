@@ -6,7 +6,8 @@ import type { Edge, EdgeProps } from '@xyflow/react';
 
 import type { ModelJoin, Point } from './modelGraph';
 import {
-  EndMark, endMarks, endSides, markPath, moveCorner, moveSegment, orthogonalPath, removeCorner, routeOf,
+  EndMark, Side, endMarks, endSides, markPath, moveCorner, moveSegment, orthogonalPath, removeCorner, routeOf,
+  sideAt,
 } from './referencePath';
 
 export type ReferenceEdgeData = {
@@ -14,6 +15,7 @@ export type ReferenceEdgeData = {
   join: ModelJoin;
   label: string;
   onSetPoints: (index: number, points: Point[]) => void;
+  onSetSide: (index: number, end: 'from' | 'to', side: Side) => void;
 };
 export type ReferenceFlowEdge = Edge<ReferenceEdgeData, 'reference'>;
 
@@ -22,22 +24,28 @@ export type ReferenceLineProps = Pick<EdgeProps, 'id' | 'source' | 'target' | 's
   swapped: boolean;
   ends: { from: EndMark; to: EndMark };
   label: string;
+  // Each end's side when it was dragged there.
+  sides: { from?: Side; to?: Side };
   onSetPoints: (points: Point[]) => void;
+  onSetSide: (end: 'from' | 'to', side: Side) => void;
 };
 
 // A reference as Redgate draws it: square corners through its reference
 // points, a crow's foot or bar at each end, the label in the middle of the
 // longest segment. Selected, every corner can be dragged (double-click one
-// to remove it) and every segment dragged across itself. Shared by the
-// table references and the cube joins.
+// to remove it), every segment dragged across itself, and each end dragged
+// to the other side of its table. Shared by the table references and the
+// cube joins.
 export const ReferenceLine = memo(({
-  id, source, target, sourceY, targetY, selected, points: saved, swapped, ends, label, onSetPoints,
+  id, source, target, sourceY, targetY, selected, points: saved, swapped, sides, ends, label, onSetPoints, onSetSide,
 }: ReferenceLineProps) => {
   const from = useInternalNode(source);
   const to = useInternalNode(target);
   const { screenToFlowPosition } = useReactFlow();
   // The points while a drag is under way.
   const [draft, setDraft] = useState<Point[] | null>(null);
+  // An end's side while it is dragged.
+  const [endDraft, setEndDraft] = useState<{ end: 'from' | 'to'; side: Side } | null>(null);
   if (!from || !to) {
     return null;
   }
@@ -47,7 +55,8 @@ export const ReferenceLine = memo(({
   });
   const a = box(from);
   const b = box(to);
-  const [sourceSide, targetSide] = endSides(a, b, swapped);
+  const fixed = endDraft ? { ...sides, [endDraft.end]: endDraft.side } : sides;
+  const [sourceSide, targetSide] = endSides(a, b, swapped, fixed);
   const sourcePoint = { x: sourceSide === 'right' ? a.x + a.width : a.x, y: sourceY };
   const targetPoint = { x: targetSide === 'right' ? b.x + b.width : b.x, y: targetY };
   const points = draft ?? saved;
@@ -83,6 +92,32 @@ export const ReferenceLine = memo(({
       setDraft(null);
       if (moved && last) {
         onSetPoints(last);
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  // Drag an end: it goes to the side of its table nearer the pointer.
+  const startEndDrag = (end: 'from' | 'to') => (e: ReactPointerEvent) => {
+    if (e.button !== 0) {
+      return;
+    }
+    e.stopPropagation();
+    e.preventDefault();
+    const own = end === 'from' ? a : b;
+    const was = end === 'from' ? sourceSide : targetSide;
+    let side = was;
+    const move = (ev: PointerEvent) => {
+      side = sideAt(own, screenToFlowPosition({ x: ev.clientX, y: ev.clientY }).x);
+      setEndDraft({ end, side });
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      setEndDraft(null);
+      if (side !== was) {
+        onSetSide(end, side);
       }
     };
     window.addEventListener('pointermove', move);
@@ -133,6 +168,21 @@ export const ReferenceLine = memo(({
             />
           );
         }) : null}
+        {selected ? ([['from', sourcePoint], ['to', targetPoint]] as const).map(([end, p]) => (
+          // A pointer handle, like the segment ones.
+          // eslint-disable-next-line jsx-a11y/interactive-supports-focus
+          <div
+            key={end}
+            role="button"
+            aria-label={end === 'from' ? 'Reference start' : 'Reference end'}
+            title="Drag to the other side of the table"
+            data-slot="model-reference-end"
+            data-end={end}
+            className="nodrag nopan tw:pointer-events-auto tw:absolute tw:size-2.5 tw:cursor-ew-resize tw:rounded-full tw:border tw:border-ring tw:bg-ring"
+            style={{ transform: `translate(-50%, -50%) translate(${p.x}px, ${p.y}px)` }}
+            onPointerDown={startEndDrag(end)}
+          />
+        )) : null}
         {selected ? route.corners.map((p, k) => (
           // A pointer handle, like the segment ones.
           // eslint-disable-next-line jsx-a11y/interactive-supports-focus
@@ -174,9 +224,11 @@ export const ReferenceEdge = memo((props: EdgeProps<ReferenceFlowEdge>) => {
       selected={rest.selected}
       points={data.join.points ?? []}
       swapped={Boolean(data.join.swapped)}
+      sides={{ from: data.join.fromSide, to: data.join.toSide }}
       ends={endMarks(data.join)}
       label={data.label}
       onSetPoints={(points) => data.onSetPoints(data.index, points)}
+      onSetSide={(end, side) => data.onSetSide(data.index, end, side)}
     />
   );
 });

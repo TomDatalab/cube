@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  addPoint, endMarks, endSides, markPath, moveCorner, moveSegment, orthogonalPath, reducePoint,
+  addPoint, endMarks, endSides, swappedSides, markPath, moveCorner, moveSegment, orthogonalPath, reducePoint,
   removeCorner, routeOf,
 } from '../pages/Schema/models/referencePath';
 import type { ModelJoin } from '../pages/Schema/models/modelGraph';
@@ -169,5 +169,20 @@ describe('referencePath', () => {
       expect(points).toEqual([{ x: 150, y: 0 }]);
       expect(straight(orthogonalPath(source, 'right', target, 'left', points).segments)).toBe(true);
     });
+  });
+
+  it('endSides keeps an end on the side it was dragged to', () => {
+    const left = { x: 0, width: 100 };
+    const right = { x: 300, width: 100 };
+    expect(endSides(left, right, false)).toEqual(['right', 'left']);
+    expect(endSides(left, right, false, { to: 'right' })).toEqual(['right', 'right']);
+    expect(endSides(left, right, false, { from: 'left', to: 'right' })).toEqual(['left', 'right']);
+    // A dragged end ignores swapped; the other end still swaps.
+    expect(endSides(left, right, true, { from: 'right' })).toEqual(['right', 'right']);
+  });
+
+  it('swappedSides moves each dragged end to its other side', () => {
+    expect(swappedSides({ fromSide: 'left' })).toEqual({ fromSide: 'right', toSide: undefined });
+    expect(swappedSides({})).toEqual({ fromSide: undefined, toSide: undefined });
   });
 });

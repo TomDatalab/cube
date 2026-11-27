@@ -85,6 +85,9 @@ export type ModelJoin = {
   points?: Point[];
   // The line leaves its tables on the other side.
   swapped?: boolean;
+  // The side of its table an end was dragged to.
+  fromSide?: 'left' | 'right';
+  toSide?: 'left' | 'right';
   // Not drawn on the canvas; still a link.
   hidden?: boolean;
   // What the reference is as a foreign key, as Redgate shows it.
@@ -236,6 +239,9 @@ export type CubeJoin = {
   on: { from: string; to: string }[];
   points: Point[];
   hidden?: boolean;
+  // The side of its cube an end was dragged to.
+  fromSide?: 'left' | 'right';
+  toSide?: 'left' | 'right';
 };
 
 export type ModelDefinition = {
@@ -378,7 +384,7 @@ export function connect(
   };
 }
 
-export type JoinPatch = Partial<Pick<ModelJoin, 'relationship' | 'join' | 'points' | 'swapped' | 'hidden'>>;
+export type JoinPatch = Partial<Pick<ModelJoin, 'relationship' | 'join' | 'points' | 'swapped' | 'hidden' | 'fromSide' | 'toSide'>>;
 
 // Copies `value` into `key`, or drops the key for an empty or false value.
 function patched<T extends object>(target: T, patch: Record<string, unknown>): T {

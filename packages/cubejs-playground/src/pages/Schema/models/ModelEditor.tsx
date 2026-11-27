@@ -57,7 +57,9 @@ import { ReferenceEdge, ReferenceFlowEdge } from './ReferenceEdge';
 import {
   AlignMode, Box as Bounds, DistributeMode, align, distribute, sameSize,
 } from './arrange';
-import { addPoint, endSides, orthogonalPath, reducePoint } from './referencePath';
+import {
+  Side, addPoint, endSides, orthogonalPath, reducePoint, swappedSides,
+} from './referencePath';
 import { Hit, searchModel } from './search';
 import { SearchBox } from './SearchBox';
 import { TOOLS, Tool, ToolPalette } from './ToolPalette';
@@ -567,6 +569,12 @@ function Editor({
     });
   }, [def, columnsOf, onRemove, onResize, collapsedTables, toggleTable, picked, onPick, selection, problemsFound]);
 
+  const onSetSide = useCallback((index: number, end: 'from' | 'to', side: Side) => {
+    setDef((d) => setJoin(d, index, end === 'from' ? { fromSide: side } : { toSide: side }));
+    revision.current += 1;
+    setDirty(true);
+  }, [setDef]);
+
   const onSetPoints = useCallback((index: number, points: Point[]) => {
     setDef((d) => setJoin(d, index, { points }));
     revision.current += 1;
@@ -583,9 +591,9 @@ function Editor({
     type: 'reference' as const,
     selected: Boolean(j.id) && selectedEdge === j.id,
     data: {
-      index, join: j, label: joinLabel(j), onSetPoints,
+      index, join: j, label: joinLabel(j), onSetPoints, onSetSide,
     },
-  }])), [def.joins, selectedEdge, onSetPoints]);
+  }])), [def.joins, selectedEdge, onSetPoints, onSetSide]);
 
   // A line from each view to every table or view it depends on that exists.
   const dependencies: DependencyFlowEdge[] = useMemo(() => {
@@ -605,6 +613,12 @@ function Editor({
       data: {},
     })));
   }, [def.views, def.tables]);
+  const onSetCubeJoinSide = useCallback((id: string, end: 'from' | 'to', side: Side) => {
+    setDef((d) => setCubeJoin(d, id, end === 'from' ? { fromSide: side } : { toSide: side }));
+    revision.current += 1;
+    setDirty(true);
+  }, [setDef]);
+
   const onSetCubeJoinPoints = useCallback((id: string, points: Point[]) => {
     setDef((d) => setCubeJoin(d, id, { points }));
     revision.current += 1;
@@ -622,11 +636,11 @@ function Editor({
       label: REL_LABEL[j.relationship],
       type: 'cubejoin',
       selected: selectedEdge === cubeJoinEdgeId(j.id),
-      data: { join: j, onSetPoints: onSetCubeJoinPoints },
+      data: { join: j, onSetPoints: onSetCubeJoinPoints, onSetSide: onSetCubeJoinSide },
     })),
     // cubeSourceEdges reads only the tables and the cubes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onSetCubeJoinPoints]);
+  ], [def.cubes, def.cubeJoins, def.tables, def.joins, selectedEdge, onSetCubeJoinPoints, onSetCubeJoinSide]);
   const edges: (ReferenceFlowEdge | DependencyFlowEdge | CubeJoinFlowEdge)[] = useMemo(
     () => [...references, ...dependencies, ...cubeLines],
     [references, dependencies, cubeLines]
@@ -1189,7 +1203,7 @@ function Editor({
     };
     const a = end(j.from.alias, j.from.column);
     const b = end(j.to.alias, j.to.column);
-    const [sa, sb] = endSides(a, b, Boolean(j.swapped));
+    const [sa, sb] = endSides(a, b, Boolean(j.swapped), { from: j.fromSide, to: j.toSide });
     return orthogonalPath(
       { x: sa === 'right' ? a.x + a.width : a.x, y: a.y },
       sa,
@@ -1205,7 +1219,7 @@ function Editor({
       return;
     }
     if (what === 'swap') {
-      change(setJoin(def, edgeAt, { swapped: !j.swapped }));
+      change(setJoin(def, edgeAt, { swapped: !j.swapped, ...swappedSides(j) }));
     } else if (what === 'add') {
       change(setJoin(def, edgeAt, { points: addPoint(j.points ?? [], referencePath(edgeAt)) }));
     } else {
