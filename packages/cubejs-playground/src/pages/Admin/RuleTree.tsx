@@ -1,14 +1,18 @@
-import { CaretDownOutlined, CaretRightOutlined, CloseOutlined } from '@ant-design/icons';
+import { DragEvent, useEffect, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight, CircleAlert, X } from 'lucide-react';
+
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import {
-  Alert, Button, Empty, Input, message, Popconfirm, Space, Spin, Tag, Typography,
-} from 'antd';
-import { CSSProperties, DragEvent, useEffect, useRef, useState } from 'react';
+  Confirm, EmptyState, notify, SearchInput, Spinner, Tag,
+} from '@/components/kit';
+import { cn } from '@/lib/utils';
 
 import { useIsMounted } from '../../hooks';
 import {
-  AdminApi, PAGE_SIZE, Rule, WorkspaceListing,
+  AdminApi, memberName, PAGE_SIZE, Rule, RuleMember, WorkspaceListing,
 } from './api';
-import { USER_DRAG_TYPE } from './MembershipTree';
+import { USER_DRAG_NAME_TYPE, USER_DRAG_TYPE } from './MembershipTree';
 import { groupByOrganization } from './membershipGroups';
 import { useSearch } from './useSearch';
 
@@ -41,13 +45,12 @@ type Props = {
   onChanged?: () => void;
 };
 
-const dropStyle = (highlighted: boolean): CSSProperties => ({
-  borderRadius: 4,
-  border: `1px dashed ${highlighted ? 'var(--pg-accent, #2f5597)' : 'transparent'}`,
-  background: highlighted ? 'var(--pg-accent-soft, rgba(47, 85, 151, 0.1))' : undefined,
-});
+const dropClass = (highlighted: boolean) => cn(
+  'tw:rounded tw:border tw:border-dashed',
+  highlighted ? 'tw:border-primary tw:bg-primary/10' : 'tw:border-transparent'
+);
 
-const toggleStyle: CSSProperties = { cursor: 'pointer', userSelect: 'none' };
+const toggleClass = 'tw:flex tw:cursor-pointer tw:items-center tw:gap-1 tw:select-none';
 
 function count(n: number, one: string, many: string) {
   return n === 1 ? `(1 ${one})` : `(${n} ${many})`;
@@ -62,7 +65,7 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     q, setQ, page, setPage, result, loading, error,
   } = useSearch((term, p) => api.searchWorkspaces({ q: term, page: p }), []);
   const [rules, setRules] = useState<Record<string, Rule[]>>({});
-  const [members, setMembers] = useState<Record<string, string[]>>({});
+  const [members, setMembers] = useState<Record<string, RuleMember[]>>({});
   const [openWorkspaces, setOpenWorkspaces] = useState<Set<string>>(new Set());
   const [openRules, setOpenRules] = useState<Set<string>>(new Set());
   // `ws:<id>` or `rule:<id>`: what a drag hovers.
@@ -78,12 +81,12 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
       }
       return list;
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
       return null;
     }
   }
 
-  async function loadMembers(rule: string): Promise<string[] | null> {
+  async function loadMembers(rule: string): Promise<RuleMember[] | null> {
     try {
       const list = await api.ruleMembers(rule);
       if (isMounted()) {
@@ -91,7 +94,7 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
       }
       return list;
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
       return null;
     }
   }
@@ -158,7 +161,7 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     }
     setOpenWorkspaces(new Set(openWorkspaces).add(ws.id));
     if (rule.workspaceId === ws.id) {
-      message.info(`${rule.description} is already in ${ws.name}`);
+      notify.info(`${rule.description} is already in ${ws.name}`);
       if (!rules[ws.id]) {
         loadRules(ws.id);
       }
@@ -166,10 +169,10 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     }
     try {
       await api.updateRule(rule.id, { workspaceId: ws.id });
-      message.success(`${rule.description} moved to ${ws.name}, with its members`);
+      notify.success(`${rule.description} moved to ${ws.name}, with its members`);
       onChanged?.();
     } catch (err: any) {
-      message.error(err.message);
+      notify.error(err.message);
     }
     await Promise.all([loadRules(ws.id), rules[rule.workspaceId] ? loadRules(rule.workspaceId) : null]);
   }
@@ -182,10 +185,11 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     if (!user) {
       return;
     }
+    const username = e.dataTransfer.getData(USER_DRAG_NAME_TYPE) || user;
     setOpenRules(new Set(openRules).add(rule.id));
     const current = members[rule.id] || await loadMembers(rule.id);
-    if (current?.includes(user)) {
-      message.info(`${user} is already in ${rule.description}`);
+    if (current?.some((m) => m.user === user)) {
+      notify.info(`${username} is already in ${rule.description}`);
       return;
     }
     if (!current) {
@@ -193,19 +197,20 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
     }
     try {
       await api.addRuleMember(rule.id, user);
-      message.success(`${user} added to ${rule.description} (${rule.roleName} in ${rule.workspaceName})`);
+      notify.success(`${username} added to ${rule.description} (${rule.roleName} in ${rule.workspaceName})`);
     } catch (err: any) {
-      message.error(err.message);
+      notify.error(err.message);
     }
     await loadMembers(rule.id);
   }
 
-  async function removeMember(rule: Rule, user: string) {
+  async function removeMember(rule: Rule, member: RuleMember) {
+    const { user } = member;
     try {
       await api.removeRuleMember(rule.id, user);
-      message.success(`${user} removed from ${rule.description}`);
+      notify.success(`${memberName(member)} removed from ${rule.description}`);
     } catch (err: any) {
-      message.error(err.message);
+      notify.error(err.message);
     }
     await loadMembers(rule.id);
   }
@@ -221,45 +226,43 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
         onDragOver={(e) => accept(e, USER_DRAG_TYPE, key)}
         onDragLeave={() => leave(key)}
         onDrop={(e) => dropUser(e, rule)}
-        style={{ ...dropStyle(target === key), margin: '2px 0', padding: '2px 6px' }}
+        className={cn(dropClass(target === key), 'tw:my-0.5 tw:px-1.5 tw:py-0.5')}
       >
         <div
           role="button"
           tabIndex={0}
           onClick={() => toggleRule(rule.id)}
           onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleRule(rule.id)}
-          style={toggleStyle}
+          className={cn(toggleClass, 'tw:flex-wrap')}
         >
-          {expanded ? <CaretDownOutlined /> : <CaretRightOutlined />}
-          {' '}
-          <Tag style={{ marginRight: 6 }} title={rule.permissions.join(', ')}>{rule.roleName}</Tag>
-          <Typography.Text>{rule.description}</Typography.Text>
-          {' '}
-          <Typography.Text type="secondary">{`· ${rule.type}`}</Typography.Text>
-          {' '}
-          {list ? <Typography.Text type="secondary">{count(list.length, 'member', 'members')}</Typography.Text> : null}
+          {expanded ? <ChevronDown className="tw:size-4" /> : <ChevronRight className="tw:size-4" />}
+          <Tag className="tw:mr-1" title={rule.permissions.join(', ')}>{rule.roleName}</Tag>
+          <span>{rule.description}</span>
+          <span className="tw:text-muted-foreground">{`· ${rule.type}`}</span>
+          {list ? <span className="tw:text-muted-foreground">{count(list.length, 'member', 'members')}</span> : null}
         </div>
         {expanded ? (
-          <div style={{ paddingLeft: 20 }}>
-            {list?.map((user) => (
-              <div key={user} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                <Typography.Text style={{ minWidth: 120 }}>{user}</Typography.Text>
-                <Popconfirm
-                  title={`Remove ${user} from ${rule.description}?`}
-                  onConfirm={() => removeMember(rule, user)}
+          <div className="tw:pl-5">
+            {list?.map((member) => (
+              <div key={member.user} className="tw:mt-1 tw:flex tw:items-center tw:gap-2">
+                <span className="tw:min-w-[120px]">{memberName(member)}</span>
+                <Confirm
+                  title={`Remove ${memberName(member)} from ${rule.description}?`}
+                  onConfirm={() => removeMember(rule, member)}
                 >
                   <Button
-                    size="small"
-                    type="text"
-                    danger
-                    icon={<CloseOutlined />}
-                    aria-label={`Remove ${user} from ${rule.description}`}
-                  />
-                </Popconfirm>
+                    size="icon-xs"
+                    variant="ghost"
+                    className="tw:text-destructive"
+                    aria-label={`Remove ${memberName(member)} from ${rule.description}`}
+                  >
+                    <X />
+                  </Button>
+                </Confirm>
               </div>
             ))}
-            {list && !list.length ? <Typography.Text type="secondary">Drag users here</Typography.Text> : null}
-            {list ? null : <Spin size="small" />}
+            {list && !list.length ? <span className="tw:text-muted-foreground">Drag users here</span> : null}
+            {list ? null : <Spinner />}
           </div>
         ) : null}
       </div>
@@ -271,24 +274,25 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
 
   return (
     <div>
-      <Input.Search
-        allowClear
+      <SearchInput
+        className="tw:mb-4"
         placeholder="Search workspaces, or their organization"
         value={q}
-        onChange={(e) => setQ(e.target.value)}
-        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+        onChange={setQ}
       />
-      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
-      {result == null && !error ? <Spin /> : null}
+      {error ? (
+        <Alert variant="destructive" className="tw:mb-4">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+      {result == null && !error ? <Spinner className="tw:size-5" /> : null}
       {result && !groups.length && !loading ? (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={q ? 'No workspaces match' : 'No workspaces yet: create them in the Workspaces tab'}
-        />
+        <EmptyState>{q ? 'No workspaces match' : 'No workspaces yet: create them in the Workspaces tab'}</EmptyState>
       ) : null}
       {groups.map((group) => (
-        <div key={group.organizationId} style={{ marginBottom: 16 }}>
-          <Typography.Text strong>{group.organizationName}</Typography.Text>
+        <div key={group.organizationId} className="tw:mb-4 tw:text-sm">
+          <span className="tw:font-semibold">{group.organizationName}</span>
           {group.workspaces.map((ws) => {
             const key = `ws:${ws.id}`;
             const list = rules[ws.id];
@@ -300,28 +304,26 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
                 onDragOver={(e) => accept(e, RULE_DRAG_TYPE, key)}
                 onDragLeave={() => leave(key)}
                 onDrop={(e) => dropRule(e, ws)}
-                style={{ ...dropStyle(target === key), margin: '4px 0 4px 16px', padding: '4px 8px' }}
+                className={cn(dropClass(target === key), 'tw:my-1 tw:ml-4 tw:px-2 tw:py-1')}
               >
                 <div
                   role="button"
                   tabIndex={0}
                   onClick={() => toggleWorkspace(ws.id)}
                   onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleWorkspace(ws.id)}
-                  style={toggleStyle}
+                  className={toggleClass}
                 >
-                  {expanded ? <CaretDownOutlined /> : <CaretRightOutlined />}
-                  {' '}
-                  <Typography.Text>{ws.name}</Typography.Text>
-                  {' '}
-                  {list ? <Typography.Text type="secondary">{count(list.length, 'rule', 'rules')}</Typography.Text> : null}
+                  {expanded ? <ChevronDown className="tw:size-4" /> : <ChevronRight className="tw:size-4" />}
+                  <span>{ws.name}</span>
+                  {list ? <span className="tw:text-muted-foreground">{count(list.length, 'rule', 'rules')}</span> : null}
                 </div>
                 {expanded ? (
-                  <div style={{ paddingLeft: 16 }}>
+                  <div className="tw:pl-4">
                     {list?.map(renderRule)}
                     {list && !list.length ? (
-                      <Typography.Text type="secondary">No rules: drag one here</Typography.Text>
+                      <span className="tw:text-muted-foreground">No rules: drag one here</span>
                     ) : null}
-                    {list ? null : <Spin size="small" />}
+                    {list ? null : <Spinner />}
                   </div>
                 ) : null}
               </div>
@@ -330,15 +332,15 @@ export function RuleTree({ api, version = 0, onChanged }: Props) {
         </div>
       ))}
       {result && result.total > PAGE_SIZE ? (
-        <Space>
-          <Button size="small" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>
+        <div className="tw:flex tw:items-center tw:gap-2">
+          <Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>
             Previous
           </Button>
-          <Typography.Text type="secondary">{`page ${page} of ${pages}`}</Typography.Text>
-          <Button size="small" disabled={page >= pages || loading} onClick={() => setPage(page + 1)}>
+          <span className="tw:text-sm tw:text-muted-foreground">{`page ${page} of ${pages}`}</span>
+          <Button size="sm" variant="outline" disabled={page >= pages || loading} onClick={() => setPage(page + 1)}>
             Next
           </Button>
-        </Space>
+        </div>
       ) : null}
     </div>
   );

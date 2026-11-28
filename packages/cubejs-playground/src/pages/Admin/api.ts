@@ -4,8 +4,10 @@ import { authHeaders, onUnauthorized } from '../../shared/auth';
 // The RBAC management API (`/v1/users`, `/v1/organizations`, ...). These
 // routes are not scoped to a workspace, so no `X-Cube-Workspace` goes out.
 
+// `id` is the UUID every call names the user by; `username` is what people see.
 export type User = {
   id: string;
+  username: string;
   name: string | null;
   email: string | null;
   disabled: boolean;
@@ -42,7 +44,13 @@ export type TrackedConnection = { name: string; organizationId: string; origin: 
 export const ROLES = ['owner', 'editor', 'viewer'] as const;
 export type Role = typeof ROLES[number];
 
-export type Member = { user: string; role: Role };
+// `user` is the user's id; `username` is null for a subject that no longer
+// has a user (show `user` then).
+export type Member = { user: string; username: string | null; role: Role };
+export type RuleMember = { user: string; username: string | null };
+
+// What to show for a member.
+export const memberName = (m: { user: string; username: string | null }) => m.username ?? m.user;
 
 // The workspace permissions an organization's role can grant, in order.
 export const PERMISSIONS = [
@@ -126,9 +134,12 @@ export function restrictionSummary(r: Restrictions): string {
   return parts.join(' · ');
 }
 
-// A role an organization defines, with how many rules use it.
+// A role an organization defines, with how many rules use it. Every
+// organization has three default roles, `builtin` "owner", "editor" and
+// "viewer" (whatever their names now are); the others have `builtin` null.
 export type OrgRole = {
   id: string;
+  builtin: Role | null;
   organizationId: string;
   name: string;
   permissions: Permission[];
@@ -152,6 +163,19 @@ export type Rule = {
   workspaceName: string;
   organizationId: string;
   organizationName: string;
+  createdAt: string;
+  createdBy: string | null;
+};
+
+// A group of users of an organization. Placed in rules of that organization,
+// its members are members of them. `members` and `rules` are counts.
+export type Group = {
+  id: string;
+  organizationId: string;
+  organizationName: string;
+  name: string;
+  members: number;
+  rules: number;
   createdAt: string;
   createdBy: string | null;
 };
@@ -264,11 +288,42 @@ export function adminApi(basePath: string) {
       page: number;
     }): Promise<Page<Rule>> => search('rules', 'rules', opts),
 
+    searchGroups: (opts: {
+      q: string;
+      organizationId?: string | null;
+      page: number;
+    }): Promise<Page<Group>> => search('groups', 'groups', opts),
+    createGroup: (org: string, name: string): Promise<Group> => call(
+      'POST', `/v1/organizations/${id(org)}/groups`, { name }
+    ),
+    renameGroup: (group: string, name: string): Promise<Group> => call(
+      'PATCH', `/v1/groups/${id(group)}`, { name }
+    ),
+    deleteGroup: (group: string) => call('DELETE', `/v1/groups/${id(group)}`),
+    groupMembers: async (group: string): Promise<RuleMember[]> => (
+      await call('GET', `/v1/groups/${id(group)}/members`)
+    ).members.map((m: RuleMember) => ({ user: m.user, username: m.username ?? null })),
+    addGroupMember: (group: string, user: string) => call(
+      'PUT', `/v1/groups/${id(group)}/members/${id(user)}`
+    ),
+    removeGroupMember: (group: string, user: string) => call(
+      'DELETE', `/v1/groups/${id(group)}/members/${id(user)}`
+    ),
+    groupRules: async (group: string): Promise<Rule[]> => (
+      await call('GET', `/v1/groups/${id(group)}/rules`)
+    ).rules,
+    addGroupRule: (group: string, rule: string) => call(
+      'PUT', `/v1/groups/${id(group)}/rules/${id(rule)}`
+    ),
+    removeGroupRule: (group: string, rule: string) => call(
+      'DELETE', `/v1/groups/${id(group)}/rules/${id(rule)}`
+    ),
+
     users: async (): Promise<User[]> => (await call('GET', '/v1/users')).users,
-    createUser: (user: { id: string; name?: string; email?: string; password: string }) => call(
+    createUser: (user: { username: string; name?: string; email?: string; password: string }) => call(
       'POST', '/v1/users', user
     ),
-    updateUser: (user: string, patch: { name?: string; email?: string; disabled?: boolean }) => call(
+    updateUser: (user: string, patch: { username?: string; name?: string; email?: string; disabled?: boolean }) => call(
       'PATCH', `/v1/users/${id(user)}`, patch
     ),
     userAttributes: async (user: string): Promise<Attributes> => (
@@ -331,9 +386,9 @@ export function adminApi(basePath: string) {
       'PATCH', `/v1/rules/${id(rule)}`, patch
     ),
     deleteRule: (rule: string) => call('DELETE', `/v1/rules/${id(rule)}`),
-    ruleMembers: async (rule: string): Promise<string[]> => (
+    ruleMembers: async (rule: string): Promise<RuleMember[]> => (
       await call('GET', `/v1/rules/${id(rule)}/members`)
-    ).members.map((m: { user: string }) => m.user),
+    ).members.map((m: RuleMember) => ({ user: m.user, username: m.username ?? null })),
     addRuleMember: (rule: string, user: string) => call(
       'PUT', `/v1/rules/${id(rule)}/members/${id(user)}`
     ),

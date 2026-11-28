@@ -4,6 +4,7 @@ export const ADMIN_SECTIONS = [
   { key: 'workspaces', label: 'Workspaces' },
   { key: 'roles', label: 'Roles' },
   { key: 'rules', label: 'Rules' },
+  { key: 'groups', label: 'Groups' },
   { key: 'users', label: 'Users' },
 ] as const;
 

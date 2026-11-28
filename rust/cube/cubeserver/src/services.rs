@@ -26,9 +26,13 @@ pub struct RequestContext {
     /// RBAC only: the `X-Cube-Organization` header, the scope a platform
     /// admin without a workspace asks for.
     pub organization: Option<String>,
-    /// RBAC only: the user the token speaks for (`sub`, checked against the
-    /// users table on every request).
+    /// RBAC only: the UUID of the user the token speaks for (`sub`, checked
+    /// against the users table on every request). The key for SpiceDB and
+    /// the users table.
     pub user: Option<String>,
+    /// RBAC only: that user's username, what the audit columns
+    /// (`created_by`, `updated_by`) record.
+    pub username: Option<String>,
     /// RBAC only: whether `user` is a platform admin.
     pub platform_admin: bool,
     /// The request carried a token that verified. With security checks off

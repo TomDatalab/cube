@@ -79,6 +79,127 @@ const GlobalStyles = createGlobalStyle`
     white-space: nowrap;
   }
 
+  /* Files with line numbers: gutter and code share font and line height. */
+  .numbered-code {
+    display: flex;
+    margin-top: 16px;
+    overflow: auto;
+    border: 1px solid var(--pg-line, #eee);
+    border-radius: 6px;
+    background: var(--pg-surface, #fff);
+  }
+
+  .numbered-code pre,
+  .numbered-code pre[class*="language-"],
+  .numbered-code code[class*="language-"],
+  .numbered-code textarea {
+    font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+    font-size: 13px;
+    line-height: 20px;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  /* A block, so the code's own lines set the height, not the pre's font. */
+  .numbered-code code[class*="language-"] {
+    display: block;
+  }
+
+  .numbered-code pre[class*="language-"],
+  .numbered-code > pre {
+    padding: 8px 12px;
+  }
+
+  .numbered-code-gutter {
+    flex: none;
+    margin: 0;
+    padding: 8px 8px 8px 12px !important;
+    text-align: right;
+    user-select: none;
+    opacity: 0.45;
+    border-right: 1px solid var(--pg-line, #eee);
+  }
+
+  .numbered-code-sticky {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--pg-surface, #fff);
+  }
+
+  .numbered-code-editor {
+    overflow: hidden;
+  }
+
+  .numbered-code-gutter-scroll {
+    flex: none;
+    overflow: hidden;
+  }
+
+  /* Room for the textarea's own horizontal scrollbar, so the last numbers
+     still line up when it is scrolled to the end. */
+  .numbered-code-gutter-scroll .numbered-code-gutter {
+    min-height: 100%;
+    padding-bottom: 32px !important;
+  }
+
+  .numbered-code-input {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* The colored copy under the textarea: same box, same text, no events.
+     Extra room at the end so it can scroll as far as the textarea, whose
+     scrollbars take part of its box. */
+  .numbered-code-input pre[data-slot="code-colors"] {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 8px 44px 40px 12px;
+    overflow: hidden;
+    pointer-events: none;
+    background: transparent;
+  }
+
+  .numbered-code-editor textarea {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 8px 12px;
+    border: 0;
+    outline: none;
+    resize: none;
+    overflow: auto;
+    background: transparent;
+    /* The text is the colored copy's; the caret keeps the text color. */
+    color: var(--pg-text, #141446);
+    -webkit-text-fill-color: transparent;
+    caret-color: var(--pg-text, #141446);
+  }
+
+  .numbered-code-editor textarea::selection {
+    background: color-mix(in srgb, var(--pg-accent, #2f5597) 25%, transparent);
+  }
+
+  .numbered-code-editor:focus-within {
+    border-color: var(--pg-accent, #2f5597);
+  }
+
+  .numbered-code-editor textarea:disabled {
+    opacity: 0.6;
+  }
+
+  .schema-tree-column-type {
+    flex: none;
+    margin-left: auto;
+    padding-left: 8px;
+    font-size: 12px;
+    opacity: 0.55;
+  }
+
   .schema-tree-icon {
     display: inline-flex;
     flex: none;

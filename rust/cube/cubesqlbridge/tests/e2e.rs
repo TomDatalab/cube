@@ -129,10 +129,14 @@ impl Running {
 }
 
 async fn start(executor: Arc<FakeExecutor>) -> Running {
+    start_with(MODEL, executor).await
+}
+
+async fn start_with(model: &str, executor: Arc<FakeExecutor>) -> Running {
     let port = portpicker::pick_unused_port().expect("an ephemeral port");
 
     let config = SqlApiConfig {
-        model_source: ModelSource::yaml(MODEL),
+        model_source: ModelSource::yaml(model),
         postgres_bind_address: Some(format!("127.0.0.1:{port}")),
         planner_threads: 2,
         dialects: Default::default(),
@@ -335,6 +339,84 @@ async fn a_query_against_a_view_spans_its_cubes() {
 
     let request = executor.last_request().expect("one request");
     assert_eq!(request["query"]["measures"], json!(["sales.count"]));
+
+    running.stop().await;
+}
+
+/// Members named with friendly names: columns with spaces, quoted.
+const FRIENDLY: &str = r#"
+cubes:
+  - name: bossa
+    sql_table: dfos.fibercable
+    dimensions:
+      - name: Id Fibra
+        sql: id
+        type: string
+        primary_key: true
+      - name: Fabricante do Cabo
+        sql: manufacturer
+        type: string
+    measures:
+      - name: Quantidade Total
+        type: count
+      - name: Total de Fibras
+        sql: fiber_count
+        type: sum
+      - name: Fibras por Cabo
+        sql: "{Total de Fibras} / NULLIF({CUBE.Quantidade Total}, 0)"
+        type: number
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn members_with_friendly_names_are_quoted_columns() {
+    let executor = Arc::new(FakeExecutor::with_rows(2));
+    let running = start_with(FRIENDLY, executor.clone()).await;
+    let client = connect(running.port).await;
+
+    let columns: Vec<String> = client
+        .query(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'bossa' ORDER BY ordinal_position",
+            &[],
+        )
+        .await
+        .expect("the catalog query should run")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    for c in ["Fabricante do Cabo", "Quantidade Total", "Fibras por Cabo"] {
+        assert!(columns.iter().any(|x| x == c), "{c} in {columns:?}");
+    }
+
+    let rows = client
+        .query(
+            r#"SELECT "Fabricante do Cabo", MEASURE("Quantidade Total") AS q, MEASURE("Fibras por Cabo") FROM bossa GROUP BY 1 ORDER BY 1"#,
+            &[],
+        )
+        .await
+        .expect("the query should run");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<_, i64>(1), 10);
+    let request = executor.last_request().expect("one request");
+    assert_eq!(
+        request["query"]["dimensions"],
+        json!(["bossa.Fabricante do Cabo"]),
+        "{request}"
+    );
+    let measures = request["query"]["measures"].to_string();
+    assert!(measures.contains("bossa.Quantidade Total") && measures.contains("bossa.Fibras por Cabo"), "{request}");
+
+    // As the Playground writes it: qualified, quoted, filtered and truncated.
+    let rows = client
+        .query(
+            r#"SELECT bossa."Fabricante do Cabo", MEASURE(bossa."Quantidade Total") FROM bossa WHERE bossa."Fabricante do Cabo" = 'AFL' GROUP BY 1 ORDER BY 2 DESC"#,
+            &[],
+        )
+        .await
+        .expect("the Playground's SQL should run");
+    assert_eq!(rows.len(), 2);
+    let request = executor.last_request().expect("a request");
+    assert_eq!(request["query"]["measures"], json!(["bossa.Quantidade Total"]), "{request}");
+    assert!(request["query"]["filters"].to_string().contains("bossa.Fabricante do Cabo"), "{request}");
 
     running.stop().await;
 }

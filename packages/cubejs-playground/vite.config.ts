@@ -1,5 +1,7 @@
+import path from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig(({ mode }) => ({
   base: './',
@@ -16,7 +18,15 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: [
     react(),
+    // shadcn/ui: Tailwind utilities only, without its global reset (see
+    // src/shadcn.css), so the antd screens keep their look.
+    tailwindcss(),
   ],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+    },
+  },
   css: {
     preprocessorOptions: {
       less: {

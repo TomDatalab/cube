@@ -301,6 +301,22 @@ api_test!(sync_file_is_read_only, |store| {
     assert_eq!((status, body["error"].as_str()), (StatusCode::BAD_REQUEST, Some("Arquivos .jinja e .j2 não são editáveis aqui")));
 });
 
+api_test!(delete_of_a_cube_a_view_includes_is_400, |store| {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let view = "views:\n  - name: v\n    cubes:\n      - join_path: b\n        includes: \"*\"\n";
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(None, "b.yml", &cube("b"), None), put_in(None, "v.yml", view, None)]))
+        .await
+        .unwrap();
+    let (_, detail) = call(&env, Method::GET, &admin, "/cube/v1/platform/model", None).await;
+    let (id, version) = file_in(&detail, "_platform/b.yml");
+    let (status, body) = call(&env, Method::DELETE, &admin, &format!("/cube/v1/platform/model/files/{id}?version={version}"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["problems"].to_string().contains("Cube b doesn't exist"), "{body}");
+    assert_eq!(call(&env, Method::GET, &admin, &format!("/cube/v1/platform/model/files/{id}"), None).await.0, StatusCode::OK);
+});
+
 api_test!(delete_of_depended_file_is_400, |store| {
     let env = env_live(store.clone()).await;
     let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
@@ -597,7 +613,7 @@ async fn owner_org(
 ) -> (String, uuid::Uuid, String) {
     store
         .create_user(&cubeserver::rbac::store::NewUser {
-            id: user.into(),
+            username: user.into(),
             name: None,
             email: None,
             password_hash: cubeserver::rbac::identity::hash_password("owner-password-1").unwrap(),
@@ -835,7 +851,7 @@ api_test!(owner_reaches_only_own_model, |store| {
     // A workspace member of A who is not its owner: 403 on A's model routes.
     store
         .create_user(&cubeserver::rbac::store::NewUser {
-            id: "bia".into(),
+            username: "bia".into(),
             name: None,
             email: None,
             password_hash: cubeserver::rbac::identity::hash_password("member-password-1").unwrap(),
@@ -869,7 +885,7 @@ const SYNC_PASSWORD: &str = "sync-password-1";
 async fn sync_tokens(env: &Env, store: &cubeserver::rbac::store::Store) -> (String, String) {
     store
         .create_user(&cubeserver::rbac::store::NewUser {
-            id: SYNC_USER.into(),
+            username: SYNC_USER.into(),
             name: None,
             email: None,
             password_hash: cubeserver::rbac::identity::hash_password(SYNC_PASSWORD).unwrap(),
@@ -1174,4 +1190,796 @@ api_test!(owner_deleting_a_cube_a_platform_cube_joins_is_refused, |store| {
         &format!("/cube/v1/organizations/{on}/model/files/{}?version={}", row.id, row.version), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("Sua mudança quebra um cubo de outra organização"), "{body}");
+});
+
+// ---- Models: a canvas of joined tables built into one cube ----
+
+const STALE_MODEL: &str = "O model mudou desde que você abriu; abra de novo";
+
+/// As `api_test!`, with the URL of the test's own database: the `sofiadb`
+/// data source reads it, so a build loads real columns.
+macro_rules! build_test {
+    ($name:ident, |$store:ident, $url:ident| $body:block) => {
+        #[tokio::test]
+        async fn $name() {
+            let _serial = SERIAL.lock().await;
+            let _clear = ClearPolicy;
+            let Some(db) = TestDb::create().await else {
+                return;
+            };
+            install_policy(&[], &["default"]);
+            let $store = db.store.clone();
+            let $url = support::with_db(&db.admin_url, &db.name);
+            let _env = SofiadbEnv::point_at(&$url);
+            let result = tokio::spawn(async move $body).await;
+            drop(_env);
+            db.drop_db().await;
+            result.unwrap();
+        }
+    };
+}
+
+const SOFIADB_VARS: [&str; 3] =
+    ["CUBEJS_DATASOURCES", "CUBEJS_DS_SOFIADB_DB_TYPE", "CUBEJS_DS_SOFIADB_DB_URL"];
+
+/// Points the `sofiadb` data source at a database for as long as it lives,
+/// then puts back what the variables held.
+struct SofiadbEnv(Vec<Option<String>>);
+impl SofiadbEnv {
+    fn point_at(url: &str) -> Self {
+        let saved = SOFIADB_VARS.iter().map(|var| std::env::var(var).ok()).collect();
+        std::env::set_var(SOFIADB_VARS[0], "default,sofiadb");
+        std::env::set_var(SOFIADB_VARS[1], "postgres");
+        std::env::set_var(SOFIADB_VARS[2], url);
+        SofiadbEnv(saved)
+    }
+}
+impl Drop for SofiadbEnv {
+    fn drop(&mut self) {
+        for (var, saved) in SOFIADB_VARS.iter().zip(&self.0) {
+            match saved {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+}
+
+/// `shop.orders` and `shop.customers` in the database at `url`.
+async fn shop_tables(url: &str) {
+    support::connect(url)
+        .await
+        .batch_execute(
+            "CREATE SCHEMA shop; \
+             CREATE TABLE shop.customers (id integer PRIMARY KEY, region text); \
+             CREATE TABLE shop.orders (id integer PRIMARY KEY, customer_id integer, amount numeric);",
+        )
+        .await
+        .unwrap();
+}
+
+/// Orders with their customer, on data source `ds`.
+fn model_def(ds: &str) -> Value {
+    json!({
+        "dataSource": ds,
+        "tables": [
+            { "alias": "orders", "schema": "shop", "table": "orders", "x": 0, "y": 0 },
+            { "alias": "customers", "schema": "shop", "table": "customers", "x": 240, "y": 0 },
+        ],
+        "primary": "orders",
+        "primaryKey": "id",
+        "joins": [{
+            "from": { "alias": "orders", "column": "customer_id" },
+            "to": { "alias": "customers", "column": "id" },
+            "relationship": "many_to_one",
+            "join": "left",
+        }],
+    })
+}
+
+/// Owner olga of organization ON, which owns connection `sofiadb`: the
+/// env, her token, ON's id.
+async fn models_env(store: &cubeserver::rbac::store::Store) -> (Env, String, uuid::Uuid) {
+    let env = env_live(store.clone()).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (token, on, _) = owner_org(&env, store, &admin, "olga", "ON").await;
+    install_policy(&[("on", &["sofiadb"])], &["default"]);
+    own_connection(store, on).await;
+    (env, token, on)
+}
+
+/// Creates model `name` in `org`: its id.
+async fn new_model(env: &Env, token: &str, org: uuid::Uuid, name: &str) -> String {
+    let (status, body) = call(env, Method::POST, token, &format!("/cube/v1/organizations/{org}/cube-models"),
+        Some(json!({ "name": name, "definition": model_def("sofiadb") }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn build(env: &Env, token: &str, id: &str, body: Value) -> (StatusCode, Value) {
+    call(env, Method::POST, token, &format!("/cube/v1/cube-models/{id}/build"), Some(body)).await
+}
+
+api_test!(cube_models_crud_and_scope, |store| {
+    let (env, token, on) = models_env(&store).await;
+    let list = format!("/cube/v1/organizations/{on}/cube-models");
+
+    let (status, created) = call(&env, Method::POST, &token, &list,
+        Some(json!({ "name": "  Vendas ", "definition": model_def("sofiadb") }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["name"], "Vendas");
+    assert_eq!(created["organizationId"], on.to_string());
+    assert_eq!(created["version"], 1);
+    assert_eq!(created["cubeNames"], json!([]));
+    assert_eq!(created["definition"]["cubes"][0]["source"]["table"], "orders");
+    assert_eq!(created["updatedBy"], "olga");
+    assert!(created["updatedAt"].is_string(), "{created}");
+    let id = created["id"].as_str().unwrap().to_string();
+    let one = format!("/cube/v1/cube-models/{id}");
+
+    let (status, body) = call(&env, Method::GET, &token, &list, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["models"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["models"][0]["id"], id);
+    let (status, body) = call(&env, Method::GET, &token, &one, None).await;
+    assert_eq!((status, &body["name"]), (StatusCode::OK, &json!("Vendas")), "{body}");
+
+    let (status, body) = call(&env, Method::PUT, &token, &one, Some(json!({ "name": "Pedidos", "version": 1 }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!((&body["name"], &body["version"]), (&json!("Pedidos"), &json!(2)));
+    assert_eq!(body["definition"]["cubes"][0]["source"]["table"], "orders");
+    let (status, body) = call(&env, Method::PUT, &token, &one, Some(json!({ "name": "Outro", "version": 1 }))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], STALE_MODEL);
+
+    // The shape is checked on every save.
+    let mut bad = model_def("sofiadb");
+    bad["primary"] = json!("nope");
+    let (status, body) = call(&env, Method::POST, &token, &list, Some(json!({ "name": "Ruim", "definition": bad }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "A tabela principal nope não está no model");
+    let (status, body) = call(&env, Method::PUT, &token, &one,
+        Some(json!({ "definition": { "dataSource": "sofiadb", "tables": [], "joins": [], "extra": 1 }, "version": 2 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    for name in ["   ", "a\nb", "tab\there", "a\u{2028}b", "a\u{2029}b"] {
+        let (status, body) = call(&env, Method::POST, &token, &list,
+            Some(json!({ "name": name, "definition": model_def("sofiadb") }))).await;
+        assert_eq!((status, &body["error"]), (StatusCode::BAD_REQUEST, &json!("Nome inválido")), "{name:?}");
+    }
+    let (status, body) = call(&env, Method::PUT, &token, &one, Some(json!({ "name": "x\ny", "version": 2 }))).await;
+    assert_eq!((status, &body["error"]), (StatusCode::BAD_REQUEST, &json!("Nome inválido")), "{body}");
+    let (status, body) = call(&env, Method::POST, &token, &list,
+        Some(json!({ "name": "Pedidos", "definition": model_def("sofiadb") }))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // A connection of no one's: refused before any column is read.
+    let foreign = new_model(&env, &token, on, "Fora").await;
+    let (status, body) = call(&env, Method::PUT, &token, &format!("/cube/v1/cube-models/{foreign}"),
+        Some(json!({ "definition": model_def("outra"), "version": 1 }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = build(&env, &token, &foreign, json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "A conexão outra não é desta organização");
+
+    // Another organization's owner, and a user of none: as if it did not exist.
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (other, beta, _) = owner_org(&env, &store, &admin, "paula", "Beta").await;
+    store
+        .create_user(&cubeserver::rbac::store::NewUser {
+            username: "nina".into(),
+            name: None,
+            email: None,
+            password_hash: cubeserver::rbac::identity::hash_password("nina-password-1").unwrap(),
+        })
+        .await
+        .unwrap();
+    let nobody = login(&env, "nina", "nina-password-1").await;
+    for who in [&other, &nobody] {
+        assert_eq!(call(&env, Method::GET, who, &one, None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&env, Method::PUT, who, &one, Some(json!({ "name": "Meu", "version": 2 }))).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&env, Method::DELETE, who, &format!("{one}?version=2"), None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(build(&env, who, &id, json!({})).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&env, Method::GET, who, &list, None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&env, Method::POST, who, &list,
+            Some(json!({ "name": "Meu", "definition": model_def("sofiadb") }))).await.0, StatusCode::NOT_FOUND);
+    }
+    // Paula's own organization has none of ON's models.
+    let (status, body) = call(&env, Method::GET, &other, &format!("/cube/v1/organizations/{beta}/cube-models"), None).await;
+    assert_eq!((status, body["models"].as_array().unwrap().len()), (StatusCode::OK, 0), "{body}");
+    assert_eq!(call(&env, Method::GET, &token, "/cube/v1/cube-models/not-a-uuid", None).await.0, StatusCode::NOT_FOUND);
+
+    let (status, body) = call(&env, Method::DELETE, &token, &one, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = call(&env, Method::DELETE, &token, &format!("{one}?version=1"), None).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!(STALE_MODEL)), "{body}");
+    let (status, body) = call(&env, Method::DELETE, &token, &format!("{one}?version=2"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(call(&env, Method::GET, &token, &one, None).await.0, StatusCode::NOT_FOUND);
+});
+
+build_test!(building_a_model_writes_one_cube, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    assert_eq!(built["cubes"].as_array().unwrap().len(), 1, "{built}");
+    assert_eq!(built["removed"], json!([]));
+    let file_name = built["cubes"][0]["fileName"].as_str().unwrap().to_string();
+    assert_eq!(file_name, "on/vendas.yml");
+    assert_eq!(built["cubes"][0]["cubeName"], "vendas");
+    let content = built["cubes"][0]["content"].as_str().unwrap();
+    assert!(content.starts_with("# Built from model Vendas ("), "{content}");
+    assert!(content.contains("customers_region"), "{content}");
+    let detail = &built["detail"];
+    file_in(detail, &file_name);
+    assert!(detail["cubes"].as_array().unwrap().iter().any(|c| c["name"] == "vendas"), "{detail}");
+    assert_eq!(detail["models"], json!([{ "id": id, "name": "Vendas", "cubeNames": ["vendas"] }]));
+    let (status, org_detail) = call(&env, Method::GET, &token, &format!("/cube/v1/organizations/{on}/model"), None).await;
+    assert_eq!(status, StatusCode::OK, "{org_detail}");
+    assert_eq!(org_detail["models"][0]["cubeNames"], json!(["vendas"]));
+    let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!((&one["cubeNames"], &one["version"]), (&json!(["vendas"]), &json!(1)), "{one}");
+
+    // Renamed, the model still builds into the same cube and file.
+    let (status, body) = call(&env, Method::PUT, &token, &format!("/cube/v1/cube-models/{id}"),
+        Some(json!({ "name": "Pedidos", "version": 1 }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, rebuilt) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{rebuilt}");
+    assert_eq!(rebuilt["cubes"][0]["fileName"], file_name.as_str());
+    assert_eq!(rebuilt["cubes"][0]["cubeName"], "vendas");
+    assert!(rebuilt["cubes"][0]["content"].as_str().unwrap().starts_with("# Built from model Pedidos ("));
+    let rows = store.model_rows().await.unwrap();
+    assert_eq!(rows.files.iter().filter(|f| f.organization_id == Some(on)).count(), 1);
+});
+
+build_test!(rebuilding_after_a_hand_edit_needs_force, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let (file, version) = file_in(&built["detail"], "on/vendas.yml");
+
+    let edited = format!("{}# à mão\n", built["cubes"][0]["content"].as_str().unwrap());
+    let (status, body) = call(&env, Method::PUT, &token, &format!("/cube/v1/organizations/{on}/model/files/{file}"),
+        Some(json!({ "content": edited, "version": version }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "O cubo foi editado desde o último build");
+    let row = store.model_file(file.parse().unwrap()).await.unwrap().unwrap();
+    assert_eq!(row.content, edited);
+
+    let (status, forced) = build(&env, &token, &id, json!({ "force": true })).await;
+    assert_eq!(status, StatusCode::OK, "{forced}");
+    assert!(forced["cubes"][0]["content"].as_str().unwrap().starts_with("# Built from model"));
+    assert_eq!(forced["cubes"][0]["fileName"], "on/vendas.yml");
+    let row = store.model_file(file.parse().unwrap()).await.unwrap().unwrap();
+    assert_eq!(row.content, forced["cubes"][0]["content"].as_str().unwrap());
+    // Built again, with nothing edited since: no force needed.
+    assert_eq!(build(&env, &token, &id, json!({})).await.0, StatusCode::OK);
+});
+
+build_test!(deleting_the_model_keeps_the_cube, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let (status, body) = call(&env, Method::DELETE, &token, &format!("/cube/v1/cube-models/{id}?version=1"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, detail) = call(&env, Method::GET, &token, &format!("/cube/v1/organizations/{on}/model"), None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["models"], json!([]));
+    let (_, version) = file_in(&detail, "on/vendas.yml");
+    assert_eq!(version, 1);
+    assert!(detail["cubes"].as_array().unwrap().iter().any(|c| c["name"] == "vendas"), "{detail}");
+    let row = store.model_rows().await.unwrap().files.into_iter().find(|f| f.path == "vendas.yml").unwrap();
+    assert_eq!(row.content, built["cubes"][0]["content"].as_str().unwrap());
+    // The cascade drops the records, not the files.
+    let db = support::connect(&url).await;
+    let left = db.query_one("SELECT count(*) FROM cube_model_cubes", &[]).await.unwrap();
+    assert_eq!(left.get::<_, i64>(0), 0);
+});
+
+build_test!(a_build_whose_record_was_lost_adopts_its_file, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let db = support::connect(&url).await;
+    let forget = |sql: &'static str| {
+        let db = &db;
+        let id: uuid::Uuid = id.parse().unwrap();
+        async move { db.execute(sql, &[&id]).await.unwrap() }
+    };
+
+    // Nothing recorded, as after a first build whose record failed: the
+    // file is still this model's, and only `force` overwrites it.
+    forget("DELETE FROM cube_model_cubes WHERE model_id = $1").await;
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!("O cubo foi editado desde o último build")), "{body}");
+    let (status, body) = build(&env, &token, &id, json!({ "force": true })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cubes"][0]["fileName"], "on/vendas.yml");
+    assert_eq!(store.model_rows().await.unwrap().files.iter().filter(|f| f.organization_id == Some(on)).count(), 1);
+    // Recorded again: a plain rebuild works.
+    assert_eq!(build(&env, &token, &id, json!({})).await.0, StatusCode::OK);
+
+    // A file at the path with another model's header keeps the 409.
+    let other = new_model(&env, &token, on, "Vendas!").await;
+    let (status, body) = build(&env, &token, &other, json!({ "force": true })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "O caminho vendas.yml já é de outro arquivo; renomeie ou mova esse arquivo");
+});
+
+// ---- Models with cubes: one file per cube ----
+
+/// A cube of `model_def`'s table `alias`, in auto mode on its `id`.
+fn table_cube(id: &str, name: &str, alias: &str) -> Value {
+    json!({
+        "id": id, "name": name,
+        "source": { "kind": "table", "table": alias, "primaryKey": "id" },
+        "dimensions": [], "measures": [], "segments": [], "x": 600, "y": 0,
+    })
+}
+
+/// `model_def` with these cubes instead of `primary`.
+fn cubes_def(cubes: &[Value]) -> Value {
+    let mut def = model_def("sofiadb");
+    let obj = def.as_object_mut().unwrap();
+    obj.remove("primary");
+    obj.remove("primaryKey");
+    obj.insert("cubes".into(), json!(cubes));
+    def
+}
+
+/// Saves `def` on model `id` at `version`.
+async fn save_def(env: &Env, token: &str, id: &str, def: Value, version: i64) {
+    let (status, body) = call(env, Method::PUT, token, &format!("/cube/v1/cube-models/{id}"),
+        Some(json!({ "definition": def, "version": version }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// The paths of organization `org`'s files, sorted.
+async fn org_paths(store: &cubeserver::rbac::store::Store, org: uuid::Uuid) -> Vec<String> {
+    let mut paths: Vec<String> = store.model_rows().await.unwrap().files.into_iter()
+        .filter(|f| f.organization_id == Some(org)).map(|f| f.path).collect();
+    paths.sort();
+    paths
+}
+
+fn two_cubes() -> Value {
+    cubes_def(&[table_cube("c1", "orders", "orders"), table_cube("c2", "customers", "customers")])
+}
+
+api_test!(a_model_saved_before_cubes_opens_converted, |store| {
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas Mensais").await;
+    let (status, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{one}");
+    let def = &one["definition"];
+    assert!(def.get("primary").is_none() && def.get("primaryKey").is_none(), "{def}");
+    let cubes = def["cubes"].as_array().unwrap();
+    assert_eq!(cubes.len(), 1, "{def}");
+    assert_eq!((&cubes[0]["id"], &cubes[0]["name"]), (&json!("c1"), &json!("vendas_mensais")), "{def}");
+    assert_eq!(cubes[0]["source"], json!({ "kind": "joined", "table": "orders", "primaryKey": "id" }));
+    assert_eq!(one["cubeNames"], json!([]));
+    let (_, list) = call(&env, Method::GET, &token, &format!("/cube/v1/organizations/{on}/cube-models"), None).await;
+    assert_eq!(list["models"][0]["definition"]["cubes"][0]["name"], "vendas_mensais", "{list}");
+});
+
+build_test!(two_cubes_build_two_files, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let names: Vec<(&Value, &Value)> = built["cubes"].as_array().unwrap().iter()
+        .map(|c| (&c["cubeName"], &c["fileName"])).collect();
+    assert_eq!(names, vec![(&json!("orders"), &json!("on/orders.yml")), (&json!("customers"), &json!("on/customers.yml"))]);
+    assert_eq!(built["removed"], json!([]));
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+    assert_eq!(built["detail"]["models"][0]["cubeNames"], json!(["customers", "orders"]));
+    let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["cubeNames"], json!(["customers", "orders"]));
+    let (_, list) = call(&env, Method::GET, &token, &format!("/cube/v1/organizations/{on}/cube-models"), None).await;
+    assert_eq!(list["models"][0]["cubeNames"], json!(["customers", "orders"]));
+    // Built again: the same files.
+    let (status, again) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+});
+
+build_test!(removing_a_cube_removes_its_file, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    assert_eq!(build(&env, &token, &id, json!({})).await.0, StatusCode::OK);
+
+    save_def(&env, &token, &id, cubes_def(&[table_cube("c1", "orders", "orders")]), 2).await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    assert_eq!(built["removed"], json!(["on/customers.yml"]));
+    assert_eq!(built["cubes"].as_array().unwrap().len(), 1, "{built}");
+    assert_eq!(org_paths(&store, on).await, vec!["orders.yml"]);
+    assert!(built["detail"]["files"].as_array().unwrap().iter().all(|f| f["fileName"] != "on/customers.yml"));
+    assert_eq!(built["detail"]["models"][0]["cubeNames"], json!(["orders"]));
+});
+
+build_test!(removing_an_edited_cube_needs_force, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let (file, version) = file_in(&built["detail"], "on/customers.yml");
+    let edited = format!("{}# à mão\n", built["cubes"][1]["content"].as_str().unwrap());
+    let (status, body) = call(&env, Method::PUT, &token, &format!("/cube/v1/organizations/{on}/model/files/{file}"),
+        Some(json!({ "content": edited, "version": version }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    save_def(&env, &token, &id, cubes_def(&[table_cube("c1", "orders", "orders")]), 2).await;
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!("O cubo foi editado desde o último build")), "{body}");
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+    let (status, body) = build(&env, &token, &id, json!({ "force": true })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], json!(["on/customers.yml"]));
+    assert_eq!(org_paths(&store, on).await, vec!["orders.yml"]);
+});
+
+build_test!(a_cube_named_like_a_foreign_cube_is_refused, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    env.writer.clone().unwrap()
+        .write("ann", "seed", |_| Ok(vec![put_in(Some(on), "x.yml", &cube_on("orders", "sofiadb"), None)]))
+        .await
+        .unwrap();
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    for force in [false, true] {
+        let (status, body) = build(&env, &token, &id, json!({ "force": force })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "O cubo orders já existe em on/x.yml, fora deste model");
+        assert_eq!(org_paths(&store, on).await, vec!["x.yml"]);
+    }
+});
+
+build_test!(a_legacy_model_with_a_long_name_builds_and_saves, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let long = "Vendas Mensais Consolidadas Por Regiao E Por Cliente Do Ano Fiscal Corrente";
+    let cube = "vendas_mensais_consolidadas_por_regiao_e_por_cliente_do_ano_fiscal_corrente";
+    assert!(cube.len() > 63);
+    let id = new_model(&env, &token, on, long).await;
+
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    assert_eq!(built["cubes"][0]["cubeName"], cube);
+    assert_eq!(built["cubes"][0]["fileName"], format!("on/{cube}.yml"));
+    // Saved as it opens, converted: still valid, and it builds the same.
+    let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["definition"]["cubes"][0]["name"], cube, "{one}");
+    save_def(&env, &token, &id, one["definition"].clone(), 1).await;
+    let (status, again) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["cubes"][0]["content"], built["cubes"][0]["content"]);
+    assert_eq!(org_paths(&store, on).await, vec![format!("{cube}.yml")]);
+});
+
+build_test!(a_removed_cubes_name_on_a_new_cube_reuses_its_file, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let (file, _) = file_in(&built["detail"], "on/customers.yml");
+
+    // c2 removed, and a new cube c3 takes its name.
+    save_def(&env, &token, &id,
+        cubes_def(&[table_cube("c1", "orders", "orders"), table_cube("c3", "customers", "customers")]), 2).await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    assert_eq!(built["removed"], json!([]));
+    assert_eq!(built["cubes"][1]["fileName"], "on/customers.yml");
+    assert_eq!(file_in(&built["detail"], "on/customers.yml").0, file);
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+});
+
+build_test!(a_new_cube_on_a_renamed_cubes_file_is_refused, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    save_def(&env, &token, &id, two_cubes(), 1).await;
+    assert_eq!(build(&env, &token, &id, json!({})).await.0, StatusCode::OK);
+
+    // c1 renamed to sales stays in orders.yml; a new cube orders wants it.
+    save_def(&env, &token, &id, cubes_def(&[
+        table_cube("c1", "sales", "orders"),
+        table_cube("c2", "customers", "customers"),
+        table_cube("c3", "orders", "orders"),
+    ]), 2).await;
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "O arquivo orders.yml é do cubo sales deste model; renomeie um dos cubos");
+    assert_eq!(org_paths(&store, on).await, vec!["customers.yml", "orders.yml"]);
+});
+
+build_test!(an_old_build_record_moves_to_cube_model_cubes, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_model(&env, &token, on, "Vendas").await;
+    let (status, built) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{built}");
+    let model: uuid::Uuid = id.parse().unwrap();
+
+    // As the old build left it: the record on the model, none per cube.
+    let db = support::connect(&url).await;
+    let row = db.query_one("SELECT file_id, built_hash FROM cube_model_cubes WHERE model_id = $1", &[&model]).await.unwrap();
+    let (file, hash): (uuid::Uuid, String) = (row.get(0), row.get(1));
+    db.execute("DELETE FROM cube_model_cubes WHERE model_id = $1", &[&model]).await.unwrap();
+    db.execute("UPDATE cube_models SET cube_name = 'vendas', cube_file_id = $2, cube_built_hash = $3 WHERE id = $1",
+        &[&model, &file, &hash]).await.unwrap();
+
+    // The migration runs again, as on the next start.
+    cubeserver::rbac::store::Store::connect_with_pool_size(&url, 1).await.unwrap();
+    let (status, body) = build(&env, &token, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cubes"][0]["fileName"], "on/vendas.yml");
+    assert_eq!(org_paths(&store, on).await, vec!["vendas.yml"]);
+    let row = db.query_one("SELECT cube_file_id, cube_built_hash FROM cube_models WHERE id = $1", &[&model]).await.unwrap();
+    assert_eq!((row.get::<_, Option<uuid::Uuid>>(0), row.get::<_, Option<String>>(1)), (None, None));
+    let row = db.query_one("SELECT file_id FROM cube_model_cubes WHERE model_id = $1 AND cube_id = 'c1'", &[&model]).await.unwrap();
+    assert_eq!(row.get::<_, uuid::Uuid>(0), file);
+});
+
+/// `model_def` with a draft table `shop.<table>` (id, name) added.
+fn draft_def(table: &str) -> Value {
+    let mut def = model_def("sofiadb");
+    def["tables"].as_array_mut().unwrap().push(json!({
+        "alias": "items", "schema": "shop", "table": table, "x": 480, "y": 0,
+        "draft": { "columns": [
+            { "name": "id", "type": "integer", "nullable": false, "primaryKey": true },
+            { "name": "order", "type": "text", "nullable": true, "primaryKey": false },
+        ] },
+    }));
+    def["joins"].as_array_mut().unwrap().push(json!({
+        "from": { "alias": "orders", "column": "id" },
+        "to": { "alias": "items", "column": "id" },
+        "relationship": "many_to_one",
+        "join": "left",
+    }));
+    def
+}
+
+async fn new_draft_model(env: &Env, token: &str, org: uuid::Uuid, table: &str) -> String {
+    let (status, body) = call(env, Method::POST, token, &format!("/cube/v1/organizations/{org}/cube-models"),
+        Some(json!({ "name": "Rascunho", "definition": draft_def(table) }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn create_tables(env: &Env, token: &str, id: &str, body: Value) -> (StatusCode, Value) {
+    call(env, Method::POST, token, &format!("/cube/v1/cube-models/{id}/create-tables"), Some(body)).await
+}
+
+async fn table_exists(url: &str, table: &str) -> bool {
+    !support::connect(url)
+        .await
+        .query("SELECT 1 FROM information_schema.tables WHERE table_schema = 'shop' AND table_name = $1", &[&table])
+        .await
+        .unwrap()
+        .is_empty()
+}
+
+build_test!(create_tables_dry_run_lists_statements, |store, url| {
+    shop_tables(&url).await;
+    let (env, token, on) = models_env(&store).await;
+    let id = new_draft_model(&env, &token, on, "items").await;
+    let (status, body) = create_tables(&env, &token, &id, json!({ "version": 1, "dryRun": true })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["statements"], json!([
+        "CREATE TABLE \"shop\".\"items\" (\"id\" integer NOT NULL, \"order\" text, PRIMARY KEY (\"id\"))"
+    ]));
+    assert!(!table_exists(&url, "items").await);
+    let (status, body) = create_tables(&env, &token, &id, json!({ "version": 7, "dryRun": true })).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!(STALE_MODEL)), "{body}");
+    let plain = new_model(&env, &token, on, "Sem rascunho").await;
+    let (status, body) = create_tables(&env, &token, &plain, json!({ "version": 1 })).await;
+    assert_eq!((status, &body["error"]), (StatusCode::BAD_REQUEST, &json!("Não há tabelas novas para criar")), "{body}");
+});
+
+build_test!(create_tables_creates_and_clears_drafts, |store, url| {
+    shop_tables(&url).await;
+    let db = support::connect(&url).await;
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+    let (env, _, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let id = new_draft_model(&env, &admin, on, "items").await;
+
+    let (status, body) = build(&env, &admin, &id, json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "A tabela shop.items ainda não existe no banco: use Criar no banco");
+
+    let (status, body) = create_tables(&env, &admin, &id, json!({ "version": 1 })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["created"], json!(["shop.items"]));
+    assert_eq!(body["error"], Value::Null);
+    assert_eq!(body["model"]["version"], 2);
+    assert!(body["detail"].is_object(), "{body}");
+    assert!(body["model"]["definition"]["tables"][2].get("draft").is_none(), "{body}");
+    assert!(table_exists(&url, "items").await);
+    let (_, one) = call(&env, Method::GET, &admin, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert!(one["definition"]["tables"][2].get("draft").is_none(), "{one}");
+    assert_eq!(one["version"], 2);
+
+    let (status, body) = build(&env, &admin, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+});
+
+build_test!(create_tables_refuses_an_existing_table, |store, url| {
+    shop_tables(&url).await;
+    let (env, _, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let mut def = draft_def("items");
+    def["tables"][2]["table"] = json!("orders");
+    let (status, body) = call(&env, Method::POST, &admin, &format!("/cube/v1/organizations/{on}/cube-models"),
+        Some(json!({ "name": "Duplicado", "definition": def }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap();
+    let (status, body) = create_tables(&env, &admin, id, json!({ "version": 1 })).await;
+    assert_eq!((status, &body["error"]), (StatusCode::CONFLICT, &json!("A tabela shop.orders já existe no banco")), "{body}");
+    let (_, one) = call(&env, Method::GET, &admin, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["version"], 1);
+    assert!(one["definition"]["tables"][2].get("draft").is_some(), "{one}");
+});
+
+build_test!(create_tables_needs_execute, |store, url| {
+    shop_tables(&url).await;
+    support::connect(&url).await.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+    let (env, token, on) = models_env(&store).await;
+    let id = new_draft_model(&env, &token, on, "items").await;
+    // Olga owns the organization but has no workspace with `execute`.
+    let (status, body) = create_tables(&env, &token, &id, json!({ "version": 1 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!table_exists(&url, "items").await);
+    let (_, one) = call(&env, Method::GET, &token, &format!("/cube/v1/cube-models/{id}"), None).await;
+    assert_eq!(one["version"], 1);
+    // The dry run needs no execute.
+    assert_eq!(create_tables(&env, &token, &id, json!({ "version": 1, "dryRun": true })).await.0, StatusCode::OK);
+    // A user of no organization: as if the model did not exist.
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let (other, _, _) = owner_org(&env, &store, &admin, "paula", "Beta").await;
+    assert_eq!(create_tables(&env, &other, &id, json!({ "version": 1 })).await.0, StatusCode::NOT_FOUND);
+});
+
+build_test!(create_tables_partial_failure_keeps_the_first, |store, url| {
+    shop_tables(&url).await;
+    let db = support::connect(&url).await;
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+    let (env, _, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    let mut def = draft_def("items");
+    def["tables"].as_array_mut().unwrap().push(json!({
+        "alias": "ghosts", "schema": "nowhere", "table": "ghosts", "x": 0, "y": 80,
+        "draft": { "columns": [{ "name": "id", "type": "integer", "nullable": false, "primaryKey": true }] },
+    }));
+    def["joins"].as_array_mut().unwrap().push(json!({
+        "from": { "alias": "orders", "column": "id" },
+        "to": { "alias": "ghosts", "column": "id" },
+        "relationship": "many_to_one", "join": "left",
+    }));
+    let (status, body) = call(&env, Method::POST, &admin, &format!("/cube/v1/organizations/{on}/cube-models"),
+        Some(json!({ "name": "Parcial", "definition": def }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = create_tables(&env, &admin, &id, json!({ "version": 1 })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["created"], json!(["shop.items"]));
+    assert!(body["error"].as_str().unwrap().contains("nowhere.ghosts"), "{body}");
+    assert_eq!(body["model"]["version"], 2);
+    let tables = &body["model"]["definition"]["tables"];
+    assert!(tables[2].get("draft").is_none(), "{body}");
+    assert!(tables[3].get("draft").is_some(), "{body}");
+    assert!(table_exists(&url, "items").await);
+    db.batch_execute("DROP TABLE IF EXISTS shop.items").await.unwrap();
+});
+
+/// Like `call`, with extra headers.
+async fn call_h(env: &Env, method: Method, token: &str, path: &str, body: Option<Value>, lock: Option<&str>) -> (StatusCode, Value) {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::HOST, "localhost:4000")
+        .header(
+            cubeserver::handlers::playground::PLAYGROUND_KEY_HEADER,
+            cubeserver::handlers::playground::playground_key(),
+        )
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    if let Some(lock) = lock {
+        request = request.header("X-Model-Lock", lock);
+    }
+    let request = match body {
+        Some(body) => request.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .unwrap();
+    let response = env.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+api_test!(model_edit_lock, |store| {
+    let (env, token_a, on) = models_env(&store).await;
+    let admin = login(&env, ADMIN, ADMIN_PASSWORD).await;
+    store
+        .create_user(&cubeserver::rbac::store::NewUser {
+            username: "bia".into(),
+            name: None,
+            email: None,
+            password_hash: cubeserver::rbac::identity::hash_password("owner-password-1").unwrap(),
+        })
+        .await
+        .unwrap();
+    let (status, body) = call(&env, Method::PUT, &admin, &format!("/cube/v1/organizations/{on}/owners/bia"), None).await;
+    assert!(status.is_success(), "{body}");
+    let token_b = login(&env, "bia", "owner-password-1").await;
+    let id = new_model(&env, &token_a, on, "Vendas").await;
+    let one = format!("/cube/v1/cube-models/{id}");
+    let lock = format!("{one}/lock");
+    let (status, body) = call(&env, Method::POST, &token_a, &lock, Some(json!({ "token": "a1" }))).await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "held": true, "holder": "olga" })));
+    let (status, body) = call(&env, Method::POST, &token_b, &lock, Some(json!({ "token": "b1" }))).await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "held": false, "holder": "olga" })));
+
+    let msg = "O model está sendo editado por olga";
+    let upd = |v: i64| Some(json!({ "name": "X", "version": v }));
+    let (status, body) = call_h(&env, Method::PUT, &token_b, &one, upd(1), Some("b1")).await;
+    assert_eq!(status, StatusCode::LOCKED, "{body}");
+    assert_eq!(body["error"], msg);
+    let (status, _) = call_h(&env, Method::PUT, &token_b, &one, upd(1), None).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, body) = call_h(&env, Method::PUT, &token_a, &one, upd(1), Some("a1")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = call(&env, Method::POST, &token_b, &format!("{lock}/take"), Some(json!({ "token": "b1" }))).await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "held": true, "holder": "bia" })));
+    let (status, _) = call_h(&env, Method::PUT, &token_a, &one, upd(2), Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, body) = call_h(&env, Method::PUT, &token_b, &one, upd(2), Some("b1")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A, no longer the holder, is refused by build and create-tables.
+    let (status, _) = call_h(&env, Method::POST, &token_a, &format!("{one}/build"), Some(json!({})), Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, _) = call_h(&env, Method::POST, &token_a, &format!("{one}/create-tables"),
+        Some(json!({ "version": 3, "dryRun": true })), Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    // Nor may A delete it.
+    let (status, body) = call_h(&env, Method::DELETE, &token_a, &format!("{one}?version=3"), None, Some("a1")).await;
+    assert_eq!(status, StatusCode::LOCKED, "{body}");
+    assert_eq!(body["error"], "O model está sendo editado por bia");
+
+    let (status, _) = call(&env, Method::DELETE, &token_b, &format!("{lock}?token=b1"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = call_h(&env, Method::PUT, &token_a, &one, upd(3), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 });

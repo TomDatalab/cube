@@ -16,7 +16,9 @@
     "public/",
     "**/*.d.ts",
     // a separate sub-project with its own package.json, yarn.lock and ESLint setup
-    "vizard/"
+    "vizard/",
+    // shadcn/ui components, written by its CLI (`npx shadcn add`) in its own style
+    "src/components/ui/"
   ],
   "rules": {
     // airbnb's `destructuring: "any"` reports a `let { ... } = props` pattern when any one

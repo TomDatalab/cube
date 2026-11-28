@@ -23,6 +23,17 @@ pub enum PlannerError {
 }
 
 impl PlannerError {
+    /// Whether the request caused it (a 4xx): a query it cannot make sense
+    /// of, an unsupported feature, or a refusal the planner marks as the
+    /// user's (`CubeError::user`, e.g. "Cannot resolve: <cube>").
+    pub fn is_user_error(&self) -> bool {
+        match self {
+            Self::Query(_) | Self::Unsupported(_) => true,
+            Self::Plan(e) => matches!(e.cause, cubenativeutils::CubeErrorCauseType::User),
+            Self::Model(_) => false,
+        }
+    }
+
     pub fn model(message: impl Into<String>) -> Self {
         Self::Model(message.into())
     }

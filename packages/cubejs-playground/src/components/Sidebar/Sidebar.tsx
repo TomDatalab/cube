@@ -12,6 +12,7 @@ import {
   RightOutlined,
   SafetyOutlined,
   TeamOutlined,
+  UsergroupAddOutlined,
 } from '@ant-design/icons';
 import { ReactNode, useEffect, useState } from 'react';
 import { useMediaQuery } from 'react-responsive';
@@ -46,6 +47,7 @@ const ADMIN_ICONS: Record<AdminSection, ReactNode> = {
   workspaces: <AppstoreOutlined />,
   roles: <IdcardOutlined />,
   rules: <NodeIndexOutlined />,
+  groups: <UsergroupAddOutlined />,
   users: <TeamOutlined />,
 };
 
@@ -53,7 +55,7 @@ export const NAV_PAGES: NavPage[] = [
   { path: '/build', label: 'Playground', icon: <CaretRightOutlined /> },
   { path: '/schema', label: 'Data Model', icon: <ApiOutlined />, model: true },
   { path: '/data-sources', label: 'Data Source', icon: <DatabaseOutlined />, admin: true },
-  { path: '/frontend-integrations', label: 'Frontend Integrations', icon: <CodeOutlined /> },
+  { path: '/api', label: 'API', icon: <CodeOutlined /> },
   {
     path: '/admin',
     label: 'Admin',

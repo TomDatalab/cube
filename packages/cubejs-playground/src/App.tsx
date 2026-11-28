@@ -1,5 +1,6 @@
 /* eslint-disable no-undef,react/jsx-no-target-blank */
 import '@ant-design/compatible/assets/index.css';
+import './shadcn.css';
 import { Alert, Layout } from 'antd';
 import { Component, PropsWithChildren, useEffect } from 'react';
 import { RouteComponentProps, withRouter } from 'react-router-dom';
@@ -9,6 +10,8 @@ import { Root } from '@cube-dev/ui-kit';
 import { CubeLoader } from './atoms';
 import { AppContextConsumer, PlaygroundContext } from './components/AppContext';
 import GlobalStyles from './components/GlobalStyles';
+import { Toaster } from './components/ui/sonner';
+import { installColumnResize } from './shared/column-resize';
 import Header from './components/Header/Header';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { LivePreviewContextProvider } from './components/LivePreviewContext/LivePreviewContextProvider';
@@ -198,9 +201,22 @@ class App extends Component<PropsWithChildren<RouteComponentProps>, AppState> {
             </StyledLayoutContent>
           </Main>
         </Root>
+        {/*
+          shadcn/ui notifications (`toast`), in place of antd's `message`.
+          Outside Root: Root is a two-column grid (sidebar, main), and the
+          Toaster's <section> would take a column.
+        */}
+        <Toaster richColors closeButton position="top-center" />
+        <ColumnResize />
       </LivePreviewContextProvider>
     );
   }
+}
+
+// Every table's columns resize by hand (src/shared/column-resize.ts).
+function ColumnResize() {
+  useEffect(() => installColumnResize(document.body), []);
+  return null;
 }
 
 type ContextSetterProps = {

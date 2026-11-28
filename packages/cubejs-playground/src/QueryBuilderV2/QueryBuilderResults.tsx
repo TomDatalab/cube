@@ -395,7 +395,9 @@ const GridTable = tasty(Grid, {
   },
 });
 
+// `qa`: the column resize (src/shared/column-resize.ts) finds the headers.
 const ColumnHeader = tasty({
+  qa: 'ResultsColumnHeader',
   styles: {
     position: 'sticky',
     top: 0,
@@ -1230,6 +1232,7 @@ export function QueryBuilderResults({ forceMinHeight }: { forceMinHeight?: boole
         <Panel gridRows="minmax(0, 1fr)">
           <TableContainer ref={tableRef} onClick={onTableClick} onTouchStart={onTableClick}>
             <GridTable
+              qa="ResultsGrid"
               columns={`repeat(${totalColumns}, auto)`}
               mods={{ inactive: !!(isLoading || error) }}
             >

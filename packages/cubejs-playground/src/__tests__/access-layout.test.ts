@@ -36,7 +36,7 @@ function node(id: string, kind: AccessNode['kind'], organizationId: string | nul
 function graphWith(workspaces: number): AccessGraph {
   const ws = Array.from({ length: workspaces }, (_, i) => node(`workspace:w${i}`, 'workspace', O));
   return {
-    user: { id: 'ana', name: null, disabled: false },
+    user: { id: 'ana', username: 'ana', name: null, disabled: false },
     platformAdmin: false,
     nodes: [node('user:ana', 'user'), node(OID, 'organization'), ...ws, node('connection:c', 'connection', O)],
     edges: [
@@ -200,7 +200,7 @@ function kindGraph(cubes: number): AccessGraph {
     ...cs,
   ];
   return {
-    user: { id: 'ana', name: null, disabled: false },
+    user: { id: 'ana', username: 'ana', name: null, disabled: false },
     platformAdmin: false,
     nodes,
     edges: [

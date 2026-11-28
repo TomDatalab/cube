@@ -24,45 +24,46 @@ fn definition(kind: &str, name: &str) -> Option<Vec<Term>> {
     Some(match (kind, name) {
         ("platform", "manage") => vec![Rel("admin")],
         ("organization", "admin") => vec![Rel("owner"), Arrow("platform", "manage")],
-        ("organization", "view") => vec![Rel("admin"), Rel("member"), Arrow("rule", "member")],
+        ("organization", "view") => vec![Rel("admin"), Rel("member"), Arrow("rule", "members")],
         ("organization", "manage_connections") => vec![Rel("admin")],
         ("workspace", "manage") => vec![
             Rel("owner"),
-            Arrow("owner_rule", "member"),
+            Arrow("owner_rule", "members"),
             Arrow("rule", "manage"),
             Arrow("organization", "admin"),
         ],
-        ("workspace", "edit") => vec![Rel("editor"), Arrow("editor_rule", "member"), Rel("manage")],
+        ("workspace", "edit") => vec![Rel("editor"), Arrow("editor_rule", "members"), Rel("manage")],
         ("workspace", "view") => vec![
             Rel("viewer"),
-            Arrow("viewer_rule", "member"),
+            Arrow("viewer_rule", "members"),
             Arrow("rule", "view"),
             Rel("edit"),
         ],
         ("workspace", "query") => vec![
             Rel("viewer"),
-            Arrow("viewer_rule", "member"),
+            Arrow("viewer_rule", "members"),
             Arrow("rule", "query"),
             Rel("edit"),
         ],
         ("workspace", "read_objects") => vec![
             Rel("viewer"),
-            Arrow("viewer_rule", "member"),
+            Arrow("viewer_rule", "members"),
             Arrow("rule", "read_objects"),
             Rel("edit"),
         ],
         ("workspace", "write_objects") => vec![Arrow("rule", "write_objects"), Rel("edit")],
         ("workspace", "execute") => vec![Arrow("rule", "execute"), Rel("manage")],
-        ("rule", "view") => vec![All(vec![Rel("member"), Arrow("role", "can_view")])],
-        ("rule", "query") => vec![All(vec![Rel("member"), Arrow("role", "can_query")])],
+        ("rule", "members") => vec![Rel("member"), Arrow("group", "member")],
+        ("rule", "view") => vec![All(vec![Rel("members"), Arrow("role", "can_view")])],
+        ("rule", "query") => vec![All(vec![Rel("members"), Arrow("role", "can_query")])],
         ("rule", "read_objects") => {
-            vec![All(vec![Rel("member"), Arrow("role", "can_read_objects")])]
+            vec![All(vec![Rel("members"), Arrow("role", "can_read_objects")])]
         }
         ("rule", "write_objects") => {
-            vec![All(vec![Rel("member"), Arrow("role", "can_write_objects")])]
+            vec![All(vec![Rel("members"), Arrow("role", "can_write_objects")])]
         }
-        ("rule", "execute") => vec![All(vec![Rel("member"), Arrow("role", "can_execute")])],
-        ("rule", "manage") => vec![All(vec![Rel("member"), Arrow("role", "can_manage")])],
+        ("rule", "execute") => vec![All(vec![Rel("members"), Arrow("role", "can_execute")])],
+        ("rule", "manage") => vec![All(vec![Rel("members"), Arrow("role", "can_manage")])],
         ("connection", "manage") => vec![Arrow("organization", "admin")],
         ("connection", "query") => vec![Arrow("workspace", "query"), Rel("manage")],
         ("object", "read") => vec![Arrow("workspace", "read_objects")],

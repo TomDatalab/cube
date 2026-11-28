@@ -1,7 +1,10 @@
 import type { Rbac } from '../../hooks/rbac';
-import { authHeaders, onUnauthorized } from '../../shared/auth';
+import {
+  WORKSPACE_HEADER, authHeaders, getWorkspace, onUnauthorized,
+} from '../../shared/auth';
 import { playgroundFetch } from '../../shared/helpers';
 import type { OrgDetail, OrgSummary } from './tree';
+import type { DialectSpec } from './models/dialect';
 
 export const PAGE_SIZE = 50;
 
@@ -55,17 +58,46 @@ async function answer(response: Response): Promise<any> {
   return body;
 }
 
+// Who edits a model: `held` when the token asking holds the lock.
+export type LockState = { held: boolean; holder: string | null };
+
+// The header a model's writes carry the editor's lock token in.
+export const LOCK_HEADER = 'X-Model-Lock';
+
+export type CubeModelView = {
+  id: string;
+  organizationId: string;
+  name: string;
+  definition: unknown;
+  // The cubes its last build wrote, by name.
+  cubeNames: string[];
+  version: number;
+  updatedAt: string;
+  updatedBy: string | null;
+  // On a GET: the dialect each connection designs tables in, and what each
+  // of those dialects has.
+  dialects?: Record<string, string | null>;
+  dialectSpecs?: Record<string, DialectSpec>;
+};
+
 export function modelApi(rbac: Rbac, basePath = '/cube') {
   const base = basePath.replace(/\/$/, '');
   const enc = encodeURIComponent;
   const owned = rbac.session?.user.ownedOrganizations ?? [];
 
-  // The `/v1` routes: the login token and no workspace.
-  async function call(method: string, path: string, body?: unknown): Promise<any> {
+  // The `/v1` routes: the login token and, unless `extra` names it, no
+  // workspace.
+  async function call(
+    method: string,
+    path: string,
+    body?: unknown,
+    extra: Record<string, string> = {}
+  ): Promise<any> {
     const response = await fetch(`${base}/v1${path}`, {
       method,
       headers: {
         ...authHeaders(),
+        ...extra,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -75,6 +107,8 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
   }
 
   const legacy = async (path: string) => answer(await playgroundFetch(`playground/tree${path}`));
+
+  const locked = (lock?: string): Record<string, string> => (lock ? { [LOCK_HEADER]: lock } : {});
 
   const model = (org: OrgNode) => (
     org.slug === PLATFORM ? '/platform/model' : `/organizations/${enc(org.id!)}/model`
@@ -141,6 +175,100 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
       await call('PUT', `/model/files/${enc(id)}/organization`, { organizationId });
     },
 
+    // Models (RBAC only): a canvas of joined tables built into one cube.
+    async models(org: OrgNode): Promise<CubeModelView[]> {
+      return (await call('GET', `/organizations/${enc(org.id!)}/cube-models`)).models || [];
+    },
+
+    model(id: string): Promise<CubeModelView> {
+      return call('GET', `/cube-models/${enc(id)}`);
+    },
+
+    createModel(org: OrgNode, name: string, definition: unknown): Promise<CubeModelView> {
+      return call('POST', `/organizations/${enc(org.id!)}/cube-models`, { name, definition });
+    },
+
+    saveModel(
+      id: string,
+      change: { name?: string; definition?: unknown; version: number },
+      lock?: string
+    ): Promise<CubeModelView> {
+      return call('PUT', `/cube-models/${enc(id)}`, change, locked(lock));
+    },
+
+    async deleteModel(id: string, version: number, lock?: string): Promise<void> {
+      await call('DELETE', `/cube-models/${enc(id)}?version=${version}`, undefined, locked(lock));
+    },
+
+    // Claims the edit lock when it is free, expired or already ours;
+    // renewing it is claiming it again.
+    lockModel(id: string, token: string): Promise<LockState> {
+      return call('POST', `/cube-models/${enc(id)}/lock`, { token });
+    },
+
+    // Takes the lock from whoever holds it.
+    takeModelLock(id: string, token: string): Promise<LockState> {
+      return call('POST', `/cube-models/${enc(id)}/lock/take`, { token });
+    },
+
+    // `keepalive`: the release still goes out from `pagehide`.
+    async releaseModelLock(id: string, token: string): Promise<void> {
+      const response = await fetch(`${base}/v1/cube-models/${enc(id)}/lock?token=${enc(token)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+        keepalive: true,
+      });
+      onUnauthorized(response);
+      await answer(response);
+    },
+
+    // The script of `definition` in its connection's dialect; runs nothing.
+    modelSql(
+      id: string,
+      definition: unknown,
+      options: { drop?: boolean; onlyNew?: boolean; only?: string[] }
+    ): Promise<{ script: string }> {
+      return call('POST', `/cube-models/${enc(id)}/sql`, { definition, options });
+    },
+
+    buildModel(
+      id: string,
+      force?: boolean,
+      lock?: string
+    ): Promise<{
+      cubes: { cubeName: string; fileName: string; content: string }[];
+      // Files of cubes no longer in the model, deleted by the build.
+      removed: string[];
+      detail: OrgDetail;
+    }> {
+      return call('POST', `/cube-models/${enc(id)}/build`, { force }, locked(lock));
+    },
+
+    createTables(
+      id: string,
+      version: number,
+      dryRun: boolean,
+      lock?: string
+    ): Promise<{
+      statements?: string[];
+      // What the database leaves out of the tables, said once.
+      notes?: string[];
+      model?: CubeModelView;
+      created?: string[];
+      error?: string;
+      detail?: OrgDetail;
+    }> {
+      // Running the statements asks `execute` on the chosen workspace, as
+      // `/v1/execute` does.
+      const workspace = getWorkspace();
+      return call(
+        'POST',
+        `/cube-models/${enc(id)}/create-tables`,
+        { version, dryRun },
+        { ...(workspace ? { [WORKSPACE_HEADER]: workspace } : {}), ...locked(lock) }
+      );
+    },
+
     async workspaces(org: OrgNode): Promise<{ id: string; name: string }[]> {
       return (await call('GET', `/organizations/${enc(org.id!)}/workspaces`)).workspaces || [];
     },
@@ -155,7 +283,7 @@ export function modelApi(rbac: Rbac, basePath = '/cube') {
 
 export type OpenBlock = { disabled: boolean; hint?: string; warning?: string };
 
-// Whether "Abrir no Playground" works for a cube, and what to tell the user.
+// Whether "Open in Playground" works for a cube, and what to tell the user.
 // `released` is null until the connections of the chosen workspace are known.
 export function openBlock(
   cube: { dataSource: string; measures?: unknown[]; dimensions?: unknown[] },
@@ -167,16 +295,16 @@ export function openBlock(
   }
 ): OpenBlock {
   if (!(cube.measures?.length || cube.dimensions?.length)) {
-    return { disabled: true, hint: 'O cubo não tem membros' };
+    return { disabled: true, hint: 'The cube has no members' };
   }
   if (ctx.owner && !ctx.workspaces.length) {
-    return { disabled: true, hint: 'Crie um workspace nesta organização para consultar' };
+    return { disabled: true, hint: 'Create a workspace in this organization to query it' };
   }
   const workspace = ctx.workspaces.find((w) => w.id === ctx.chosen);
   if (workspace && ctx.released && !ctx.released.includes(cube.dataSource)) {
     return {
       disabled: false,
-      warning: `libere a conexão ${cube.dataSource} para o workspace ${workspace.name}`,
+      warning: `Release the connection ${cube.dataSource} to the workspace ${workspace.name}`,
     };
   }
   return { disabled: false };

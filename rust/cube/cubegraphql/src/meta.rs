@@ -49,8 +49,14 @@ pub struct MemberMeta {
 }
 
 impl MemberMeta {
-    /// The GraphQL field name — the member name without its cube prefix.
+    /// The GraphQL field name — the member name without its cube prefix,
+    /// made a GraphQL name when it is a friendly name with spaces.
     pub fn field_name(&self) -> String {
+        crate::naming::graphql_field(&self.member_name())
+    }
+
+    /// The member name without its cube prefix, as the model spells it.
+    pub fn member_name(&self) -> String {
         crate::naming::safe_name(&self.name)
     }
 }
@@ -163,6 +169,32 @@ impl MetaConfig {
         } else {
             None
         }
+    }
+
+    /// The member a GraphQL field of `cube_name` names, as the model spells
+    /// it: `quantidadeTotal` -> `Quantidade Total`. A field no member has is
+    /// returned as it is.
+    pub fn member_of_field(&self, cube_name: &str, field: &str) -> String {
+        self.find_cube(cube_name)
+            .and_then(|cube| {
+                let members = || cube.measures.iter().chain(cube.dimensions.iter());
+                members()
+                    .find(|m| m.member_name() == field)
+                    .or_else(|| members().find(|m| m.field_name() == field))
+            })
+            .map_or_else(|| field.to_string(), MemberMeta::member_name)
+    }
+
+    /// The GraphQL field a member of `cube_name` is answered under.
+    pub fn field_of_member(&self, cube_name: &str, member: &str) -> String {
+        self.find_cube(cube_name)
+            .and_then(|cube| {
+                cube.measures
+                    .iter()
+                    .chain(cube.dimensions.iter())
+                    .find(|m| m.member_name() == member)
+            })
+            .map_or_else(|| member.to_string(), MemberMeta::field_name)
     }
 
     /// Every cube that makes it into the generated schema.

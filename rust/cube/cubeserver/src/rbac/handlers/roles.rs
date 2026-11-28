@@ -6,7 +6,9 @@
 //! `role#can_<permission>@user:*`, and a rule with the role gives its members
 //! `member & role->can_<permission>` in its workspace: editing a role changes
 //! the access of every rule that uses it at once. The organization's admins
-//! manage its roles; anyone who views the organization lists them.
+//! manage its roles; anyone who views the organization lists them. Its
+//! default roles carry `builtin`, the key (`owner`, `editor`, `viewer`) a
+//! rule's `role` names them by; they are edited and deleted like any other.
 
 use std::collections::BTreeSet;
 
@@ -23,7 +25,7 @@ use super::{body, caller, resource_id, store_error};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::restrictions::Restrictions;
-use crate::rbac::store::{Role, StoreError};
+use crate::rbac::store::{Role, StoreError, DEFAULT_ROLES};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
 
@@ -38,13 +40,14 @@ pub const PERMISSIONS: [&str; 6] = [
 ];
 
 /// The permissions of the built-in roles of a rule, as a role would grant
-/// them.
+/// them: what a rule not yet moved to its default role shows.
 pub(crate) fn builtin_permissions(role: &str) -> &'static [&'static str] {
-    match role {
-        "owner" => &PERMISSIONS,
-        "editor" => &["view", "query", "read_objects", "write_objects"],
-        _ => &["view", "query", "read_objects"],
-    }
+    let viewer = DEFAULT_ROLES[2];
+    DEFAULT_ROLES
+        .iter()
+        .find(|(key, _)| *key == role)
+        .unwrap_or(&viewer)
+        .1
 }
 
 /// The longest name a role takes.
@@ -82,7 +85,7 @@ fn can_relation(permission: &str) -> &'static str {
 }
 
 /// `role#can_<permission>@user:*` for each permission.
-fn wildcard_grants(role: Uuid, permissions: &[String]) -> Vec<Relationship> {
+pub(crate) fn wildcard_grants(role: Uuid, permissions: &[String]) -> Vec<Relationship> {
     permissions
         .iter()
         .map(|p| Relationship {
@@ -151,6 +154,7 @@ fn view(role: &Role, rules: i64) -> Value {
         "name": role.name,
         "permissions": role.permissions,
         "restrictions": role.restrictions,
+        "builtin": role.builtin,
         "rules": rules,
         "createdAt": role.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "createdBy": role.created_by,
@@ -232,7 +236,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     let role = tx
-        .create_role(org.id, &name, &permissions, &restrictions, user)
+        .create_role(org.id, &name, &permissions, &restrictions, super::actor(&ctx)?)
         .await
         .map_err(|e| store_error(e, DUPLICATE))?;
     rbac.authz

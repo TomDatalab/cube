@@ -72,9 +72,20 @@ CREATE INDEX IF NOT EXISTS rules_workspace_idx ON rules (workspace_id);
 
 -- Rules from before `role` existed had the role in `type`, restricted to the
 -- three roles: it becomes their role, and `type` any label.
+-- Only before `role_id` exists: once it does, a rule with an organization's
+-- role has no `role`, and filling it would break `rules_one_role` (and with
+-- it every boot).
 ALTER TABLE rules ADD COLUMN IF NOT EXISTS role text;
-UPDATE rules SET role = type WHERE role IS NULL;
-ALTER TABLE rules ALTER COLUMN role SET NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'rules' AND column_name = 'role_id'
+    ) THEN
+        UPDATE rules SET role = type WHERE role IS NULL;
+        ALTER TABLE rules ALTER COLUMN role SET NOT NULL;
+    END IF;
+END $$;
 ALTER TABLE rules DROP CONSTRAINT IF EXISTS rules_type_check;
 DO $$
 BEGIN
@@ -161,3 +172,119 @@ CREATE TABLE IF NOT EXISTS model_state (
     version bigint NOT NULL DEFAULT 0
 );
 INSERT INTO model_state (id, version) VALUES (true, 0) ON CONFLICT DO NOTHING;
+
+-- One-off data migrations: a row per step once it has completed.
+CREATE TABLE IF NOT EXISTS rbac_migrations (
+    name text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- `users_uuid`: a user's id was their username. It becomes a UUID (as
+-- lower-case hyphenated text, so `user_attributes.user_id` keeps its type)
+-- and the username moves to its own column, NOT NULL UNIQUE. The FK from
+-- `user_attributes` cascades the new id. One DO block: all or nothing.
+DO $$
+DECLARE
+    fk text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM rbac_migrations WHERE name = 'users_uuid') THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
+    UPDATE users SET username = id WHERE username IS NULL;
+    ALTER TABLE users ALTER COLUMN username SET NOT NULL;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'users_username_key' AND conrelid = 'users'::regclass) THEN
+        ALTER TABLE users ADD CONSTRAINT users_username_key UNIQUE (username);
+    END IF;
+
+    FOR fk IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'user_attributes'::regclass AND contype = 'f'
+    LOOP
+        EXECUTE format('ALTER TABLE user_attributes DROP CONSTRAINT %I', fk);
+    END LOOP;
+    ALTER TABLE user_attributes ADD CONSTRAINT user_attributes_user_id_fkey
+        FOREIGN KEY (user_id) REFERENCES users (id)
+        ON DELETE CASCADE ON UPDATE CASCADE;
+
+    -- The same test as `store::is_uuid`: canonical form only.
+    UPDATE users SET id = gen_random_uuid()::text
+    WHERE id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+    INSERT INTO rbac_migrations (name) VALUES ('users_uuid');
+END $$;
+
+-- When the username last changed (NULL: never). A token naming the user by
+-- username (a legacy `sub`) issued before it no longer authenticates, so a
+-- name given up by a rename cannot be picked up by someone else's old token.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changed_at timestamptz;
+
+-- The key of a default role of an organization (`owner`, `editor`,
+-- `viewer`); one per key per organization. Null for any other role.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS builtin text;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'roles_builtin_check') THEN
+        ALTER TABLE roles ADD CONSTRAINT roles_builtin_check
+            CHECK (builtin IN ('owner', 'editor', 'viewer'));
+    END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS roles_builtin_idx
+    ON roles (organization_id, builtin) WHERE builtin IS NOT NULL;
+
+-- A group of users of an organization. Its members are in SpiceDB
+-- (`group#member@user`), as are the rules it is placed in
+-- (`rule#group@group`): there its members are members of the rule.
+CREATE TABLE IF NOT EXISTS groups (
+    id uuid PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations (id) ON DELETE CASCADE,
+    name text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    UNIQUE (organization_id, name)
+);
+
+-- A model: a canvas of joined tables (`definition`) built into one Cube YAML
+-- cube. `cube_*` record the last build; they do not bump `version`.
+CREATE TABLE IF NOT EXISTS cube_models (
+    id uuid PRIMARY KEY,
+    organization_id uuid NOT NULL REFERENCES organizations (id) ON DELETE CASCADE,
+    name text NOT NULL,
+    definition jsonb NOT NULL,
+    cube_name text,
+    cube_file_id uuid,
+    cube_built_hash text,
+    version int NOT NULL DEFAULT 1,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    updated_by text NOT NULL,
+    UNIQUE (organization_id, name)
+);
+
+-- What the last build of a model wrote, per cube: its file and the hash of
+-- what was written. Moved here from cube_models.cube_file_id/cube_built_hash
+-- (cube_models.cube_name stays: it names the converted cube).
+CREATE TABLE IF NOT EXISTS cube_model_cubes (
+    model_id uuid NOT NULL REFERENCES cube_models (id) ON DELETE CASCADE,
+    cube_id text NOT NULL,
+    cube_name text NOT NULL,
+    file_id uuid NOT NULL,
+    built_hash text NOT NULL,
+    PRIMARY KEY (model_id, cube_id)
+);
+INSERT INTO cube_model_cubes (model_id, cube_id, cube_name, file_id, built_hash)
+    SELECT id, 'c1', cube_name, cube_file_id, cube_built_hash FROM cube_models
+    WHERE cube_name IS NOT NULL AND cube_file_id IS NOT NULL AND cube_built_hash IS NOT NULL
+    ON CONFLICT DO NOTHING;
+UPDATE cube_models SET cube_file_id = NULL, cube_built_hash = NULL WHERE cube_file_id IS NOT NULL;
+
+-- Who is editing a model: one live lock per model (see handlers::cube_models).
+CREATE TABLE IF NOT EXISTS cube_model_locks (
+    model_id uuid PRIMARY KEY REFERENCES cube_models (id) ON DELETE CASCADE,
+    user_name text NOT NULL,
+    token text NOT NULL,
+    heartbeat_at timestamptz NOT NULL DEFAULT now()
+);

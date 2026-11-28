@@ -5,7 +5,7 @@
 //! Any role also makes the user an `organization#member`, which is removed
 //! when they hold no role in any workspace of that organization.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
@@ -19,7 +19,6 @@ use super::organizations::{organization_ref, user_ref, visible_organization};
 use super::{body, caller, existing_user, resource_id, resource_name, store_error, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
-use crate::rbac::identity::validate_user_id;
 use crate::rbac::store::{Workspace, WorkspaceListing};
 use crate::rbac::{authz_error, ObjectRef, Rbac, Relationship, RelationshipFilter, Update};
 use crate::services::RequestContext;
@@ -164,7 +163,7 @@ pub async fn create(
         .await
         .map_err(|e| store_error(e, conflict))?;
     let ws = tx
-        .create_workspace(org.id, &name, user)
+        .create_workspace(org.id, &name, super::actor(&ctx)?)
         .await
         .map_err(|e| store_error(e, conflict))?;
     rbac.authz
@@ -381,7 +380,7 @@ async fn read_members(rbac: &Rbac, ws: Uuid) -> Result<Vec<(String, &'static str
     Ok(members)
 }
 
-/// → `{members: [{user, role}]}`: `view`.
+/// → `{members: [{user, username, role}]}`, `user` the UUID: `view`.
 pub async fn members(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -389,12 +388,29 @@ pub async fn members(
 ) -> Result<Json<Value>, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let ws = visible_workspace(rbac, &id, "view", user).await?;
-    let members: Vec<Value> = read_members(rbac, ws.id)
-        .await?
+    let members = read_members(rbac, ws.id).await?;
+    let names = usernames(rbac, members.iter().map(|(user, _)| user)).await?;
+    let members: Vec<Value> = members
         .into_iter()
-        .map(|(user, role)| json!({ "user": user, "role": role }))
+        .map(|(user, role)| json!({ "user": user, "username": names.get(&user), "role": role }))
         .collect();
     Ok(Json(json!({ "members": members })))
+}
+
+/// The username of each of these user ids; an id no user has is left out.
+pub(crate) async fn usernames<'a>(
+    rbac: &Rbac,
+    ids: impl IntoIterator<Item = &'a String>,
+) -> Result<HashMap<String, String>, ApiError> {
+    let ids: Vec<String> = ids.into_iter().cloned().collect();
+    Ok(rbac
+        .store
+        .users_by_ids(&ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .into_iter()
+        .map(|u| (u.id, u.username))
+        .collect())
 }
 
 /// `{role}`: `manage`. Replaces the user's previous role in the workspace.
@@ -429,7 +445,9 @@ pub async fn set_member(
     }));
     updates.push(Update::Touch(membership(ws.organization_id, &member.id)));
     rbac.authz.write(&updates, &[]).await.map_err(authz_error)?;
-    Ok(Json(json!({ "user": member.id, "role": role })))
+    Ok(Json(
+        json!({ "user": member.id, "username": member.username, "role": role }),
+    ))
 }
 
 /// `manage`. Removes the user's role, and their organization membership when
@@ -441,7 +459,8 @@ pub async fn remove_member(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let ws = visible_workspace(rbac, &id, "manage", user).await?;
-    validate_user_id(&member)?;
+    let member =
+        super::member_subject(rbac, &member, "workspace", ws.id.to_string(), &ROLES).await?;
     rbac.authz
         .delete(&role_relationships(ws.id, &member))
         .await

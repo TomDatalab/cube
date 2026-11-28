@@ -116,7 +116,9 @@ impl SubscriptionServer {
             Err(err) => Err(err),
         };
         match authenticated {
-            Ok((authenticated, user, platform_admin)) => {
+            Ok((authenticated, identity)) => {
+                let platform_admin = identity.as_ref().is_some_and(|i| i.platform_admin);
+                let (user, username) = identity.map(|i| (i.id, i.username)).unzip();
                 self.store
                     .set_auth_context(
                         connection_id,
@@ -129,6 +131,7 @@ impl SubscriptionServer {
                             workspace: workspace.filter(|_| self.state.rbac.is_some()),
                             organization: organization.filter(|_| self.state.rbac.is_some()),
                             user,
+                            username,
                             platform_admin,
                             token_verified: authenticated.token_verified,
                         },
@@ -154,15 +157,21 @@ impl SubscriptionServer {
     async fn resolve_rbac_identity(
         &self,
         authenticated: crate::services::AuthenticatedRequest,
-    ) -> Result<(crate::services::AuthenticatedRequest, Option<String>, bool), ApiError> {
+    ) -> Result<
+        (
+            crate::services::AuthenticatedRequest,
+            Option<crate::rbac::identity::Identity>,
+        ),
+        ApiError,
+    > {
         match &self.state.rbac {
             Some(rbac) => {
-                let (user, platform_admin) =
+                let identity =
                     crate::rbac::identity::resolve_identity(rbac, &authenticated.security_context)
                         .await?;
-                Ok((authenticated, Some(user), platform_admin))
+                Ok((authenticated, Some(identity)))
             }
-            None => Ok((authenticated, None, false)),
+            None => Ok((authenticated, None)),
         }
     }
 
@@ -204,9 +213,10 @@ impl SubscriptionServer {
                         .await
                     };
                 match identity {
-                    Ok((user, platform_admin)) => RequestContext {
-                        user: Some(user),
-                        platform_admin,
+                    Ok(identity) => RequestContext {
+                        user: Some(identity.id),
+                        username: Some(identity.username),
+                        platform_admin: identity.platform_admin,
                         ..auth_context
                     },
                     Err(err) => {

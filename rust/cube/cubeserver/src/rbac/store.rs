@@ -16,6 +16,8 @@ const MIGRATIONS: &str = include_str!("migrations.sql");
 #[derive(Debug)]
 pub enum StoreError {
     Conflict(String),
+    /// A value the store refuses, with a message for the caller.
+    Invalid(String),
     NotFound,
     Db(String),
 }
@@ -24,6 +26,7 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Conflict(m) => write!(f, "conflict: {m}"),
+            Self::Invalid(m) => write!(f, "{m}"),
             Self::NotFound => write!(f, "not found"),
             Self::Db(m) => write!(f, "database error: {m}"),
         }
@@ -54,7 +57,8 @@ impl From<deadpool_postgres::PoolError> for StoreError {
 
 #[derive(Debug, Clone)]
 pub struct NewUser {
-    pub id: String,
+    /// The id is generated (a UUID); the username is the login name.
+    pub username: String,
     pub name: Option<String>,
     pub email: Option<String>,
     pub password_hash: String,
@@ -62,13 +66,19 @@ pub struct NewUser {
 
 #[derive(Debug, Clone)]
 pub struct User {
+    /// The UUID, lower-case hyphenated.
     pub id: String,
+    /// Unique, renamable; never shaped like a UUID.
+    pub username: String,
     pub name: Option<String>,
     pub email: Option<String>,
     pub password_hash: String,
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub password_changed_at: DateTime<Utc>,
+    /// When the username last changed; `None` if it never did. A token that
+    /// names the user by username (`sub`, legacy) issued before it is void.
+    pub username_changed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,13 +149,68 @@ pub struct Role {
     pub restrictions: Restrictions,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
+    /// The key (`owner`, `editor`, `viewer`) of a default role of the
+    /// organization, `None` for any other role. It survives a rename.
+    pub builtin: Option<String>,
 }
+
+/// The default roles every organization holds: key and permissions.
+pub const DEFAULT_ROLES: [(&str, &[&str]); 3] = [
+    (
+        "owner",
+        &[
+            "view",
+            "query",
+            "read_objects",
+            "write_objects",
+            "execute",
+            "manage",
+        ],
+    ),
+    ("editor", &["view", "query", "read_objects", "write_objects"]),
+    ("viewer", &["view", "query", "read_objects"]),
+];
 
 /// A role with the number of rules that use it.
 #[derive(Debug, Clone)]
 pub struct RoleListing {
     pub role: Role,
     pub rules: i64,
+}
+
+/// A group of users of an organization. Who is in it, and the rules it is
+/// placed in, are SpiceDB relationships.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+/// A model: a canvas of tables and cubes, each cube built into its own
+/// Cube YAML file.
+#[derive(Debug, Clone)]
+pub struct CubeModel {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub definition: serde_json::Value,
+    /// The name of the cube a definition without cubes converts to.
+    pub cube_name: Option<String>,
+    pub version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub created_by: String,
+    pub updated_by: String,
+}
+
+/// A group with the name of its organization.
+#[derive(Debug, Clone)]
+pub struct GroupListing {
+    pub group: Group,
+    pub organization_name: String,
 }
 
 /// A named role in a workspace: its members hold a built-in `role`
@@ -163,7 +228,10 @@ pub struct Rule {
     pub created_by: String,
 }
 
-/// What a rule grants: a built-in role or one of its organization's.
+/// What a rule grants: one of its organization's roles. `Builtin` is a row
+/// not yet moved to its organization's default role by
+/// [`crate::rbac::default_roles`]: it is still read and removed, but the API
+/// never writes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleRole<'a> {
     Builtin(&'a str),
@@ -197,8 +265,28 @@ pub struct RuleListing {
     pub workspace_name: String,
     pub organization_id: Uuid,
     pub organization_name: String,
-    /// The name and permissions of its custom role, if it has one.
-    pub custom_role: Option<(String, Vec<String>)>,
+    /// Its role of the organization, if it has one (a rule not yet moved
+    /// off a built-in role has none).
+    pub role: Option<RuleRoleRow>,
+}
+
+/// What a rule's answer shows of its role.
+#[derive(Debug, Clone)]
+pub struct RuleRoleRow {
+    pub name: String,
+    pub permissions: Vec<String>,
+    /// The key of a default role, `None` for any other.
+    pub builtin: Option<String>,
+}
+
+impl From<Role> for RuleRoleRow {
+    fn from(role: Role) -> Self {
+        Self {
+            name: role.name,
+            permissions: role.permissions,
+            builtin: role.builtin,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -311,7 +399,8 @@ pub struct StoredObject {
     pub updated_by: String,
 }
 
-const USER_COLS: &str = "id, name, email, password_hash, disabled, created_at, password_changed_at";
+const USER_COLS: &str = "id, name, email, password_hash, disabled, created_at, \
+                         password_changed_at, username, username_changed_at";
 const OBJECT_COLS: &str = "id, workspace_id, type, name, content_type, content, version, \
                            created_at, created_by, updated_at, updated_by";
 
@@ -324,7 +413,29 @@ fn user_from(r: &Row) -> User {
         disabled: r.get(4),
         created_at: r.get(5),
         password_changed_at: r.get(6),
+        username: r.get(7),
+        username_changed_at: r.get(8),
     }
+}
+
+/// Whether `s` is a user id: a UUID in its canonical text form only (36
+/// characters, lower-case hex, hyphenated), exactly what the `users_uuid`
+/// migration treats as one. The one test for "is this a UUID or a
+/// username" everywhere (store, identity, SpiceDB subjects, token `sub`).
+pub fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
+}
+
+/// A username shaped like a user id could be taken for another user's id.
+fn check_username(username: &str) -> Result<(), StoreError> {
+    if is_uuid(username) {
+        return Err(StoreError::Invalid("A username cannot be a UUID".into()));
+    }
+    Ok(())
 }
 
 fn org_from(r: &Row) -> Organization {
@@ -350,7 +461,61 @@ fn workspace_from(r: &Row) -> Workspace {
 const RULE_COLS: &str =
     "id, workspace_id, description, type, role, role_id, created_at, created_by";
 const ROLE_COLS: &str =
-    "id, organization_id, name, permissions, restrictions, created_at, created_by";
+    "id, organization_id, name, permissions, restrictions, created_at, created_by, builtin";
+const GROUP_COLS: &str = "id, organization_id, name, created_at, created_by";
+
+fn group_from(r: &Row) -> Group {
+    Group {
+        id: r.get(0),
+        organization_id: r.get(1),
+        name: r.get(2),
+        created_at: r.get(3),
+        created_by: r.get(4),
+    }
+}
+
+const CUBE_MODEL_COLS: &str = "id, organization_id, name, definition, cube_name, \
+     version, created_at, updated_at, created_by, updated_by";
+
+/// Who holds a model's edit lock, and the token that proves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelLock {
+    pub user_name: String,
+    pub token: String,
+}
+
+/// What the last build of a model wrote for one of its cubes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltRecord {
+    pub cube_id: String,
+    pub cube_name: String,
+    pub file_id: Uuid,
+    pub built_hash: String,
+}
+
+fn built_record_from(r: &Row) -> BuiltRecord {
+    BuiltRecord {
+        cube_id: r.get(0),
+        cube_name: r.get(1),
+        file_id: r.get(2),
+        built_hash: r.get(3),
+    }
+}
+
+fn cube_model_from(r: &Row) -> CubeModel {
+    CubeModel {
+        id: r.get(0),
+        organization_id: r.get(1),
+        name: r.get(2),
+        definition: r.get(3),
+        cube_name: r.get(4),
+        version: r.get(5),
+        created_at: r.get(6),
+        updated_at: r.get(7),
+        created_by: r.get(8),
+        updated_by: r.get(9),
+    }
+}
 
 fn rule_from(r: &Row) -> Rule {
     Rule {
@@ -365,11 +530,16 @@ fn rule_from(r: &Row) -> Rule {
     }
 }
 
-/// `(name, permissions)` at columns `at` and `at + 1`, `None` when NULL.
-fn custom_role(r: &Row, at: usize) -> Option<(String, Vec<String>)> {
+/// The role's name, permissions and key at columns `at` to `at + 2`, `None`
+/// when the rule has no role row.
+fn rule_role_row(r: &Row, at: usize) -> Option<RuleRoleRow> {
     let name: Option<String> = r.get(at);
     let permissions: Option<Vec<String>> = r.get(at + 1);
-    name.zip(permissions)
+    name.zip(permissions).map(|(name, permissions)| RuleRoleRow {
+        name,
+        permissions,
+        builtin: r.get(at + 2),
+    })
 }
 
 /// A stored `restrictions` that does not parse is an error, never "no
@@ -386,6 +556,7 @@ fn role_from(r: &Row) -> Result<Role, StoreError> {
         restrictions,
         created_at: r.get(5),
         created_by: r.get(6),
+        builtin: r.get(7),
     })
 }
 
@@ -415,12 +586,17 @@ mod q {
     use super::*;
 
     pub async fn create_user(c: &tokio_postgres::Client, u: &NewUser) -> Result<User, StoreError> {
+        check_username(&u.username)?;
         let sql = format!(
-            "INSERT INTO users (id, name, email, password_hash) VALUES ($1, $2, $3, $4) \
-             RETURNING {USER_COLS}"
+            "INSERT INTO users (id, username, name, email, password_hash) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING {USER_COLS}"
         );
+        let id = Uuid::new_v4().hyphenated().to_string();
         let row = c
-            .query_one(&sql, &[&u.id, &u.name, &u.email, &u.password_hash])
+            .query_one(
+                &sql,
+                &[&id, &u.username, &u.name, &u.email, &u.password_hash],
+            )
             .await?;
         Ok(user_from(&row))
     }
@@ -665,6 +841,65 @@ mod q {
         role_from(&row)
     }
 
+    /// Inserts the default roles the organization lacks and returns all
+    /// three. A default role takes its key as name, or `<key> (default)`
+    /// when a role of that name exists, then `<key> (default 2)`, ...
+    pub async fn seed_default_roles(
+        c: &tokio_postgres::Client,
+        organization_id: Uuid,
+        created_by: &str,
+    ) -> Result<Vec<Role>, StoreError> {
+        let mut out = Vec::with_capacity(DEFAULT_ROLES.len());
+        for (key, perms) in DEFAULT_ROLES {
+            let sql = format!(
+                "SELECT {ROLE_COLS} FROM roles WHERE organization_id = $1 AND builtin = $2"
+            );
+            if let Some(row) = c.query_opt(&sql, &[&organization_id, &key]).await? {
+                out.push(role_from(&row)?);
+                continue;
+            }
+            let mut name = key.to_string();
+            let mut n = 1;
+            while c
+                .query_opt(
+                    "SELECT 1 FROM roles WHERE organization_id = $1 AND name = $2",
+                    &[&organization_id, &name],
+                )
+                .await?
+                .is_some()
+            {
+                n += 1;
+                name = if n == 2 {
+                    format!("{key} (default)")
+                } else {
+                    format!("{key} (default {})", n - 1)
+                };
+            }
+            let perms: Vec<String> = perms.iter().map(|p| p.to_string()).collect();
+            let restrictions = restrictions_json(&Restrictions::default())?;
+            let sql = format!(
+                "INSERT INTO roles (id, organization_id, name, permissions, restrictions, \
+                 created_by, builtin) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {ROLE_COLS}"
+            );
+            let row = c
+                .query_one(
+                    &sql,
+                    &[
+                        &Uuid::new_v4(),
+                        &organization_id,
+                        &name,
+                        &perms,
+                        &restrictions,
+                        &created_by,
+                        &key,
+                    ],
+                )
+                .await?;
+            out.push(role_from(&row)?);
+        }
+        Ok(out)
+    }
+
     pub async fn update_role(
         c: &tokio_postgres::Client,
         id: Uuid,
@@ -692,6 +927,35 @@ mod q {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub async fn create_group(
+        c: &tokio_postgres::Client,
+        organization_id: Uuid,
+        name: &str,
+        created_by: &str,
+    ) -> Result<Group, StoreError> {
+        let sql = format!(
+            "INSERT INTO groups (id, organization_id, name, created_by) \
+             VALUES ($1, $2, $3, $4) RETURNING {GROUP_COLS}"
+        );
+        let row = c
+            .query_one(&sql, &[&Uuid::new_v4(), &organization_id, &name, &created_by])
+            .await?;
+        Ok(group_from(&row))
+    }
+
+    pub async fn rename_group(
+        c: &tokio_postgres::Client,
+        id: Uuid,
+        name: &str,
+    ) -> Result<Option<Group>, StoreError> {
+        let sql = format!("UPDATE groups SET name = $2 WHERE id = $1 RETURNING {GROUP_COLS}");
+        Ok(c.query_opt(&sql, &[&id, &name]).await?.as_ref().map(group_from))
+    }
+
+    pub async fn delete_group(c: &tokio_postgres::Client, id: Uuid) -> Result<bool, StoreError> {
+        Ok(c.execute("DELETE FROM groups WHERE id = $1", &[&id]).await? > 0)
     }
 
     pub async fn create_object(
@@ -863,6 +1127,16 @@ macro_rules! shared_creates {
             )
             .await
         }
+        /// Inserts the organization's missing default roles; returns all three.
+        pub async fn seed_default_roles(
+            &self,
+            organization_id: Uuid,
+            created_by: &str,
+        ) -> Result<Vec<Role>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::seed_default_roles(c, organization_id, created_by).await
+        }
         pub async fn update_role(
             &self,
             id: Uuid,
@@ -879,6 +1153,27 @@ macro_rules! shared_creates {
             let guard = $conn(self).await?;
             let c: &tokio_postgres::Client = &guard;
             q::delete_role(c, id).await
+        }
+        pub async fn create_group(
+            &self,
+            organization_id: Uuid,
+            name: &str,
+            created_by: &str,
+        ) -> Result<Group, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::create_group(c, organization_id, name, created_by).await
+        }
+        pub async fn rename_group(&self, id: Uuid, name: &str) -> Result<Option<Group>, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::rename_group(c, id, name).await
+        }
+        /// `true` when a row was deleted.
+        pub async fn delete_group(&self, id: Uuid) -> Result<bool, StoreError> {
+            let guard = $conn(self).await?;
+            let c: &tokio_postgres::Client = &guard;
+            q::delete_group(c, id).await
         }
         pub async fn create_object(&self, o: &NewObject) -> Result<StoredObject, StoreError> {
             let guard = $conn(self).await?;
@@ -936,26 +1231,79 @@ impl Store {
 
     shared_creates!(Self::conn);
 
+    /// The user with this id (see [`is_uuid`]). A username finds nothing.
     pub async fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
+        if !is_uuid(id) {
+            return Ok(None);
+        }
         let c = self.conn().await?;
         let sql = format!("SELECT {USER_COLS} FROM users WHERE id = $1");
         Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(user_from))
     }
 
+    pub async fn user_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {USER_COLS} FROM users WHERE username = $1");
+        Ok(c.query_opt(&sql, &[&username])
+            .await?
+            .as_ref()
+            .map(user_from))
+    }
+
+    /// `key` names a user by id when it [`is_uuid`] and a user has that id,
+    /// else by username.
+    pub async fn resolve_user(&self, key: &str) -> Result<Option<User>, StoreError> {
+        if is_uuid(key) {
+            if let Some(user) = self.user(key).await? {
+                return Ok(Some(user));
+            }
+        }
+        self.user_by_username(key).await
+    }
+
+    /// The users with these ids, in no particular order; unknown ids are
+    /// left out.
+    pub async fn users_by_ids(&self, ids: &[String]) -> Result<Vec<User>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {USER_COLS} FROM users WHERE id = ANY($1)");
+        Ok(c.query(&sql, &[&ids]).await?.iter().map(user_from).collect())
+    }
+
+    /// Whether the one-off data migration `name` completed (`rbac_migrations`).
+    pub async fn migration_applied(&self, name: &str) -> Result<bool, StoreError> {
+        let c = self.conn().await?;
+        Ok(c.query_opt("SELECT 1 FROM rbac_migrations WHERE name = $1", &[&name])
+            .await?
+            .is_some())
+    }
+
+    /// Records that the one-off data migration `name` completed.
+    pub async fn record_migration(&self, name: &str) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        c.execute(
+            "INSERT INTO rbac_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&name],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn users(&self) -> Result<Vec<User>, StoreError> {
         let c = self.conn().await?;
-        let sql = format!("SELECT {USER_COLS} FROM users ORDER BY id");
+        let sql = format!("SELECT {USER_COLS} FROM users ORDER BY username");
         Ok(c.query(&sql, &[]).await?.iter().map(user_from).collect())
     }
 
     pub async fn search_users(&self, s: &Search) -> Result<Page<User>, StoreError> {
         let c = self.conn().await?;
         let q = s.escaped();
-        const WHERE: &str = "($1::text IS NULL OR id ILIKE '%' || $1 || '%' ESCAPE '\\' \
+        const WHERE: &str = "($1::text IS NULL OR username ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR name ILIKE '%' || $1 || '%' ESCAPE '\\' \
-             OR email ILIKE '%' || $1 || '%' ESCAPE '\\')";
-        let sql =
-            format!("SELECT {USER_COLS} FROM users WHERE {WHERE} ORDER BY id LIMIT $2 OFFSET $3");
+             OR email ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR id = lower($1))";
+        let sql = format!(
+            "SELECT {USER_COLS} FROM users WHERE {WHERE} ORDER BY username LIMIT $2 OFFSET $3"
+        );
         let items = c
             .query(&sql, &[&q, &s.limit(), &s.offset()])
             .await?
@@ -1053,23 +1401,36 @@ impl Store {
             .collect())
     }
 
-    /// `None` fields are left unchanged. `Ok(None)` when the user is unknown.
+    /// `None` fields are left unchanged. `Ok(None)` when the user is unknown;
+    /// a username already taken is `Conflict`.
     pub async fn update_user(
         &self,
         id: &str,
+        username: Option<String>,
         name: Option<String>,
         email: Option<String>,
         disabled: Option<bool>,
     ) -> Result<Option<User>, StoreError> {
+        if let Some(username) = &username {
+            check_username(username)?;
+        }
+        if !is_uuid(id) {
+            return Ok(None);
+        }
         let c = self.conn().await?;
         let sql = format!(
-            "UPDATE users SET name = COALESCE($2, name), email = COALESCE($3, email), \
-             disabled = COALESCE($4, disabled) WHERE id = $1 RETURNING {USER_COLS}"
+            "UPDATE users SET username = COALESCE($2, username), name = COALESCE($3, name), \
+             email = COALESCE($4, email), disabled = COALESCE($5, disabled), \
+             username_changed_at = CASE WHEN $2::text IS NOT NULL AND $2 <> username \
+                                        THEN now() ELSE username_changed_at END \
+             WHERE id = $1 RETURNING {USER_COLS}"
         );
-        Ok(c.query_opt(&sql, &[&id, &name, &email, &disabled])
-            .await?
-            .as_ref()
-            .map(user_from))
+        Ok(
+            c.query_opt(&sql, &[&id, &username, &name, &email, &disabled])
+                .await?
+                .as_ref()
+                .map(user_from),
+        )
     }
 
     /// Also bumps `password_changed_at`, invalidating older tokens.
@@ -1260,6 +1621,58 @@ impl Store {
     }
 
     // roles
+    /// The organization's default role with the key, wherever it was renamed.
+    pub async fn default_role(
+        &self,
+        organization_id: Uuid,
+        key: &str,
+    ) -> Result<Option<Role>, StoreError> {
+        let c = self.conn().await?;
+        let sql =
+            format!("SELECT {ROLE_COLS} FROM roles WHERE organization_id = $1 AND builtin = $2");
+        c.query_opt(&sql, &[&organization_id, &key])
+            .await?
+            .as_ref()
+            .map(role_from)
+            .transpose()
+    }
+
+    pub async fn organization_ids(&self) -> Result<Vec<Uuid>, StoreError> {
+        let c = self.conn().await?;
+        let rows = c.query("SELECT id FROM organizations ORDER BY id", &[]).await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Rules still on a built-in `role`, with their workspace's organization.
+    pub async fn rules_with_builtin_role(&self) -> Result<Vec<(Rule, Uuid)>, StoreError> {
+        let c = self.conn().await?;
+        let cols = RULE_COLS
+            .split(", ")
+            .map(|c| format!("r.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {cols}, w.organization_id FROM rules r \
+             JOIN workspaces w ON w.id = r.workspace_id WHERE r.role IS NOT NULL ORDER BY r.id"
+        );
+        Ok(c.query(&sql, &[])
+            .await?
+            .iter()
+            .map(|r| (rule_from(r), r.get(8)))
+            .collect())
+    }
+
+    /// Points the rule at the role and clears its built-in `role`.
+    pub async fn set_rule_role_id(&self, rule: Uuid, role_id: Uuid) -> Result<bool, StoreError> {
+        let c = self.conn().await?;
+        Ok(c.execute(
+            "UPDATE rules SET role_id = $2, role = NULL WHERE id = $1",
+            &[&rule, &role_id],
+        )
+        .await?
+            > 0)
+    }
+
     pub async fn role(&self, id: Uuid) -> Result<Option<Role>, StoreError> {
         let c = self.conn().await?;
         let sql = format!("SELECT {ROLE_COLS} FROM roles WHERE id = $1");
@@ -1296,10 +1709,62 @@ impl Store {
             .map(|r| {
                 Ok(RoleListing {
                     role: role_from(r)?,
-                    rules: r.get(7),
+                    rules: r.get(8),
                 })
             })
             .collect()
+    }
+
+    pub async fn group(&self, id: Uuid) -> Result<Option<Group>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {GROUP_COLS} FROM groups WHERE id = $1");
+        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(group_from))
+    }
+
+    pub async fn groups_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Group>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {GROUP_COLS} FROM groups WHERE id = ANY($1) ORDER BY name, id");
+        Ok(c.query(&sql, &[&ids]).await?.iter().map(group_from).collect())
+    }
+
+    /// Groups by organization and name. `visible: None` lists those of every
+    /// organization; `organization` narrows to one. `q` matches the group's
+    /// name, its organization's name or the start of its id.
+    pub async fn search_groups(
+        &self,
+        visible: Option<&[Uuid]>,
+        organization: Option<Uuid>,
+        s: &Search,
+    ) -> Result<Page<GroupListing>, StoreError> {
+        let c = self.conn().await?;
+        let q = s.escaped();
+        let visible = visible.map(<[Uuid]>::to_vec);
+        const FROM: &str = "FROM groups g JOIN organizations o ON o.id = g.organization_id \
+             WHERE ($1::text IS NULL OR g.name ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR o.name ILIKE '%' || $1 || '%' ESCAPE '\\' OR g.id::text LIKE lower($1) || '%' ESCAPE '\\') \
+             AND ($2::uuid[] IS NULL OR g.organization_id = ANY($2)) \
+             AND ($3::uuid IS NULL OR g.organization_id = $3)";
+        let sql = format!(
+            "SELECT g.id, g.organization_id, g.name, g.created_at, g.created_by, o.name {FROM} \
+             ORDER BY o.name, g.name, g.id LIMIT $4 OFFSET $5"
+        );
+        let items = c
+            .query(&sql, &[&q, &visible, &organization, &s.limit(), &s.offset()])
+            .await?
+            .iter()
+            .map(|r| GroupListing {
+                group: group_from(r),
+                organization_name: r.get(5),
+            })
+            .collect();
+        let total = c
+            .query_one(
+                &format!("SELECT count(*) {FROM}"),
+                &[&q, &visible, &organization],
+            )
+            .await?
+            .get(0);
+        Ok(Page { items, total })
     }
 
     /// The user's attributes: name to values.
@@ -1395,6 +1860,7 @@ impl Store {
              WHERE ($1::text IS NULL OR r.description ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR r.type ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR coalesce(r.role, ro.name) ILIKE '%' || $1 || '%' ESCAPE '\\' \
+             OR ro.builtin ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR w.name ILIKE '%' || $1 || '%' ESCAPE '\\' \
              OR o.name ILIKE '%' || $1 || '%' ESCAPE '\\') \
              AND ($2::uuid[] IS NULL OR w.id = ANY($2)) \
@@ -1402,7 +1868,7 @@ impl Store {
              AND ($4::uuid IS NULL OR w.id = $4)";
         let sql = format!(
             "SELECT r.id, r.workspace_id, r.description, r.type, r.role, r.role_id, \
-             r.created_at, r.created_by, w.name, o.id, o.name, ro.name, ro.permissions {FROM} \
+             r.created_at, r.created_by, w.name, o.id, o.name, ro.name, ro.permissions, ro.builtin {FROM} \
              ORDER BY o.name, o.id, w.name, w.id, r.description, r.id LIMIT $5 OFFSET $6"
         );
         let items = c
@@ -1424,7 +1890,7 @@ impl Store {
                 workspace_name: r.get(8),
                 organization_id: r.get(9),
                 organization_name: r.get(10),
-                custom_role: custom_role(r, 11),
+                role: rule_role_row(r, 11),
             })
             .collect();
         let total = c
@@ -1570,6 +2036,236 @@ impl Store {
                 }
             }
         }
+    }
+
+    pub async fn cube_models_of(&self, organization_id: Uuid) -> Result<Vec<CubeModel>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "SELECT {CUBE_MODEL_COLS} FROM cube_models WHERE organization_id = $1 ORDER BY name, id"
+        );
+        Ok(c.query(&sql, &[&organization_id]).await?.iter().map(cube_model_from).collect())
+    }
+
+    pub async fn cube_model(&self, id: Uuid) -> Result<Option<CubeModel>, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!("SELECT {CUBE_MODEL_COLS} FROM cube_models WHERE id = $1");
+        Ok(c.query_opt(&sql, &[&id]).await?.as_ref().map(cube_model_from))
+    }
+
+    /// A name already used in the organization is `Conflict`.
+    pub async fn create_cube_model(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+        definition: &serde_json::Value,
+        actor: &str,
+    ) -> Result<CubeModel, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "INSERT INTO cube_models (id, organization_id, name, definition, created_by, updated_by) \
+             VALUES ($1, $2, $3, $4, $5, $5) RETURNING {CUBE_MODEL_COLS}"
+        );
+        let row = c
+            .query_one(&sql, &[&Uuid::new_v4(), &organization_id, &name, definition, &actor])
+            .await?;
+        Ok(cube_model_from(&row))
+    }
+
+    /// Optimistic update like `update_object`: `Conflict` on a stale
+    /// version (or a name taken), `NotFound` when the model does not exist.
+    /// `None` fields are kept.
+    pub async fn update_cube_model(
+        &self,
+        id: Uuid,
+        name: Option<&str>,
+        definition: Option<&serde_json::Value>,
+        expected_version: i32,
+        actor: &str,
+    ) -> Result<CubeModel, StoreError> {
+        let c = self.conn().await?;
+        let sql = format!(
+            "UPDATE cube_models SET name = COALESCE($3, name), \
+             definition = COALESCE($4, definition), version = version + 1, \
+             updated_at = now(), updated_by = $5 \
+             WHERE id = $1 AND version = $2 RETURNING {CUBE_MODEL_COLS}"
+        );
+        match c
+            .query_opt(&sql, &[&id, &expected_version, &name, &definition, &actor])
+            .await?
+        {
+            Some(r) => Ok(cube_model_from(&r)),
+            None => Err(self.cube_model_miss(&c, id).await?),
+        }
+    }
+
+    /// The records of model `model_id`'s last build, by cube name.
+    pub async fn cube_model_cubes(&self, model_id: Uuid) -> Result<Vec<BuiltRecord>, StoreError> {
+        let c = self.conn().await?;
+        let rows = c
+            .query(
+                "SELECT cube_id, cube_name, file_id, built_hash FROM cube_model_cubes \
+                 WHERE model_id = $1 ORDER BY cube_name, cube_id",
+                &[&model_id],
+            )
+            .await?;
+        Ok(rows.iter().map(built_record_from).collect())
+    }
+
+    /// Claims the edit lock of model `model_id` for `user`/`token`: when
+    /// `take` is set, or the lock is missing, older than `ttl_secs` or
+    /// already holds `token`, it is (re)written with a fresh heartbeat.
+    /// Returns the live lock afterwards: ours when claimed, the other
+    /// holder's otherwise.
+    pub async fn claim_cube_model_lock(
+        &self,
+        model_id: Uuid,
+        user: &str,
+        token: &str,
+        take: bool,
+        ttl_secs: i64,
+    ) -> Result<Option<ModelLock>, StoreError> {
+        let ttl = ttl_secs as f64;
+        let mut c = self.conn().await?;
+        let tx = c.transaction().await?;
+        tx.query_opt(
+            "SELECT 1 FROM cube_model_locks WHERE model_id = $1 FOR UPDATE",
+            &[&model_id],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO cube_model_locks (model_id, user_name, token, heartbeat_at) \
+             VALUES ($1, $2, $3, now()) \
+             ON CONFLICT (model_id) DO UPDATE \
+             SET user_name = EXCLUDED.user_name, token = EXCLUDED.token, heartbeat_at = now() \
+             WHERE $4 OR cube_model_locks.token = EXCLUDED.token \
+                OR cube_model_locks.heartbeat_at < now() - make_interval(secs => $5)",
+            &[&model_id, &user, &token, &take, &ttl],
+        )
+        .await?;
+        let row = tx
+            .query_opt(
+                "SELECT user_name, token FROM cube_model_locks \
+                 WHERE model_id = $1 AND heartbeat_at >= now() - make_interval(secs => $2)",
+                &[&model_id, &ttl],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| ModelLock { user_name: r.get(0), token: r.get(1) }))
+    }
+
+    /// Drops the lock of model `model_id` when it holds `token`.
+    pub async fn release_cube_model_lock(
+        &self,
+        model_id: Uuid,
+        token: &str,
+    ) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        c.execute(
+            "DELETE FROM cube_model_locks WHERE model_id = $1 AND token = $2",
+            &[&model_id, &token],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The lock of model `model_id` when its last heartbeat is within
+    /// `ttl_secs`.
+    pub async fn live_cube_model_lock(
+        &self,
+        model_id: Uuid,
+        ttl_secs: i64,
+    ) -> Result<Option<ModelLock>, StoreError> {
+        let c = self.conn().await?;
+        let row = c
+            .query_opt(
+                "SELECT user_name, token FROM cube_model_locks \
+                 WHERE model_id = $1 AND heartbeat_at >= now() - make_interval(secs => $2)",
+                &[&model_id, &(ttl_secs as f64)],
+            )
+            .await?;
+        Ok(row.map(|r| ModelLock { user_name: r.get(0), token: r.get(1) }))
+    }
+
+    /// The build records of every model of the organization, as
+    /// `(model_id, record)` by cube name.
+    pub async fn cube_model_cubes_of(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<(Uuid, BuiltRecord)>, StoreError> {
+        let c = self.conn().await?;
+        let rows = c
+            .query(
+                "SELECT r.cube_id, r.cube_name, r.file_id, r.built_hash, r.model_id \
+                 FROM cube_model_cubes r JOIN cube_models m ON m.id = r.model_id \
+                 WHERE m.organization_id = $1 ORDER BY r.cube_name, r.cube_id",
+                &[&organization_id],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get(4), built_record_from(r)))
+            .collect())
+    }
+
+    /// Replaces the records of model `model_id`'s last build, in one
+    /// transaction. The model's version is not bumped; `NotFound` when the
+    /// model is gone.
+    pub async fn set_cube_model_cubes(
+        &self,
+        model_id: Uuid,
+        records: &[BuiltRecord],
+    ) -> Result<(), StoreError> {
+        let mut c = self.conn().await?;
+        let tx = c.transaction().await?;
+        if tx
+            .query_opt(
+                "SELECT 1 FROM cube_models WHERE id = $1 FOR UPDATE",
+                &[&model_id],
+            )
+            .await?
+            .is_none()
+        {
+            return Err(StoreError::NotFound);
+        }
+        tx.execute("DELETE FROM cube_model_cubes WHERE model_id = $1", &[&model_id])
+            .await?;
+        for r in records {
+            tx.execute(
+                "INSERT INTO cube_model_cubes (model_id, cube_id, cube_name, file_id, built_hash) \
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[&model_id, &r.cube_id, &r.cube_name, &r.file_id, &r.built_hash],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// `Conflict` on a stale version, `NotFound` when it does not exist.
+    pub async fn delete_cube_model(&self, id: Uuid, expected_version: i32) -> Result<(), StoreError> {
+        let c = self.conn().await?;
+        let n = c
+            .execute(
+                "DELETE FROM cube_models WHERE id = $1 AND version = $2",
+                &[&id, &expected_version],
+            )
+            .await?;
+        if n == 0 {
+            return Err(self.cube_model_miss(&c, id).await?);
+        }
+        Ok(())
+    }
+
+    async fn cube_model_miss(&self, c: &Object, id: Uuid) -> Result<StoreError, StoreError> {
+        let exists = c
+            .query_opt("SELECT 1 FROM cube_models WHERE id = $1", &[&id])
+            .await?
+            .is_some();
+        Ok(if exists {
+            StoreError::Conflict("stale model version".into())
+        } else {
+            StoreError::NotFound
+        })
     }
 
     pub async fn delete_object(&self, id: Uuid) -> Result<bool, StoreError> {

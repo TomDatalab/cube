@@ -29,7 +29,10 @@
     "noImplicitAny": false,
     "incremental": true,
     "target": "ES2020",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": [
     "src/**/*"

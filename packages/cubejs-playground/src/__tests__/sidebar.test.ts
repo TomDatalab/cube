@@ -66,21 +66,21 @@ describe('Sidebar', () => {
     rbac = ADMIN;
     render();
 
-    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'Frontend Integrations']);
+    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'API']);
     expect(host.textContent).toContain('Administração');
     expect(group()?.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('opens the Admin group onto its five pages', () => {
+  it('opens the Admin group onto its six pages', () => {
     rbac = ADMIN;
     render();
 
     act(() => group()!.click());
 
     expect(group()?.getAttribute('aria-expanded')).toBe('true');
-    expect(labels().slice(4)).toEqual(['Organizations', 'Workspaces', 'Roles', 'Rules', 'Users']);
+    expect(labels().slice(4)).toEqual(['Organizations', 'Workspaces', 'Roles', 'Rules', 'Groups', 'Users']);
     expect([...host.querySelectorAll('[role="group"] a')].map((a) => a.getAttribute('href')))
-      .toEqual(['/admin/organizations', '/admin/workspaces', '/admin/roles', '/admin/rules', '/admin/users']);
+      .toEqual(['/admin/organizations', '/admin/workspaces', '/admin/roles', '/admin/rules', '/admin/groups', '/admin/users']);
 
     act(() => group()!.click());
     expect(labels()).toHaveLength(4);
@@ -98,7 +98,7 @@ describe('Sidebar', () => {
     rbac = USER;
     render();
 
-    expect(labels()).toEqual(['Playground', 'Frontend Integrations']);
+    expect(labels()).toEqual(['Playground', 'API']);
     expect(host.textContent).not.toContain('Administração');
     expect(group()).toBeNull();
   });
@@ -107,7 +107,7 @@ describe('Sidebar', () => {
     rbac = NO_RBAC;
     render();
 
-    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'Frontend Integrations']);
+    expect(labels()).toEqual(['Playground', 'Data Model', 'Data Source', 'API']);
     expect(group()).toBeNull();
   });
 
@@ -149,5 +149,6 @@ describe('pageFor', () => {
     expect(pageTrail('/admin/users').map((p) => p.label)).toEqual(['Admin', 'Users']);
     expect(pageTrail('/admin').map((p) => p.label)).toEqual(['Admin']);
     expect(pageTrail('/build').map((p) => p.label)).toEqual(['Playground']);
+    expect(pageTrail('/api').map((p) => p.label)).toEqual(['API']);
   });
 });

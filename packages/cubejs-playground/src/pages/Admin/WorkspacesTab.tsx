@@ -1,11 +1,19 @@
+import { Fragment, useEffect, useState } from 'react';
+import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
+
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import {
-  Alert, Button, Input, message, Popconfirm, Space, Table, Typography,
-} from 'antd';
-import { useEffect, useState } from 'react';
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table';
+import {
+  Confirm, EmptyState, notify, Pager, SearchInput, Spinner,
+} from '@/components/kit';
 
 import { useIsMounted } from '../../hooks';
+import { IdText } from './IdText';
 import {
-  AdminApi, Connection, PAGE_SIZE, Workspace, WorkspaceListing,
+  AdminApi, Connection, PAGE_SIZE, Workspace,
 } from './api';
 import { NameDialog, NameValues } from './NameDialog';
 import { organizationOptions, RemoteSelect } from './RemoteSelect';
@@ -22,6 +30,8 @@ type Props = {
 // Every workspace of every organization, filtered by organization.
 export function WorkspacesTab({ api, organization, onOrganizationChange }: Props) {
   const isMounted = useIsMounted();
+  // The workspaces whose details are open under their row.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   // `true`: a new workspace; a workspace: renaming it.
   const [editing, setEditing] = useState<Workspace | true | null>(null);
   // The name of the filtered organization, which may come in as an id only.
@@ -58,17 +68,17 @@ export function WorkspacesTab({ api, organization, onOrganizationChange }: Props
     } else {
       await api.renameWorkspace(editing!.id, name);
     }
-    message.success(`${name} saved`);
+    notify.success(`${name} saved`);
     reload();
   }
 
   async function remove(ws: Workspace) {
     try {
       await api.deleteWorkspace(ws.id);
-      message.success(`${ws.name} deleted`);
+      notify.success(`${ws.name} deleted`);
       reload();
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
   }
 
@@ -79,9 +89,12 @@ export function WorkspacesTab({ api, organization, onOrganizationChange }: Props
     dialogTitle = 'Rename workspace';
   }
 
+  const rows = result?.items || [];
+  const COLUMNS = 5;
+
   return (
     <>
-      <Space style={{ marginBottom: 16 }}>
+      <div className="tw:mb-4 tw:flex tw:flex-wrap tw:items-center tw:gap-2">
         <RemoteSelect
           allowClear
           placeholder="All organizations"
@@ -91,56 +104,94 @@ export function WorkspacesTab({ api, organization, onOrganizationChange }: Props
           onChange={(v) => onOrganizationChange(v || null)}
           fetchOptions={organizationOptions(api)}
         />
-        <Button type="primary" onClick={() => setEditing(true)}>
+        <Button onClick={() => setEditing(true)}>
           New workspace
         </Button>
-      </Space>
+      </div>
 
-      <Input.Search
-        allowClear
+      <SearchInput
+        className="tw:mb-4"
         placeholder="Search workspaces, or their organization"
         value={q}
-        onChange={(e) => setQ(e.target.value)}
-        style={{ maxWidth: 400, display: 'block', marginBottom: 16 }}
+        onChange={setQ}
       />
-      {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
+      {error ? (
+        <Alert variant="destructive" className="tw:mb-4">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
 
-      <Table<WorkspaceListing>
-        rowKey="id"
-        size="small"
-        loading={loading}
-        dataSource={result?.items || []}
-        pagination={{
-          current: page,
-          pageSize: PAGE_SIZE,
-          total: result?.total ?? 0,
-          onChange: setPage,
-          showSizeChanger: false,
-        }}
-        expandable={{
-          expandedRowRender: (ws) => <WorkspaceDetails api={api} workspace={ws} />,
-        }}
-        columns={[
-          { title: 'Workspace', dataIndex: 'name' },
-          { title: 'Organization', dataIndex: 'organizationName' },
-          { title: 'Id', dataIndex: 'id', render: (v) => <Typography.Text type="secondary" copyable>{v}</Typography.Text> },
-          {
-            title: '',
-            align: 'right',
-            render: (_, ws) => (
-              <Space>
-                <Button size="small" onClick={() => setEditing(ws)}>Rename</Button>
-                <Popconfirm
-                  title={`Delete ${ws.name}, with its members, objects and connection releases?`}
-                  onConfirm={() => remove(ws)}
-                >
-                  <Button size="small" danger>Delete</Button>
-                </Popconfirm>
-              </Space>
-            ),
-          },
-        ]}
-      />
+      <div className="tw:relative">
+        <div className="tw:rounded-md tw:border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="tw:w-8" />
+                <TableHead>Workspace</TableHead>
+                <TableHead>Organization</TableHead>
+                <TableHead>Id</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={COLUMNS}>
+                    <EmptyState className="tw:py-6">{loading ? <Spinner className="tw:mx-auto" /> : 'No data'}</EmptyState>
+                  </TableCell>
+                </TableRow>
+              ) : rows.map((ws) => {
+                const open = Boolean(expanded[ws.id]);
+                return (
+                  <Fragment key={ws.id}>
+                    <TableRow>
+                      <TableCell>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={open ? 'Collapse row' : 'Expand row'}
+                          aria-expanded={open}
+                          onClick={() => setExpanded((e) => ({ ...e, [ws.id]: !open }))}
+                        >
+                          {open ? <ChevronDown /> : <ChevronRight />}
+                        </Button>
+                      </TableCell>
+                      <TableCell className="tw:whitespace-normal">{ws.name}</TableCell>
+                      <TableCell className="tw:whitespace-normal">{ws.organizationName}</TableCell>
+                      <TableCell><IdText id={ws.id} /></TableCell>
+                      <TableCell className="tw:text-right">
+                        <div className="tw:flex tw:items-center tw:justify-end tw:gap-2">
+                          <Button size="sm" variant="outline" onClick={() => setEditing(ws)}>Rename</Button>
+                          <Confirm
+                            title={`Delete ${ws.name}, with its members, objects and connection releases?`}
+                            onConfirm={() => remove(ws)}
+                          >
+                            <Button size="sm" variant="outline" className="tw:text-destructive">Delete</Button>
+                          </Confirm>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                    {open ? (
+                      <TableRow className="tw:hover:bg-transparent">
+                        <TableCell colSpan={COLUMNS} className="tw:bg-muted/30 tw:whitespace-normal">
+                          <WorkspaceDetails api={api} workspace={ws} />
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
+                  </Fragment>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+        {loading && rows.length > 0 ? (
+          <div className="tw:absolute tw:inset-0 tw:flex tw:items-center tw:justify-center tw:bg-background/50">
+            <Spinner className="tw:size-5" />
+          </div>
+        ) : null}
+        <Pager current={page} pageSize={PAGE_SIZE} total={result?.total ?? 0} onChange={setPage} />
+      </div>
 
       <NameDialog
         title={dialogTitle}
@@ -178,7 +229,7 @@ function WorkspaceDetails({ api, workspace }: DetailsProps) {
         setConnections(loaded);
       }
     } catch (e: any) {
-      message.error(e.message);
+      notify.error(e.message);
     }
   }
 

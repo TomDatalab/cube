@@ -50,13 +50,13 @@ describe('the Admin page API client', () => {
   });
 
   it('posts JSON bodies', async () => {
-    await adminApi('/cube').createUser({ id: 'ana', name: 'Ana', password: 'a-long-password' });
+    await adminApi('/cube').createUser({ username: 'ana', name: 'Ana', password: 'a-long-password' });
 
     const { url, init, headers } = lastCall();
     expect(url).toBe('/cube/v1/users');
     expect(init.method).toBe('POST');
     expect(headers.get('Content-Type')).toBe('application/json');
-    expect(JSON.parse(init.body)).toEqual({ id: 'ana', name: 'Ana', password: 'a-long-password' });
+    expect(JSON.parse(init.body)).toEqual({ username: 'ana', name: 'Ana', password: 'a-long-password' });
   });
 
   it('encodes ids in paths', async () => {
@@ -222,7 +222,10 @@ describe('the Admin page API client', () => {
   it('lists and adds rule members', async () => {
     fetchMock.mockReturnValueOnce(answer(200, { members: [{ user: 'ana' }, { user: 'bia' }] }));
 
-    expect(await adminApi('/cube').ruleMembers('r1')).toEqual(['ana', 'bia']);
+    expect(await adminApi('/cube').ruleMembers('r1')).toEqual([
+      { user: 'ana', username: null },
+      { user: 'bia', username: null },
+    ]);
 
     await adminApi('/cube').addRuleMember('r1', 'a b');
     const { url, init } = lastCall();

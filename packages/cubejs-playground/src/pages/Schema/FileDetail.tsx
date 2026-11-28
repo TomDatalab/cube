@@ -1,9 +1,9 @@
 import { useEffect, useReducer } from 'react';
-import { Button, Input, Modal, Select, Space, Typography, message } from 'antd';
+import { Button, Modal, Select, Space, Typography, message } from 'antd';
 
-import PrismCode from '../../PrismCode';
 import { Alert } from '../../atoms';
 import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
+import { CodeEditor, CodeView } from './NumberedCode';
 import { initialEditor, problemLines, readOnlyReason, reduce } from './editor';
 import type { OrgDetail, OrgSummary } from './tree';
 
@@ -21,8 +21,6 @@ type Props = {
   onMoved: (organizationId: string | null) => void;
   onReload: () => void;
 };
-
-const MONO = { fontFamily: 'monospace' } as const;
 
 export function FileDetail({
   api, org, id, file, isAdmin, orgs, onSaved, onRemoved, onMoved, onReload,
@@ -157,12 +155,10 @@ export function FileDetail({
               )}
             />
           )}
-          <Input.TextArea
-            rows={24}
-            style={MONO}
+          <CodeEditor
             value={state.draft}
             disabled={state.mode === 'saving'}
-            onChange={(e) => dispatch({ type: 'change', text: e.target.value })}
+            onChange={(text) => dispatch({ type: 'change', text })}
           />
           <Space style={{ marginTop: 8 }}>
             <Button type="primary" loading={state.mode === 'saving'} onClick={save}>Salvar</Button>
@@ -172,7 +168,7 @@ export function FileDetail({
           </Space>
         </>
       ) : (
-        <PrismCode code={file.content} style={{ padding: 0, marginTop: 16 }} />
+        <CodeView code={file.content} />
       )}
       {file.updatedBy && file.updatedAt && (
         <div>

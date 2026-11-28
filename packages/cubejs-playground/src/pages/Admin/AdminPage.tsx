@@ -1,10 +1,13 @@
-import { Alert, Layout, Typography } from 'antd';
 import { useMemo, useState } from 'react';
+import { Info } from 'lucide-react';
 import { Redirect, useHistory, useLocation } from 'react-router-dom';
+
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
 import { usePlaygroundContext, useRbac } from '../../hooks';
 import { Content, Header } from '../components/Ui';
 import { adminApi } from './api';
+import { GroupsTab } from './GroupsTab';
 import { OrganizationsTab } from './OrganizationsTab';
 import { RolesTab } from './RolesTab';
 import { RulesTab } from './RulesTab';
@@ -14,7 +17,7 @@ import { WorkspacesTab } from './WorkspacesTab';
 
 // With RBAC on: organizations, workspaces (with their members and connection
 // releases), roles (what an organization's rules may grant), rules (named
-// roles in a workspace) and users, each at its own /admin/<section> path, listed under
+// roles in a workspace), groups (users placed in rules together) and users, each at its own /admin/<section> path, listed under
 // Admin in the sidebar, through the management API. A section loads when
 // shown, so it sees what the others changed. Platform admins only
 // (`AdminOnly`).
@@ -36,11 +39,11 @@ export function AdminPage() {
   const title = ADMIN_SECTIONS.find((s) => s.key === section)!.label;
 
   return (
-    <Layout>
+    <div className="tw:text-foreground">
       <Header>
-        <Typography.Title>{title}</Typography.Title>
+        <h1 className="tw:text-3xl tw:font-semibold">{title}</h1>
       </Header>
-      <Content>
+      <Content className="tw:pb-8">
         {enabled ? (
           <>
             {section === 'organizations' ? (
@@ -61,22 +64,24 @@ export function AdminPage() {
             ) : null}
             {section === 'roles' ? <RolesTab api={api} /> : null}
             {section === 'rules' ? <RulesTab api={api} /> : null}
+            {section === 'groups' ? <GroupsTab api={api} /> : null}
             {section === 'users' ? (
               <UsersTab
                 api={api}
-                currentUser={session?.user.id ?? null}
+                currentUser={session ? { id: session.user.id, username: session.user.username } : null}
               />
             ) : null}
           </>
         ) : (
-          <Alert
-            type="info"
-            showIcon
-            message="RBAC is off"
-            description="Set CUBE_RBAC=spicedb to manage users, organizations, workspaces and rules here."
-          />
+          <Alert>
+            <Info />
+            <AlertTitle>RBAC is off</AlertTitle>
+            <AlertDescription>
+              Set CUBE_RBAC=spicedb to manage users, organizations, workspaces and rules here.
+            </AlertDescription>
+          </Alert>
         )}
       </Content>
-    </Layout>
+    </div>
   );
 }

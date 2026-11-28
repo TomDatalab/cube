@@ -351,7 +351,7 @@ fn query_type(meta: Arc<MetaConfig>) -> Object {
                     parse_dates(&mut result);
                     extensions.record(&result);
 
-                    let rows = shape_rows(&result);
+                    let rows = shape_rows(&fields_of_members(&result, &meta));
                     Ok(Some(FieldValue::list(
                         rows.into_iter().map(FieldValue::owned_any),
                     )))
@@ -477,8 +477,52 @@ fn selection_to_field_node(field: SelectionField<'_>) -> async_graphql::Result<F
 }
 
 fn visible_named_members(cube: &CubeMeta) -> impl Iterator<Item = &MemberMeta> {
+    // Two members cannot be one field: the first keeps it.
+    let mut seen = HashSet::new();
     cube.visible_members()
-        .filter(|member| is_valid_name(&member.field_name()))
+        .filter(move |member| {
+            let field = member.field_name();
+            is_valid_name(&field) && seen.insert(field)
+        })
+}
+
+/// The load result with each `cube.member` key (rows and annotation) as the
+/// GraphQL field it is answered under: `bossa.Quantidade Total` ->
+/// `bossa.quantidadeTotal`, `….Data de Fabricação.month` -> `….dataDeFabricacao.month`.
+fn fields_of_members(result: &Value, meta: &MetaConfig) -> Value {
+    let key_of = |key: &str| -> String {
+        let mut parts = key.splitn(3, '.');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(cube), Some(member), rest) => {
+                let field = meta.field_of_member(cube, member);
+                match rest {
+                    Some(rest) => format!("{cube}.{field}.{rest}"),
+                    None => format!("{cube}.{field}"),
+                }
+            }
+            _ => key.to_string(),
+        }
+    };
+    let rekey = |v: &Value| -> Value {
+        match v.as_object() {
+            Some(obj) => Value::Object(obj.iter().map(|(k, v)| (key_of(k), v.clone())).collect()),
+            None => v.clone(),
+        }
+    };
+    let mut out = result.clone();
+    if let Some(Value::Array(rows)) = out.get_mut("data") {
+        for row in rows.iter_mut() {
+            *row = rekey(row);
+        }
+    }
+    if let Some(Value::Object(annotation)) = out.get_mut("annotation") {
+        for part in ["measures", "dimensions", "timeDimensions"] {
+            if let Some(v) = annotation.get_mut(part) {
+                *v = rekey(v);
+            }
+        }
+    }
+    out
 }
 
 fn unique_by_field_name<'a>(cubes: &[&'a CubeMeta]) -> Vec<&'a CubeMeta> {

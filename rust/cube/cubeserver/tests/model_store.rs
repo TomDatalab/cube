@@ -517,3 +517,24 @@ db_test!(refresh_never_moves_live_back, |store| {
     assert_eq!(rt.version(), last);
     assert_eq!(std::fs::read_link(rt.live_path()).unwrap(), std::path::PathBuf::from(format!("v{last}")));
 });
+
+db_test!(cube_model_lock_claim_take_expire, |store| {
+    let org = store.create_organization("o", "o", "ann").await.unwrap();
+    let model = store
+        .create_cube_model(org.id, "m", &serde_json::json!({}), "ann")
+        .await
+        .unwrap();
+    let id = model.id;
+    let l = store.claim_cube_model_lock(id, "a", "t1", false, 120).await.unwrap().unwrap();
+    assert_eq!((l.user_name.as_str(), l.token.as_str()), ("a", "t1"));
+    let l = store.claim_cube_model_lock(id, "b", "t2", false, 120).await.unwrap().unwrap();
+    assert_eq!(l.user_name, "a");
+    let l = store.claim_cube_model_lock(id, "b", "t2", false, 0).await.unwrap().unwrap();
+    assert_eq!(l.user_name, "b");
+    let l = store.claim_cube_model_lock(id, "a", "t1", true, 120).await.unwrap().unwrap();
+    assert_eq!(l.user_name, "a");
+    store.release_cube_model_lock(id, "t2").await.unwrap();
+    assert_eq!(store.live_cube_model_lock(id, 120).await.unwrap().unwrap().user_name, "a");
+    store.release_cube_model_lock(id, "t1").await.unwrap();
+    assert!(store.live_cube_model_lock(id, 120).await.unwrap().is_none());
+});

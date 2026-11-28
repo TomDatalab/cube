@@ -414,3 +414,16 @@ cubes:
     .to_string();
     assert!(rendered.starts_with("a.yml Errors:"), "{rendered}");
 }
+
+#[test]
+fn member_names_may_be_friendly_names() {
+    let model = |name: &str| {
+        format!("cubes:\n  - name: orders\n    sql_table: public.orders\n    measures:\n      - name: \"{name}\"\n        type: count\n")
+    };
+    for ok in ["count", "Quantidade Total", "Data de Fabricação", "_x 2"] {
+        ModelLoader::load_str(&model(ok), "model.yml").unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for bad in ["a.b", " a", "a ", "a  b", "{a}", "1 a", "a'b", "a-b"] {
+        assert_contains(&errors(&model(bad)), "fails to match the identifier pattern");
+    }
+}

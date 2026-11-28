@@ -1,7 +1,8 @@
 //! User management, for platform admins: `/v1/users`.
 //!
-//! Responses carry `{id, name, email, disabled, createdAt}`, never the
-//! password hash.
+//! Responses carry `{id, username, name, email, disabled, createdAt}`
+//! (`id` the UUID), never the password hash. A user in the path is named by
+//! UUID or by username.
 
 use std::collections::BTreeSet;
 
@@ -17,12 +18,12 @@ use uuid::Uuid;
 
 use super::organizations::user_ref;
 use super::workspaces::workspace_ref;
-use super::{body, rbac_of, store_error, SearchParams};
+use super::{body, named_user, rbac_of, store_error, user_not_found, SearchParams};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::handlers::data_sources::data_source_types;
 use crate::rbac::access::{self, AccessInput};
-use crate::rbac::identity::{hash_password, user_token_claims, validate_user_id};
+use crate::rbac::identity::{hash_password, user_token_claims, validate_new_username};
 use crate::rbac::restrictions::{validated_attributes, Attributes};
 use crate::rbac::store::{NewUser, StoreError, User};
 use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
@@ -31,7 +32,9 @@ use crate::services::RequestContext;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateUser {
-    id: String,
+    username: Option<String>,
+    /// The username, as the field was called before users had a UUID.
+    id: Option<String>,
     name: Option<String>,
     email: Option<String>,
     password: String,
@@ -40,6 +43,7 @@ pub struct CreateUser {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateUser {
+    username: Option<String>,
     name: Option<String>,
     email: Option<String>,
     disabled: Option<bool>,
@@ -54,6 +58,7 @@ pub struct SetPassword {
 fn view(user: &User) -> Value {
     json!({
         "id": user.id,
+        "username": user.username,
         "name": user.name,
         "email": user.email,
         "disabled": user.disabled,
@@ -73,7 +78,8 @@ fn require_admin<'a>(state: &'a AppState, ctx: &RequestContext) -> Result<&'a Rb
     Ok(rbac)
 }
 
-/// `{id, name?, email?, password}` → 201 with the user.
+/// `{username, name?, email?, password}` → 201 with the user. `id` is
+/// accepted in place of `username` (its old name).
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -81,20 +87,27 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_user_id(&request.id)?;
+    let username = match (request.username, request.id) {
+        (Some(u), Some(id)) if u != id => {
+            return Err(ApiError::bad_request("Give username or id, not both"))
+        }
+        (Some(u), _) | (None, Some(u)) => u,
+        (None, None) => return Err(ApiError::bad_request("The username is required")),
+    };
+    validate_new_username(&username)?;
 
     let password = request.password;
     let password_hash = rbac.run_hashing(move || hash_password(&password)).await??;
     let user = rbac
         .store
         .create_user(&NewUser {
-            id: request.id,
+            username,
             name: request.name,
             email: request.email,
             password_hash,
         })
         .await
-        .map_err(|e| store_error(e, "A user with this id already exists"))?;
+        .map_err(|e| store_error(e, "A user with this username already exists"))?;
     Ok((StatusCode::CREATED, Json(view(&user))))
 }
 
@@ -119,7 +132,9 @@ pub(crate) async fn list(
     }
 }
 
-/// `{name?, email?, disabled?}`: disabling locks the user out at once.
+/// `{username?, name?, email?, disabled?}`: disabling locks the user out at
+/// once. A rename keeps the user's id, and so their access and their tokens;
+/// a username taken by another user is 409.
 pub async fn update(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
@@ -128,21 +143,65 @@ pub async fn update(
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_user_id(&id)?;
-    if request.name.is_none() && request.email.is_none() && request.disabled.is_none() {
+    let user = named_user(rbac, &id).await?;
+    if request.username.is_none()
+        && request.name.is_none()
+        && request.email.is_none()
+        && request.disabled.is_none()
+    {
         return Err(ApiError::bad_request("Nothing to update"));
     }
-    // Disabling the only admin would lock user management out for good.
-    if request.disabled == Some(true) && ctx.user.as_deref() == Some(id.as_str()) {
+    if let Some(username) = &request.username {
+        validate_new_username(username)?;
+        if *username != user.username {
+            refuse_configured_rename(rbac, &user.username)?;
+        }
+    }
+    // Disabling the only admin would lock user management out for good. The
+    // path may name the caller by username: compare ids.
+    if request.disabled == Some(true) && ctx.user.as_deref() == Some(user.id.as_str()) {
         return Err(ApiError::bad_request("You cannot disable your own account"));
     }
     let user = rbac
         .store
-        .update_user(&id, request.name, request.email, request.disabled)
+        .update_user(
+            &user.id,
+            request.username,
+            request.name,
+            request.email,
+            request.disabled,
+        )
         .await
-        .map_err(|e| store_error(e, "This email is already in use"))?
+        .map_err(|e| match e {
+            StoreError::Conflict(c) if c.contains("username") => ApiError::new(
+                StatusCode::CONFLICT,
+                "A user with this username already exists",
+            ),
+            e => store_error(e, "This email is already in use"),
+        })?
         .ok_or_else(user_not_found)?;
     Ok(Json(view(&user)))
+}
+
+/// `CUBE_RBAC_ADMINS` and `CUBE_SYNC_USER` name users by username: renamed,
+/// the next start would create a new admin under the old name, and the sync
+/// routes would refuse the renamed user (and serve whoever takes the old
+/// name). 409 for those users.
+fn refuse_configured_rename(rbac: &Rbac, username: &str) -> Result<(), ApiError> {
+    let variable = if rbac.config.admins.iter().any(|a| a == username) {
+        "CUBE_RBAC_ADMINS"
+    } else if rbac.config.sync_user == username {
+        "CUBE_SYNC_USER"
+    } else {
+        return Ok(());
+    };
+    Err(ApiError::new(
+        StatusCode::CONFLICT,
+        format!(
+            "{username} is listed in {variable}: remove it from {variable} and restart, \
+             then rename the user, then add the new username to {variable}"
+        ),
+    ))
 }
 
 /// `{password}`: an admin reset. Every token the user holds stops working.
@@ -154,12 +213,12 @@ pub async fn set_password(
 ) -> Result<StatusCode, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
     let request = body(request)?;
-    validate_user_id(&id)?;
+    let user = named_user(rbac, &id).await?;
 
     let password = request.password;
     let hash = rbac.run_hashing(move || hash_password(&password)).await??;
     rbac.store
-        .set_password_hash(&id, &hash)
+        .set_password_hash(&user.id, &hash)
         .await
         .map_err(|e| match e {
             StoreError::NotFound => user_not_found(),
@@ -176,13 +235,7 @@ pub async fn issue_token(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    validate_user_id(&id)?;
-    let user = rbac
-        .store
-        .user(&id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(user_not_found)?;
+    let user = named_user(rbac, &id).await?;
     if user.disabled {
         return Err(ApiError::new(StatusCode::CONFLICT, "The user is disabled"));
     }
@@ -194,17 +247,6 @@ pub async fn issue_token(
     })))
 }
 
-/// The user in the path, or 404.
-async fn known_user(rbac: &Rbac, id: &str) -> Result<(), ApiError> {
-    validate_user_id(id)?;
-    rbac.store
-        .user(id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .map(|_| ())
-        .ok_or_else(user_not_found)
-}
-
 /// → `{attributes: {name: [values]}}`. Platform admins only.
 pub(crate) async fn attributes(
     State(state): State<AppState>,
@@ -212,10 +254,10 @@ pub(crate) async fn attributes(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    known_user(rbac, &id).await?;
+    let user = named_user(rbac, &id).await?;
     let attributes = rbac
         .store
-        .user_attributes(&id)
+        .user_attributes(&user.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     Ok(Json(json!({ "attributes": attributes })))
@@ -230,10 +272,10 @@ pub(crate) async fn set_attributes(
     request: Result<Json<AttributesBody>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    known_user(rbac, &id).await?;
+    let user = named_user(rbac, &id).await?;
     let attributes = validated_attributes(body(request)?.attributes)?;
     rbac.store
-        .set_user_attributes(&id, &attributes)
+        .set_user_attributes(&user.id, &attributes)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
     Ok(Json(json!({ "attributes": attributes })))
@@ -252,13 +294,67 @@ pub(crate) async fn access(
     Path(id): Path<String>,
 ) -> Result<Json<access::AccessGraph>, ApiError> {
     let rbac = require_admin(&state, &ctx)?;
-    validate_user_id(&id)?;
-    let user = rbac
-        .store
-        .user(&id)
-        .await
-        .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(user_not_found)?;
+    let user = named_user(rbac, &id).await?;
+    Ok(Json(access::build(
+        &access_input(&state, rbac, user).await?,
+    )))
+}
+
+/// → what the user reaches, by kind (`rbac::access::summarize`), with the
+/// objects of the workspaces where they read objects. Platform admins only.
+pub(crate) async fn permissions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rbac = require_admin(&state, &ctx)?;
+    let user = named_user(rbac, &id).await?;
+    let summary = access::summarize(&access::build(&access_input(&state, rbac, user).await?));
+    let readable: Vec<(Uuid, bool)> = summary
+        .workspaces
+        .iter()
+        .filter(|w| w.permissions.iter().any(|p| p == "read objects"))
+        .filter_map(|w| {
+            let write = w.permissions.iter().any(|p| p == "write objects");
+            w.id.parse().ok().map(|id| (id, write))
+        })
+        .collect();
+    let listed = try_join_all(
+        readable
+            .iter()
+            .map(|(ws, _)| rbac.store.objects_of_workspace(*ws, None)),
+    )
+    .await
+    .map_err(|e| store_error(e, "Conflict"))?;
+    let objects: Vec<Value> = readable
+        .iter()
+        .zip(listed)
+        .flat_map(|((ws, write), objects)| {
+            objects.into_iter().map(move |o| {
+                let permissions: &[&str] = if *write {
+                    &["read", "write"]
+                } else {
+                    &["read"]
+                };
+                json!({
+                    "id": o.id,
+                    "type": o.r#type,
+                    "name": o.name,
+                    "workspaceId": ws,
+                    "permissions": permissions,
+                })
+            })
+        })
+        .collect();
+    let mut body = serde_json::to_value(&summary).map_err(|_| ApiError::internal())?;
+    body["objects"] = Value::Array(objects);
+    Ok(Json(body))
+}
+
+/// What `access::build` reads about a user: their relationships, rules,
+/// groups, roles, workspaces, organizations, connections and the model's cubes.
+async fn access_input(state: &AppState, rbac: &Rbac, user: User) -> Result<AccessInput, ApiError> {
+    let id = user.id.clone();
     let platform_admin = rbac.is_platform_admin(&id).await?;
     let mut input = AccessInput {
         user,
@@ -267,6 +363,9 @@ pub(crate) async fn access(
         organizations: vec![],
         workspaces: vec![],
         rules: vec![],
+        indirect_rules: BTreeSet::new(),
+        groups: vec![],
+        rule_groups: vec![],
         roles: vec![],
         connections: vec![],
         releases: vec![],
@@ -275,7 +374,7 @@ pub(crate) async fn access(
         cubes: vec![],
     };
     if platform_admin {
-        return Ok(Json(access::build(&input)));
+        return Ok(input);
     }
 
     let mut direct = Vec::new();
@@ -313,6 +412,43 @@ pub(crate) async fn access(
         .iter()
         .filter_map(|r| r.resource.id.parse().ok())
         .collect();
+    // The groups the user is in, and the rules those are placed in.
+    let group_ids: Vec<Uuid> = rbac
+        .authz
+        .read(&RelationshipFilter {
+            kind: "group",
+            id: None,
+            relation: Some("member"),
+            subject: Some(user_ref(&id)),
+        })
+        .await
+        .map_err(authz_error)?
+        .iter()
+        .filter_map(|r| r.resource.id.parse().ok())
+        .collect();
+    let groups = rbac
+        .store
+        .groups_by_ids(&group_ids)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
+    let placed = try_join_all(
+        groups
+            .iter()
+            .map(|g| super::groups::rule_ids(rbac, g.id)),
+    )
+    .await?;
+    let rule_groups: Vec<(Uuid, Uuid)> = groups
+        .iter()
+        .zip(placed)
+        .flat_map(|(g, rules)| rules.into_iter().map(move |r| (r, g.id)))
+        .collect();
+    let indirect_rules: BTreeSet<Uuid> = rule_groups
+        .iter()
+        .map(|(r, _)| *r)
+        .filter(|r| !rule_ids.contains(r))
+        .collect();
+    let mut rule_ids = rule_ids;
+    rule_ids.extend(indirect_rules.iter().copied());
     let rules = rbac
         .store
         .rules_by_ids(&rule_ids)
@@ -391,10 +527,13 @@ pub(crate) async fn access(
     input.organizations = organizations;
     input.workspaces = workspaces;
     input.rules = rules;
+    input.indirect_rules = indirect_rules;
+    input.groups = groups;
+    input.rule_groups = rule_groups;
     input.roles = roles;
     input.connections = connections;
     input.releases = releases;
-    input.configured = data_source_types(&state).await?.into_keys().collect();
+    input.configured = data_source_types(state).await?.into_keys().collect();
 
     // Configured data sources that are no organization's connection.
     let rows: BTreeSet<String> = rbac
@@ -411,8 +550,8 @@ pub(crate) async fn access(
         .filter(|name| !rows.contains(*name))
         .cloned()
         .collect();
-    input.cubes = access_cubes(&*crate::handlers::tree::index(&state).await?);
-    Ok(Json(access::build(&input)))
+    input.cubes = access_cubes(&*crate::handlers::tree::index(state).await?);
+    Ok(input)
 }
 
 /// The cubes and views of the model index, each with its folder and the data
@@ -470,8 +609,4 @@ fn access_cubes(index: &crate::model_index::ModelIndex) -> Vec<access::AccessCub
             }
         })
         .collect()
-}
-
-fn user_not_found() -> ApiError {
-    ApiError::not_found("User not found")
 }

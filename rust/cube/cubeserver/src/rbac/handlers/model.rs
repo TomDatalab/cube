@@ -32,27 +32,46 @@ const SYNC_MESSAGE: &str = "Este arquivo é gerado a partir do catálogo do Sofi
 const TEMPLATE_MESSAGE: &str = "Arquivos .jinja e .j2 não são editáveis aqui";
 
 /// Whose files a route serves.
-struct Scope {
-    organization: Option<Uuid>,
-    slug: String,
+pub(crate) struct Scope {
+    pub(crate) organization: Option<Uuid>,
+    pub(crate) slug: String,
     /// The caller owns the organization without being a platform admin:
     /// nothing returned may reveal another organization's files.
-    owner_only: bool,
+    pub(crate) owner_only: bool,
 }
 
 /// `e` as `owner_only` callers may see it.
-fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> WriteError {
+pub(crate) fn redacted(mut e: WriteError, owner_only: bool, slug: &str) -> WriteError {
     if owner_only && !e.problems.is_empty() {
         e.problems = redact(&e.problems, &e.problems, slug, &e.defs);
     }
     e
 }
 
-async fn detail_of(state: &AppState, scope: &Scope) -> Result<Value, ApiError> {
-    org_detail_for(state, &scope.slug, scope.owner_only).await
+/// The node's detail; an organization's also lists its models
+/// (`models: [{id, name, cubeNames}]`, by name; `cubeNames` are those of
+/// the last build, by name).
+pub(crate) async fn detail_of(state: &AppState, scope: &Scope) -> Result<Value, ApiError> {
+    let mut detail = org_detail_for(state, &scope.slug, scope.owner_only).await?;
+    if let Some(org) = scope.organization {
+        let store = &super::rbac_of(state)?.store;
+        let records = super::cube_models::records_of(store, org).await?;
+        let models: Vec<Value> = store
+            .cube_models_of(org)
+            .await
+            .map_err(|e| store_error(e, "Conflict"))?
+            .iter()
+            .map(|m| {
+                let names = super::cube_models::cube_names(records.get(&m.id));
+                json!({ "id": m.id, "name": m.name, "cubeNames": names })
+            })
+            .collect();
+        detail["models"] = json!(models);
+    }
+    Ok(detail)
 }
 
-fn writer(state: &AppState) -> Result<Arc<ModelWriter>, ApiError> {
+pub(crate) fn writer(state: &AppState) -> Result<Arc<ModelWriter>, ApiError> {
     state
         .model_writer
         .clone()
@@ -86,7 +105,8 @@ fn check_editable(file: &ModelFile) -> Result<(), WriteError> {
     ))
 }
 
-async fn org_scope(
+/// The organization `id` as its admins reach it, and the caller's username.
+pub(crate) async fn org_scope(
     state: &AppState,
     ctx: &RequestContext,
     id: &str,
@@ -100,12 +120,12 @@ async fn org_scope(
             slug: org.slug,
             owner_only,
         },
-        user.to_string(),
+        super::actor(ctx)?.to_string(),
     ))
 }
 
 fn platform_scope(state: &AppState, ctx: &RequestContext) -> Result<(Scope, String), ApiError> {
-    let (_, user) = caller(state, ctx)?;
+    caller(state, ctx)?;
     require_platform_admin(ctx, "reach the platform model")?;
     Ok((
         Scope {
@@ -113,7 +133,7 @@ fn platform_scope(state: &AppState, ctx: &RequestContext) -> Result<(Scope, Stri
             slug: PLATFORM_FOLDER.to_string(),
             owner_only: false,
         },
-        user.to_string(),
+        super::actor(ctx)?.to_string(),
     ))
 }
 
@@ -324,7 +344,8 @@ pub async fn move_file(
     Path(file): Path<String>,
     request: Result<Json<MoveFile>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_, user) = caller(&state, &ctx)?;
+    caller(&state, &ctx)?;
+    let user = super::actor(&ctx)?;
     require_platform_admin(&ctx, "move model files")?;
     let request = body(request)?;
     let writer = writer(&state)?;
@@ -561,8 +582,9 @@ fn require_sync_user<'a>(
     state: &'a AppState,
     ctx: &'a RequestContext,
 ) -> Result<&'a crate::rbac::Rbac, ApiError> {
-    let (rbac, user) = caller(state, ctx)?;
-    if user != rbac.config.sync_user {
+    // `CUBE_SYNC_USER` is a username.
+    let (rbac, _) = caller(state, ctx)?;
+    if super::actor(ctx)? != rbac.config.sync_user {
         return Err(ApiError::forbidden(
             "Só o usuário de sincronização usa esta rota",
         ));
@@ -644,7 +666,7 @@ pub async fn sync_put(
     request: Result<Json<SyncBody>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let rbac = require_sync_user(&state, &ctx)?;
-    let user = ctx.user.clone().unwrap_or_default();
+    let user = super::actor(&ctx)?.to_string();
     let request = body(request)?;
     let prefix = format!("{connection}/");
     let mut seen = std::collections::HashSet::new();

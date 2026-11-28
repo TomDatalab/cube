@@ -204,7 +204,7 @@ pub async fn create(
         name: resource_name(&request.name)?,
         content_type: content_type(&request.content_type)?,
         content: content_bytes(request.content, request.encoding.as_deref())?,
-        created_by: user.to_string(),
+        created_by: super::actor(&ctx)?.to_string(),
     };
 
     // The row and the grant together: the transaction rolls back unless
@@ -290,7 +290,7 @@ pub async fn update(
     request: Result<Json<UpdateObject>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let object = visible_object(&state, &ctx, &id, "write").await?;
-    let (rbac, user) = caller(&state, &ctx)?;
+    let (rbac, _) = caller(&state, &ctx)?;
     let request = body(request)?;
     let name = request.name.as_deref().map(resource_name).transpose()?;
     let content_type = request
@@ -310,7 +310,7 @@ pub async fn update(
             name,
             content_type,
             content,
-            user,
+            super::actor(&ctx)?,
         )
         .await
         .map_err(|e| match e {

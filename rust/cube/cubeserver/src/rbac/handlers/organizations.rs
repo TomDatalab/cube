@@ -76,14 +76,14 @@ pub(crate) async fn visible_organization(
         .ok_or_else(not_found)
 }
 
-/// `{name, owner}` → 201. Platform admins only; the owner must be an
-/// existing, enabled user.
+/// `{name, owner}` → 201. Platform admins only; the owner (UUID or
+/// username) must be an existing, enabled user.
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
     request: Result<Json<CreateOrganization>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let (rbac, user) = caller(&state, &ctx)?;
+    let (rbac, _) = caller(&state, &ctx)?;
     if !ctx.platform_admin {
         return Err(ApiError::forbidden(
             "Only platform admins create organizations",
@@ -91,17 +91,16 @@ pub async fn create(
     }
     let request = body(request)?;
     let name = resource_name(&request.name)?;
+    // `owner` names the user by UUID or by username. Not `named_user`: a
+    // bad owner is a bad body (400), not a missing path resource (404).
     validate_user_id(&request.owner)?;
     let owner = rbac
         .store
-        .user(&request.owner)
+        .resolve_user(&request.owner)
         .await
-        .map_err(|e| store_error(e, "Conflict"))?;
-    if !owner.is_some_and(|o| !o.disabled) {
-        return Err(ApiError::bad_request(
-            "The owner must be an existing, enabled user",
-        ));
-    }
+        .map_err(|e| store_error(e, "Conflict"))?
+        .filter(|o| !o.disabled)
+        .ok_or_else(|| ApiError::bad_request("The owner must be an existing, enabled user"))?;
 
     // An explicit slug that is taken is a 409. A derived one is recomputed
     // and retried when a concurrent create took it first.
@@ -128,27 +127,35 @@ pub async fn create(
             .transaction()
             .await
             .map_err(|e| store_error(e, "Conflict"))?;
-        match tx.create_organization(&name, &slug, user).await {
+        match tx.create_organization(&name, &slug, super::actor(&ctx)?).await {
             Ok(org) => break (tx, org),
             Err(StoreError::Conflict(c))
                 if request.slug.is_none() && attempt < 5 && c.contains("organizations_slug") => {}
             Err(e) => return Err(store_error(e, "Conflict")),
         }
     };
+    let roles = tx
+        .seed_default_roles(org.id, super::actor(&ctx)?)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?;
     let resource = organization_ref(org.id);
+    let mut relationships = vec![
+        Relationship {
+            resource: resource.clone(),
+            relation: "platform",
+            subject: platform(),
+        },
+        Relationship {
+            resource,
+            relation: "owner",
+            subject: user_ref(&owner.id),
+        },
+    ];
+    for role in &roles {
+        relationships.extend(super::roles::wildcard_grants(role.id, &role.permissions));
+    }
     rbac.authz
-        .touch(&[
-            Relationship {
-                resource: resource.clone(),
-                relation: "platform",
-                subject: platform(),
-            },
-            Relationship {
-                resource,
-                relation: "owner",
-                subject: user_ref(&request.owner),
-            },
-        ])
+        .touch(&relationships)
         .await
         // Dropping `tx` rolls the row back.
         .map_err(authz_error)?;
@@ -264,6 +271,14 @@ pub async fn delete(
         .roles_of_organization(org.id)
         .await
         .map_err(|e| store_error(e, "Conflict"))?;
+    // Its groups too; their members go after the commit (with no workspace
+    // left, no rule holds them).
+    let groups = rbac
+        .store
+        .search_groups(None, Some(org.id), &Default::default())
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .items;
 
     // The row goes in a transaction committed only once SpiceDB forgot the
     // organization: a failure leaves both or neither.
@@ -291,6 +306,9 @@ pub async fn delete(
     tx.commit().await.map_err(|e| store_error(e, "Conflict"))?;
     for role in &roles {
         super::roles::forget(rbac, role.role.id).await?;
+    }
+    for group in &groups {
+        super::groups::forget(rbac, group.group.id).await?;
     }
     crate::rbac::ownership::refresh_after_commit(&state).await;
     Ok(StatusCode::NO_CONTENT)
@@ -321,7 +339,10 @@ pub async fn remove_owner(
 ) -> Result<StatusCode, ApiError> {
     let (rbac, user) = caller(&state, &ctx)?;
     let org = visible_organization(rbac, &id, "admin", user).await?;
-    validate_user_id(&owner)?;
+    // Like a member: an owner subject with no user row is removable too.
+    let key = owner;
+    let owner =
+        super::member_subject(rbac, &key, "organization", org.id.to_string(), &["owner"]).await?;
     let owners = rbac
         .authz
         .read(&RelationshipFilter {
@@ -339,7 +360,7 @@ pub async fn remove_owner(
         .collect();
     if !owners.contains(&owner.as_str()) {
         return Err(ApiError::not_found(format!(
-            "{owner} is not an owner of this organization"
+            "{key} is not an owner of this organization"
         )));
     }
     // Remove only while another owner is still there: two concurrent

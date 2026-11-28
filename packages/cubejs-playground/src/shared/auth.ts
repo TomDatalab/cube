@@ -1,7 +1,7 @@
 // With RBAC on, `playground/context` hands out no token (`authRequired`):
 // a user logs in, and the token goes on every request after. Platform admins
 // see the whole Playground; anyone else gets the query builder and the
-// Frontend Integrations page, scoped to a workspace they pick.
+// API page, scoped to a workspace they pick.
 // Both live in sessionStorage, so they end with the tab.
 
 const STORAGE_KEY = 'cubePlaygroundSession';
@@ -19,6 +19,8 @@ export type Session = {
   expiresAt: string;
   user: {
     id: string;
+    // What people see; `id` is the UUID the server's calls name the user by.
+    username: string;
     name: string | null;
     platformAdmin: boolean;
     // The organizations the user owns: they open the Data Model page.
@@ -77,6 +79,10 @@ export function getSession(): Session | null {
     if (session.token && Date.parse(session.expiresAt) > Date.now()) {
       hadSession = true;
       lastToken = session.token;
+      // Stored by an older page, before users had a username.
+      if (session.user && session.user.username == null) {
+        session.user.username = session.user.id;
+      }
       return session;
     }
   } catch {
@@ -178,6 +184,22 @@ export function chooseWorkspace(id: string | null, reload = () => window.locatio
   }
 }
 
+// Switch to `scope` (an organization of `null`/`_platform`: the Platform),
+// then run `then` (a navigation), then reload like `chooseWorkspace`, so the
+// page `then` opened starts over in the new scope.
+export function switchScope(
+  scope: { workspace: string | null; organization: string | null },
+  then: () => void,
+  reload = () => window.location.reload()
+) {
+  const organization = scope.organization === PLATFORM_SCOPE ? null : scope.organization;
+  const survives = setScope(scope.workspace, scope.workspace ? null : organization);
+  then();
+  if (survives) {
+    reload();
+  }
+}
+
 // Switch to an organization's model (`null` or `_platform`: the Platform),
 // clearing the workspace; reloads like `chooseWorkspace`.
 export function chooseOrganizationScope(
@@ -236,6 +258,7 @@ export async function login(
     expiresAt: body.expiresAt,
     user: {
       ...body.user,
+      username: body.user?.username ?? body.user?.id,
       platformAdmin: Boolean(body.user?.platformAdmin),
       // Older servers do not send the list.
       ownedOrganizations: body.user?.ownedOrganizations ?? [],

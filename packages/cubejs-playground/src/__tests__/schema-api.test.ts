@@ -16,7 +16,7 @@ function session(platformAdmin: boolean, ownedOrganizations = owned) {
   return {
     token: 'jwt',
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-    user: { id: 'u', name: null, platformAdmin, ownedOrganizations },
+    user: { id: 'u', username: 'u', name: null, platformAdmin, ownedOrganizations },
   };
 }
 
@@ -132,14 +132,58 @@ describe('openBlock', () => {
   it('asks an owner for a workspace', () => {
     const block = openBlock(cube, { owner: true, workspaces: [], chosen: null, released: null });
     expect(block.disabled).toBe(true);
-    expect(block.hint).toBe('Crie um workspace nesta organização para consultar');
+    expect(block.hint).toBe('Create a workspace in this organization to query it');
     expect(openBlock(cube, { owner: false, workspaces: [], chosen: null, released: null }).disabled).toBe(false);
   });
 
   it('warns when the connection is not released to the chosen workspace', () => {
     const block = openBlock(cube, { owner: true, workspaces, chosen: 'w1', released: ['other'] });
     expect(block.disabled).toBe(false);
-    expect(block.warning).toBe('libere a conexão sales_db para o workspace Main');
+    expect(block.warning).toBe('Release the connection sales_db to the workspace Main');
     expect(openBlock(cube, { owner: true, workspaces, chosen: 'w1', released: ['sales_db'] }).warning).toBeUndefined();
+  });
+});
+
+describe('model edit lock client', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    sessionStorage.setItem('cubePlaygroundSession', JSON.stringify(session(false)));
+    fetchMock = vi.fn(() => answer(200, { held: true, holder: 'me' }));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const call = (i: number) => {
+    const [url, init] = fetchMock.mock.calls[i];
+    return { url, init, headers: new Headers(init?.headers) };
+  };
+
+  it('claims, takes and releases the lock, and sends the token on writes', async () => {
+    const api = modelApi(buildRbac({ authRequired: true }, session(false)));
+    expect(await api.lockModel('m/1', 't1')).toEqual({ held: true, holder: 'me' });
+    expect(call(0).url).toBe('/cube/v1/cube-models/m%2F1/lock');
+    expect(call(0).init.method).toBe('POST');
+    expect(JSON.parse(call(0).init.body)).toEqual({ token: 't1' });
+    await api.takeModelLock('m1', 't1');
+    expect(call(1).url).toBe('/cube/v1/cube-models/m1/lock/take');
+    fetchMock.mockReturnValueOnce(answer(204, null));
+    await api.releaseModelLock('m1', 't 1');
+    expect(call(2).url).toBe('/cube/v1/cube-models/m1/lock?token=t%201');
+    expect(call(2).init.method).toBe('DELETE');
+    expect(call(2).init.keepalive).toBe(true);
+    expect(call(2).headers.get('Authorization')).toBe('jwt');
+
+    await api.saveModel('m1', { version: 1 }, 't1');
+    await api.deleteModel('m1', 1, 't1');
+    await api.buildModel('m1', false, 't1');
+    await api.createTables('m1', 1, true, 't1');
+    [3, 4, 5, 6].forEach((i) => expect(call(i).headers.get('X-Model-Lock')).toBe('t1'));
+    await api.saveModel('m1', { version: 1 });
+    expect(call(7).headers.get('X-Model-Lock')).toBeNull();
   });
 });

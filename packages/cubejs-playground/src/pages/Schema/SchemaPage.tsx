@@ -1,24 +1,45 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Layout, Modal, Empty, Typography, Input, Tooltip, Button, Spin, message } from 'antd';
 import type { DataNode } from 'antd/lib/tree';
-import { RouterProps } from 'react-router-dom';
+import { Prompt, RouterProps } from 'react-router-dom';
+import { Plus, Workflow } from 'lucide-react';
+import { toast } from 'sonner';
+
+import { Button as UiButton } from '@/components/ui/button';
+import { EmptyState } from '@/components/kit';
 
 import { playgroundAction } from '../../events';
 import { Menu, Tree } from '../../components';
 import { Alert, CubeLoader } from '../../atoms';
 import { AppContext } from '../../components/AppContext';
 import { ButtonDropdown } from '../../QueryBuilder/ButtonDropdown';
-import { useRbac } from '../../hooks';
+import { useOrganizationScope, useRbac, useWorkspace } from '../../hooks';
+import { authHeaders, onUnauthorized, switchScope } from '../../shared/auth';
 import { SchemaFormat } from '../../types';
 import { CubeIcon } from '../../shared/icons/CubeIcon';
 import { FileIcon } from '../../shared/icons/FileIcon';
 import { TableIcon } from '../../shared/icons/TableIcon';
-import { CubeDetail } from './CubeDetail';
+import { CubeChange, CubeDetail } from './CubeDetail';
+import { CubeList } from './CubeList';
+import { FileList, fileListRows, TableList, tableListRows } from './OrgLists';
+import { cubeEditBlock, cubeFileOf, cubeUsers } from './cubeEdit';
+import { removeCube } from './cubeYaml';
+import { loadRows, openScope, orgWorkspace, previewHeaders, PreviewQuery } from './preview';
 import { FileDetail } from './FileDetail';
 import { fileHint, offersJavaScript } from './editor';
-import { FileContent, OrgNode, PLATFORM, modelApi } from './api';
-import { useOpenBlock } from './useOpenBlock';
 import {
+  CubeModelView, FileContent, OrgNode, PLATFORM, modelApi,
+} from './api';
+import { useOpenBlock } from './useOpenBlock';
+import { useCollapsed } from './useCollapsed';
+import { PanelToggle } from './PanelToggle';
+import { useResizable } from './useResizable';
+import { ResizeHandle } from './ResizeHandle';
+import { Built, ModelEditor, builtMessage } from './models/ModelEditor';
+import { emptyDefinition } from './models/modelGraph';
+import { NameDialog } from '../Admin/NameDialog';
+import {
+  ColumnNode,
   OrgDetail,
   OrgSummary,
   TreeCube,
@@ -34,10 +55,13 @@ import {
 
 const { Content, Sider } = Layout;
 
+// The tree's width in px: where it starts and how far its edge drags.
+const TREE_WIDTH = { initial: 340, min: 220, max: 640 };
+
 const PAGE_SIZE = 50;
 const MORE_KEY = 'more:';
 
-const TREE_ICONS = { cube: CubeIcon, table: TableIcon, file: FileIcon };
+const TREE_ICONS = { cube: CubeIcon, table: TableIcon, file: FileIcon, model: Workflow };
 
 // The full name a tooltip shows: a file's whole path, else the title.
 function fullName(node: DataNode): string | undefined {
@@ -61,30 +85,173 @@ function TreeTitle({ node }: { node: DataNode }) {
         </span>
       ) : null}
       <span className="schema-tree-label">{node.title}</span>
+      {'columnType' in node ? (
+        <span className="schema-tree-column-type">{(node as ColumnNode).columnType}</span>
+      ) : null}
     </span>
   );
 }
+const LEAVE_MODEL = 'This model has changes not saved. Leave without saving?';
+
+// The right panel for an organization's "Models" node: its models, each
+// opening its editor, and "New model". Models need an organization (an id).
+function ModelList({
+  orgName, models, canCreate, onOpen, onNew,
+}: {
+  orgName: string;
+  models: NonNullable<OrgDetail['models']>;
+  canCreate: boolean;
+  onOpen: (id: string) => void;
+  onNew: () => void;
+}) {
+  return (
+    <div data-testid="model-list" className="tw:flex tw:flex-col tw:gap-3">
+      <div className="tw:flex tw:items-center tw:justify-between tw:gap-3">
+        <h4 className="tw:m-0 tw:text-lg tw:font-medium">{`Models of ${orgName} (${models.length})`}</h4>
+        <UiButton
+          disabled={!canCreate}
+          title={canCreate ? undefined : 'Models belong to an organization'}
+          onClick={onNew}
+        >
+          <Plus />
+          New model
+        </UiButton>
+      </div>
+      {models.length === 0 ? (
+        <EmptyState>No models yet: a model joins tables into one cube</EmptyState>
+      ) : (
+        <ul className="tw:m-0 tw:list-none tw:divide-y tw:rounded-md tw:border tw:p-0">
+          {models.map((m) => (
+            <li key={m.id}>
+              <button
+                type="button"
+                data-slot="model-list-item"
+                className="tw:flex tw:w-full tw:cursor-pointer tw:items-center tw:justify-between tw:gap-3 tw:border-0 tw:bg-transparent tw:px-3 tw:py-2 tw:text-left tw:text-sm tw:text-foreground tw:hover:bg-accent"
+                onClick={() => onOpen(m.id)}
+              >
+                <span className="tw:truncate">{m.name}</span>
+                <span className="tw:text-muted-foreground">{m.cubeNames?.length ? `cube ${m.cubeNames.join(', ')}` : 'not built yet'}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS = 2;
 
 // A cube's panel: its members come with the model, and the button needs the
 // organization's workspaces.
-function CubePanel({ api, org, owner, cube, errors, onOpen }: {
+// Its members are edited in its file: read fresh, changed, saved with the
+// version read (a concurrent change makes the save a 409, not a loss).
+function CubePanel({
+  api, org, owner, basePath, cube, cubes, errors, files, onOpen, onSaved, onDeleted,
+}: {
   api: ReturnType<typeof modelApi>;
   org: OrgNode | undefined;
   owner: boolean;
+  basePath: string;
   cube: TreeCube;
+  // The organization's cubes and views: who uses this cube.
+  cubes: TreeCube[];
   errors: OrgDetail['errors'];
+  files: OrgDetail['files'];
   onOpen: () => void;
+  onSaved: (detail: OrgDetail) => void;
+  onDeleted: () => void;
 }) {
   const open = useOpenBlock(api, org, owner, cube);
-  return <CubeDetail cube={cube} errors={errors} open={open} onOpen={onOpen} />;
+  // The preview queries with the user's own access: an admin in the cube's
+  // organization, an owner in the workspace chosen in the header.
+  // The header may be in another organization: an owner queries in a
+  // workspace of the cube's own (the chosen one when it is of it).
+  const chosen = useWorkspace();
+  const organization = useOrganizationScope();
+  const workspace = orgWorkspace(chosen, open.workspaces);
+  const scope = org ? previewHeaders({ isAdmin: !owner, slug: org.slug, workspace }) : null;
+  // "Open in Playground" runs in the header's scope: move it to the cube's
+  // organization first, or the query reaches a model without the cube.
+  const openHere = () => {
+    const next = org && openScope({
+      isAdmin: !owner, slug: org.slug, workspace: chosen, organization, workspaces: open.workspaces ?? [],
+    });
+    if (next) {
+      switchScope(next, onOpen);
+    } else {
+      onOpen();
+    }
+  };
+  let previewBlock: string | null = null;
+  if (!scope) {
+    previewBlock = 'Choose a workspace in the header to preview this cube';
+  } else if (open.disabled && open.hint) {
+    previewBlock = open.hint;
+  }
+  const loadUrl = `${basePath.replace(/\/$/, '')}/v1/load`;
+  const runQuery = scope && !open.disabled
+    ? (query: PreviewQuery) => loadRows(loadUrl, { ...authHeaders(), ...scope }, query, (url, init) => (
+      fetch(url, init).then((r) => {
+        onUnauthorized(r);
+        return r;
+      })
+    ))
+    : null;
+  const file = cubeFileOf(files, cube);
+  const routed = Boolean(org && (org.slug === PLATFORM || org.id));
+  const editBlock = cubeEditBlock({ cube, file, routed });
+  const onEdit = async (change: CubeChange) => {
+    if (!org || !file?.id) {
+      return;
+    }
+    const current = await api.file(org, file.id);
+    const next = change(current.content);
+    if (next === current.content) {
+      return;
+    }
+    onSaved(await api.save(org, file.id, next, current.version ?? file.version ?? 0));
+  };
+  // The cube leaves its file, read fresh; the file goes when the cube is all
+  // it defines. The server refuses what breaks the model.
+  const onDelete = async () => {
+    if (!org || !file?.id) {
+      return;
+    }
+    const current = await api.file(org, file.id);
+    const version = current.version ?? file.version ?? 0;
+    const next = removeCube(current.content, cube.name);
+    if (next === null) {
+      await api.remove(org, file.id, version);
+    } else {
+      await api.save(org, file.id, next, version);
+    }
+    onDeleted();
+  };
+  return (
+    <CubeDetail
+      cube={cube}
+      errors={errors}
+      open={open}
+      onOpen={openHere}
+      editBlock={editBlock}
+      onEdit={onEdit}
+      onDelete={onDelete}
+      users={cubeUsers(cube.name, cubes)}
+      preview={{
+        runQuery, block: previewBlock, hidden: !owner,
+      }}
+    />
+  );
 }
 
 export function SchemaPage({ history }: RouterProps) {
   const { playgroundContext } = useContext(AppContext);
   const rbac = useRbac();
   const token = rbac.session?.token;
+  const [treeCollapsed, toggleTree] = useCollapsed('cubePlayground.schemaTreeCollapsed');
+  const [treeWidth, setTreeWidth] = useResizable('cubePlayground.schemaTreeWidth', TREE_WIDTH.initial, TREE_WIDTH.min, TREE_WIDTH.max);
   const api = useMemo(
     () => modelApi(rbac, playgroundContext.basePath),
     [rbac.isAdmin, token, playgroundContext.basePath]
@@ -110,6 +277,10 @@ export function SchemaPage({ history }: RouterProps) {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [shown, setShown] = useState(false);
+  // The open model's editor has changes not saved.
+  const [modelDirty, setModelDirty] = useState(false);
+  // The organization "New model" asks a name for.
+  const [newModelIn, setNewModelIn] = useState<string | null>(null);
 
   // The organizations the lists returned, by slug.
   const known = useRef<Record<string, OrgSummary>>({});
@@ -428,6 +599,77 @@ export function SchemaPage({ history }: RouterProps) {
     });
   };
 
+  // Selects a node; leaving a model with changes not saved asks first. It
+  // reads refs: the toast after a build calls it later.
+  const dirtyRef = useRef(false);
+  dirtyRef.current = modelDirty;
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selectedKey;
+  const select = (key: string | null): boolean => {
+    // eslint-disable-next-line no-alert
+    if (dirtyRef.current && key !== selectedRef.current && !window.confirm(LEAVE_MODEL)) {
+      return false;
+    }
+    if (key !== selectedRef.current) {
+      setModelDirty(false);
+    }
+    setSelectedKey(key);
+    return true;
+  };
+
+  const openUnder = (slug: string, group: 'cubes' | 'models', key: string) => {
+    if (select(key)) {
+      setExpandedKeys((keys) => Array.from(new Set([...keys, `org:${slug}`, `org:${slug}:${group}`])));
+    }
+  };
+
+  const createModel = async (slug: string, name: string) => {
+    const org = known.current[slug] ?? { slug, name: slug };
+    const created = await api.createModel(org, name, emptyDefinition());
+    await loadDetail(slug, true);
+    openUnder(slug, 'models', `model:${slug}:${created.id}`);
+  };
+
+  // The deleted model's changes are gone with it: leaving does not ask.
+  const afterModelDelete = async (slug: string) => {
+    dirtyRef.current = false;
+    setModelDirty(false);
+    openUnder(slug, 'models', `org:${slug}:models`);
+    toast.success('Model deleted');
+    await loadDetail(slug, true);
+    refreshOrgs();
+  };
+
+  // A save changes only the model's entry (its name may change): the list
+  // stays sorted by name, and nothing is introspected again.
+  const afterModelSave = (slug: string, saved: CubeModelView) => {
+    setDetails((current) => {
+      const detail = current[slug];
+      if (!detail) {
+        return current;
+      }
+      const entry = { id: saved.id, name: saved.name, cubeNames: saved.cubeNames };
+      const models = [...(detail.models || []).filter((m) => m.id !== saved.id), entry]
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return { ...current, [slug]: { ...detail, models } };
+    });
+  };
+
+  // The build answers with what it built and removed and the
+  // organization's refreshed detail; Open cube opens the first cube built.
+  const afterBuild = (slug: string, built: Built, detail: OrgDetail) => {
+    setDetails((current) => ({ ...current, [slug]: detail }));
+    refreshOrgs();
+    const text = builtMessage(built);
+    if (!text) {
+      return;
+    }
+    const [first] = built.cubes;
+    toast.success(text, first ? {
+      action: { label: 'Open cube', onClick: () => openUnder(slug, 'cubes', `cube:${slug}:${first}`) },
+    } : undefined);
+  };
+
   const afterFileChange = (slug: string, others: string[] = []) => {
     [slug, ...others].forEach((s) => {
       if (details[s]) {
@@ -466,6 +708,96 @@ export function SchemaPage({ history }: RouterProps) {
       );
     }
 
+    if (selected.kind === 'tables' || selected.kind === 'files') {
+      if (!detail) {
+        return <CubeLoader />;
+      }
+      const orgName = known.current[selected.slug]?.name ?? selected.slug;
+      if (selected.kind === 'tables') {
+        const rows = tableListRows(selected.slug, detail.tables);
+        return (
+          <TableList
+            orgName={orgName}
+            rows={rows}
+            checkedKeys={checkedKeys}
+            onCheck={(keys) => {
+              // This organization's tables as checked here; the others' stay.
+              const here = new Set(rows.map((r) => r.key));
+              setCheckedKeys([...checkedKeys.filter((k) => !here.has(k)), ...keys]);
+            }}
+          />
+        );
+      }
+      return (
+        <FileList
+          orgName={orgName}
+          rows={fileListRows(selected.slug, detail.files || [], detail.cubes, detail.errors || [])}
+          onOpen={(key) => {
+            setExpandedKeys((keys) => Array.from(new Set([...keys, `org:${selected.slug}`, `files:${selected.slug}`])));
+            setSelectedKey(key);
+          }}
+        />
+      );
+    }
+
+    if (selected.kind === 'cubes' || selected.kind === 'views') {
+      if (!detail) {
+        return <CubeLoader />;
+      }
+      const orgKey = `org:${selected.slug}`;
+      const group = selected.kind;
+      return (
+        <CubeList
+          orgName={known.current[selected.slug]?.name ?? selected.slug}
+          cubes={detail.cubes}
+          errors={detail.errors || []}
+          type={group === 'views' ? 'view' : 'cube'}
+          onOpen={(name) => {
+            // The node shows selected under its open "Cubes" or "Views" node.
+            setExpandedKeys((keys) => Array.from(new Set([...keys, orgKey, `${orgKey}:${group}`])));
+            setSelectedKey(`cube:${selected.slug}:${name}`);
+          }}
+        />
+      );
+    }
+
+    if (selected.kind === 'models') {
+      if (!detail) {
+        return <CubeLoader />;
+      }
+      const org = known.current[selected.slug];
+      return (
+        <ModelList
+          orgName={org?.name ?? selected.slug}
+          models={detail.models || []}
+          canCreate={Boolean(org?.id)}
+          onOpen={(id) => openUnder(selected.slug, 'models', `model:${selected.slug}:${id}`)}
+          onNew={() => setNewModelIn(selected.slug)}
+        />
+      );
+    }
+
+    if (selected.kind === 'model') {
+      const org = known.current[selected.slug] ?? { slug: selected.slug, name: selected.slug };
+      if (!detail || !selected.rest) {
+        return <CubeLoader />;
+      }
+      return (
+        <ModelEditor
+          key={selected.rest}
+          api={api}
+          org={org}
+          modelId={selected.rest}
+          tables={detail.tables || {}}
+          onBuilt={(built, refreshed) => afterBuild(selected.slug, built, refreshed)}
+          onTablesCreated={(created) => setDetails((current) => ({ ...current, [selected.slug]: created }))}
+          onSaved={(saved) => afterModelSave(selected.slug, saved)}
+          onDeleted={() => afterModelDelete(selected.slug)}
+          onDirtyChange={setModelDirty}
+        />
+      );
+    }
+
     if (selected.kind === 'cube') {
       const cube = detail?.cubes.find((c) => c.name === selected.rest);
       if (!cube) {
@@ -476,9 +808,20 @@ export function SchemaPage({ history }: RouterProps) {
           api={api}
           org={known.current[selected.slug]}
           owner={!rbac.isAdmin}
+          basePath={playgroundContext.basePath ?? '/cube'}
           cube={cube}
+          cubes={detail.cubes}
           errors={detail.errors || []}
+          files={detail.files || []}
           onOpen={() => history.push(buildQueryUrl(cube))}
+          onDeleted={() => {
+            setSelectedKey(null);
+            afterFileChange(selected.slug);
+          }}
+          onSaved={(saved) => {
+            setDetails((current) => ({ ...current, [selected.slug]: saved }));
+            refreshOrgs();
+          }}
         />
       );
     }
@@ -635,7 +978,9 @@ export function SchemaPage({ history }: RouterProps) {
             loadMore();
             return;
           }
-          setSelectedKey(key);
+          if (!select(key)) {
+            return;
+          }
           if (key && parseKey(key).kind === 'org') {
             loadDetail(parseKey(key).slug);
           }
@@ -646,58 +991,94 @@ export function SchemaPage({ history }: RouterProps) {
 
   return (
     <Layout style={{ height: '100%' }}>
-      <Sider width={340} className="schema-sidebar">
-        <div style={{ display: 'flex', gap: 8, padding: 8, alignItems: 'center' }}>
-          <Input
-            allowClear
-            placeholder="Search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            suffix={searching ? <Spin size="small" /> : undefined}
-          />
-          <Tooltip title={mixedOrgs ? 'Escolha tabelas de uma única organização' : ''}>
-            <span>
-              <ButtonDropdown
-                show={shown}
-                disabled={!checkedKeys.length || mixedOrgs}
-                type="primary"
-                data-testid="chart-type-btn"
-                overlay={(
-                  <Menu data-testid="generate-schema">
-                    <Menu.Item
-                      title={
-                        !isYamlFormatSupported
-                          ? 'yaml schema format is supported by Cube 0.31.0 and later'
-                          : ''
-                      }
-                      disabled={!isYamlFormatSupported}
-                      onClick={() => generateSchema(SchemaFormat.yaml)}
-                    >
-                      YAML
-                    </Menu.Item>
-                    {offersJavaScript(rbac.enabled) && (
-                      <Menu.Item onClick={() => generateSchema()}>
-                        JavaScript
-                      </Menu.Item>
+      <Sider
+        width={treeWidth}
+        // No width transition: the edge follows the pointer while dragged.
+        style={{ position: 'relative', transition: 'none' }}
+        collapsible
+        collapsed={treeCollapsed}
+        collapsedWidth={48}
+        trigger={null}
+        className="schema-sidebar"
+      >
+        {treeCollapsed ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 8 }}>
+            <PanelToggle collapsed onToggle={toggleTree} label="the data model tree" />
+          </div>
+        ) : (
+          <>
+            {/* A narrow tree wraps the button and the toggle under the search. */}
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: 8, padding: 8, alignItems: 'center',
+            }}
+            >
+              <Input
+                allowClear
+                style={{ flex: '1 1 80px', minWidth: 0 }}
+                placeholder="Search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                suffix={searching ? <Spin size="small" /> : undefined}
+              />
+              <Tooltip title={mixedOrgs ? 'Escolha tabelas de uma única organização' : ''}>
+                <span>
+                  <ButtonDropdown
+                    show={shown}
+                    disabled={!checkedKeys.length || mixedOrgs}
+                    type="primary"
+                    data-testid="chart-type-btn"
+                    overlay={(
+                      <Menu data-testid="generate-schema">
+                        <Menu.Item
+                          title={
+                            !isYamlFormatSupported
+                              ? 'yaml schema format is supported by Cube 0.31.0 and later'
+                              : ''
+                          }
+                          disabled={!isYamlFormatSupported}
+                          onClick={() => generateSchema(SchemaFormat.yaml)}
+                        >
+                          YAML
+                        </Menu.Item>
+                        {offersJavaScript(rbac.enabled) && (
+                          <Menu.Item onClick={() => generateSchema()}>
+                            JavaScript
+                          </Menu.Item>
+                        )}
+                      </Menu>
                     )}
-                  </Menu>
-                )}
-                style={{ border: 0 }}
-                onOverlayOpen={() => setShown(true)}
-                onOverlayClose={() => setShown(false)}
-                onItemClick={() => setShown(false)}
-              >
-                Generate Data Model
-              </ButtonDropdown>
-            </span>
-          </Tooltip>
-        </div>
-        {renderTree()}
+                    style={{ border: 0 }}
+                    onOverlayOpen={() => setShown(true)}
+                    onOverlayClose={() => setShown(false)}
+                    onItemClick={() => setShown(false)}
+                  >
+                    Generate Data Model
+                  </ButtonDropdown>
+                </span>
+              </Tooltip>
+              <PanelToggle collapsed={false} onToggle={toggleTree} label="the data model tree" className="tw:ml-auto" />
+            </div>
+            {renderTree()}
+            <ResizeHandle
+              width={treeWidth}
+              min={TREE_WIDTH.min}
+              max={TREE_WIDTH.max}
+              label="the data model tree"
+              onResize={setTreeWidth}
+            />
+          </>
+        )}
       </Sider>
 
       <Content style={{ minHeight: 280, padding: 24 }}>
         {renderContent()}
       </Content>
+      <Prompt when={modelDirty} message={LEAVE_MODEL} />
+      <NameDialog
+        title={newModelIn ? 'New model' : null}
+        onSubmit={({ name }) => createModel(newModelIn!, name)}
+        onClose={() => setNewModelIn(null)}
+      />
     </Layout>
   );
 }

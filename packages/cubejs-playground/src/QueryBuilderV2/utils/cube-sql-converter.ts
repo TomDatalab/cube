@@ -78,6 +78,15 @@ export type NormalizedQuery = Omit<Query, 'order'> & {
   order?: Array<{ id: string; desc: boolean }>;
 };
 
+// `cube.member` as SQL: a part that is not a plain identifier (a friendly
+// name, `Quantidade Total`) is quoted.
+export function sqlPath(path: string): string {
+  return path
+    .split('.')
+    .map((part) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(part) ? part : `"${part.replace(/"/g, '""')}"`))
+    .join('.');
+}
+
 export class CubeSQLConverter {
   protected members: ConverterMember[] = [];
 
@@ -203,7 +212,7 @@ export class CubeSQLConverter {
 
       return this.makeFilter({
         ...filter,
-        member: isMeasureFilter ? this.makeMeasure(filter.member!) : filter.member,
+        member: isMeasureFilter ? this.makeMeasure(filter.member!) : sqlPath(filter.member!),
       });
     };
 
@@ -240,7 +249,7 @@ export class CubeSQLConverter {
       );
 
       if (filters) {
-        query.push(`WHERE ${[filters, ...(this.query.segments || [])].join(' AND ')}`);
+        query.push(`WHERE ${[filters, ...(this.query.segments || []).map(sqlPath)].join(' AND ')}`);
       }
 
       if (measureFilters.length) {
@@ -280,7 +289,7 @@ export class CubeSQLConverter {
   }
 
   protected makeMeasure(name: string) {
-    return `MEASURE(${name})`;
+    return `MEASURE(${sqlPath(name)})`;
   }
 
   protected makeFilter(filter: BinaryFilter | UnaryFilter): string {
@@ -395,15 +404,15 @@ export class CubeSQLConverter {
   }
 
   protected makeDimension(name: string) {
-    return name;
+    return sqlPath(name);
   }
 
   protected makeTimeDimension(name: string, granularity?: string) {
     if (!granularity) {
-      return name;
+      return sqlPath(name);
     }
 
-    return `DATE_TRUNC('${granularity}', ${name})`;
+    return `DATE_TRUNC('${granularity}', ${sqlPath(name)})`;
   }
 
   protected escapeValue(value: string) {

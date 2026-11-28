@@ -1,9 +1,14 @@
 import {
-  Alert, Button, Modal, Space, Spin, Typography,
-} from 'antd';
-import {
   PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
+import { CircleAlert, TriangleAlert } from 'lucide-react';
+
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
+import { Spinner } from '@/components/kit';
 
 import { AdminApi, User } from '../api';
 import {
@@ -36,6 +41,7 @@ const DIM_OPACITY = 0.55;
 const KIND_COLOR: Record<AccessNodeKind, string> = {
   user: 'var(--pg-graph-user, #1f1d3a)',
   organization: 'var(--pg-graph-organization, #2f7d6d)',
+  group: 'var(--pg-graph-group, #5a8f29)',
   rule: 'var(--pg-graph-rule, #8a5cc2)',
   role: 'var(--pg-graph-role, #c2477a)',
   workspace: 'var(--pg-graph-workspace, #6a66f0)',
@@ -265,7 +271,7 @@ export function AccessModal({ api, user, onClose }: Props) {
   // What goes full screen: the dialog's whole content (title bar and its
   // buttons included), or just the graph and its panel outside a dialog.
   function fullScreenTarget(): Element | null {
-    return content.current?.closest('.ant-modal-content') ?? content.current;
+    return content.current?.closest('[data-slot="dialog-content"]') ?? content.current;
   }
 
   function toggleFullScreen() {
@@ -506,21 +512,21 @@ export function AccessModal({ api, user, onClose }: Props) {
         padding: 16, minWidth: 0, maxHeight: narrow ? undefined : viewHeight, overflowY: 'auto',
       }}
       >
-        <Typography.Text type="secondary" style={{ textTransform: 'uppercase', fontSize: 12, letterSpacing: '.06em' }}>
-          What {graph.user.id} can do
-        </Typography.Text>
+        <span className="tw:text-xs tw:tracking-[.06em] tw:text-muted-foreground tw:uppercase">
+          What {graph.user.username} can do
+        </span>
         {graph.platformAdmin ? (
-          <Typography.Paragraph style={{ marginTop: 8 }}>
+          <p className="tw:mt-2">
             Platform admin: full access to every organization, workspace and connection.
-          </Typography.Paragraph>
+          </p>
         ) : null}
         {grouped.map(({ node, grants }) => (
           <div key={node.id} style={{ marginTop: 14 }}>
             <div style={{ fontWeight: 600 }}>
-              {node.name} <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>{node.kind}</Typography.Text>
+              {node.name} <span className="tw:text-xs tw:font-normal tw:text-muted-foreground">{node.kind}</span>
             </div>
             {node.notes.map((note) => (
-              <div key={note}><Typography.Text type="secondary" style={{ fontSize: 12 }}>{note}</Typography.Text></div>
+              <div key={note}><span className="tw:text-xs tw:text-muted-foreground">{note}</span></div>
             ))}
             {grants.map((g) => (
               <div key={g.permission} style={{ marginTop: 6 }}>
@@ -561,7 +567,7 @@ export function AccessModal({ api, user, onClose }: Props) {
           <div key={n.id} style={{ marginTop: 14 }}>
             <div style={{ fontWeight: 600 }}>{n.name}</div>
             {n.notes.map((note) => (
-              <div key={note}><Typography.Text type="secondary" style={{ fontSize: 12 }}>{note}</Typography.Text></div>
+              <div key={note}><span className="tw:text-xs tw:text-muted-foreground">{note}</span></div>
             ))}
           </div>
         ))}
@@ -571,19 +577,22 @@ export function AccessModal({ api, user, onClose }: Props) {
 
   let body;
   if (error) {
-    body = <Alert type="error" message={error} showIcon />;
+    body = (
+      <Alert variant="destructive">
+        <CircleAlert />
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
+    );
   } else if (!graph) {
-    body = <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>;
+    body = <div className="tw:flex tw:justify-center tw:p-12"><Spinner /></div>;
   } else {
     body = (
       <>
         {graph.user.disabled ? (
-          <Alert
-            type="warning"
-            showIcon
-            message="Disabled: these grants do not apply while the user is disabled."
-            style={{ marginBottom: 12 }}
-          />
+          <Alert className="tw:mb-3">
+            <TriangleAlert />
+            <AlertDescription>Disabled: these grants do not apply while the user is disabled.</AlertDescription>
+          </Alert>
         ) : null}
         <div
           style={{
@@ -610,37 +619,36 @@ export function AccessModal({ api, user, onClose }: Props) {
   }
 
   return (
-    <Modal
-      title={(
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', paddingRight: 24 }}>
-          <span>Access of {userId}</span>
-          <Space size={8} wrap>
-            {summary ? <Typography.Text type="secondary" style={{ fontFamily: MONO, fontSize: 12 }}>{summary}</Typography.Text> : null}
-            {graph ? (
-              <Space size={4}>
-                <Button size="small" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)}>−</Button>
-                <Button size="small" aria-label="Zoom in" onClick={() => zoomBy(ZOOM_STEP)}>+</Button>
-                <Button size="small" onClick={fit}>Fit</Button>
-                <Button size="small" disabled={!Object.keys(positions).length} onClick={() => setPositions({})}>
-                  Reset layout
-                </Button>
-                {canFullScreen ? (
-                  <Button size="small" aria-pressed={full} onClick={toggleFullScreen}>
-                    {full ? 'Exit full screen' : 'Full screen'}
+    <Dialog open={user != null} onOpenChange={(next) => !next && close()}>
+      <DialogContent
+        aria-describedby={undefined}
+        className="tw:max-h-[95vh] tw:w-[90vw] tw:max-w-[90vw] tw:overflow-y-auto tw:sm:max-w-[90vw]"
+      >
+        <DialogHeader>
+          <div className="tw:flex tw:flex-wrap tw:items-center tw:justify-between tw:gap-3 tw:pr-6">
+            <DialogTitle>Access of {user?.username}</DialogTitle>
+            <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2 tw:text-sm tw:font-normal">
+              {summary ? <span className="tw:text-xs tw:text-muted-foreground" style={{ fontFamily: MONO }}>{summary}</span> : null}
+              {graph ? (
+                <div className="tw:flex tw:items-center tw:gap-1">
+                  <Button size="xs" variant="outline" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)}>−</Button>
+                  <Button size="xs" variant="outline" aria-label="Zoom in" onClick={() => zoomBy(ZOOM_STEP)}>+</Button>
+                  <Button size="xs" variant="outline" onClick={fit}>Fit</Button>
+                  <Button size="xs" variant="outline" disabled={!Object.keys(positions).length} onClick={() => setPositions({})}>
+                    Reset layout
                   </Button>
-                ) : null}
-              </Space>
-            ) : null}
-          </Space>
-        </div>
-      )}
-      visible={user != null}
-      onCancel={close}
-      footer={null}
-      width="90vw"
-      destroyOnClose
-    >
-      <div ref={content}>{body}</div>
-    </Modal>
+                  {canFullScreen ? (
+                    <Button size="xs" variant="outline" aria-pressed={full} onClick={toggleFullScreen}>
+                      {full ? 'Exit full screen' : 'Full screen'}
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </DialogHeader>
+        <div ref={content} className="tw:min-w-0 tw:text-sm">{body}</div>
+      </DialogContent>
+    </Dialog>
   );
 }

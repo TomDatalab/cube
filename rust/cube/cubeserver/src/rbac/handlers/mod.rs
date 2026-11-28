@@ -2,6 +2,8 @@
 
 pub mod auth;
 pub mod connections;
+pub mod cube_models;
+pub mod groups;
 pub mod model;
 pub mod objects;
 pub mod organizations;
@@ -22,7 +24,7 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::validate_user_id;
 use crate::rbac::store::{Search, StoreError, User};
-use crate::rbac::{unauthenticated, Rbac};
+use crate::rbac::{authz_error, unauthenticated, Rbac, RelationshipFilter};
 use crate::services::RequestContext;
 
 /// Routes reachable without a token (`POST /v1/auth/login`).
@@ -47,6 +49,10 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             put(users::set_password),
         )
         .route(&format!("{base}/v1/users/:id/access"), get(users::access))
+        .route(
+            &format!("{base}/v1/users/:id/permissions"),
+            get(users::permissions),
+        )
         .route(
             &format!("{base}/v1/users/:id/attributes"),
             get(users::attributes).put(users::set_attributes),
@@ -138,6 +144,25 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
             &format!("{base}/v1/rules/:id/members/:user"),
             put(rules::add_member).delete(rules::remove_member),
         )
+        .route(&format!("{base}/v1/groups"), get(groups::list_all))
+        .route(
+            &format!("{base}/v1/organizations/:id/groups"),
+            get(groups::of_organization).post(groups::create),
+        )
+        .route(
+            &format!("{base}/v1/groups/:id"),
+            get(groups::get).patch(groups::update).delete(groups::delete),
+        )
+        .route(&format!("{base}/v1/groups/:id/members"), get(groups::members))
+        .route(
+            &format!("{base}/v1/groups/:id/members/:user"),
+            put(groups::add_member).delete(groups::remove_member),
+        )
+        .route(&format!("{base}/v1/groups/:id/rules"), get(groups::rules))
+        .route(
+            &format!("{base}/v1/groups/:id/rules/:rule"),
+            put(groups::add_rule).delete(groups::remove_rule),
+        )
         .route(
             &format!("{base}/v1/workspaces/:id/objects"),
             get(objects::list).post(objects::create),
@@ -155,6 +180,36 @@ pub fn authenticated_routes(base: &str) -> Router<AppState> {
         .route(
             &format!("{base}/v1/organizations/:id/model/generate"),
             post(model::org_generate),
+        )
+        .route(
+            &format!("{base}/v1/organizations/:id/cube-models"),
+            get(cube_models::list).post(cube_models::create),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id"),
+            get(cube_models::get)
+                .put(cube_models::update)
+                .delete(cube_models::delete),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/lock"),
+            post(cube_models::lock).delete(cube_models::release_lock),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/lock/take"),
+            post(cube_models::take_lock),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/build"),
+            post(cube_models::build),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/create-tables"),
+            post(cube_models::create_tables),
+        )
+        .route(
+            &format!("{base}/v1/cube-models/:id/sql"),
+            post(cube_models::sql),
         )
         .route(
             &format!("{base}/v1/platform/model/generate"),
@@ -245,6 +300,7 @@ pub(crate) fn body<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, ApiE
 pub(crate) fn store_error(error: StoreError, conflict: &str) -> ApiError {
     match error {
         StoreError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, conflict),
+        StoreError::Invalid(m) => ApiError::bad_request(m),
         e => {
             tracing::error!("RBAC store failed: {e}");
             crate::rbac::unavailable()
@@ -262,6 +318,12 @@ pub(crate) fn caller<'a>(
     Ok((rbac, user))
 }
 
+/// The caller's username, what `created_by`/`updated_by` record; 401
+/// without an identity.
+pub(crate) fn actor(ctx: &RequestContext) -> Result<&str, ApiError> {
+    ctx.username.as_deref().ok_or_else(unauthenticated)
+}
+
 /// A resource id from the path. Anything that is not a UUID cannot exist: 404.
 pub(crate) fn resource_id(id: &str, kind: &str) -> Result<Uuid, ApiError> {
     id.parse()
@@ -277,16 +339,61 @@ pub(crate) fn resource_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
-/// A user to grant something to: 400 when the id is malformed or the user
-/// is disabled, 404 when unknown.
-pub(crate) async fn existing_user(rbac: &Rbac, id: &str) -> Result<User, ApiError> {
-    validate_user_id(id)?;
-    let user = rbac
-        .store
-        .user(id)
+/// The user a path segment or body field names, by UUID or by username
+/// (`Store::resolve_user`): 400 when the key is malformed, 404 when no user
+/// has it. Everything downstream takes the returned `User.id`.
+pub(crate) async fn named_user(rbac: &Rbac, key: &str) -> Result<User, ApiError> {
+    validate_user_id(key)?;
+    rbac.store
+        .resolve_user(key)
         .await
         .map_err(|e| store_error(e, "Conflict"))?
-        .ok_or_else(|| ApiError::not_found("User not found"))?;
+        .ok_or_else(user_not_found)
+}
+
+pub(crate) fn user_not_found() -> ApiError {
+    ApiError::not_found("User not found")
+}
+
+/// The SpiceDB subject id a member path names, to remove it from `kind`
+/// `id` by one of `relations`. The key itself when that resource relates a
+/// subject with exactly this id: a subject left without a user row (an
+/// orphan) is removed, even when a live user has since taken its name.
+/// Otherwise the user's UUID ([`named_user`]), or the key when no user has
+/// it. 400 when the key is malformed.
+pub(crate) async fn member_subject(
+    rbac: &Rbac,
+    key: &str,
+    kind: &'static str,
+    id: String,
+    relations: &[&str],
+) -> Result<String, ApiError> {
+    validate_user_id(key)?;
+    let literal = rbac
+        .authz
+        .read(&RelationshipFilter {
+            kind,
+            id: Some(id),
+            relation: None,
+            subject: Some(organizations::user_ref(key)),
+        })
+        .await
+        .map_err(authz_error)?;
+    if literal.iter().any(|r| relations.contains(&r.relation)) {
+        return Ok(key.to_string());
+    }
+    Ok(rbac
+        .store
+        .resolve_user(key)
+        .await
+        .map_err(|e| store_error(e, "Conflict"))?
+        .map_or_else(|| key.to_string(), |user| user.id))
+}
+
+/// A user to grant something to ([`named_user`]): also 400 when the user
+/// is disabled.
+pub(crate) async fn existing_user(rbac: &Rbac, key: &str) -> Result<User, ApiError> {
+    let user = named_user(rbac, key).await?;
     if user.disabled {
         return Err(ApiError::bad_request("User is disabled"));
     }

@@ -118,6 +118,19 @@ fn prepare_includes(view: &mut CubeDef, cubes: &Members<CubeDef>, reporter: &mut
     if view.cubes.is_empty() {
         return;
     }
+    // Like a join to a missing cube: without this a view of a deleted cube
+    // compiles to a view with no members of it.
+    let mut missing: Vec<&str> = Vec::new();
+    for include in &view.cubes {
+        for part in include.join_path.as_deref().unwrap_or("").split('.') {
+            if !part.is_empty() && cubes.get(part).is_none() && !missing.contains(&part) {
+                missing.push(part);
+            }
+        }
+    }
+    for part in missing {
+        reporter.error(format!("Cube {part} doesn't exist"));
+    }
 
     let mut all_members: Vec<String> = Vec::new();
     let mut resolved_members: HashSet<String> = HashSet::new();

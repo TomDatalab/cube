@@ -961,10 +961,12 @@ fn split_member_path(path: &str) -> Result<Vec<String>, CubeError> {
         .split('.')
         .map(|s| s.trim().to_string())
         .collect();
+    // A member's name may be a friendly name: words with single spaces
+    // between them (`{bossa.Quantidade Total}`).
     if parts.is_empty()
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || !p.chars().all(is_ident_char))
+        || parts.iter().any(|p| {
+            p.is_empty() || p.contains("  ") || !p.chars().all(|c| is_ident_char(c) || c == ' ')
+        })
     {
         return Err(CubeError::user(format!(
             "Unsupported expression in member sql: `{}`. Only member references, FILTER_PARAMS, \

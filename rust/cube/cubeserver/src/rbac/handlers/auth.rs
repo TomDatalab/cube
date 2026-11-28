@@ -11,7 +11,7 @@ use super::{body, rbac_of};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::rbac::identity::{
-    check_credentials, hash_password, user_token_claims, validate_user_id,
+    check_password, hash_password, login_user, user_token_claims, validate_user_id,
 };
 use crate::rbac::store::StoreError;
 use crate::rbac::{unauthenticated, unavailable, Rbac};
@@ -39,7 +39,8 @@ async fn failure(rbac: &Rbac, error: ApiError) -> ApiError {
     error
 }
 
-/// `{username, password}` → `{token, expiresAt, user: {id, name, platformAdmin, ownedOrganizations: [{id, slug, name}]}}`.
+/// `{username, password}` → `{token, expiresAt, user: {id, username, name, platformAdmin, ownedOrganizations: [{id, slug, name}]}}`;
+/// `id` is the user's UUID.
 pub async fn login(
     State(state): State<AppState>,
     request: Result<Json<LoginRequest>, JsonRejection>,
@@ -49,20 +50,27 @@ pub async fn login(
 
     // SpiceDB is asked before the password is checked, so an outage answers
     // 503 whether or not the password is right: the answer never tells a
-    // correct password from a wrong one. A name that is not a valid id
-    // cannot be asked about, and is refused below like an unknown user.
-    // The owned organizations are looked up here too, and only put in the
-    // answer once the password is right.
-    let (platform_admin, owned) = if validate_user_id(&request.username).is_ok() {
-        (
-            rbac.is_platform_admin(&request.username).await?,
-            rbac.owned_organizations(&request.username).await?,
-        )
-    } else {
-        (false, Vec::new())
+    // correct password from a wrong one. An unknown name is asked about too
+    // (it holds nothing), so an outage does not tell it from a known one; a
+    // name that is not a valid id cannot be asked about, and is refused
+    // below like an unknown user. The owned organizations are looked up here
+    // too, and only put in the answer once the password is right.
+    let user = login_user(rbac, &request.username).await?;
+    let key = match &user {
+        Some(user) => Some(user.id.as_str()),
+        None => validate_user_id(&request.username)
+            .is_ok()
+            .then_some(request.username.as_str()),
+    };
+    let (platform_admin, owned) = match key {
+        Some(key) => (
+            rbac.is_platform_admin(key).await?,
+            rbac.owned_organizations(key).await?,
+        ),
+        None => (false, Vec::new()),
     };
 
-    let Some(user) = check_credentials(rbac, &request.username, &request.password).await? else {
+    let Some(user) = check_password(rbac, user, &request.password).await? else {
         return Err(failure(rbac, ApiError::new(StatusCode::UNAUTHORIZED, INVALID_LOGIN)).await);
     };
     let (claims, expires_at) = user_token_claims(&user.id, rbac.config.token_ttl);
@@ -73,6 +81,7 @@ pub async fn login(
         "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "user": {
             "id": user.id,
+            "username": user.username,
             "name": user.name,
             "platformAdmin": platform_admin,
             "ownedOrganizations": owned
@@ -94,7 +103,11 @@ pub async fn change_password(
     let user = ctx.user.as_deref().ok_or_else(unauthenticated)?;
     let request = body(request)?;
 
-    if check_credentials(rbac, user, &request.current_password)
+    let current = rbac.store.user(user).await.map_err(|e| {
+        tracing::error!("RBAC store unavailable: {e}");
+        unavailable()
+    })?;
+    if check_password(rbac, current, &request.current_password)
         .await?
         .is_none()
     {

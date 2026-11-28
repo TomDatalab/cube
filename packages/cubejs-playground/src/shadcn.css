@@ -1,0 +1,171 @@
+/*
+ * shadcn/ui on Tailwind v4, beside antd.
+ *
+ * Tailwind's global reset (preflight) is left out: it would restyle every
+ * antd screen. Only the theme and the utilities are imported, and the reset
+ * shadcn components need is applied to them alone (their `data-slot`
+ * elements), in the base layer, under the utilities.
+ *
+ * Dark mode follows the Playground's own switch: html[data-theme="dark"].
+ */
+@layer theme, base, components;
+@import "tailwindcss/theme.css" layer(theme) prefix(tw);
+/*
+ * Utilities outside any layer: antd's sheet resets elements unlayered
+ * (`button { color: inherit }`), and an unlayered rule beats every layered
+ * one. Unlayered, a utility class wins over an element selector by
+ * specificity, as it should.
+ *
+ * Every utility carries the `tw:` prefix (`tw:flex`), so the words of the
+ * rest of the Playground ("hidden", "table", ...) never become utilities
+ * that could restyle antd or other libraries.
+ */
+@import "tailwindcss/utilities.css" prefix(tw);
+@import "tw-animate-css";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme inline {
+  --radius-sm: calc(var(--shadcn-radius) - 4px);
+  --radius-md: calc(var(--shadcn-radius) - 2px);
+  --radius-lg: var(--shadcn-radius);
+  --radius-xl: calc(var(--shadcn-radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+:root {
+  /* Not `--radius`: @cube-dev/ui-kit sets that one (6px) for its own components. */
+  --shadcn-radius: 0.5rem;
+  /*
+   * The Playground's palette (src/theme/dark-tokens.ts, light and dark under
+   * html[data-theme="dark"]), so shadcn screens match the antd ones.
+   */
+  --background: var(--pg-surface, #ffffff);
+  --foreground: var(--pg-text, #21263f);
+  --card: var(--pg-surface, #ffffff);
+  --card-foreground: var(--pg-text, #21263f);
+  --popover: var(--pg-raised, #ffffff);
+  --popover-foreground: var(--pg-text, #21263f);
+  --primary: var(--pg-accent, #2f5597);
+  --primary-foreground: var(--pg-bar-text, #ffffff);
+  --secondary: var(--pg-subtle, #f6f7fb);
+  --secondary-foreground: var(--pg-text, #21263f);
+  --muted: var(--pg-subtle, #f6f7fb);
+  --muted-foreground: var(--pg-muted, #6c7393);
+  --accent: var(--pg-hover, #edf3fb);
+  --accent-foreground: var(--pg-text, #21263f);
+  --destructive: var(--pg-negative, #c2371b);
+  --border: var(--pg-line, #e3e4ee);
+  --input: var(--pg-line, #e3e4ee);
+  --ring: var(--pg-accent, #2f5597);
+  /* The Models canvas' table colors (TABLE_COLORS in models/modelGraph.ts). */
+  --model-slate: var(--pg-model-slate, #64748b);
+  --model-blue: var(--pg-model-blue, #3b82f6);
+  --model-green: var(--pg-model-green, #22c55e);
+  --model-amber: var(--pg-model-amber, #f59e0b);
+  --model-red: var(--pg-model-red, #ef4444);
+  --model-violet: var(--pg-model-violet, #8b5cf6);
+  --model-pink: var(--pg-model-pink, #ec4899);
+  --model-teal: var(--pg-model-teal, #14b8a6);
+  --model-view: var(--pg-model-view, #e0f0ff);
+  --model-view-border: var(--pg-model-view-border, #60a5fa);
+  --model-note: var(--pg-model-note, #fef9c3);
+  /* Text on a palette color: dark in both themes, the palette being light in dark mode. */
+  --model-ink: var(--pg-model-ink, #111827);
+}
+
+/* The dark accent is light: text on it is the dark page color. */
+:root[data-theme="dark"] {
+  --primary-foreground: var(--pg-bg, #171b2c);
+}
+
+/* What preflight would give shadcn's elements, and only them. */
+@layer base {
+  :where([data-slot]),
+  :where([data-slot])::before,
+  :where([data-slot])::after {
+    box-sizing: border-box;
+    border: 0 solid var(--border);
+  }
+  /* Any element with a border utility (no preflight: else currentColor). */
+  :where([class*="tw:border"]) {
+    border-color: var(--border);
+  }
+  :where(button[data-slot], input[data-slot], textarea[data-slot], select[data-slot]) {
+    font: inherit;
+    color: inherit;
+    background-color: transparent;
+    margin: 0;
+  }
+}
+
+/* Column resizing (src/shared/column-resize.ts): a handle on the right edge
+   of every header cell. Unlayered, like the utilities. */
+.pg-col-resize {
+  position: absolute;
+  top: 0;
+  /* Inside the cell: a resized table's cells clip what overflows them. */
+  right: 0;
+  z-index: 3;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.pg-col-resize::after {
+  content: "";
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  right: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+th:hover > .pg-col-resize::after,
+[data-qa="ResultsColumnHeader"]:hover > .pg-col-resize::after {
+  background: var(--pg-line, #e3e4ee);
+}
+.pg-col-resize:hover::after,
+.pg-col-resize.active::after {
+  top: 0;
+  bottom: 0;
+  background: var(--pg-accent, #2f5597);
+}
+body.pg-col-resizing,
+body.pg-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+/* Once resized, a column cuts what does not fit. */
+table[data-col-resized] > thead > tr > th,
+table[data-col-resized] > tbody > tr > td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The Models canvas: a link dot grows under the pointer, easier to grab. */
+[data-slot='model-canvas'] .react-flow__handle.connectable {
+  transition: scale 120ms ease-out;
+}
+[data-slot='model-canvas'] .react-flow__handle.connectable:hover {
+  scale: 1.35;
+}
